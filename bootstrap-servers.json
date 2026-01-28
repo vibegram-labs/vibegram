@@ -1,0 +1,16 @@
+{
+    "version": 2,
+    "updatedAt": 1738067400000,
+    "bootstrapUrls": [
+        "https://gist.githubusercontent.com/Vibe-source/37d1709f5dbacb24a669ac0c04f4929d/raw/servers.json"
+    ],
+    "servers": [
+        {
+            "url": "https://modest-recreation-production-8329.up.railway.app",
+            "name": "Railway Primary",
+            "type": "direct",
+            "priority": 1
+        }
+    ],
+    "note": "Railway server deployed 2026-01-28"
+}

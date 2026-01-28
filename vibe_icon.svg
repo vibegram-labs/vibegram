@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Minimal Clean Background -->
+  <rect width="512" height="512" rx="120" ry="120" fill="#191919"/>
+  
+  <!-- Crisp, Bold V Shape -->
+  <path d="M145 160 L256 370 L367 160" 
+        stroke="#5EB1B2" 
+        stroke-width="72" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" 
+        fill="none"/>
+</svg>
