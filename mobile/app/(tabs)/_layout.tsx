@@ -323,22 +323,6 @@ export default function TabLayout() {
     // NATIVE TABS MODE (Production / Native Module)
     // ────────────────────────────────────────────────────────────────────────
     if (nativeTabsAvailable) {
-        // Wrapper for Home to pass props
-        const HomeScene = () => (
-            <HomeScreen
-                onChatSelect={(id) => setActiveChat(id)}
-                onOpenStoryCamera={openStoryCamera}
-            />
-        )
-
-        const scenes = {
-            contacts: ContactsScreen,
-            calls: CallsScreen,
-            home: HomeScene,
-            settings: SettingsScreen,
-            vibe: () => <View style={styles.nativeSpacerScene} />,
-        }
-
         return (
             <View style={{ flex: 1, backgroundColor: colors.background }}>
                 {/* Story Camera Overlay (Global) */}
@@ -358,66 +342,77 @@ export default function TabLayout() {
                     </AnimatedView>
                 )}
 
-                <NativeTabBar
-                    currentIndex={PAGES[currentTab]}
-                    onIndexChange={(index) => {
-                        try {
-                            const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
-                            if (index === 4) {
-                                safeRouterPush('/agent', 'native-vibe-tab');
-                                return;
-                            }
-                            const page = pageNames[index];
-                            if (!page) return;
-                            console.log('[TabsLayout] native tab index change', index, page);
-                            setCurrentTab(page);
-                            // Also update shared values to keep things in sync if we switch back (optional)
-                            pageIndex.value = index;
-                        } catch (error) {
-                            console.error('[TabsLayout] native tab index change failed', error);
-                        }
-                    }}
-                    tabs={[
-                        {
-                            key: 'contacts',
-                            title: t('tabs.contacts'),
-                            sfSymbol: 'person.2.fill',
-                            unfocusedSfSymbol: 'person.2',
-                        },
-                        {
-                            key: 'calls',
-                            title: t('tabs.calls'),
-                            sfSymbol: 'phone.fill',
-                            unfocusedSfSymbol: 'phone',
-                        },
-                        {
-                            key: 'home',
-                            title: t('tabs.chats'),
-                            sfSymbol: 'bubble.left.and.bubble.right.fill',
-                            unfocusedSfSymbol: 'bubble.left.and.bubble.right',
-                            badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
-                        },
-                        {
-                            key: 'settings',
-                            title: t('tabs.settings'),
-                            sfSymbol: 'person.crop.circle.fill',
-                            unfocusedSfSymbol: 'person.crop.circle',
-                            iconSource: settingsIconSource,
-                            unfocusedIconSource: settingsIconSource,
-                        },
-                        {
-                            key: 'vibe',
-                            title: 'Vibe',
-                            iconSource: require('../../assets/logos/logotransparent.png'),
-                            unfocusedIconSource: require('../../assets/logos/logotransparent.png'),
-                            preventsDefault: true,
-                        },
-                    ]}
-                    activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
-                    inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
-                    isDark={isDark}
-                    scenes={scenes}
-                />
+                <View style={[styles.nativePageContainer, showBottomBar && styles.nativePageContainerWithTabs]}>
+                    {currentTab === 'contacts' && <ContactsScreen />}
+                    {currentTab === 'calls' && <CallsScreen />}
+                    {currentTab === 'home' && (
+                        <HomeScreen
+                            onChatSelect={(id) => setActiveChat(id)}
+                            onOpenStoryCamera={openStoryCamera}
+                        />
+                    )}
+                    {currentTab === 'settings' && <SettingsScreen />}
+                </View>
+
+                {showBottomBar && (
+                    <AnimatedView style={[styles.nativeBottomBarWrapper, bottomBarFadeStyle]}>
+                        <NativeTabBar
+                            currentIndex={PAGES[currentTab]}
+                            onIndexChange={(index) => {
+                                try {
+                                    const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
+                                    const page = pageNames[index];
+                                    if (!page) return;
+                                    console.log('[TabsLayout] native tab index change', index, page);
+                                    setCurrentTab(page);
+                                    pageIndex.value = index;
+                                } catch (error) {
+                                    console.error('[TabsLayout] native tab index change failed', error);
+                                }
+                            }}
+                            tabs={[
+                                {
+                                    key: 'contacts',
+                                    title: t('tabs.contacts'),
+                                    sfSymbol: 'person.2.fill',
+                                    unfocusedSfSymbol: 'person.2',
+                                },
+                                {
+                                    key: 'calls',
+                                    title: t('tabs.calls'),
+                                    sfSymbol: 'phone.fill',
+                                    unfocusedSfSymbol: 'phone',
+                                },
+                                {
+                                    key: 'home',
+                                    title: t('tabs.chats'),
+                                    sfSymbol: 'bubble.left.and.bubble.right.fill',
+                                    unfocusedSfSymbol: 'bubble.left.and.bubble.right',
+                                    badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
+                                },
+                                {
+                                    key: 'settings',
+                                    title: t('tabs.settings'),
+                                    sfSymbol: 'person.crop.circle.fill',
+                                    unfocusedSfSymbol: 'person.crop.circle',
+                                    iconSource: settingsIconSource,
+                                    unfocusedIconSource: settingsIconSource,
+                                },
+                                {
+                                    key: 'vibe',
+                                    title: 'Vibe',
+                                    iconSource: require('../../assets/logos/logotransparent.png'),
+                                    unfocusedIconSource: require('../../assets/logos/logotransparent.png'),
+                                    preventsDefault: true,
+                                },
+                            ]}
+                            activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
+                            inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
+                            isDark={isDark}
+                            onVibePress={() => safeRouterPush('/agent', 'native-vibe-tab')}
+                        />
+                    </AnimatedView>
+                )}
             </View>
         )
     }
@@ -553,8 +548,17 @@ const styles = StyleSheet.create({
         height: '100%',
         overflow: 'hidden',
     },
-    nativeSpacerScene: {
+    nativePageContainer: {
         flex: 1,
+    },
+    nativePageContainerWithTabs: {
+        paddingBottom: Platform.OS === 'ios' ? 104 : 98,
+    },
+    nativeBottomBarWrapper: {
+        position: 'absolute',
+        bottom: 0,
+        left: 0,
+        right: 0,
         backgroundColor: 'transparent',
     },
     bottomBarWrapper: {

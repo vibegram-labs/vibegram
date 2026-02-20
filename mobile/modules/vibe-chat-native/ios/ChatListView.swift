@@ -11,8 +11,8 @@ private let chatListSendVerticalTiming = CAMediaTimingFunction(
 public final class ChatListView: ExpoView, UICollectionViewDataSource,
   UICollectionViewDelegateFlowLayout
 {
-  public var onViewportChanged: EventDispatcher?
-  public var onNativeEvent: EventDispatcher?
+  public var onViewportChanged = EventDispatcher()
+  public var onNativeEvent = EventDispatcher()
 
   @objc public var surfaceId: String = "" {
     didSet {
@@ -446,8 +446,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               }
             }, completion: nil)
         },
-        completion: { [weak self] _ in
-          guard let self else { return }
+        completion: { _ in
           finalize(shouldAnimateScroll)
         })
       return
@@ -650,7 +649,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   func applyTransactions(_ transactions: [[String: Any]]) {
-    onNativeEvent?(["type": "transactionsApplied", "count": transactions.count])
+    onNativeEvent(["type": "transactionsApplied", "count": transactions.count])
   }
 
   func scrollToBottom(animated: Bool) {
@@ -981,19 +980,24 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     messageId: String,
     text: String,
     timestamp: String,
-    timestampMs: Double
+    timestampMs: Double,
+    replyToId: String? = nil
   ) {
+    var message: [String: Any] = [
+      "id": messageId,
+      "text": text,
+      "timestamp": timestamp,
+      "timestampMs": timestampMs,
+      "isMe": true,
+      "status": "pending",
+    ]
+    if let replyToId {
+      message["replyToId"] = replyToId
+    }
     nativeOutgoingRowsById[messageId] = [
       "kind": "message",
       "key": "m-\(messageId)",
-      "message": [
-        "id": messageId,
-        "text": text,
-        "timestamp": timestamp,
-        "timestampMs": timestampMs,
-        "isMe": true,
-        "status": "pending",
-      ],
+      "message": message,
     ]
     if !nativeOutgoingOrder.contains(messageId) {
       nativeOutgoingOrder.append(messageId)
@@ -1109,7 +1113,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       sourceTextEndFrame: overlayParts.sourceTextEndFrame
     )
     activeSendTransition = state
-    onNativeEvent?(["type": "sendTransitionStarted", "messageId": payload.messageId])
+    onNativeEvent(["type": "sendTransitionStarted", "messageId": payload.messageId])
 
     // Promote the hidden outgoing row into layout now (as an invisible row)
     // so the list shift is synchronized with transition motion.
@@ -1190,23 +1194,21 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       // list to apply latest payload once so the message becomes visible.
       setRows(sourceRowsPayload)
     }
-    onNativeEvent?(["type": "sendTransitionCompleted", "messageId": revealedMessageId ?? ""])
+    onNativeEvent(["type": "sendTransitionCompleted", "messageId": revealedMessageId ?? ""])
   }
 
   private var hasLoggedDispatcherStatus = false
   private func emitViewport() {
     if !hasLoggedDispatcherStatus {
       hasLoggedDispatcherStatus = true
-      NSLog("[ChatListView] EventDispatcher status — onViewportChanged nil: %@, onNativeEvent nil: %@",
-            onViewportChanged == nil ? "YES" : "NO",
-            onNativeEvent == nil ? "YES" : "NO")
+      NSLog("[ChatListView] EventDispatcher status — dispatchers initialized (non-nil)")
     }
     let contentHeight = collectionView.contentSize.height
     let layoutHeight = collectionView.bounds.height
     let offsetY = collectionView.contentOffset.y
     let distanceFromBottom = max(0.0, contentHeight - (offsetY + layoutHeight))
 
-    onViewportChanged?([
+    onViewportChanged([
       "contentHeight": contentHeight,
       "layoutHeight": layoutHeight,
       "offsetY": offsetY,
@@ -1424,10 +1426,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let h = bounds.height
     guard w > 0, h > 0 else { return }
 
-    // If keyboard is visible, safe area is handled by keyboard height.
-    // If keyboard is hidden, account for bottom safe area.
+    // When GIF panel is shown, the input bar itself owns the keyboard-sized
+    // area and we must not also offset by keyboardHeight.
+    let effectiveKeyboardHeight: CGFloat = bar.isGifPanelPresented ? 0 : keyboardHeight
+
+    // If keyboard is effectively visible, safe area is handled by keyboard height.
+    // Otherwise, account for bottom safe area in the bar layout.
     let safeBottom: CGFloat
-    if keyboardHeight > 0 {
+    if effectiveKeyboardHeight > 0 {
       safeBottom = 0
     } else {
       safeBottom = safeAreaInsets.bottom
@@ -1440,11 +1446,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let barH = bar.barHeight
 
     // Position at bottom, above keyboard
-    let barY = h - barH - keyboardHeight
+    let barY = h - barH - effectiveKeyboardHeight
     bar.frame = CGRect(x: 0, y: barY, width: w, height: barH)
 
     // Update collection view bottom inset
-    let totalBottomPadding = barH + keyboardHeight
+    let totalBottomPadding = barH + effectiveKeyboardHeight
     let baseInsets = flowLayout.sectionInset
     if abs(baseInsets.bottom - totalBottomPadding) > 0.5 {
       contentPaddingBottom = totalBottomPadding
@@ -1466,7 +1472,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     formatter.dateFormat = "HH:mm"
     let timestamp = formatter.string(from: now)
 
-    NSLog("[ChatListView] handleNativeSend START — messageId: %@, text length: %lu, nativeSendEnabled: %@", messageId, text.count, nativeSendEnabled ? "true" : "false")
+    // Capture reply-to ID before dismissing the banner (dismissing clears it).
+    let replyToMessageId = inputBar?.activeReplyToMessageId
+
+    NSLog("[ChatListView] handleNativeSend START — messageId: %@, text length: %lu, nativeSendEnabled: %@, replyTo: %@", messageId, text.count, nativeSendEnabled ? "true" : "false", replyToMessageId ?? "nil")
 
     // 1. Dismiss reply banner (non-animated, before layout measurement).
     inputBar?.dismissReplyBanner(animated: false)
@@ -1512,17 +1521,22 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         messageId: messageId,
         text: text,
         timestamp: timestamp,
-        timestampMs: timestampMs
+        timestampMs: timestampMs,
+        replyToId: replyToMessageId
       )
     } else {
-      NSLog("[ChatListView] handleNativeSend dispatching onNativeEvent sendMessage (dispatcher nil: %@)", onNativeEvent == nil ? "YES" : "NO")
-      onNativeEvent?([
+      NSLog("[ChatListView] handleNativeSend dispatching onNativeEvent sendMessage")
+      var sendPayload: [String: Any] = [
         "type": "sendMessage",
         "messageId": messageId,
         "text": text,
         "timestamp": timestamp,
         "timestampMs": timestampMs,
-      ])
+      ]
+      if let replyToMessageId {
+        sendPayload["replyToMessageId"] = replyToMessageId
+      }
+      onNativeEvent(sendPayload)
       NSLog("[ChatListView] handleNativeSend onNativeEvent dispatched")
     }
     NSLog("[ChatListView] handleNativeSend END")
@@ -1537,15 +1551,15 @@ extension ChatListView: ChatInputBarDelegate {
   }
 
   func inputBarDidTapAttachment() {
-    onNativeEvent?(["type": "attachmentPressed"])
+    onNativeEvent(["type": "attachmentPressed"])
   }
 
   func inputBarDidTapAction() {
-    onNativeEvent?(["type": "inputActionPressed", "action": "mic"])
+    onNativeEvent(["type": "inputActionPressed", "action": "mic"])
   }
 
   func inputBarTextDidChange(text: String) {
-    onNativeEvent?(["type": "textChanged", "text": text])
+    onNativeEvent(["type": "textChanged", "text": text])
   }
 
   func inputBarHeightDidChange() {
@@ -1553,7 +1567,7 @@ extension ChatListView: ChatInputBarDelegate {
   }
 
   func inputBarRecordingStateDidChange(isRecording: Bool, isLocked: Bool, mode: String) {
-    onNativeEvent?([
+    onNativeEvent([
       "type": "recordingState",
       "isRecording": isRecording,
       "isLocked": isLocked,
@@ -1562,20 +1576,21 @@ extension ChatListView: ChatInputBarDelegate {
   }
 
   func inputBarRecordingDidCancel() {
-    onNativeEvent?(["type": "recordingCanceled"])
+    onNativeEvent(["type": "recordingCanceled"])
   }
 
-  func inputBarDidRecordVoice(uri: String, duration: Double) {
-    onNativeEvent?([
+  func inputBarDidRecordVoice(uri: String, duration: Double, waveform: [Double]) {
+    onNativeEvent([
       "type": "attachmentVoice",
       "uri": uri,
       "duration": duration,
       "name": "voice-message.m4a",
+      "waveform": waveform,
     ])
   }
 
   func inputBarDidSelectImage(uri: String) {
-    onNativeEvent?(["type": "attachmentImage", "uri": uri])
+    onNativeEvent(["type": "attachmentImage", "uri": uri])
   }
 
   func inputBarDidSelectGif(
@@ -1585,7 +1600,7 @@ extension ChatListView: ChatInputBarDelegate {
     width: Int,
     height: Int
   ) {
-    onNativeEvent?([
+    onNativeEvent([
       "type": "attachmentGif",
       "id": id,
       "url": url,
@@ -1596,14 +1611,14 @@ extension ChatListView: ChatInputBarDelegate {
   }
 
   func inputBarDidSelectFile(uri: String, name: String) {
-    onNativeEvent?(["type": "attachmentFile", "uri": uri, "name": name])
+    onNativeEvent(["type": "attachmentFile", "uri": uri, "name": name])
   }
 
   func inputBarDidSelectLocation(latitude: Double, longitude: Double) {
-    onNativeEvent?(["type": "attachmentLocation", "latitude": latitude, "longitude": longitude])
+    onNativeEvent(["type": "attachmentLocation", "latitude": latitude, "longitude": longitude])
   }
 
   func inputBarReplyDismissed() {
-    onNativeEvent?(["type": "replyDismissed"])
+    onNativeEvent(["type": "replyDismissed"])
   }
 }

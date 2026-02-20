@@ -103,7 +103,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     }
     swipeReplyDidTrigger = true
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
-    onNativeEvent?([
+    onNativeEvent([
       "type": "swipeReply",
       "messageId": messageId,
     ])
@@ -184,7 +184,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     contextMenuHostCell = cell
     contextMenuHostCellOriginalTransform = cell.transform
 
-    onNativeEvent?(["type": "contextMenuOpened", "messageId": messageId])
+    onNativeEvent(["type": "contextMenuOpened", "messageId": messageId])
   }
 
   @available(iOS 13.0, *)
@@ -219,7 +219,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     // Use the overlay's messageId directly as it's the source of truth
     guard let overlay = customContextMenuOverlay else { return }
 
-    onNativeEvent?([
+    onNativeEvent([
       "type": "addReaction",
       "reaction": reaction,
       "messageId": overlay.messageId,
@@ -231,7 +231,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
 
     guard let overlay = customContextMenuOverlay else { return }
 
-    onNativeEvent?([
+    onNativeEvent([
       "type": "contextMenuAction",
       "action": actionId,
       "messageId": overlay.messageId,

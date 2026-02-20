@@ -40,10 +40,12 @@ final class ChatGifPanelView: UIView {
     private let glassBackground = UIVisualEffectView(
         effect: UIBlurEffect(style: .systemChromeMaterialDark))
     private let headerView = UIView()
-    private let titleLabel = UILabel()
+    private let tabControl = UISegmentedControl(items: ["GIFs", "Stickers", "Emoji"])
     private let closeButton = UIButton(type: .system)
     private let contentView = UIView()
     private let fallbackLabel = UILabel()
+    private let loadingView = UIView()
+    private let loadingSpinner = UIActivityIndicatorView(style: .medium)
 
     #if canImport(GiphyUISDK)
         private var pickerViewController: GiphyViewController?
@@ -69,16 +71,31 @@ final class ChatGifPanelView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
 
+        glassBackground.layer.cornerRadius = 20
+        glassBackground.layer.cornerCurve = .continuous
+        glassBackground.clipsToBounds = true
         let headerH: CGFloat = 42
         headerView.frame = CGRect(x: 0, y: 0, width: bounds.width, height: headerH)
-        titleLabel.frame = CGRect(x: 12, y: 0, width: max(1, bounds.width - 80), height: headerH)
+        tabControl.frame = CGRect(x: 12, y: 6, width: max(1, bounds.width - 64), height: 30)
         closeButton.frame = CGRect(x: bounds.width - 40, y: 5, width: 32, height: 32)
         contentView.frame = CGRect(
             x: 0, y: headerH, width: bounds.width, height: max(0, bounds.height - headerH))
         fallbackLabel.frame = contentView.bounds.insetBy(dx: 20, dy: 20)
+        loadingView.frame = contentView.bounds
+        loadingSpinner.center = CGPoint(x: loadingView.bounds.midX, y: loadingView.bounds.midY)
 
         #if canImport(GiphyUISDK)
             pickerViewController?.view.frame = contentView.bounds
+        #endif
+    }
+
+    override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+        super.traitCollectionDidChange(previousTraitCollection)
+        #if canImport(GiphyUISDK)
+            guard let picker = pickerViewController else { return }
+            picker.theme = GPHTheme(
+                type: traitCollection.userInterfaceStyle == .dark ? .darkBlur : .lightBlur)
+            normalizePickerVisuals()
         #endif
     }
 
@@ -86,7 +103,25 @@ final class ChatGifPanelView: UIView {
         delegate?.chatGifPanelDidRequestClose(self)
     }
 
+    @objc private func contentTypeChanged() {
+        #if canImport(GiphyUISDK)
+            guard let picker = pickerViewController else { return }
+            switch tabControl.selectedSegmentIndex {
+            case 1:
+                picker.selectedContentType = .stickers
+            case 2:
+                picker.selectedContentType = .emoji
+            default:
+                picker.selectedContentType = .gifs
+            }
+        #endif
+    }
+
     private func setupUI() {
+        layer.cornerRadius = 20
+        layer.cornerCurve = .continuous
+        layer.borderWidth = 0.35
+        layer.borderColor = UIColor(white: 1.0, alpha: 0.08).cgColor
         clipsToBounds = true
         backgroundColor = .clear
 
@@ -97,16 +132,33 @@ final class ChatGifPanelView: UIView {
         headerView.backgroundColor = .clear
         addSubview(headerView)
 
-        titleLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-        titleLabel.textColor = UIColor(white: 0.95, alpha: 0.9)
-        titleLabel.text = "GIFs"
-        headerView.addSubview(titleLabel)
+        tabControl.selectedSegmentIndex = 0
+        tabControl.backgroundColor = .clear
+        tabControl.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.16)
+        tabControl.setTitleTextAttributes(
+            [
+                .foregroundColor: UIColor(white: 0.95, alpha: 0.84),
+                .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
+            ],
+            for: .normal
+        )
+        tabControl.setTitleTextAttributes(
+            [
+                .foregroundColor: UIColor.white,
+                .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
+            ],
+            for: .selected
+        )
+        tabControl.addTarget(self, action: #selector(contentTypeChanged), for: .valueChanged)
+        headerView.addSubview(tabControl)
 
         let closeCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
         closeButton.setImage(
             UIImage(systemName: "xmark", withConfiguration: closeCfg), for: .normal)
         closeButton.tintColor = UIColor(white: 0.95, alpha: 0.85)
-        closeButton.backgroundColor = UIColor(white: 0.2, alpha: 0.35)
+        closeButton.backgroundColor = .clear
+        closeButton.layer.borderWidth = 0.35
+        closeButton.layer.borderColor = UIColor(white: 1.0, alpha: 0.12).cgColor
         closeButton.layer.cornerRadius = 16
         closeButton.layer.cornerCurve = .continuous
         closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
@@ -123,7 +175,28 @@ final class ChatGifPanelView: UIView {
         fallbackLabel.isHidden = true
         contentView.addSubview(fallbackLabel)
 
+        loadingView.backgroundColor = .clear
+        loadingView.isUserInteractionEnabled = false
+        contentView.addSubview(loadingView)
+
+        loadingSpinner.hidesWhenStopped = true
+        loadingSpinner.startAnimating()
+        loadingView.addSubview(loadingSpinner)
+
         installEmbeddedPickerIfNeeded()
+        refreshGlass()
+    }
+
+    private func refreshGlass() {
+        if #available(iOS 26.0, *) {
+            let glassEffect = UIGlassEffect()
+            glassEffect.isInteractive = true
+            glassBackground.effect = glassEffect
+            glassBackground.backgroundColor = .clear
+        } else {
+            glassBackground.effect = UIBlurEffect(style: .systemMaterial)
+            glassBackground.backgroundColor = .clear
+        }
     }
 
     private func configureGiphySDKIfNeeded() {
@@ -140,6 +213,8 @@ final class ChatGifPanelView: UIView {
             guard pickerViewController == nil else { return }
             guard let host = hostViewController else {
                 fallbackLabel.isHidden = false
+                loadingSpinner.stopAnimating()
+                loadingView.isHidden = true
                 return
             }
 
@@ -147,18 +222,43 @@ final class ChatGifPanelView: UIView {
 
             let picker = GiphyViewController()
             picker.delegate = self
-            picker.mediaTypeConfig = [.gifs]
+            picker.showConfirmationScreen = false
+            picker.dimBackground = false
+            picker.shouldLocalizeSearch = true
+            picker.placeholderText = "Search"
+            picker.theme = GPHTheme(
+                type: traitCollection.userInterfaceStyle == .dark ? .darkBlur : .lightBlur)
+            picker.mediaTypeConfig = [.gifs, .stickers, .emoji]
+            picker.selectedContentType = .gifs
 
             host.addChild(picker)
             contentView.addSubview(picker.view)
             picker.view.frame = contentView.bounds
             picker.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+            picker.view.backgroundColor = .clear
+            picker.view.isOpaque = false
+            contentView.bringSubviewToFront(loadingView)
+            contentView.bringSubviewToFront(fallbackLabel)
             picker.didMove(toParent: host)
 
             pickerViewController = picker
             fallbackLabel.isHidden = true
+            loadingSpinner.startAnimating()
+            loadingView.isHidden = false
+            contentTypeChanged()
+            normalizePickerVisuals()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+                self?.normalizePickerVisuals()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.30) { [weak self] in
+                self?.normalizePickerVisuals()
+                self?.loadingSpinner.stopAnimating()
+                self?.loadingView.isHidden = true
+            }
         #else
             fallbackLabel.isHidden = false
+            loadingSpinner.stopAnimating()
+            loadingView.isHidden = true
         #endif
     }
 
@@ -170,6 +270,23 @@ final class ChatGifPanelView: UIView {
             picker.removeFromParent()
             pickerViewController = nil
         #endif
+    }
+
+    private func normalizePickerVisuals() {
+        #if canImport(GiphyUISDK)
+            guard let rootView = pickerViewController?.view else { return }
+            scrubBackgrounds(in: rootView)
+        #endif
+    }
+
+    private func scrubBackgrounds(in view: UIView) {
+        if !(view is UIVisualEffectView) {
+            view.backgroundColor = .clear
+            if let collectionView = view as? UICollectionView {
+                collectionView.backgroundColor = .clear
+            }
+        }
+        view.subviews.forEach { scrubBackgrounds(in: $0) }
     }
 
     private func unwrapOptional(_ value: Any) -> Any? {

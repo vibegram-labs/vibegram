@@ -102,7 +102,7 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
         debugAnimationPanel={debugAnimationPanel}
         onViewportChanged={(event: any) => {
           // Log once to verify event bridge works
-          if (!(onViewportChanged as any)?._logged) {
+          if (onViewportChanged && !(onViewportChanged as any)._logged) {
             console.log('[NativeChatSurface] onViewportChanged first event received');
             (onViewportChanged as any)._logged = true;
           }

@@ -14,6 +14,7 @@ export interface RuntimeChatMessage {
   mediaUrl?: string;
   fileName?: string;
   duration?: number;
+  waveform?: number[];
   isVideoNote?: boolean;
   uploadProgress?: number;
   isMe: boolean;
@@ -111,6 +112,9 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
       replyToId: current.replyToId,
       reactionEmoji: current.reactionEmoji,
       encryptedContent: current.encryptedContent,
+      metadata: current.waveform && current.waveform.length > 0
+        ? { waveform: current.waveform }
+        : undefined,
       bubbleShape: resolveBubbleShape(current.isMe, isSequenceStart, isSequenceEnd, current.type),
     };
 

@@ -1,3 +1,4 @@
+import AVFoundation
 import CoreLocation
 import PhotosUI
 import UIKit
@@ -25,7 +26,7 @@ protocol ChatInputBarDelegate: AnyObject {
   // Recording
   func inputBarRecordingStateDidChange(isRecording: Bool, isLocked: Bool, mode: String)
   func inputBarRecordingDidCancel()
-  func inputBarDidRecordVoice(uri: String, duration: Double)
+  func inputBarDidRecordVoice(uri: String, duration: Double, waveform: [Double])
   // Reply
   func inputBarReplyDismissed()
 }
@@ -55,11 +56,17 @@ final class FluidVADVisualizer: UIView {
     super.layoutSubviews()
     let center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
     let baseRadius = bounds.width / 2
-    let path = UIBezierPath(
-      arcCenter: center, radius: baseRadius, startAngle: 0, endAngle: .pi * 2, clockwise: true)
     for l in layers {
-      l.path = path.cgPath
-      l.frame = bounds
+      l.bounds = bounds
+      l.position = center
+      l.path =
+        UIBezierPath(
+          arcCenter: CGPoint(x: bounds.width / 2, y: bounds.height / 2),
+          radius: baseRadius,
+          startAngle: 0,
+          endAngle: .pi * 2,
+          clockwise: true
+        ).cgPath
     }
   }
 
@@ -219,6 +226,11 @@ final class ChatInputBar: UIView {
   private var recordingTimer: Timer?
   private var vadTimer: Timer?
   private var recordingGestureStartPoint: CGPoint = .zero
+  private var audioRecorder: AVAudioRecorder?
+  private var recordingFileURL: URL?
+  private var recordingWaveformSamples: [CGFloat] = []
+
+  private let cancelOverlayButton = UIButton(type: .custom)
 
   // Attachment sheet
   private var attachmentSheet: ChatAttachmentSheet?
@@ -259,6 +271,7 @@ final class ChatInputBar: UIView {
   var currentText: String {
     textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
   }
+  var isGifPanelPresented: Bool { gifPanelVisible }
 
   // Recording state
   private var isRecording = false
@@ -366,6 +379,11 @@ final class ChatInputBar: UIView {
   }
   required init?(coder: NSCoder) { nil }
 
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    maybePrepareGifPanel()
+  }
+
   // MARK: - Setup
 
   private func setupViews() {
@@ -465,6 +483,10 @@ final class ChatInputBar: UIView {
     sendButton.layer.insertSublayer(sendGradient, at: 0)
     sendButton.addTarget(self, action: #selector(sendTapped), for: .touchUpInside)
     pillContainer.addSubview(sendButton)
+
+    cancelOverlayButton.addTarget(self, action: #selector(cancelOverlayTapped), for: .touchUpInside)
+    cancelOverlayButton.isHidden = true
+    pillContainer.addSubview(cancelOverlayButton)
 
     contentRow.addSubview(pillContainer)
 
@@ -612,13 +634,16 @@ final class ChatInputBar: UIView {
     super.layoutSubviews()
     let w = bounds.width
     guard w > 0 else { return }
+    maybePrepareGifPanel()
 
     let safeBottom = max(0, bottomSafeAreaInset)
     let clampedSendProgress = max(0.0, min(1.0, sendProgress))
     let clampedRecordingExpand = max(0.0, min(1.0, recordingExpandProgress))
     let micVisibility = max(0.0, min(1.0, 1.0 - clampedSendProgress))
 
-    let dynamicHPad = 26.0 - (16.0 * keyboardProgress)
+    // Keep horizontal geometry stable when swapping keyboard <-> GIF panel.
+    let layoutKeyboardProgress = max(keyboardProgress, gifPanelVisible ? 1.0 : 0.0)
+    let dynamicHPad = 26.0 - (16.0 * layoutKeyboardProgress)
 
     // Measure text height
     let recordingLeftExpansion = (sideSize + sideGap) * clampedRecordingExpand
@@ -753,16 +778,20 @@ final class ChatInputBar: UIView {
       }
     }
 
+    cancelOverlayButton.frame = pillContainer.bounds
+
+    let gifPanelX = dynamicHPad
+    let gifPanelW = max(1, w - (dynamicHPad * 2))
     if gifPanelVisible {
       gifPanel.frame = CGRect(
-        x: 0,
+        x: gifPanelX,
         y: contentRow.frame.maxY + vPad,
-        width: w,
+        width: gifPanelW,
         height: gifPanelH + safeBottom
       )
       gifPanel.alpha = 1
     } else {
-      gifPanel.frame = CGRect(x: 0, y: contentRow.frame.maxY, width: w, height: 0)
+      gifPanel.frame = CGRect(x: gifPanelX, y: contentRow.frame.maxY, width: gifPanelW, height: 0)
       gifPanel.alpha = 0
     }
     gifPanel.isHidden = !gifPanelVisible
@@ -955,26 +984,34 @@ final class ChatInputBar: UIView {
   }
 
   private func preferredGifPanelHeight() -> CGFloat {
+    let safeBottom = max(0, bottomSafeAreaInset)
     if keyboardHeightForPanels > 0 {
-      return max(220, keyboardHeightForPanels)
+      return max(220, keyboardHeightForPanels - safeBottom)
     }
     if lastKnownKeyboardHeight > 0 {
-      return max(220, lastKnownKeyboardHeight)
+      return max(220, lastKnownKeyboardHeight - safeBottom)
     }
     return defaultGifPanelHeight
+  }
+
+  private func maybePrepareGifPanel() {
+    guard window != nil else { return }
+    if gifPanel.hostViewController == nil {
+      gifPanel.hostViewController = findViewController()
+    }
+    gifPanel.prepareIfNeeded()
   }
 
   private func setGifPanelVisible(_ visible: Bool, animated: Bool) {
     guard visible != gifPanelVisible else { return }
     if visible {
-      if textView.isFirstResponder {
-        textView.resignFirstResponder()
-      }
-      gifPanel.hostViewController = findViewController()
-      gifPanel.prepareIfNeeded()
+      maybePrepareGifPanel()
     }
 
     gifPanelVisible = visible
+    if visible, textView.isFirstResponder {
+      textView.resignFirstResponder()
+    }
     gifButton.tintColor = appearance.textColorThem.withAlphaComponent(visible ? 1.0 : 0.85)
 
     let applyChanges = {
@@ -984,7 +1021,9 @@ final class ChatInputBar: UIView {
       self.superview?.layoutIfNeeded()
     }
 
-    if animated {
+    // Keyboard hide animation already drives the transition when opening GIF.
+    let shouldAnimate = animated && !(visible && keyboardProgress > 0.01)
+    if shouldAnimate {
       UIView.animate(
         withDuration: 0.25,
         delay: 0,
@@ -1038,6 +1077,10 @@ final class ChatInputBar: UIView {
     let t = currentText
     guard !t.isEmpty else { return }
     delegate?.inputBarDidSend(text: t)
+  }
+
+  @objc private func cancelOverlayTapped() {
+    cancelRecording()
   }
 
   private func findViewController() -> UIViewController? {
@@ -1143,8 +1186,9 @@ final class ChatInputBar: UIView {
     // 2. Show Timer + Cancel
     // 3. Mic scales Up
 
-    textView.isHidden = true
-    placeholderLabel.isHidden = true
+    textView.alpha = 0
+    textView.isUserInteractionEnabled = false
+    placeholderLabel.alpha = 0
     sendButton.isUserInteractionEnabled = false
     sendButton.alpha = 0
     slideToCancelLabel.isHidden = false
@@ -1156,6 +1200,8 @@ final class ChatInputBar: UIView {
     recordingTimerLabel.text = "0:00.00"
 
     recordingStartTime = Date()
+    recordingWaveformSamples.removeAll(keepingCapacity: true)
+    recordingFileURL = nil
     let timer = Timer.scheduledTimer(withTimeInterval: 0.03, repeats: true) { [weak self] _ in
       self?.updateTimer()
     }
@@ -1186,17 +1232,68 @@ final class ChatInputBar: UIView {
 
     // Mic Pulse / Scale
     UIView.animate(withDuration: 0.2) {
-      self.micButton.transform = CGAffineTransform(scaleX: 1.8, y: 1.8)
-      self.micVADView.transform = CGAffineTransform(scaleX: 1.8, y: 1.8)
+      self.micButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
+      self.micGlass.transform = CGAffineTransform(scaleX: 2.8, y: 2.8)
+      self.micVADView.transform = CGAffineTransform(scaleX: 2.8, y: 2.8)
       self.micButton.alpha = 1
     }
 
     micVADView.start()
 
+    let outputURL = FileManager.default.temporaryDirectory
+      .appendingPathComponent("voice-\(UUID().uuidString)")
+      .appendingPathExtension("m4a")
+    recordingFileURL = outputURL
+
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      do {
+        try AVAudioSession.sharedInstance().setCategory(
+          .playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+        try AVAudioSession.sharedInstance().setActive(true)
+        let settings: [String: Any] = [
+          AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+          AVSampleRateKey: 44100.0,
+          AVNumberOfChannelsKey: 1,
+          AVEncoderBitRateKey: 96_000,
+          AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+        ]
+        let recorder = try AVAudioRecorder(url: outputURL, settings: settings)
+        recorder.isMeteringEnabled = true
+        recorder.record()
+
+        DispatchQueue.main.async {
+          guard let self = self else { return }
+          if self.isRecording {
+            self.audioRecorder = recorder
+          } else {
+            recorder.stop()
+            DispatchQueue.global(qos: .userInitiated).async {
+              try? AVAudioSession.sharedInstance().setActive(
+                false, options: .notifyOthersOnDeactivation)
+            }
+          }
+        }
+      } catch {
+        print("Failed to start VAD audio recorder: \(error)")
+      }
+    }
+
     vadTimer?.invalidate()
     vadTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
       guard let self = self, self.isRecording else { return }
-      self.micVADView.level = CGFloat.random(in: 0...1.0)
+      if let recorder = self.audioRecorder, recorder.isRecording {
+        recorder.updateMeters()
+        let db = recorder.averagePower(forChannel: 0)
+        let minDb: Float = -45.0
+        let level = max(0.0, min(1.0, CGFloat((db - minDb) / (-minDb))))
+        self.micVADView.level = level
+        self.recordingWaveformSamples.append(level)
+        if self.recordingWaveformSamples.count > 480 {
+          self.recordingWaveformSamples.removeFirst(self.recordingWaveformSamples.count - 480)
+        }
+      } else {
+        self.micVADView.level = 0
+      }
     }
 
     delegate?.inputBarRecordingStateDidChange(isRecording: true, isLocked: false, mode: "voice")
@@ -1222,9 +1319,21 @@ final class ChatInputBar: UIView {
     vadTimer?.invalidate()
     micVADView.stop()
 
-    slideToCancelLabel.text = "Tap mic to send"
+    slideToCancelLabel.text = "Cancel"
     slideChevronView.isHidden = true
     lockPill.isHidden = true
+    cancelOverlayButton.isHidden = false
+
+    let sendIcon = UIImage(
+      systemName: "arrow.up.circle.fill",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .medium))
+    UIView.transition(with: micButton, duration: 0.2, options: .transitionCrossDissolve) {
+      self.micButton.setImage(sendIcon, for: .normal)
+      self.micButton.tintColor =
+        self.appearance.bubbleMeGradient.first
+        ?? self.appearance.textColorThem.withAlphaComponent(0.9)
+    }
+
     stopRecordingHintAnimations()
     slideToCancelLabel.transform = .identity
     lockPill.transform = .identity
@@ -1367,8 +1476,13 @@ final class ChatInputBar: UIView {
 
     micVADView.stop()
 
+    audioRecorder?.stop()
     let dur = Date().timeIntervalSince(recordingStartTime ?? Date())
-    delegate?.inputBarDidRecordVoice(uri: "full-implementation-todo", duration: dur)
+    let waveform = downsampleWaveform(recordingWaveformSamples, targetCount: 28)
+    let outputURI = recordingFileURL?.absoluteString ?? ""
+    if !outputURI.isEmpty {
+      delegate?.inputBarDidRecordVoice(uri: outputURI, duration: dur, waveform: waveform)
+    }
 
     resetUI()
     recordingTimer?.invalidate()
@@ -1378,9 +1492,22 @@ final class ChatInputBar: UIView {
   private func resetUI(revealAttach: Bool = true) {
     vadTimer?.invalidate()
     vadTimer = nil
+    let rec = audioRecorder
+    audioRecorder = nil
+
+    DispatchQueue.global(qos: .userInitiated).async {
+      rec?.stop()
+      try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+    }
+
     recordingStartTime = nil
+    recordingFileURL = nil
+    recordingWaveformSamples.removeAll(keepingCapacity: true)
+    textView.alpha = 1
+    textView.isUserInteractionEnabled = true
     textView.isHidden = false
     applyPlaceholder()
+    placeholderLabel.alpha = 1
     slideToCancelLabel.isHidden = true
     slideChevronView.isHidden = true
     recordingTimerLabel.isHidden = true
@@ -1405,14 +1532,52 @@ final class ChatInputBar: UIView {
       self.attachButton.transform = .identity
       self.attachButton.alpha = revealAttach ? 1 : 0
       self.micButton.transform = .identity
+      self.micGlass.transform = .identity
       self.micVADView.transform = .identity
       self.micButton.alpha = 1
       self.micGlass.backgroundColor = .clear
+
+      let micCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+      self.micButton.setImage(
+        UIImage(systemName: "mic.fill", withConfiguration: micCfg), for: .normal)
+      self.micButton.tintColor = self.appearance.textColorThem.withAlphaComponent(0.9)
+
+      self.cancelOverlayButton.isHidden = true
+
       self.setNeedsLayout()
       self.layoutIfNeeded()
       self.superview?.setNeedsLayout()
       self.superview?.layoutIfNeeded()
     }
+  }
+
+  private func downsampleWaveform(_ samples: [CGFloat], targetCount: Int) -> [Double] {
+    guard targetCount > 0 else { return [] }
+    let sanitized = samples
+      .map { max(0.0, min(1.0, $0)) }
+      .filter { $0.isFinite }
+    guard !sanitized.isEmpty else {
+      return Array(repeating: 0.18, count: targetCount)
+    }
+    if sanitized.count == targetCount {
+      return sanitized.map(Double.init)
+    }
+    let bucketSize = Double(sanitized.count) / Double(targetCount)
+    var result: [Double] = []
+    result.reserveCapacity(targetCount)
+    for index in 0..<targetCount {
+      let start = Int(floor(Double(index) * bucketSize))
+      let end = min(sanitized.count, Int(floor(Double(index + 1) * bucketSize)))
+      if start < end {
+        let slice = sanitized[start..<end]
+        let avg = slice.reduce(0.0, +) / CGFloat(slice.count)
+        result.append(Double(max(0.12, avg)))
+      } else {
+        let clampedIndex = min(max(0, start), sanitized.count - 1)
+        result.append(Double(max(0.12, sanitized[clampedIndex])))
+      }
+    }
+    return result
   }
 
   private func startRecordingHintAnimations() {

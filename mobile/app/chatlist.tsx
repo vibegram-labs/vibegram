@@ -1959,11 +1959,15 @@ export default function ChatListScreen({
         if (type === 'attachmentVoice') {
             const uriRaw = nativeEvent.uri;
             const durationRaw = typeof nativeEvent.duration === 'number' ? nativeEvent.duration : 0;
+            const waveformRaw = Array.isArray(nativeEvent.waveform)
+                ? nativeEvent.waveform.filter((v: unknown) => typeof v === 'number').map((v: number) => Math.max(0, Math.min(1, v)))
+                : undefined;
             if (typeof uriRaw !== 'string' || !effectiveChatId) return;
             void sendMessage(effectiveChatId, '', 'voice', {
                 mediaUrl: uriRaw,
                 duration: durationRaw,
                 fileName: 'voice-message.m4a',
+                waveform: waveformRaw,
             });
             return;
         }
@@ -2459,6 +2463,9 @@ export default function ChatListScreen({
             mediaUrl: message.mediaUrl,
             fileName: message.fileName,
             duration: message.duration,
+            waveform: Array.isArray(message.extra?.waveform)
+                ? message.extra?.waveform.filter((v: unknown) => typeof v === 'number').map((v: number) => Math.max(0, Math.min(1, v)))
+                : undefined,
             isVideoNote: !!message.isVideoNote,
             uploadProgress: uploadProgressById?.[message.id] || 0,
             isMe: message.isMe,

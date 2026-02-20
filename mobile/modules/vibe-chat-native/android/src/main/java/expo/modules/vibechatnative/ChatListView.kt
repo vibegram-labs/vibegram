@@ -15,6 +15,11 @@ import android.view.animation.PathInterpolator
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
 import android.animation.ValueAnimator
+import android.media.MediaPlayer
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.os.SystemClock
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.recyclerview.widget.DiffUtil
@@ -55,6 +60,10 @@ private data class NativeRowItem(
   val isMe: Boolean,
   val messageId: String?,
   val shape: NativeBubbleShape,
+  val messageType: String,
+  val mediaUrl: String?,
+  val duration: Double?,
+  val waveform: List<Float>?,
 )
 
 private data class SendTransitionPayload(
@@ -69,6 +78,10 @@ private class NativeRowViewHolder(
   val bubbleContainer: FrameLayout,
   val tailView: BubbleTailView,
   val textView: TextView,
+  val voiceContainer: FrameLayout,
+  val voiceButton: TextView,
+  val voiceWaveView: VoiceWaveformView,
+  val voiceDurationView: TextView,
   val timeView: TextView,
   val dayLabel: TextView,
 ) : RecyclerView.ViewHolder(container)
@@ -105,15 +118,299 @@ private class BubbleTailView(context: Context) : View(context) {
   }
 }
 
+private class VoiceWaveformView(context: Context) : View(context) {
+  private val activePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.FILL
+    color = Color.WHITE
+  }
+  private val inactivePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.FILL
+    color = Color.argb(74, 255, 255, 255)
+  }
+  private val barCount = 28
+  private var barEnvelope: FloatArray = makeDefaultEnvelope(barCount)
+  private var playbackProgress = 0f
+  private var level = 0f
+  private var isPlaying = false
+  private var phase = 0f
+
+  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+    val desiredHeight = dp(10)
+    val resolvedHeight = resolveSize(desiredHeight, heightMeasureSpec)
+    super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(resolvedHeight, MeasureSpec.EXACTLY))
+  }
+
+  fun updatePlayback(progress: Float, level: Float, isPlaying: Boolean) {
+    playbackProgress = progress.coerceIn(0f, 1f)
+    this.level = level.coerceIn(0f, 1f)
+    this.isPlaying = isPlaying
+    if (isPlaying) {
+      phase += 0.34f
+    }
+    invalidate()
+  }
+
+  fun setWaveform(samples: List<Float>?) {
+    val normalized =
+      samples
+        ?.map { it.coerceIn(0f, 1f) }
+        ?.filter { it.isFinite() }
+        .orEmpty()
+    if (normalized.isEmpty()) {
+      barEnvelope = makeDefaultEnvelope(barCount)
+      invalidate()
+      return
+    }
+    if (normalized.size == barCount) {
+      barEnvelope = normalized.toFloatArray()
+      invalidate()
+      return
+    }
+    val bucketSize = normalized.size.toFloat() / barCount.toFloat()
+    val next = FloatArray(barCount)
+    for (index in 0 until barCount) {
+      val start = kotlin.math.floor(index * bucketSize).toInt()
+      val end = min(normalized.size, kotlin.math.floor((index + 1) * bucketSize).toInt())
+      if (start < end) {
+        var sum = 0f
+        for (i in start until end) sum += normalized[i]
+        next[index] = sum / (end - start).toFloat()
+      } else {
+        val clamped = min(max(0, start), normalized.size - 1)
+        next[index] = normalized[clamped]
+      }
+    }
+    barEnvelope = next
+    invalidate()
+  }
+
+  override fun onDraw(canvas: Canvas) {
+    super.onDraw(canvas)
+    if (width <= 0 || height <= 0) return
+    val spacing = dpF(2f)
+    val totalSpacing = spacing * (barCount - 1)
+    val barWidth = max(1f, (width - totalSpacing) / barCount.toFloat())
+    val minHeight = max(1f, height * 0.28f)
+    val maxHeight = max(minHeight + 1f, height * 0.92f)
+    var x = 0f
+    for (index in 0 until barCount) {
+      val normalizedIndex = index / max(1f, barCount.toFloat())
+      val base = barEnvelope[index]
+      val pulse =
+        if (isPlaying) {
+          (kotlin.math.sin((phase + (index * 0.62f)).toDouble()) * 0.08 + 0.92).toFloat()
+        } else {
+          1.0f
+        }
+      val liveBoost = if (isPlaying) level * 0.18f else 0f
+      val amplitude = ((base + liveBoost) * pulse).coerceIn(0.12f, 1f)
+      val barHeight = minHeight + ((maxHeight - minHeight) * amplitude)
+      val y = (height - barHeight) * 0.5f
+      val paint = if (normalizedIndex < playbackProgress) activePaint else inactivePaint
+      val r = barWidth * 0.5f
+      canvas.drawRoundRect(x, y, x + barWidth, y + barHeight, r, r, paint)
+      x += barWidth + spacing
+    }
+  }
+
+  private fun makeDefaultEnvelope(count: Int): FloatArray {
+    if (count <= 0) return floatArrayOf()
+    val out = FloatArray(count)
+    for (i in 0 until count) {
+      val t = i.toFloat() / max(1f, (count - 1).toFloat())
+      val wave = (kotlin.math.sin((t * Math.PI * 5.0) + 0.7) * 0.5 + 0.5).toFloat()
+      out[i] = (0.22f + (wave * 0.55f)).coerceIn(0.18f, 0.82f)
+    }
+    return out
+  }
+
+  private fun dp(value: Int): Int =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value.toFloat(),
+      context.resources.displayMetrics,
+    ).toInt()
+
+  private fun dpF(value: Float): Float =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      context.resources.displayMetrics,
+    )
+}
+
 private class NativeRowsAdapter(
   private val context: Context,
 ) : RecyclerView.Adapter<NativeRowViewHolder>() {
   private val rows = mutableListOf<NativeRowItem>()
   private var hiddenMessageId: String? = null
   private var appearance = ChatListAppearance()
+  private val voicePlayback = VoicePlaybackCoordinator()
 
   init {
     setHasStableIds(true)
+  }
+
+  private inner class VoicePlaybackCoordinator {
+    private var activeMessageId: String? = null
+    private var activeHolder: NativeRowViewHolder? = null
+    private var mediaPlayer: MediaPlayer? = null
+    private var isPrepared = false
+    private val handler = Handler(Looper.getMainLooper())
+    private var ticker: Runnable? = null
+    private var progress = 0f
+    private var level = 0f
+    private var isPlaying = false
+
+    fun bind(holder: NativeRowViewHolder, item: NativeRowItem) {
+      if (activeMessageId == item.messageId) {
+        activeHolder = holder
+        applyState(holder, isPlaying, progress, level)
+      } else {
+        applyState(holder, false, 0f, 0f)
+      }
+    }
+
+    fun detach(holder: NativeRowViewHolder) {
+      if (activeHolder === holder) {
+        activeHolder = null
+      }
+    }
+
+    fun toggle(holder: NativeRowViewHolder, item: NativeRowItem) {
+      val messageId = item.messageId?.takeIf { it.isNotBlank() } ?: return
+      val mediaUrl = item.mediaUrl?.takeIf { it.isNotBlank() } ?: return
+
+      if (activeMessageId == messageId) {
+        val player = mediaPlayer ?: return
+        if (!isPrepared) {
+          return
+        }
+        if (player.isPlaying) {
+          player.pause()
+          isPlaying = false
+          applyState(holder, false, progress, level)
+        } else {
+          player.start()
+          isPlaying = true
+        }
+        return
+      }
+
+      stop(resetProgress = true)
+
+      val player = MediaPlayer()
+      try {
+        if (mediaUrl.startsWith("content://")) {
+          val uri = Uri.parse(mediaUrl)
+          player.setDataSource(context, uri)
+        } else {
+          player.setDataSource(mediaUrl)
+        }
+      } catch (_: Throwable) {
+        player.release()
+        return
+      }
+
+      activeMessageId = messageId
+      activeHolder = holder
+      mediaPlayer = player
+      isPrepared = false
+      progress = 0f
+      level = 0f
+      isPlaying = false
+      applyState(holder, false, 0f, 0f)
+
+      player.setOnPreparedListener {
+        isPrepared = true
+        it.start()
+        isPlaying = true
+        startTicker()
+      }
+      player.setOnCompletionListener {
+        stop(resetProgress = true)
+      }
+      player.setOnErrorListener { _, _, _ ->
+        stop(resetProgress = true)
+        true
+      }
+      player.prepareAsync()
+    }
+
+    private fun startTicker() {
+      if (ticker != null) {
+        return
+      }
+      val runnable = object : Runnable {
+        override fun run() {
+          val player = mediaPlayer
+          if (player == null) {
+            stop(resetProgress = true)
+            return
+          }
+          if (!isPrepared) {
+            handler.postDelayed(this, 16L)
+            return
+          }
+          val duration: Int
+          val position: Int
+          try {
+            duration = player.duration
+            position = player.currentPosition
+          } catch (_: IllegalStateException) {
+            handler.postDelayed(this, 16L)
+            return
+          }
+          progress =
+            if (duration > 0) {
+              (position.toFloat() / duration.toFloat()).coerceIn(0f, 1f)
+            } else {
+              0f
+            }
+          val t = SystemClock.uptimeMillis() * 0.001f
+          level =
+            if (player.isPlaying) {
+              (0.42f + 0.38f * kotlin.math.abs(kotlin.math.sin((t * 8.5f).toDouble()))).toFloat()
+            } else {
+              0.12f
+            }
+          isPlaying = player.isPlaying
+          activeHolder?.let { applyState(it, isPlaying, progress, level) }
+          handler.postDelayed(this, 16L)
+        }
+      }
+      ticker = runnable
+      handler.post(runnable)
+    }
+
+    private fun applyState(holder: NativeRowViewHolder, isPlaying: Boolean, progress: Float, level: Float) {
+      holder.voiceButton.text = if (isPlaying) "❚❚" else "▶"
+      holder.voiceWaveView.updatePlayback(progress, level, isPlaying)
+    }
+
+    private fun stop(resetProgress: Boolean) {
+      ticker?.let { handler.removeCallbacks(it) }
+      ticker = null
+      mediaPlayer?.setOnCompletionListener(null)
+      mediaPlayer?.setOnPreparedListener(null)
+      mediaPlayer?.setOnErrorListener(null)
+      try {
+        mediaPlayer?.stop()
+      } catch (_: Throwable) {
+        // no-op: player can still be in preparing state
+      }
+      mediaPlayer?.release()
+      mediaPlayer = null
+      isPrepared = false
+      isPlaying = false
+      if (resetProgress) {
+        progress = 0f
+        level = 0f
+      }
+      activeHolder?.let { applyState(it, false, progress, level) }
+      activeHolder = null
+      activeMessageId = null
+    }
   }
 
   fun setRows(next: List<NativeRowItem>) {
@@ -209,6 +506,32 @@ private class NativeRowsAdapter(
       maxWidth = (context.resources.displayMetrics.widthPixels * 0.85f).toInt()
     }
 
+    val voiceContainer = FrameLayout(context).apply {
+      visibility = View.GONE
+      alpha = 1f
+    }
+
+    val voiceButton = TextView(context).apply {
+      text = "▶"
+      gravity = Gravity.CENTER
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+      setTextColor(Color.WHITE)
+      background = GradientDrawable().apply {
+        setColor(Color.argb(56, 255, 255, 255))
+        shape = GradientDrawable.OVAL
+      }
+      includeFontPadding = false
+    }
+
+    val voiceWave = VoiceWaveformView(context)
+
+    val voiceDuration = TextView(context).apply {
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+      setTextColor(Color.argb(200, 255, 255, 255))
+      gravity = Gravity.END or Gravity.CENTER_VERTICAL
+      includeFontPadding = false
+    }
+
     val time = TextView(context).apply {
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
       setTextColor(Color.argb(184, 255, 255, 255))
@@ -229,6 +552,31 @@ private class NativeRowsAdapter(
         FrameLayout.LayoutParams.WRAP_CONTENT,
         FrameLayout.LayoutParams.WRAP_CONTENT,
       ),
+    )
+    voiceContainer.addView(
+      voiceButton,
+      FrameLayout.LayoutParams(dp(30), dp(30)).apply {
+        gravity = Gravity.START or Gravity.CENTER_VERTICAL
+      },
+    )
+    voiceContainer.addView(
+      voiceWave,
+      FrameLayout.LayoutParams(dp(128), dp(10)).apply {
+        gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        leftMargin = dp(38)
+      },
+    )
+    voiceContainer.addView(
+      voiceDuration,
+      FrameLayout.LayoutParams(dp(42), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+        gravity = Gravity.END or Gravity.CENTER_VERTICAL
+      },
+    )
+    bubble.addView(
+      voiceContainer,
+      FrameLayout.LayoutParams(dp(188), dp(34)).apply {
+        gravity = Gravity.START
+      },
     )
     bubble.addView(
       time,
@@ -255,7 +603,7 @@ private class NativeRowsAdapter(
       ),
     )
 
-    return NativeRowViewHolder(root, bubble, tail, text, time, day)
+    return NativeRowViewHolder(root, bubble, tail, text, voiceContainer, voiceButton, voiceWave, voiceDuration, time, day)
   }
 
   override fun onBindViewHolder(holder: NativeRowViewHolder, position: Int) {
@@ -265,8 +613,17 @@ private class NativeRowsAdapter(
 
   override fun getItemCount(): Int = rows.size
 
+  override fun onViewRecycled(holder: NativeRowViewHolder) {
+    super.onViewRecycled(holder)
+    voicePlayback.detach(holder)
+    holder.voiceWaveView.updatePlayback(0f, 0f, false)
+    holder.voiceWaveView.setWaveform(null)
+    holder.voiceButton.text = "▶"
+  }
+
   private fun NativeRowViewHolder.bind(item: NativeRowItem, hidden: Boolean) {
     if (item.kind == "day") {
+      voicePlayback.detach(this)
       dayLabel.visibility = View.VISIBLE
       dayLabel.text = item.text
       dayLabel.setTextColor(appearance.dayTextColor)
@@ -277,6 +634,7 @@ private class NativeRowsAdapter(
       }
       bubbleContainer.visibility = View.GONE
       tailView.visibility = View.GONE
+      voiceWaveView.setWaveform(null)
       return
     }
 
@@ -284,10 +642,13 @@ private class NativeRowsAdapter(
     bubbleContainer.visibility = View.VISIBLE
     bubbleContainer.alpha = if (hidden) 0f else 1f
 
+    val isVoice = item.messageType == "voice" || item.messageType == "music"
     textView.text = item.text
     timeView.text = item.timestamp
     textView.setTextColor(if (item.isMe) appearance.textColorMe else appearance.textColorThem)
     timeView.setTextColor(if (item.isMe) appearance.timeColorMe else appearance.timeColorThem)
+    voiceDurationView.text = formatDuration(item.duration)
+    voiceWaveView.setWaveform(item.waveform)
 
     val lp = bubbleContainer.layoutParams as FrameLayout.LayoutParams
     lp.gravity = if (item.isMe) Gravity.END else Gravity.START
@@ -308,6 +669,24 @@ private class NativeRowsAdapter(
       dpF(item.shape.bottomLeft), dpF(item.shape.bottomLeft),
     )
     bubbleContainer.background = drawable
+
+    if (isVoice) {
+      textView.visibility = View.GONE
+      voiceContainer.visibility = View.VISIBLE
+      bubbleContainer.minimumWidth = dp(220)
+      voiceButton.setOnClickListener {
+        voicePlayback.toggle(this, item)
+      }
+      voicePlayback.bind(this, item)
+    } else {
+      textView.visibility = View.VISIBLE
+      voiceContainer.visibility = View.GONE
+      bubbleContainer.minimumWidth = dp(26)
+      voiceButton.setOnClickListener(null)
+      voicePlayback.detach(this)
+      voiceWaveView.updatePlayback(0f, 0f, false)
+      voiceWaveView.setWaveform(null)
+    }
 
     if (!hidden && item.shape.showTail) {
       tailView.configure(
@@ -357,6 +736,13 @@ private class NativeRowsAdapter(
       value,
       context.resources.displayMetrics,
     )
+
+  private fun formatDuration(value: Double?): String {
+    val totalSeconds = max(0, (value ?: 0.0).roundToInt())
+    val minutes = totalSeconds / 60
+    val seconds = totalSeconds % 60
+    return String.format("%d:%02d", minutes, seconds)
+  }
 }
 
 class ChatListView(
@@ -594,6 +980,10 @@ class ChatListView(
             isMe = false,
             messageId = null,
             shape = NativeBubbleShape(showTail = false, topLeft = 18f, topRight = 18f, bottomRight = 18f, bottomLeft = 18f),
+            messageType = "text",
+            mediaUrl = null,
+            duration = null,
+            waveform = null,
           ),
         )
         continue
@@ -604,6 +994,25 @@ class ChatListView(
       val timestamp = (message["timestamp"] as? String) ?: ""
       val isMe = (message["isMe"] as? Boolean) ?: false
       val messageId = message["id"] as? String
+      val messageType = ((message["type"] as? String) ?: "text").lowercase()
+      val metadata = message["metadata"] as? Map<*, *>
+      val mediaUrl =
+        (message["mediaUrl"] as? String)
+          ?: (message["media_url"] as? String)
+          ?: (message["uri"] as? String)
+          ?: (message["audioUrl"] as? String)
+          ?: (message["audio_url"] as? String)
+          ?: (metadata?.get("mediaUrl") as? String)
+          ?: (metadata?.get("media_url") as? String)
+          ?: (metadata?.get("uri") as? String)
+          ?: (metadata?.get("audioUrl") as? String)
+          ?: (metadata?.get("audio_url") as? String)
+      val duration =
+        parseDouble(message["duration"])
+          ?: parseDouble(metadata?.get("duration"))
+      val waveform =
+        parseWaveform(message["waveform"])
+          ?: parseWaveform(metadata?.get("waveform"))
       val shapeMap = message["bubbleShape"] as? Map<*, *>
       val shape = NativeBubbleShape(
         showTail = (shapeMap?.get("showTail") as? Boolean) ?: true,
@@ -622,6 +1031,10 @@ class ChatListView(
           isMe = isMe,
           messageId = messageId,
           shape = shape,
+          messageType = messageType,
+          mediaUrl = mediaUrl,
+          duration = duration,
+          waveform = waveform,
         ),
       )
     }
@@ -852,6 +1265,30 @@ class ChatListView(
       value.toFloat(),
       context.resources.displayMetrics,
     ).toInt()
+
+  private fun parseDouble(raw: Any?): Double? {
+    return when (raw) {
+      is Number -> raw.toDouble()
+      is String -> raw.toDoubleOrNull()
+      else -> null
+    }
+  }
+
+  private fun parseWaveform(raw: Any?): List<Float>? {
+    val list = raw as? List<*> ?: return null
+    if (list.isEmpty()) return null
+    val out =
+      list.mapNotNull { item ->
+        when (item) {
+          is Number -> item.toFloat()
+          is String -> item.toFloatOrNull()
+          else -> null
+        }
+      }
+        .filter { it.isFinite() }
+        .map { it.coerceIn(0f, 1f) }
+    return out.ifEmpty { null }
+  }
 
   private fun lerp(a: Float, b: Float, t: Float): Float = a + ((b - a) * t)
 }

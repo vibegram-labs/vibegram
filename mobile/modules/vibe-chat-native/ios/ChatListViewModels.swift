@@ -35,9 +35,14 @@ struct BubbleShape {
   let borderBottomRightRadius: CGFloat
 
   static func from(raw: [String: Any]?, isMe: Bool) -> BubbleShape {
-    let fallback = isMe
-      ? BubbleShape(isMe: true, showTail: true, borderTopLeftRadius: 18, borderTopRightRadius: 18, borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
-      : BubbleShape(isMe: false, showTail: true, borderTopLeftRadius: 18, borderTopRightRadius: 18, borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
+    let fallback =
+      isMe
+      ? BubbleShape(
+        isMe: true, showTail: true, borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
+      : BubbleShape(
+        isMe: false, showTail: true, borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
     guard let raw else {
       return fallback
     }
@@ -46,8 +51,10 @@ struct BubbleShape {
       showTail: (raw["showTail"] as? Bool) ?? true,
       borderTopLeftRadius: CGFloat((raw["borderTopLeftRadius"] as? NSNumber)?.doubleValue ?? 18),
       borderTopRightRadius: CGFloat((raw["borderTopRightRadius"] as? NSNumber)?.doubleValue ?? 18),
-      borderBottomLeftRadius: CGFloat((raw["borderBottomLeftRadius"] as? NSNumber)?.doubleValue ?? 18),
-      borderBottomRightRadius: CGFloat((raw["borderBottomRightRadius"] as? NSNumber)?.doubleValue ?? 18)
+      borderBottomLeftRadius: CGFloat(
+        (raw["borderBottomLeftRadius"] as? NSNumber)?.doubleValue ?? 18),
+      borderBottomRightRadius: CGFloat(
+        (raw["borderBottomRightRadius"] as? NSNumber)?.doubleValue ?? 18)
     )
   }
 }
@@ -81,6 +88,7 @@ struct ChatListRow {
   let mediaUrl: String?
   let fileName: String?
   let duration: Double?
+  let waveform: [CGFloat]?
   let isVideoNote: Bool
   let uploadProgress: Double?
 
@@ -115,7 +123,8 @@ struct ChatListRow {
     guard let kindRaw = raw["kind"] as? String else {
       return nil
     }
-    let keyValue = (raw["key"] as? String)?.isEmpty == false ? (raw["key"] as? String)! : UUID().uuidString
+    let keyValue =
+      (raw["key"] as? String)?.isEmpty == false ? (raw["key"] as? String)! : UUID().uuidString
     key = keyValue
 
     if kindRaw == "day" {
@@ -128,11 +137,14 @@ struct ChatListRow {
       isEdited = false
       isPinned = false
       messageId = nil
-      shape = BubbleShape(isMe: false, showTail: false, borderTopLeftRadius: 18, borderTopRightRadius: 18, borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
+      shape = BubbleShape(
+        isMe: false, showTail: false, borderTopLeftRadius: 18, borderTopRightRadius: 18,
+        borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
       messageType = "text"
       mediaUrl = nil
       fileName = nil
       duration = nil
+      waveform = nil
       isVideoNote = false
       uploadProgress = nil
       return
@@ -154,11 +166,25 @@ struct ChatListRow {
     shape = BubbleShape.from(raw: message["bubbleShape"] as? [String: Any], isMe: isMe)
 
     let metadata = message["metadata"] as? [String: Any]
-    mediaUrl =
-      (message["mediaUrl"] as? String)
-      ?? (message["media_url"] as? String)
-      ?? (metadata?["mediaUrl"] as? String)
-      ?? (metadata?["media_url"] as? String)
+    let mediaUrl1 = message["mediaUrl"] as? String
+    let mediaUrl2 = message["media_url"] as? String
+    let mediaUrl3 = message["uri"] as? String
+    let mediaUrl4 = message["audioUrl"] as? String
+    let mediaUrl5 = message["audio_url"] as? String
+    let metaUrl1 = metadata?["mediaUrl"] as? String
+    let metaUrl2 = metadata?["media_url"] as? String
+    let metaUrl3 = metadata?["uri"] as? String
+    let metaUrl4 = metadata?["audioUrl"] as? String
+    let metaUrl5 = metadata?["audio_url"] as? String
+
+    let mediaUrlCandidates: [String?] = [
+      mediaUrl1, mediaUrl2, mediaUrl3, mediaUrl4, mediaUrl5,
+      metaUrl1, metaUrl2, metaUrl3, metaUrl4, metaUrl5,
+    ]
+    mediaUrl = mediaUrlCandidates.compactMap { value in
+      guard let value, !value.isEmpty else { return nil }
+      return value
+    }.first
     fileName =
       (message["fileName"] as? String)
       ?? (message["file_name"] as? String)
@@ -167,6 +193,9 @@ struct ChatListRow {
     duration =
       parseDouble(message["duration"])
       ?? parseDouble(metadata?["duration"])
+    waveform =
+      parseWaveform(message["waveform"])
+      ?? parseWaveform(metadata?["waveform"])
     isVideoNote =
       (message["isVideoNote"] as? Bool)
       ?? (metadata?["isVideoNote"] as? Bool)
@@ -181,12 +210,11 @@ struct ChatListRow {
 
 private func bubbleShapeEqual(_ lhs: BubbleShape, _ rhs: BubbleShape) -> Bool {
   let epsilon: CGFloat = 0.1
-  return lhs.isMe == rhs.isMe &&
-    lhs.showTail == rhs.showTail &&
-    abs(lhs.borderTopLeftRadius - rhs.borderTopLeftRadius) <= epsilon &&
-    abs(lhs.borderTopRightRadius - rhs.borderTopRightRadius) <= epsilon &&
-    abs(lhs.borderBottomLeftRadius - rhs.borderBottomLeftRadius) <= epsilon &&
-    abs(lhs.borderBottomRightRadius - rhs.borderBottomRightRadius) <= epsilon
+  return lhs.isMe == rhs.isMe && lhs.showTail == rhs.showTail
+    && abs(lhs.borderTopLeftRadius - rhs.borderTopLeftRadius) <= epsilon
+    && abs(lhs.borderTopRightRadius - rhs.borderTopRightRadius) <= epsilon
+    && abs(lhs.borderBottomLeftRadius - rhs.borderBottomLeftRadius) <= epsilon
+    && abs(lhs.borderBottomRightRadius - rhs.borderBottomRightRadius) <= epsilon
 }
 
 private func parseDouble(_ raw: Any?) -> Double? {
@@ -205,35 +233,71 @@ private func parseDouble(_ raw: Any?) -> Double? {
   return nil
 }
 
+private func parseWaveform(_ raw: Any?) -> [CGFloat]? {
+  guard let array = raw as? [Any], !array.isEmpty else {
+    return nil
+  }
+  let mapped: [CGFloat] = array.compactMap { item in
+    if let num = item as? NSNumber {
+      return CGFloat(truncating: num)
+    }
+    if let dbl = item as? Double {
+      return CGFloat(dbl)
+    }
+    if let int = item as? Int {
+      return CGFloat(int)
+    }
+    if let str = item as? String, let dbl = Double(str) {
+      return CGFloat(dbl)
+    }
+    return nil
+  }
+  let normalized = mapped
+    .filter { $0.isFinite }
+    .map { max(0.0, min(1.0, $0)) }
+  return normalized.isEmpty ? nil : normalized
+}
+
 private func optionalDoubleEqual(_ lhs: Double?, _ rhs: Double?, epsilon: Double = 0.0001) -> Bool {
   switch (lhs, rhs) {
   case (nil, nil):
     return true
-  case let (l?, r?):
+  case (let l?, let r?):
     return abs(l - r) <= epsilon
   default:
     return false
   }
 }
 
+private func optionalWaveformEqual(_ lhs: [CGFloat]?, _ rhs: [CGFloat]?, epsilon: CGFloat = 0.001)
+  -> Bool
+{
+  switch (lhs, rhs) {
+  case (nil, nil):
+    return true
+  case (let l?, let r?):
+    guard l.count == r.count else { return false }
+    for (a, b) in zip(l, r) {
+      if abs(a - b) > epsilon {
+        return false
+      }
+    }
+    return true
+  default:
+    return false
+  }
+}
+
 func chatListRowContentEqual(_ lhs: ChatListRow, _ rhs: ChatListRow) -> Bool {
-  return lhs.kind == rhs.kind &&
-    lhs.key == rhs.key &&
-    lhs.label == rhs.label &&
-    lhs.text == rhs.text &&
-    lhs.timestamp == rhs.timestamp &&
-    lhs.isMe == rhs.isMe &&
-    lhs.status == rhs.status &&
-    lhs.isEdited == rhs.isEdited &&
-    lhs.isPinned == rhs.isPinned &&
-    lhs.messageId == rhs.messageId &&
-    lhs.messageType == rhs.messageType &&
-    lhs.mediaUrl == rhs.mediaUrl &&
-    lhs.fileName == rhs.fileName &&
-    optionalDoubleEqual(lhs.duration, rhs.duration) &&
-    lhs.isVideoNote == rhs.isVideoNote &&
-    optionalDoubleEqual(lhs.uploadProgress, rhs.uploadProgress) &&
-    bubbleShapeEqual(lhs.shape, rhs.shape)
+  return lhs.kind == rhs.kind && lhs.key == rhs.key && lhs.label == rhs.label
+    && lhs.text == rhs.text && lhs.timestamp == rhs.timestamp && lhs.isMe == rhs.isMe
+    && lhs.status == rhs.status && lhs.isEdited == rhs.isEdited && lhs.isPinned == rhs.isPinned
+    && lhs.messageId == rhs.messageId && lhs.messageType == rhs.messageType
+    && lhs.mediaUrl == rhs.mediaUrl && lhs.fileName == rhs.fileName
+    && optionalDoubleEqual(lhs.duration, rhs.duration) && lhs.isVideoNote == rhs.isVideoNote
+    && optionalWaveformEqual(lhs.waveform, rhs.waveform)
+    && optionalDoubleEqual(lhs.uploadProgress, rhs.uploadProgress)
+    && bubbleShapeEqual(lhs.shape, rhs.shape)
 }
 
 struct SendTransitionPayload {
@@ -306,8 +370,7 @@ struct SendTransitionPayload {
     let textStartRect = rectInHost(x: startX, y: startY, width: startWidth, height: startHeight)
 
     var backgroundStartRect: CGRect?
-    if
-      let bgX = number("startBackgroundX"),
+    if let bgX = number("startBackgroundX"),
       let bgY = number("startBackgroundY"),
       let bgWidth = number("startBackgroundWidth"),
       let bgHeight = number("startBackgroundHeight")

@@ -1,3 +1,4 @@
+import AVFoundation
 import UIKit
 
 final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
@@ -386,6 +387,299 @@ final class BubbleUploadProgressView: UIView {
   }
 }
 
+final class VoiceWaveformView: UIView {
+  private let barCount = 28
+  private var barLayers: [CALayer] = []
+  private var barEnvelope: [CGFloat] = []
+  private var playbackProgress: CGFloat = 0.0
+  private var level: CGFloat = 0.0
+  private var isPlaying = false
+  private var phase: CGFloat = 0.0
+  private var activeColor = UIColor.white
+  private var inactiveColor = UIColor(white: 1.0, alpha: 0.24)
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = false
+    backgroundColor = .clear
+    barEnvelope = Self.makeDefaultEnvelope(count: barCount)
+    for _ in 0..<barCount {
+      let layer = CALayer()
+      layer.backgroundColor = inactiveColor.cgColor
+      barLayers.append(layer)
+      self.layer.addSublayer(layer)
+    }
+  }
+
+  required init?(coder: NSCoder) {
+    return nil
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    applyBarFrames()
+  }
+
+  func applyColors(active: UIColor, inactive: UIColor) {
+    activeColor = active
+    inactiveColor = inactive
+    applyBarFrames()
+  }
+
+  func setWaveform(_ samples: [CGFloat]?) {
+    guard let samples, !samples.isEmpty else {
+      barEnvelope = Self.makeDefaultEnvelope(count: barCount)
+      applyBarFrames()
+      return
+    }
+    let normalized = samples
+      .filter { $0.isFinite }
+      .map { max(0.0, min(1.0, $0)) }
+    guard !normalized.isEmpty else {
+      barEnvelope = Self.makeDefaultEnvelope(count: barCount)
+      applyBarFrames()
+      return
+    }
+
+    if normalized.count == barCount {
+      barEnvelope = normalized
+    } else {
+      var resampled: [CGFloat] = []
+      resampled.reserveCapacity(barCount)
+      let bucketSize = CGFloat(normalized.count) / CGFloat(barCount)
+      for index in 0..<barCount {
+        let start = Int(floor(CGFloat(index) * bucketSize))
+        let end = min(normalized.count, Int(floor(CGFloat(index + 1) * bucketSize)))
+        if start < end {
+          let slice = normalized[start..<end]
+          let avg = slice.reduce(0.0, +) / CGFloat(slice.count)
+          resampled.append(avg)
+        } else {
+          resampled.append(normalized[min(max(0, start), normalized.count - 1)])
+        }
+      }
+      barEnvelope = resampled
+    }
+    applyBarFrames()
+  }
+
+  func setPlayback(progress: CGFloat, level: CGFloat, isPlaying: Bool) {
+    playbackProgress = max(0.0, min(1.0, progress))
+    self.level = max(0.0, min(1.0, level))
+    self.isPlaying = isPlaying
+    if isPlaying {
+      phase += 0.38
+    }
+    applyBarFrames()
+  }
+
+  private func applyBarFrames() {
+    guard !barLayers.isEmpty, bounds.width > 1.0, bounds.height > 1.0 else { return }
+    let spacing: CGFloat = 2.0
+    let totalSpacing = spacing * CGFloat(max(0, barCount - 1))
+    let barWidth = max(1.0, floor((bounds.width - totalSpacing) / CGFloat(barCount)))
+    let minHeight = max(1.0, floor(bounds.height * 0.28))
+    let maxHeight = max(minHeight + 1.0, floor(bounds.height * 0.92))
+    var x: CGFloat = 0.0
+
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for (index, barLayer) in barLayers.enumerated() {
+      let normalizedIndex = CGFloat(index) / CGFloat(max(1, barCount))
+      let base = barEnvelope[index]
+      let pulse = isPlaying
+        ? (sin(phase + CGFloat(index) * 0.62) * 0.08 + 0.92)
+        : 1.0
+      let liveBoost = isPlaying ? (level * 0.18) : 0.0
+      let amplitude = max(0.12, min(1.0, (base + liveBoost) * pulse))
+      let barHeight = minHeight + ((maxHeight - minHeight) * amplitude)
+      let y = floor((bounds.height - barHeight) * 0.5)
+      barLayer.frame = CGRect(x: x, y: y, width: barWidth, height: floor(barHeight))
+      barLayer.cornerRadius = barWidth * 0.5
+      barLayer.backgroundColor =
+        normalizedIndex < playbackProgress ? activeColor.cgColor : inactiveColor.cgColor
+      x += barWidth + spacing
+    }
+    CATransaction.commit()
+  }
+
+  private static func makeDefaultEnvelope(count: Int) -> [CGFloat] {
+    guard count > 0 else { return [] }
+    var output: [CGFloat] = []
+    output.reserveCapacity(count)
+    for i in 0..<count {
+      let t = CGFloat(i) / CGFloat(max(1, count - 1))
+      let wave = sin((t * .pi * 5.0) + 0.7) * 0.5 + 0.5
+      output.append(max(0.18, min(0.82, 0.22 + (wave * 0.55))))
+    }
+    return output
+  }
+}
+
+private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
+  static let shared = VoiceBubblePlaybackCoordinator()
+
+  private weak var activeCell: ChatListCell?
+  private var activeMessageId: String?
+  private var player: AVAudioPlayer?
+  private var displayLink: CADisplayLink?
+  private var playbackProgress: CGFloat = 0.0
+  private var level: CGFloat = 0.0
+  private var isPlaying = false
+
+  private override init() {
+    super.init()
+  }
+
+  deinit {
+    displayLink?.invalidate()
+    player?.stop()
+  }
+
+  func bind(cell: ChatListCell, messageId: String?) {
+    guard let messageId, !messageId.isEmpty else {
+      cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
+      return
+    }
+    if activeMessageId == messageId {
+      activeCell = cell
+      cell.applyVoicePlaybackState(
+        isPlaying: isPlaying, progress: playbackProgress, level: level
+      )
+      return
+    }
+    cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
+  }
+
+  func unbind(cell: ChatListCell) {
+    if activeCell === cell {
+      activeCell = nil
+    }
+  }
+
+  func toggle(cell: ChatListCell, messageId: String?, mediaURL: String?) {
+    guard let messageId, !messageId.isEmpty, let mediaURL, !mediaURL.isEmpty else {
+      return
+    }
+
+    if activeMessageId == messageId, let player {
+      if player.isPlaying {
+        player.pause()
+        isPlaying = false
+        cell.applyVoicePlaybackState(
+          isPlaying: false, progress: playbackProgress, level: level
+        )
+      } else {
+        player.play()
+        isPlaying = true
+      }
+      return
+    }
+
+    stopActivePlayback(resetProgress: true)
+
+    guard let resolvedURL = resolveAudioURL(from: mediaURL) else {
+      return
+    }
+
+    do {
+      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
+      try AVAudioSession.sharedInstance().setActive(true)
+      let nextPlayer = try AVAudioPlayer(contentsOf: resolvedURL)
+      nextPlayer.delegate = self
+      nextPlayer.prepareToPlay()
+      nextPlayer.isMeteringEnabled = true
+      player = nextPlayer
+      activeMessageId = messageId
+      activeCell = cell
+      playbackProgress = 0.0
+      level = 0.0
+      isPlaying = nextPlayer.play()
+      ensureDisplayLink()
+      cell.applyVoicePlaybackState(isPlaying: isPlaying, progress: 0.0, level: 0.0)
+    } catch {
+      stopActivePlayback(resetProgress: true)
+    }
+  }
+
+  func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
+    stopActivePlayback(resetProgress: true)
+  }
+
+  private func ensureDisplayLink() {
+    if displayLink != nil {
+      return
+    }
+    let link = CADisplayLink(target: self, selector: #selector(handleDisplayTick))
+    link.add(to: .main, forMode: .common)
+    displayLink = link
+  }
+
+  @objc private func handleDisplayTick() {
+    guard let player else {
+      stopActivePlayback(resetProgress: true)
+      return
+    }
+    if player.duration > 0 {
+      playbackProgress = CGFloat(player.currentTime / player.duration)
+    } else {
+      playbackProgress = 0.0
+    }
+    playbackProgress = max(0.0, min(1.0, playbackProgress))
+    player.updateMeters()
+    let db = player.averagePower(forChannel: 0)
+    let minDb: Float = -48.0
+    let normalized = (db - minDb) / (-minDb)
+    level = max(0.0, min(1.0, CGFloat(normalized)))
+    if !player.isPlaying && playbackProgress >= 0.999 {
+      stopActivePlayback(resetProgress: true)
+      return
+    }
+    activeCell?.applyVoicePlaybackState(
+      isPlaying: player.isPlaying, progress: playbackProgress, level: level
+    )
+  }
+
+  private func stopActivePlayback(resetProgress: Bool) {
+    player?.stop()
+    player = nil
+    try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
+    isPlaying = false
+    displayLink?.invalidate()
+    displayLink = nil
+    if resetProgress {
+      playbackProgress = 0.0
+      level = 0.0
+    }
+    activeCell?.applyVoicePlaybackState(
+      isPlaying: false,
+      progress: playbackProgress,
+      level: level
+    )
+    activeMessageId = nil
+    activeCell = nil
+  }
+
+  private func resolveAudioURL(from raw: String) -> URL? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+
+    if let url = URL(string: trimmed), url.isFileURL {
+      return url
+    }
+    if trimmed.hasPrefix("/") {
+      return URL(fileURLWithPath: trimmed)
+    }
+    if let decoded = trimmed.removingPercentEncoding, decoded.hasPrefix("/") {
+      return URL(fileURLWithPath: decoded)
+    }
+    if let url = URL(string: trimmed), url.scheme == nil {
+      return URL(fileURLWithPath: trimmed)
+    }
+    return nil
+  }
+}
+
 final class ChatListCell: UICollectionViewCell {
   static let reuseIdentifier = "ChatListCell"
 
@@ -398,8 +692,7 @@ final class ChatListCell: UICollectionViewCell {
   private let mediaVoiceButtonIconView = UIImageView()
   private let mediaTitleLabel = UILabel()
   private let mediaDetailLabel = UILabel()
-  private let mediaWaveTrackView = UIView()
-  private let mediaWaveFillView = UIView()
+  private let mediaWaveformView = VoiceWaveformView()
   private let mediaDurationBadge = UILabel()
   private let mediaProgressOverlayView = UIView()
   private let mediaProgressRingView = BubbleUploadProgressView()
@@ -429,8 +722,7 @@ final class ChatListCell: UICollectionViewCell {
     mediaVoiceButtonView.addSubview(mediaVoiceButtonIconView)
     mediaContainerView.addSubview(mediaTitleLabel)
     mediaContainerView.addSubview(mediaDetailLabel)
-    mediaContainerView.addSubview(mediaWaveTrackView)
-    mediaWaveTrackView.addSubview(mediaWaveFillView)
+    mediaContainerView.addSubview(mediaWaveformView)
     mediaContainerView.addSubview(mediaDurationBadge)
     mediaContainerView.addSubview(mediaProgressOverlayView)
     mediaProgressOverlayView.addSubview(mediaProgressRingView)
@@ -456,6 +748,9 @@ final class ChatListCell: UICollectionViewCell {
     mediaVoiceButtonView.backgroundColor = UIColor(white: 1.0, alpha: 0.22)
     mediaVoiceButtonView.clipsToBounds = true
     mediaVoiceButtonView.layer.cornerCurve = .continuous
+    mediaVoiceButtonView.isUserInteractionEnabled = true
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handleVoiceTap))
+    mediaVoiceButtonView.addGestureRecognizer(tap)
 
     mediaVoiceButtonIconView.tintColor = .white
     mediaVoiceButtonIconView.contentMode = .scaleAspectFit
@@ -469,13 +764,6 @@ final class ChatListCell: UICollectionViewCell {
     mediaDetailLabel.font = UIFont.systemFont(ofSize: 11, weight: .regular)
     mediaDetailLabel.textColor = UIColor(white: 1.0, alpha: 0.82)
     mediaDetailLabel.numberOfLines = 1
-
-    mediaWaveTrackView.backgroundColor = UIColor(white: 1.0, alpha: 0.22)
-    mediaWaveTrackView.clipsToBounds = true
-    mediaWaveTrackView.layer.cornerRadius = 2.0
-    mediaWaveTrackView.layer.cornerCurve = .continuous
-
-    mediaWaveFillView.backgroundColor = UIColor.white
 
     mediaDurationBadge.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
     mediaDurationBadge.textColor = .white
@@ -511,7 +799,7 @@ final class ChatListCell: UICollectionViewCell {
     mediaVoiceButtonView.isHidden = true
     mediaTitleLabel.isHidden = true
     mediaDetailLabel.isHidden = true
-    mediaWaveTrackView.isHidden = true
+    mediaWaveformView.isHidden = true
     mediaDurationBadge.isHidden = true
     mediaProgressOverlayView.isHidden = true
     metaContainerView.isHidden = true
@@ -534,6 +822,10 @@ final class ChatListCell: UICollectionViewCell {
     dayLabel.layer.borderWidth = 0.5
     dayLabel.layer.cornerRadius = 12.0
     dayLabel.clipsToBounds = true
+    mediaWaveformView.applyColors(
+      active: appearance.textColorThem.withAlphaComponent(0.95),
+      inactive: appearance.textColorThem.withAlphaComponent(0.26)
+    )
     setNeedsLayout()
   }
 
@@ -581,6 +873,12 @@ final class ChatListCell: UICollectionViewCell {
       timestampLabel.textColor = metaColor
       configureMediaPresentation(for: row, textColor: textColor, metaColor: metaColor)
       configureStatus(for: row, baseColor: metaColor)
+      if row.visualKind == .voice {
+        VoiceBubblePlaybackCoordinator.shared.bind(
+          cell: self, messageId: row.messageId)
+      } else {
+        VoiceBubblePlaybackCoordinator.shared.unbind(cell: self)
+      }
       // Use full opacity — visibility is controlled by isHidden, not alpha.
       // This eliminates the 0→1 opacity flicker that plagued updates.
       messageLabel.alpha = 1.0
@@ -592,11 +890,14 @@ final class ChatListCell: UICollectionViewCell {
 
   override func prepareForReuse() {
     super.prepareForReuse()
+    VoiceBubblePlaybackCoordinator.shared.unbind(cell: self)
     row = nil
     isGhostHidden = false
     mediaProgressSpinner.stopAnimating()
     mediaProgressOverlayView.isHidden = true
     mediaProgressRingView.setProgress(nil)
+    applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
+    mediaWaveformView.setWaveform(nil)
     contentView.alpha = 1.0
     contentView.transform = .identity
     // Strip any residual UIKit animations from the previous lifecycle.
@@ -690,12 +991,13 @@ final class ChatListCell: UICollectionViewCell {
     mediaVoiceButtonView.isHidden = true
     mediaTitleLabel.isHidden = true
     mediaDetailLabel.isHidden = true
-    mediaWaveTrackView.isHidden = true
+    mediaWaveformView.isHidden = true
     mediaDurationBadge.isHidden = true
     mediaPrimaryIconView.image = nil
     mediaTitleLabel.text = nil
     mediaDetailLabel.text = nil
     mediaDurationBadge.text = nil
+    mediaWaveformView.setWaveform(nil)
 
     mediaTitleLabel.textColor = textColor
     mediaTitleLabel.textAlignment = .left
@@ -715,10 +1017,15 @@ final class ChatListCell: UICollectionViewCell {
       mediaVoiceButtonView.isHidden = false
       mediaTitleLabel.isHidden = false
       mediaDetailLabel.isHidden = false
-      mediaWaveTrackView.isHidden = false
+      mediaWaveformView.isHidden = false
       mediaTitleLabel.text = row.messageType == "music" ? "Audio" : "Voice message"
       mediaDetailLabel.text = formatBubbleDuration(seconds: row.duration)
-      mediaContainerView.backgroundColor = UIColor(white: 1.0, alpha: row.isMe ? 0.14 : 0.1)
+      mediaContainerView.backgroundColor = .clear
+      mediaWaveformView.setWaveform(row.waveform)
+      mediaWaveformView.applyColors(
+        active: textColor.withAlphaComponent(0.95),
+        inactive: textColor.withAlphaComponent(0.25)
+      )
 
     case .video:
       mediaPrimaryIconView.isHidden = false
@@ -803,8 +1110,7 @@ final class ChatListCell: UICollectionViewCell {
     mediaPrimaryIconView.frame = .zero
     mediaVoiceButtonView.frame = .zero
     mediaVoiceButtonIconView.frame = .zero
-    mediaWaveTrackView.frame = .zero
-    mediaWaveFillView.frame = .zero
+    mediaWaveformView.frame = .zero
     mediaTitleLabel.frame = .zero
     mediaDetailLabel.frame = .zero
     mediaDurationBadge.frame = .zero
@@ -843,19 +1149,11 @@ final class ChatListCell: UICollectionViewCell {
         height: 14.0
       )
       let trackY: CGFloat = 25.0
-      mediaWaveTrackView.frame = CGRect(
+      mediaWaveformView.frame = CGRect(
         x: textStartX,
         y: trackY,
         width: max(1.0, width - textStartX - rightInset),
-        height: 4.0
-      )
-      let defaultFill: CGFloat = 0.35
-      let resolved = CGFloat(max(0.08, min(1.0, row.uploadProgress ?? defaultFill)))
-      mediaWaveFillView.frame = CGRect(
-        x: 0.0,
-        y: 0.0,
-        width: floor(mediaWaveTrackView.bounds.width * resolved),
-        height: mediaWaveTrackView.bounds.height
+        height: 9.0
       )
 
     case .video, .videoNote, .media:
@@ -908,6 +1206,20 @@ final class ChatListCell: UICollectionViewCell {
       height: ringSize
     )
     mediaProgressSpinner.center = CGPoint(x: width * 0.5, y: height * 0.5)
+  }
+
+  @objc private func handleVoiceTap() {
+    guard let row, row.visualKind == .voice else { return }
+    VoiceBubblePlaybackCoordinator.shared.toggle(
+      cell: self, messageId: row.messageId, mediaURL: row.mediaUrl
+    )
+  }
+
+  fileprivate func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat) {
+    let symbol = isPlaying ? "pause.fill" : "play.fill"
+    mediaVoiceButtonIconView.image = UIImage(systemName: symbol)?.withConfiguration(
+      UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
+    mediaWaveformView.setPlayback(progress: progress, level: level, isPlaying: isPlaying)
   }
 
   private func layoutMetaLabels(for row: ChatListRow) {

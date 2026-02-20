@@ -168,79 +168,72 @@ final class SendTransitionState: NSObject {
     animY.delegate = self
     overlayContainer.layer.add(animY, forKey: "sendTransitionY")
 
-    // ── Bubble snapshot: morph frame + crossfade in ──
-    // Starts at 0.04s delay, fades in over 0.18s — overlaps with source fade-out.
+    // ── Bubble snapshot: fade in at final size ──
+    // The bubble is a rasterized snapshot — animating bounds.size would
+    // stretch/distort the image. Keep it at its natural end frame and
+    // only crossfade opacity. The container's additive position animation
+    // handles the motion from source → target.
     bubbleSnapshot.frame = bubbleEndFrame
-    addFrameAnimation(
-      layer: bubbleSnapshot.layer,
-      from: bubbleStartFrame,
-      to: bubbleEndFrame,
-      keyPrefix: "bubble")
     bubbleSnapshot.layer.opacity = 0.0
     let bubbleFadeIn = CABasicAnimation(keyPath: "opacity")
     bubbleFadeIn.fromValue = 0.0
     bubbleFadeIn.toValue = 1.0
-    bubbleFadeIn.beginTime = CACurrentMediaTime() + 0.04
-    bubbleFadeIn.duration = 0.18
+    bubbleFadeIn.beginTime = CACurrentMediaTime()
+    bubbleFadeIn.duration = 0.12
     bubbleFadeIn.timingFunction = CAMediaTimingFunction(name: .easeIn)
     bubbleFadeIn.fillMode = .backwards
     bubbleFadeIn.isRemovedOnCompletion = false
     bubbleSnapshot.layer.add(bubbleFadeIn, forKey: "bubbleFadeIn")
     bubbleSnapshot.layer.opacity = 1.0
 
-    // ── Source background ghost: morphs frame + fades out ──
-    // Starts immediately, fades over 0.18s — overlaps with bubble fade-in.
+    // ── Source background ghost: fades out in place ──
+    // Only opacity — NO frame morph on the background snapshot.
+    // Morphing bounds.size on a rasterized snapshot compresses the
+    // input pill visually. Instead, it dissolves in place while the
+    // container's additive position animation handles the motion.
     if
       let sourceBackgroundSnapshot,
-      let sourceBackgroundStartFrame,
-      let sourceBackgroundEndFrame
+      let sourceBackgroundStartFrame
     {
-      sourceBackgroundSnapshot.frame = sourceBackgroundEndFrame
-      addFrameAnimation(
-        layer: sourceBackgroundSnapshot.layer,
-        from: sourceBackgroundStartFrame,
-        to: sourceBackgroundEndFrame,
-        keyPrefix: "sourceBackground")
+      sourceBackgroundSnapshot.frame = sourceBackgroundStartFrame
       sourceBackgroundSnapshot.layer.opacity = 1.0
       let bgFadeOut = CABasicAnimation(keyPath: "opacity")
       bgFadeOut.fromValue = 1.0
       bgFadeOut.toValue = 0.0
+      bgFadeOut.beginTime = CACurrentMediaTime() + 0.06
       bgFadeOut.duration = 0.18
       bgFadeOut.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
       bgFadeOut.isRemovedOnCompletion = false
-      bgFadeOut.fillMode = .forwards
+      bgFadeOut.fillMode = .backwards
       sourceBackgroundSnapshot.layer.add(bgFadeOut, forKey: "bgFadeOut")
       sourceBackgroundSnapshot.layer.opacity = 0.0
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.28) {
         sourceBackgroundSnapshot.removeFromSuperview()
       }
     }
 
-    // ── Source text ghost: morphs frame + crossfades out ──
-    // Starts at 0.02s, fades over 0.16s — the text dissolves as bubble text appears.
+    // ── Source text ghost: crossfades out as bubble text appears ──
+    // Only opacity — NO frame morph on the text layer.
+    // Morphing bounds.size.width on a text snapshot compresses the
+    // text horizontally. Instead, the text just dissolves in place
+    // while the container handles the positional motion.
     if
       let sourceTextSnapshot,
-      let sourceTextStartFrame,
-      let sourceTextEndFrame
+      let sourceTextStartFrame
     {
-      sourceTextSnapshot.frame = sourceTextEndFrame
-      addFrameAnimation(
-        layer: sourceTextSnapshot.layer,
-        from: sourceTextStartFrame,
-        to: sourceTextEndFrame,
-        keyPrefix: "sourceText")
+      sourceTextSnapshot.frame = sourceTextStartFrame
       sourceTextSnapshot.layer.opacity = 1.0
       let textFadeOut = CABasicAnimation(keyPath: "opacity")
       textFadeOut.fromValue = 1.0
       textFadeOut.toValue = 0.0
-      textFadeOut.beginTime = CACurrentMediaTime() + 0.02
+      textFadeOut.beginTime = CACurrentMediaTime()
       textFadeOut.duration = 0.16
       textFadeOut.timingFunction = CAMediaTimingFunction(name: .easeIn)
       textFadeOut.fillMode = .backwards
       textFadeOut.isRemovedOnCompletion = false
       sourceTextSnapshot.layer.add(textFadeOut, forKey: "textFadeOut")
       sourceTextSnapshot.layer.opacity = 0.0
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.20) {
         sourceTextSnapshot.removeFromSuperview()
       }
     }
