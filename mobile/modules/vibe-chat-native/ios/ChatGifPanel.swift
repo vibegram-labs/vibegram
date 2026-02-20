@@ -29,11 +29,14 @@ protocol ChatGifPanelViewDelegate: AnyObject {
 
 final class ChatGifPanelView: UIView {
     weak var delegate: ChatGifPanelViewDelegate?
+    private var panelVisible = false
     weak var hostViewController: UIViewController? {
         didSet {
             guard hostViewController !== oldValue else { return }
             removeEmbeddedPicker()
-            installEmbeddedPickerIfNeeded()
+            if panelVisible {
+                installEmbeddedPickerIfNeeded()
+            }
         }
     }
 
@@ -65,7 +68,20 @@ final class ChatGifPanelView: UIView {
     }
 
     func prepareIfNeeded() {
+        guard panelVisible else { return }
         installEmbeddedPickerIfNeeded()
+    }
+
+    func setPanelVisible(_ visible: Bool) {
+        guard panelVisible != visible else { return }
+        panelVisible = visible
+        if visible {
+            installEmbeddedPickerIfNeeded()
+        } else {
+            removeEmbeddedPicker()
+            loadingSpinner.stopAnimating()
+            loadingView.isHidden = true
+        }
     }
 
     override func layoutSubviews() {
@@ -183,7 +199,9 @@ final class ChatGifPanelView: UIView {
         loadingSpinner.startAnimating()
         loadingView.addSubview(loadingSpinner)
 
-        installEmbeddedPickerIfNeeded()
+        if panelVisible {
+            installEmbeddedPickerIfNeeded()
+        }
         refreshGlass()
     }
 
@@ -231,6 +249,11 @@ final class ChatGifPanelView: UIView {
             picker.mediaTypeConfig = [.gifs, .stickers, .emoji]
             picker.selectedContentType = .gifs
 
+            // Try to natively hide the search bar if the property exists
+            if picker.responds(to: NSSelectorFromString("setShowSearchBar:")) {
+                picker.setValue(false, forKey: "showSearchBar")
+            }
+
             host.addChild(picker)
             contentView.addSubview(picker.view)
             picker.view.frame = contentView.bounds
@@ -276,6 +299,24 @@ final class ChatGifPanelView: UIView {
         #if canImport(GiphyUISDK)
             guard let rootView = pickerViewController?.view else { return }
             scrubBackgrounds(in: rootView)
+
+            // Attempt to hide search bar and header views
+            for subview in rootView.subviews {
+                // If the view is relatively short and at the top, it's likely the search/tab header
+                if subview.frame.height > 0 && subview.frame.height < 100 && subview.frame.minY < 50
+                {
+                    subview.alpha = 0
+                    subview.isHidden = true
+                }
+
+                // If the view is the main collection/scroll view, shift it up
+                if String(describing: type(of: subview)).contains("Grid")
+                    || subview is UICollectionView || subview is UIScrollView
+                {
+                    subview.frame = rootView.bounds
+                    subview.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+                }
+            }
         #endif
     }
 

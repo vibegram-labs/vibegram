@@ -37,10 +37,34 @@ const getLoginToken = (): string | null => {
 
 let activeBaseUrl = BASE_URLS[0];
 
+const getOrderedBaseUrls = () => {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    for (const url of [activeBaseUrl, ...BASE_URLS]) {
+        if (!url || seen.has(url)) continue;
+        seen.add(url);
+        ordered.push(url);
+    }
+    return ordered;
+};
+
+const isNetworkErrorLike = (error: unknown) => {
+    const message = String((error as any)?.message || error || '').toLowerCase();
+    return (
+        message.includes('network request failed') ||
+        message.includes('network error') ||
+        message.includes('failed to fetch') ||
+        message.includes('fetch failed') ||
+        message.includes('timeout') ||
+        message.includes('timed out') ||
+        message.includes('aborted')
+    );
+};
+
 const fetchWithRetry = async (endpoint: string, options: RequestInit = {}) => {
     let lastError;
 
-    for (const url of BASE_URLS) {
+    for (const url of getOrderedBaseUrls()) {
         const controller = new AbortController();
         const timeoutId = setTimeout(() => controller.abort(), 40000);
         try {
@@ -163,7 +187,17 @@ export const uploadMedia = async (
     };
     const mimeType = mimeMap[ext] || 'application/octet-stream';
 
-    for (const baseUrl of BASE_URLS) {
+    const uploadOrder = getOrderedBaseUrls();
+    const startTime = Date.now();
+    const totalBudgetMs = 35000;
+    const maxAttemptTimeoutMs = 20000;
+
+    for (const baseUrl of uploadOrder) {
+        const elapsed = Date.now() - startTime;
+        if (elapsed >= totalBudgetMs) break;
+        const remainingMs = totalBudgetMs - elapsed;
+        const attemptTimeoutMs = Math.max(6000, Math.min(maxAttemptTimeoutMs, remainingMs));
+
         try {
             // Strip /api suffix to get the base server URL, then append the upload path
             const serverBase = baseUrl.replace(/\/api$/, '');
@@ -219,12 +253,13 @@ export const uploadMedia = async (
                 xhr.onerror = () => reject(new Error('Upload network error'));
                 xhr.onabort = () => reject(new Error('Upload cancelled'));
                 xhr.ontimeout = () => reject(new Error('Upload timeout'));
-                xhr.timeout = 120000; // 2 minutes
+                xhr.timeout = attemptTimeoutMs;
 
                 xhr.send(formData);
             });
 
             // console.log('[API] Upload success:', result.url);
+            activeBaseUrl = baseUrl;
             return result.url;
         } catch (e: any) {
             console.warn(`[API] Upload failed to ${baseUrl}:`, e.message);
@@ -232,7 +267,7 @@ export const uploadMedia = async (
         }
     }
 
-    console.error('[API] All upload endpoints failed');
+    console.warn('[API] All upload endpoints failed, deferring media send until connection recovers');
     return null;
 };
 
@@ -338,8 +373,12 @@ export const apiClient = {
             const res = await fetchWithRetry(`/user/${userId}`)
             if (res.status === 404) return null
             return await res.json()
-        } catch (e) {
-            console.error('Get user failed', e)
+        } catch (e: unknown) {
+            if (isNetworkErrorLike(e)) {
+                console.warn('Get user failed (network):', (e as any)?.message || e)
+            } else {
+                console.error('Get user failed', e)
+            }
             return null
         }
     },
@@ -404,8 +443,12 @@ export const apiClient = {
             const json = await res.json()
             if (!Array.isArray(json)) throw new Error('Invalid response format')
             return json
-        } catch (e) {
-            console.error('Get chats failed', e)
+        } catch (e: unknown) {
+            if (isNetworkErrorLike(e)) {
+                console.warn('Get chats failed (network):', (e as any)?.message || e)
+            } else {
+                console.error('Get chats failed', e)
+            }
             throw e
         }
     },
@@ -718,8 +761,12 @@ export const apiClient = {
         try {
             const res = await fetchWithRetry(`/stories/feed/${userId}`);
             return await res.json();
-        } catch (e) {
-            console.error('Get stories feed failed', e);
+        } catch (e: unknown) {
+            if (isNetworkErrorLike(e)) {
+                console.warn('Get stories feed failed (network):', (e as any)?.message || e);
+            } else {
+                console.error('Get stories feed failed', e);
+            }
             return { success: false, feed: [] };
         }
     },
@@ -728,8 +775,12 @@ export const apiClient = {
         try {
             const res = await fetchWithRetry(`/stories/my/${userId}`);
             return await res.json();
-        } catch (e) {
-            console.error('Get my stories failed', e);
+        } catch (e: unknown) {
+            if (isNetworkErrorLike(e)) {
+                console.warn('Get my stories failed (network):', (e as any)?.message || e);
+            } else {
+                console.error('Get my stories failed', e);
+            }
             return { success: false, stories: [] };
         }
     },

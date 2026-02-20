@@ -19,6 +19,47 @@ const CHATSTORE_DEBUG = false;
 const chatStoreLog = (...args: any[]) => {
     if (CHATSTORE_DEBUG) console.log(...args);
 };
+const MEDIA_UPLOAD_DEFERRED = 'MEDIA_UPLOAD_DEFERRED';
+const MEDIA_LOCAL_FILE_MISSING = 'MEDIA_LOCAL_FILE_MISSING';
+const RETRY_DISPATCH_GAP_MS = 320;
+const STALE_SENDING_RETRY_MS = 14_000;
+
+const isRecoverableSendError = (error: unknown) => {
+    const message = String((error as any)?.message || error || '').toLowerCase();
+    return (
+        message.includes('network request failed') ||
+        message.includes('network error') ||
+        message.includes('failed to fetch') ||
+        message.includes('fetch failed') ||
+        message.includes('timeout') ||
+        message.includes('transport_close') ||
+        message.includes('upload') ||
+        message.includes(MEDIA_UPLOAD_DEFERRED.toLowerCase())
+    );
+};
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+
+const normalizeFileUri = (uri: string) => (uri.startsWith('file://') ? uri : `file://${uri}`);
+
+const guessMediaExtension = (uri: string, type?: Message['type']): string => {
+    const cleanUri = uri.split('?')[0].split('#')[0];
+    const ext = cleanUri.split('.').pop()?.trim().toLowerCase();
+    if (ext) return ext;
+    if (type === 'voice' || type === 'music') return 'm4a';
+    if (type === 'image') return 'jpg';
+    if (type === 'video') return 'mp4';
+    return 'bin';
+};
+
+const ensureReadableLocalUri = async (uri: string): Promise<string | null> => {
+    const normalizedUri = normalizeFileUri(uri);
+    const info = await FileSystem.getInfoAsync(normalizedUri);
+    if (!(info as any)?.exists) return null;
+    return normalizedUri;
+};
+
+
 
 // --- Obfuscation Helpers (Match Web Client) ---
 const generateNoise = (len = 32) => {
@@ -214,6 +255,8 @@ let chatChannels: Map<string, Channel> = new Map();
 let loadChatsDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let channelResyncTimer: ReturnType<typeof setTimeout> | null = null;
 const pendingRetryFlushTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const pendingRetryPumpRunning = new Set<string>();
+const pendingRetryPumpNeedsAnotherPass = new Set<string>();
 // Dedup set to prevent processing the same message multiple times from concurrent broadcasts
 const recentlyProcessedMsgIds = new Set<string>();
 // AbortControllers for cancellable media uploads
@@ -263,7 +306,57 @@ const isValidBinaryId = (value?: string | null): boolean => {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 };
 
+const isRetryableMessage = (message: Message, now = Date.now()): boolean => {
+    if (message.status === 'pending' || message.status === 'error') return true;
+    if (message.status === 'sending') {
+        const sentAt = typeof message.timestamp === 'number' ? message.timestamp : now;
+        return now - sentAt > STALE_SENDING_RETRY_MS;
+    }
+    return false;
+};
+
+const runChatRetryPump = async (chatId: string, get: any) => {
+    if (pendingRetryPumpRunning.has(chatId)) {
+        pendingRetryPumpNeedsAnotherPass.add(chatId);
+        return;
+    }
+
+    pendingRetryPumpRunning.add(chatId);
+    try {
+        const state = get();
+        const chat = state.chats.find((c: Chat) => c.chatId === chatId);
+        if (!chat) return;
+
+        const now = Date.now();
+        const toRetry = chat.messages
+            .filter((m: Message) => isRetryableMessage(m, now))
+            .sort((a: Message, b: Message) => (a.timestamp || 0) - (b.timestamp || 0));
+
+        if (toRetry.length === 0) return;
+
+        chatStoreLog('[ChatStore] Retry flush (sequential):', chatId, toRetry.length);
+        for (const message of toRetry) {
+            const latestChat = get().chats.find((c: Chat) => c.chatId === chatId);
+            const latestMessage = latestChat?.messages.find((m: Message) => m.id === message.id);
+            if (!latestMessage || !isRetryableMessage(latestMessage)) continue;
+
+            get().retryMessage(chatId, message.id);
+            await sleep(RETRY_DISPATCH_GAP_MS);
+        }
+    } finally {
+        pendingRetryPumpRunning.delete(chatId);
+        if (pendingRetryPumpNeedsAnotherPass.delete(chatId)) {
+            scheduleChatRetryFlush(chatId, get, RETRY_DISPATCH_GAP_MS);
+        }
+    }
+};
+
 const scheduleChatRetryFlush = (chatId: string, get: any, delayMs = 900) => {
+    if (pendingRetryPumpRunning.has(chatId)) {
+        pendingRetryPumpNeedsAnotherPass.add(chatId);
+        return;
+    }
+
     const existing = pendingRetryFlushTimers.get(chatId);
     if (existing) {
         clearTimeout(existing);
@@ -271,19 +364,7 @@ const scheduleChatRetryFlush = (chatId: string, get: any, delayMs = 900) => {
 
     const timer = setTimeout(() => {
         pendingRetryFlushTimers.delete(chatId);
-        const state = get();
-        const chat = state.chats.find((c: Chat) => c.chatId === chatId);
-        if (!chat) return;
-
-        const toRetry = chat.messages.filter((m: Message) => {
-            const status = m.status;
-            return status === 'pending' || status === 'error' || status === 'sending';
-        });
-
-        if (toRetry.length > 0) {
-            chatStoreLog('[ChatStore] Retry flush:', chatId, toRetry.length);
-            toRetry.forEach((m: Message) => state.retryMessage(chatId, m.id));
-        }
+        void runChatRetryPump(chatId, get);
     }, delayMs);
 
     pendingRetryFlushTimers.set(chatId, timer);
@@ -295,6 +376,46 @@ const scheduleChannelResync = (get: any, delayMs = 220) => {
         channelResyncTimer = null;
         Promise.resolve(get().loadChats()).catch(() => { });
     }, delayMs);
+};
+
+const tryOpenDirectChatChannel = async (chatId: string): Promise<Channel | null> => {
+    const existing = chatChannels.get(chatId);
+    if (existing) return existing;
+
+    const activeSocket = socket;
+    if (!activeSocket || !activeSocket.isConnected()) return null;
+
+    let directChannel: Channel | null = null;
+    try {
+        directChannel = activeSocket.channel(`chat:${chatId}`, {});
+        const joined = await new Promise<boolean>((resolve) => {
+            let settled = false;
+            let timeout: ReturnType<typeof setTimeout> | null = null;
+            const settle = (value: boolean) => {
+                if (settled) return;
+                settled = true;
+                if (timeout) {
+                    clearTimeout(timeout);
+                    timeout = null;
+                }
+                resolve(value);
+            };
+            directChannel!
+                .join()
+                .receive("ok", () => settle(true))
+                .receive("error", () => settle(false))
+                .receive("timeout", () => settle(false));
+            timeout = setTimeout(() => settle(false), 1400);
+        });
+        if (!joined) {
+            try { directChannel.leave(); } catch { /* ignore */ }
+            return null;
+        }
+        return directChannel;
+    } catch {
+        try { directChannel?.leave(); } catch { /* ignore */ }
+        return null;
+    }
 };
 
 const removeMessageFromChatList = (chats: Chat[], chatId: string, messageId: string): Chat[] => {
@@ -581,6 +702,8 @@ export const resetSocketConnection = () => {
     }
     pendingRetryFlushTimers.forEach((timer) => clearTimeout(timer));
     pendingRetryFlushTimers.clear();
+    pendingRetryPumpRunning.clear();
+    pendingRetryPumpNeedsAnotherPass.clear();
 
     // Reset flag so socket can be re-initialized
     socketInitialized = false;
@@ -718,15 +841,23 @@ export const useChatStore = create<ChatState>()(
                     }
 
                     if (toRetry.length > 0) {
-                        chatStoreLog('[ChatStore] Retrying', toRetry.length, 'queued/pending messages');
-                        // Small delay to let channels rejoin first
-                        setTimeout(() => {
-                            toRetry.forEach(msg => {
-                                if (msg.chatId) {
-                                    get().retryMessage(msg.chatId, msg.id);
-                                }
-                            });
-                        }, 1500);
+                        const retryChatIds = Array.from(
+                            new Set(
+                                toRetry
+                                    .map((msg) => msg.chatId)
+                                    .filter((chatId): chatId is string => typeof chatId === 'string' && chatId.length > 0),
+                            ),
+                        );
+
+                        chatStoreLog('[ChatStore] Retrying pending messages by chat', {
+                            messages: toRetry.length,
+                            chats: retryChatIds.length,
+                        });
+
+                        retryChatIds.forEach((retryChatId, index) => {
+                            // Stagger each chat pump to avoid reconnect burst.
+                            scheduleChatRetryFlush(retryChatId, get, 1200 + (index * 180));
+                        });
                     }
                     set({ offlineQueue: [] });
 
@@ -1320,7 +1451,11 @@ export const useChatStore = create<ChatState>()(
                     });
 
                 } catch (e) {
-                    console.error('[ChatStore] Load chats failed:', e);
+                    if (isRecoverableSendError(e)) {
+                        console.warn('[ChatStore] Load chats deferred (network):', (e as any)?.message || e);
+                    } else {
+                        console.error('[ChatStore] Load chats failed:', e);
+                    }
                     set({ isLoading: false });
                 }
             },
@@ -1909,21 +2044,77 @@ export const useChatStore = create<ChatState>()(
                     set({ chats: updatedChats });
                 }
 
-                if (!isConnected) {
-                    console.log('[ChatStore] Offline, queuing message:', msgId);
-                    const { offlineQueue } = get();
-                    const nextQueueMap = new Map<string, Message>();
-                    offlineQueue.forEach((m) => nextQueueMap.set(m.id, m));
-                    nextQueueMap.set(msgId, optimisticMsg);
-                    set({ offlineQueue: Array.from(nextQueueMap.values()) });
-                    return;
-                }
-
-                // 1.5 UPLOAD MEDIA if this is a media message with a local file URI
+                // 1.5 Normalize/Persist local media URI before queueing or upload.
                 let resolvedMediaUrl = metadata.mediaUrl;
                 let mediaKey: string | undefined; // AES key for file-level encryption
                 const isLocalFile = resolvedMediaUrl && (resolvedMediaUrl.startsWith('file://') || resolvedMediaUrl.startsWith('/'));
                 const isMediaType = ['image', 'video', 'voice', 'music', 'file'].includes(type) || metadata.mediaUrl;
+
+                const syncOptimisticMediaUri = (nextUri: string) => {
+                    const nextChats = get().chats;
+                    const nextChatIndex = nextChats.findIndex((c) => c.chatId === chatId);
+                    if (nextChatIndex === -1) return;
+
+                    let changed = false;
+                    const updatedChats = [...nextChats];
+                    const updatedMessages = updatedChats[nextChatIndex].messages.map((m) => {
+                        if (m.id !== msgId || m.mediaUrl === nextUri) return m;
+                        changed = true;
+                        return { ...m, mediaUrl: nextUri };
+                    });
+
+                    if (!changed) return;
+                    updatedChats[nextChatIndex] = {
+                        ...updatedChats[nextChatIndex],
+                        messages: updatedMessages,
+                        lastMessage: updatedMessages[updatedMessages.length - 1] || updatedChats[nextChatIndex].lastMessage,
+                    };
+                    set({ chats: updatedChats });
+                };
+
+                if (isLocalFile && isMediaType) {
+                    const readableUri = await ensureReadableLocalUri(resolvedMediaUrl);
+                    if (!readableUri) {
+                        console.warn('[ChatStore] Local media file is not readable:', resolvedMediaUrl);
+                        const latestChats = get().chats;
+                        const idx = latestChats.findIndex((c) => c.chatId === chatId);
+                        if (idx > -1) {
+                            const updated = [...latestChats];
+                            updated[idx] = {
+                                ...updated[idx],
+                                messages: updated[idx].messages.map((m) => (
+                                    m.id === msgId
+                                        ? {
+                                            ...m,
+                                            status: 'error' as const,
+                                            errorMessage: 'Local media file is no longer available. Please record/select again.',
+                                        }
+                                        : m
+                                )),
+                            };
+                            set({ chats: updated });
+                        }
+                        get().clearUploadProgress(msgId);
+                        return;
+                    }
+
+                    resolvedMediaUrl = readableUri;
+                    metadata.mediaUrl = readableUri;
+                    syncOptimisticMediaUri(readableUri);
+                }
+
+                if (!isConnected) {
+                    console.log('[ChatStore] Offline, queuing message:', msgId);
+                    const { offlineQueue } = get();
+                    const queuedMessage = get().chats
+                        .find((c) => c.chatId === chatId)
+                        ?.messages.find((m) => m.id === msgId) || optimisticMsg;
+                    const nextQueueMap = new Map<string, Message>();
+                    offlineQueue.forEach((m) => nextQueueMap.set(m.id, m));
+                    nextQueueMap.set(msgId, queuedMessage);
+                    set({ offlineQueue: Array.from(nextQueueMap.values()) });
+                    return;
+                }
 
                 // 1.6 START KEY FETCH IN PARALLEL with media processing (HD speed optimization)
                 const chat = chats.find(c => c.chatId === chatId);
@@ -1947,7 +2138,12 @@ export const useChatStore = create<ChatState>()(
                         // Step 0: Set initial progress to show activity
                         get().setUploadProgress(msgId, 0.05);
 
-                        let fileUri = resolvedMediaUrl.startsWith('file://') ? resolvedMediaUrl : `file://${resolvedMediaUrl}`;
+                        let fileUri = normalizeFileUri(resolvedMediaUrl);
+                        const readableFileUri = await ensureReadableLocalUri(fileUri);
+                        if (!readableFileUri) {
+                            throw new Error(MEDIA_LOCAL_FILE_MISSING);
+                        }
+                        fileUri = readableFileUri;
 
                         // Check file size to decide encryption strategy
                         const fileInfo = await FileSystem.getInfoAsync(fileUri);
@@ -1963,7 +2159,7 @@ export const useChatStore = create<ChatState>()(
                             console.log(`[ChatStore] Large file (${Math.round(fileSizeMB)}MB), using chunked encryption`);
                             get().setUploadProgress(msgId, 0.05);
 
-                            const ext = resolvedMediaUrl.split('.').pop()?.toLowerCase() || 'bin';
+                            const ext = guessMediaExtension(resolvedMediaUrl, type);
                             const tempPath = `${FileSystem.cacheDirectory}encrypted_${Date.now()}.${ext}.enc`;
 
                             const result = await encryptFileChunked(
@@ -1999,8 +2195,7 @@ export const useChatStore = create<ChatState>()(
                                     useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
                                     console.log('[ChatStore] Large media encrypted & uploaded, URL:', resolvedMediaUrl);
                                 } else {
-                                    console.warn('[ChatStore] Media upload failed, sending with local URI');
-                                    mediaKey = undefined;
+                                    throw new Error(MEDIA_UPLOAD_DEFERRED);
                                 }
                             } else {
                                 // Chunked encryption not available (e.g. Expo Go), upload directly
@@ -2018,6 +2213,8 @@ export const useChatStore = create<ChatState>()(
                                     resolvedMediaUrl = uploadedUrl;
                                     const originalUri = metadata.mediaUrl?.startsWith('file://') ? metadata.mediaUrl : `file://${metadata.mediaUrl}`;
                                     useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                } else {
+                                    throw new Error(MEDIA_UPLOAD_DEFERRED);
                                 }
                             }
                         } else {
@@ -2061,7 +2258,11 @@ export const useChatStore = create<ChatState>()(
                             }
 
                             // Step 1: Read file as base64
-                            const fileBase64 = await FileSystem.readAsStringAsync(fileUri, {
+                            const readableUri = await ensureReadableLocalUri(fileUri);
+                            if (!readableUri) {
+                                throw new Error(MEDIA_LOCAL_FILE_MISSING);
+                            }
+                            const fileBase64 = await FileSystem.readAsStringAsync(readableUri, {
                                 encoding: FileSystem.EncodingType.Base64,
                             });
                             console.log('[ChatStore] File read, size:', Math.round(fileBase64.length * 0.75 / 1024), 'KB');
@@ -2074,7 +2275,7 @@ export const useChatStore = create<ChatState>()(
                             get().setUploadProgress(msgId, 0.25); // 25%
 
                             // Step 3: Write encrypted data to a temp file
-                            const ext = type === 'image' ? 'jpg' : (resolvedMediaUrl.split('.').pop()?.toLowerCase() || 'bin');
+                            const ext = type === 'image' ? 'jpg' : guessMediaExtension(resolvedMediaUrl, type);
                             const tempPath = `${FileSystem.cacheDirectory}encrypted_${Date.now()}.${ext}.enc`;
                             await FileSystem.writeAsStringAsync(tempPath, encResult.encryptedBase64, {
                                 encoding: FileSystem.EncodingType.Base64,
@@ -2106,15 +2307,22 @@ export const useChatStore = create<ChatState>()(
 
                                 console.log('[ChatStore] Encrypted media uploaded, URL:', resolvedMediaUrl);
                             } else {
-                                console.warn('[ChatStore] Media upload failed, sending with local URI');
-                                mediaKey = undefined; // Can't use encryption if upload failed
+                                throw new Error(MEDIA_UPLOAD_DEFERRED);
                             }
                         }
 
                     } catch (uploadErr) {
-                        console.error('[ChatStore] Media encrypt/upload error:', uploadErr);
-                        mediaKey = undefined;
-                        // Continue sending with local URI as fallback
+                        const uploadMessage = String((uploadErr as any)?.message || uploadErr || '').toLowerCase();
+                        if (
+                            uploadMessage.includes('not readable') ||
+                            uploadMessage.includes('does not exist') ||
+                            uploadMessage.includes('no such file') ||
+                            uploadMessage.includes(MEDIA_LOCAL_FILE_MISSING.toLowerCase())
+                        ) {
+                            throw new Error(MEDIA_LOCAL_FILE_MISSING);
+                        }
+                        console.warn('[ChatStore] Media encrypt/upload deferred:', uploadErr);
+                        throw uploadErr;
                     }
                 }
 
@@ -2191,13 +2399,27 @@ export const useChatStore = create<ChatState>()(
                     }
 
                     // Send via Channel
-                    const channel = chatChannels.get(chatId);
+                    let channel = chatChannels.get(chatId);
+                    let ephemeralChannel: Channel | null = null;
+                    if (!channel) {
+                        ephemeralChannel = await tryOpenDirectChatChannel(chatId);
+                        if (ephemeralChannel) {
+                            channel = ephemeralChannel;
+                            console.log('[ChatStore] Using direct channel fallback for send', { chatId });
+                        }
+                    }
                     console.log('[ChatStore] Channel lookup', {
                         chatId,
                         hasChannel: !!channel,
                         channelsCount: chatChannels.size,
                     });
                     if (channel) {
+                        const sendChannel = channel;
+                        const isEphemeralChannel = sendChannel === ephemeralChannel;
+                        const releaseEphemeralChannel = () => {
+                            if (!isEphemeralChannel) return;
+                            try { sendChannel.leave(); } catch { /* ignore */ }
+                        };
                         const payload = {
                             id: msgId,
                             fromId: auth.userId,
@@ -2231,7 +2453,8 @@ export const useChatStore = create<ChatState>()(
                         // Play sent sound immediately (optimistic)
                         SoundManager.play('sent');
 
-                        channel.push("message", payload).receive("ok", () => {
+                        sendChannel.push("message", payload).receive("ok", () => {
+                            releaseEphemeralChannel();
                             console.log('[ChatStore] Channel push OK received', {
                                 msgId,
                                 chatId,
@@ -2259,6 +2482,7 @@ export const useChatStore = create<ChatState>()(
                                 set({ chats: updated });
                             }
                         }).receive("error", (err: any) => {
+                            releaseEphemeralChannel();
                             console.error('[ChatStore] Channel push ERROR', {
                                 msgId,
                                 chatId,
@@ -2300,6 +2524,7 @@ export const useChatStore = create<ChatState>()(
                                 }
                             }
                         }).receive("timeout", () => {
+                            releaseEphemeralChannel();
                             get().clearUploadProgress(msgId);
                             console.error('[ChatStore] Message send timed out:', msgId);
                             // Timeout is treated as transient network/channel failure.
@@ -2367,8 +2592,16 @@ export const useChatStore = create<ChatState>()(
                         console.log('[ChatStore] Upload cancelled by user:', msgId);
                         return;
                     }
-                    console.error('[ChatStore] sendMessage error:', e);
-                    const transient = !get().isConnected;
+                    const errorMessage = String(e?.message || e || '');
+                    const localFileMissing = errorMessage.includes(MEDIA_LOCAL_FILE_MISSING);
+                    const transient = !localFileMissing && (!get().isConnected || isRecoverableSendError(e));
+                    if (transient) {
+                        console.warn('[ChatStore] sendMessage deferred (pending):', e?.message || e);
+                    } else if (localFileMissing) {
+                        console.warn('[ChatStore] sendMessage failed: missing local media file', { msgId, chatId });
+                    } else {
+                        console.error('[ChatStore] sendMessage error:', e);
+                    }
                     // Update message status based on failure type
                     const currentChats = get().chats;
                     const idx = currentChats.findIndex(c => c.chatId === chatId);
@@ -2378,7 +2611,15 @@ export const useChatStore = create<ChatState>()(
                         newChats[idx] = {
                             ...newChats[idx],
                             messages: newChats[idx].messages.map(m =>
-                                m.id === msgId ? { ...m, status: nextStatus } : m
+                                m.id === msgId
+                                    ? {
+                                        ...m,
+                                        status: nextStatus,
+                                        errorMessage: localFileMissing
+                                            ? 'Local media file is no longer available. Please record/select again.'
+                                            : m.errorMessage,
+                                    }
+                                    : m
                             )
                         };
                         set({ chats: newChats });

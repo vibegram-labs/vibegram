@@ -125,7 +125,30 @@ export interface NativeChatListModule {
     animated: boolean,
     viewPosition?: number,
   ) => Promise<void>;
-  startSendTransition?: (surfaceId: string, payload: Record<string, unknown>) => Promise<void>;
+  startSendTransition?: (surfaceId: string, payload: NativeSendTransitionPayload) => Promise<void>;
+}
+
+export interface NativeSendTransitionPayload {
+  messageId: string;
+  text: string;
+  timestamp: string;
+  startX: number;
+  startY: number;
+  startWidth: number;
+  startHeight: number;
+  startBackgroundX?: number;
+  startBackgroundY?: number;
+  startBackgroundWidth?: number;
+  startBackgroundHeight?: number;
+  startContentX?: number;
+  startContentY?: number;
+  startContentWidth?: number;
+  startContentHeight?: number;
+  sourceScrollOffset?: number;
+  sourceContainerX?: number;
+  sourceContainerY?: number;
+  sourceContainerWidth?: number;
+  sourceContainerHeight?: number;
 }
 
 export interface NativeChatRuntimeInfo {

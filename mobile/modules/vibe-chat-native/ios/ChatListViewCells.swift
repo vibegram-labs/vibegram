@@ -29,7 +29,8 @@ final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
 
   override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]?
   {
-    let attributes = super.layoutAttributesForElements(in: rect)
+    let attributes = super.layoutAttributesForElements(in: rect)?
+      .map { $0.copy() as! UICollectionViewLayoutAttributes }
     // Force alpha=1 on every layout pass — prevent UIKit from
     // ever setting a sub-1.0 alpha on any cell at any point.
     attributes?.forEach { $0.alpha = 1.0 }
@@ -45,13 +46,51 @@ final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
   }
 }
 
+private struct BubbleSurfaceStyle {
+  let showsBlur: Bool
+  let blurStyle: UIBlurEffect.Style
+  let blurAlpha: CGFloat
+  let gradientColors: [CGColor]
+  let gradientOpacity: Float
+  let fillColor: CGColor
+}
+
+private func bubbleSurfaceStyle(isMe: Bool, appearance: ChatListAppearance) -> BubbleSurfaceStyle {
+  let gradientColors =
+    appearance.bubbleMeGradient.isEmpty
+    ? [appearance.bubbleThemColor.cgColor, appearance.bubbleThemColor.cgColor]
+    : appearance.bubbleMeGradient.map(\.cgColor)
+
+  if isMe {
+    let fallbackMe =
+      appearance.bubbleMeGradient.first
+      ?? appearance.bubbleThemColor
+    return BubbleSurfaceStyle(
+      showsBlur: false,
+      blurStyle: .systemThinMaterialDark,
+      blurAlpha: 0.0,
+      gradientColors: gradientColors,
+      gradientOpacity: 1.0,
+      fillColor: fallbackMe.withAlphaComponent(1.0).cgColor
+    )
+  }
+
+  return BubbleSurfaceStyle(
+    showsBlur: false,
+    blurStyle: .systemMaterialDark,
+    blurAlpha: 0.0,
+    gradientColors: gradientColors,
+    gradientOpacity: 0.0,
+    fillColor: appearance.bubbleThemColor.withAlphaComponent(1.0).cgColor
+  )
+}
+
 final class BubbleBackgroundView: UIView {
   private let blurView = UIVisualEffectView(
     effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
   private let gradientLayer = CAGradientLayer()
   private let fillLayer = CAShapeLayer()
   private let bubbleMaskLayer = CAShapeLayer()
-  private var appearance = ChatListAppearance.fallback
   private var shape = BubbleShape(
     isMe: false, showTail: false, borderTopLeftRadius: 18, borderTopRightRadius: 18,
     borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
@@ -72,8 +111,8 @@ final class BubbleBackgroundView: UIView {
 
   func configure(isMe: Bool, shape: BubbleShape, hidden: Bool, appearance: ChatListAppearance) {
     let previousShape = self.shape
-    self.appearance = appearance
     self.shape = shape
+    let style = bubbleSurfaceStyle(isMe: isMe, appearance: appearance)
 
     // Check if only the corner radii changed (sequence boundary update).
     let shapeOnlyChange =
@@ -88,16 +127,15 @@ final class BubbleBackgroundView: UIView {
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     isHidden = hidden
-    blurView.isHidden = hidden
-    blurView.effect = UIBlurEffect(style: isMe ? .systemThinMaterialDark : .systemMaterialDark)
-    blurView.alpha = isMe ? 0.4 : 0.5
-    gradientLayer.isHidden = !isMe
-    gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-    gradientLayer.opacity = isMe ? 0.85 : 0.0
-    fillLayer.fillColor =
-      isMe
-      ? UIColor.clear.cgColor
-      : appearance.bubbleThemColor.withAlphaComponent(0.82).cgColor
+    blurView.isHidden = hidden || !style.showsBlur || style.blurAlpha <= 0.001
+    if !blurView.isHidden {
+      blurView.effect = UIBlurEffect(style: style.blurStyle)
+    }
+    blurView.alpha = style.blurAlpha
+    gradientLayer.isHidden = style.gradientOpacity <= 0.001
+    gradientLayer.colors = style.gradientColors
+    gradientLayer.opacity = style.gradientOpacity
+    fillLayer.fillColor = style.fillColor
     CATransaction.commit()
 
     if shapeOnlyChange {
@@ -259,8 +297,8 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     let mediaHeight: CGFloat
     switch row.visualKind {
     case .voice:
-      targetWidth = 214.0
-      mediaHeight = 42.0
+      targetWidth = 242.0
+      mediaHeight = 56.0
     case .video:
       targetWidth = 224.0
       mediaHeight = 140.0
@@ -387,16 +425,110 @@ final class BubbleUploadProgressView: UIView {
   }
 }
 
+final class VoicePlayProgressView: UIView {
+  private let fillView = UIView()
+  private let iconView = UIImageView()
+  private let ringTrackLayer = CAShapeLayer()
+  private let ringProgressLayer = CAShapeLayer()
+  private var iconTintColor = UIColor.systemBlue
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = true
+    backgroundColor = .clear
+
+    fillView.isUserInteractionEnabled = false
+    fillView.backgroundColor = UIColor(white: 1.0, alpha: 0.96)
+    fillView.layer.cornerCurve = .continuous
+    addSubview(fillView)
+
+    ringTrackLayer.fillColor = UIColor.clear.cgColor
+    ringTrackLayer.strokeColor = UIColor.white.withAlphaComponent(0.3).cgColor
+    ringTrackLayer.lineWidth = 2.2
+    ringTrackLayer.lineCap = .round
+    layer.addSublayer(ringTrackLayer)
+
+    ringProgressLayer.fillColor = UIColor.clear.cgColor
+    ringProgressLayer.strokeColor = UIColor.systemBlue.cgColor
+    ringProgressLayer.lineWidth = 2.2
+    ringProgressLayer.lineCap = .round
+    ringProgressLayer.strokeStart = 0.0
+    ringProgressLayer.strokeEnd = 0.0
+    layer.addSublayer(ringProgressLayer)
+
+    iconView.contentMode = .scaleAspectFit
+    addSubview(iconView)
+    setPlaybackState(isPlaying: false, progress: 0.0)
+  }
+
+  required init?(coder: NSCoder) {
+    return nil
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let diameter = max(1.0, min(bounds.width, bounds.height) - 6.0)
+    let fillFrame = CGRect(
+      x: floor((bounds.width - diameter) * 0.5),
+      y: floor((bounds.height - diameter) * 0.5),
+      width: diameter,
+      height: diameter
+    )
+    fillView.frame = fillFrame
+    fillView.layer.cornerRadius = diameter * 0.5
+
+    let ringRadius = max(2.0, (diameter * 0.5) + 1.8)
+    let center = CGPoint(x: bounds.midX, y: bounds.midY)
+    let ringPath = UIBezierPath(
+      arcCenter: center,
+      radius: ringRadius,
+      startAngle: -.pi / 2,
+      endAngle: (.pi * 3.0) / 2.0,
+      clockwise: true)
+    ringTrackLayer.frame = bounds
+    ringProgressLayer.frame = bounds
+    ringTrackLayer.path = ringPath.cgPath
+    ringProgressLayer.path = ringPath.cgPath
+
+    iconView.frame = CGRect(
+      x: floor((bounds.width - 18.0) * 0.5),
+      y: floor((bounds.height - 18.0) * 0.5),
+      width: 18.0,
+      height: 18.0
+    )
+  }
+
+  func applyStyle(fillColor: UIColor, iconTint: UIColor, ringTint: UIColor) {
+    fillView.backgroundColor = fillColor
+    iconTintColor = iconTint
+    iconView.tintColor = iconTintColor
+    ringTrackLayer.strokeColor = ringTint.withAlphaComponent(0.28).cgColor
+    ringProgressLayer.strokeColor = ringTint.cgColor
+  }
+
+  func setPlaybackState(isPlaying: Bool, progress: CGFloat) {
+    let symbol = isPlaying ? "pause.fill" : "play.fill"
+    let config = UIImage.SymbolConfiguration(pointSize: 17, weight: .bold)
+    iconView.image = UIImage(systemName: symbol, withConfiguration: config)
+    iconView.tintColor = iconTintColor
+
+    let clamped = max(0.0, min(1.0, progress))
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    ringProgressLayer.strokeEnd = clamped
+    CATransaction.commit()
+  }
+}
+
 final class VoiceWaveformView: UIView {
-  private let barCount = 28
+  private let barCount = 34
   private var barLayers: [CALayer] = []
   private var barEnvelope: [CGFloat] = []
   private var playbackProgress: CGFloat = 0.0
   private var level: CGFloat = 0.0
   private var isPlaying = false
-  private var phase: CGFloat = 0.0
   private var activeColor = UIColor.white
-  private var inactiveColor = UIColor(white: 1.0, alpha: 0.24)
+  private var inactiveColor = UIColor(white: 1.0, alpha: 0.28)
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -432,7 +564,8 @@ final class VoiceWaveformView: UIView {
       applyBarFrames()
       return
     }
-    let normalized = samples
+    let normalized =
+      samples
       .filter { $0.isFinite }
       .map { max(0.0, min(1.0, $0)) }
     guard !normalized.isEmpty else {
@@ -441,35 +574,45 @@ final class VoiceWaveformView: UIView {
       return
     }
 
+    let resampled: [CGFloat]
     if normalized.count == barCount {
-      barEnvelope = normalized
+      resampled = normalized
     } else {
-      var resampled: [CGFloat] = []
-      resampled.reserveCapacity(barCount)
+      var output: [CGFloat] = []
+      output.reserveCapacity(barCount)
       let bucketSize = CGFloat(normalized.count) / CGFloat(barCount)
       for index in 0..<barCount {
         let start = Int(floor(CGFloat(index) * bucketSize))
         let end = min(normalized.count, Int(floor(CGFloat(index + 1) * bucketSize)))
         if start < end {
           let slice = normalized[start..<end]
-          let avg = slice.reduce(0.0, +) / CGFloat(slice.count)
-          resampled.append(avg)
+          let sumSquares = slice.reduce(CGFloat(0.0)) { partial, value in
+            partial + (value * value)
+          }
+          let rms = sqrt(sumSquares / CGFloat(slice.count))
+          let peak = slice.max() ?? rms
+          // RMS gives stable body; peak preserves consonant spikes.
+          let energy = (rms * 0.58) + (peak * 0.42)
+          output.append(max(0.0, min(1.0, pow(energy, 0.76))))
         } else {
-          resampled.append(normalized[min(max(0, start), normalized.count - 1)])
+          output.append(normalized[min(max(0, start), normalized.count - 1)])
         }
       }
-      barEnvelope = resampled
+      resampled = output
     }
+
+    barEnvelope = Self.shaped(Self.smoothed(Self.smoothed(resampled)))
     applyBarFrames()
   }
 
   func setPlayback(progress: CGFloat, level: CGFloat, isPlaying: Bool) {
-    playbackProgress = max(0.0, min(1.0, progress))
+    let clamped = max(0.0, min(1.0, progress))
+    playbackProgress =
+      isPlaying
+      ? (playbackProgress + ((clamped - playbackProgress) * 0.35))
+      : clamped
     self.level = max(0.0, min(1.0, level))
     self.isPlaying = isPlaying
-    if isPlaying {
-      phase += 0.38
-    }
     applyBarFrames()
   }
 
@@ -478,41 +621,84 @@ final class VoiceWaveformView: UIView {
     let spacing: CGFloat = 2.0
     let totalSpacing = spacing * CGFloat(max(0, barCount - 1))
     let barWidth = max(1.0, floor((bounds.width - totalSpacing) / CGFloat(barCount)))
-    let minHeight = max(1.0, floor(bounds.height * 0.28))
+    let minHeight = max(1.0, floor(bounds.height * 0.22))
     let maxHeight = max(minHeight + 1.0, floor(bounds.height * 0.92))
+    let dynamicGain = isPlaying ? (1.0 + (level * 0.22)) : 1.0
+    let progressX = max(0.0, min(bounds.width, playbackProgress * bounds.width))
     var x: CGFloat = 0.0
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     for (index, barLayer) in barLayers.enumerated() {
-      let normalizedIndex = CGFloat(index) / CGFloat(max(1, barCount))
-      let base = barEnvelope[index]
-      let pulse = isPlaying
-        ? (sin(phase + CGFloat(index) * 0.62) * 0.08 + 0.92)
-        : 1.0
-      let liveBoost = isPlaying ? (level * 0.18) : 0.0
-      let amplitude = max(0.12, min(1.0, (base + liveBoost) * pulse))
+      let spectralBias = 0.92 + (0.12 * CGFloat(sin(Double(index) * 0.52)))
+      let amplitude = max(0.16, min(1.0, barEnvelope[index] * dynamicGain * spectralBias))
       let barHeight = minHeight + ((maxHeight - minHeight) * amplitude)
       let y = floor((bounds.height - barHeight) * 0.5)
+      let barStart = x
+      let barEnd = x + barWidth
+      let fillFraction = max(0.0, min(1.0, (progressX - barStart) / max(1.0, barEnd - barStart)))
       barLayer.frame = CGRect(x: x, y: y, width: barWidth, height: floor(barHeight))
       barLayer.cornerRadius = barWidth * 0.5
-      barLayer.backgroundColor =
-        normalizedIndex < playbackProgress ? activeColor.cgColor : inactiveColor.cgColor
+      barLayer.backgroundColor = blendedColor(fraction: fillFraction)
       x += barWidth + spacing
     }
     CATransaction.commit()
   }
 
+  private func blendedColor(fraction: CGFloat) -> CGColor {
+    if fraction <= 0.0 { return inactiveColor.cgColor }
+    if fraction >= 1.0 { return activeColor.cgColor }
+
+    var ar: CGFloat = 0
+    var ag: CGFloat = 0
+    var ab: CGFloat = 0
+    var aa: CGFloat = 0
+    var ir: CGFloat = 0
+    var ig: CGFloat = 0
+    var ib: CGFloat = 0
+    var ia: CGFloat = 0
+    guard
+      activeColor.getRed(&ar, green: &ag, blue: &ab, alpha: &aa),
+      inactiveColor.getRed(&ir, green: &ig, blue: &ib, alpha: &ia)
+    else {
+      return activeColor.withAlphaComponent(fraction).cgColor
+    }
+    let t = fraction
+    return UIColor(
+      red: ir + ((ar - ir) * t),
+      green: ig + ((ag - ig) * t),
+      blue: ib + ((ab - ib) * t),
+      alpha: ia + ((aa - ia) * t)
+    ).cgColor
+  }
+
+  private static func smoothed(_ values: [CGFloat]) -> [CGFloat] {
+    guard values.count > 2 else { return values }
+    var result = values
+    for index in values.indices {
+      let left = values[max(0, index - 1)]
+      let center = values[index]
+      let right = values[min(values.count - 1, index + 1)]
+      result[index] = max(0.14, min(1.0, (left * 0.2) + (center * 0.6) + (right * 0.2)))
+    }
+    return result
+  }
+
+  private static func shaped(_ values: [CGFloat]) -> [CGFloat] {
+    return values.enumerated().map { index, value in
+      let edgeAttenuation =
+        1.0
+        - (abs((CGFloat(index) / CGFloat(max(1, values.count - 1))) - 0.5) * 0.18)
+      return max(0.14, min(1.0, pow(value, 0.86) * edgeAttenuation))
+    }
+  }
+
   private static func makeDefaultEnvelope(count: Int) -> [CGFloat] {
     guard count > 0 else { return [] }
-    var output: [CGFloat] = []
-    output.reserveCapacity(count)
-    for i in 0..<count {
-      let t = CGFloat(i) / CGFloat(max(1, count - 1))
-      let wave = sin((t * .pi * 5.0) + 0.7) * 0.5 + 0.5
-      output.append(max(0.18, min(0.82, 0.22 + (wave * 0.55))))
+    let template: [CGFloat] = [0.74, 0.58, 0.81, 0.63, 0.48, 0.86, 0.62, 0.22, 0.26, 0.71]
+    return (0..<count).map { index in
+      template[index % template.count]
     }
-    return output
   }
 }
 
@@ -583,7 +769,8 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
     }
 
     do {
-      try AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.duckOthers])
+      try AVAudioSession.sharedInstance().setCategory(
+        .playback, mode: .default, options: [.duckOthers])
       try AVAudioSession.sharedInstance().setActive(true)
       let nextPlayer = try AVAudioPlayer(contentsOf: resolvedURL)
       nextPlayer.delegate = self
@@ -664,6 +851,27 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
     let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return nil }
 
+    // Sandbox path remapping: App UUIDs change on update/build, breaking absolute paths.
+    var pathString = trimmed
+    if trimmed.hasPrefix("file://") {
+      if let url = URL(string: trimmed) {
+        pathString = url.path
+      } else if let decoded = trimmed.removingPercentEncoding, let url = URL(string: decoded) {
+        pathString = url.path
+      }
+    }
+
+    if pathString.contains("/Application/") || pathString.contains("/Containers/") {
+      let sandboxTargets = ["/Library/", "/Documents/", "/tmp/"]
+      for target in sandboxTargets {
+        if let range = pathString.range(of: target, options: .backwards) {
+          let suffix = pathString[range.lowerBound...]
+          let patchedPath = NSHomeDirectory() + suffix
+          return URL(fileURLWithPath: patchedPath)
+        }
+      }
+    }
+
     if let url = URL(string: trimmed), url.isFileURL {
       return url
     }
@@ -683,13 +891,12 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
 final class ChatListCell: UICollectionViewCell {
   static let reuseIdentifier = "ChatListCell"
 
-  fileprivate let bubbleView = BubbleBackgroundView()
-  fileprivate let tailView = BubbleTailView()
+  let bubbleView = BubbleBackgroundView()
+  let tailView = BubbleTailView()
   private let messageLabel = UILabel()
   private let mediaContainerView = UIView()
   private let mediaPrimaryIconView = UIImageView()
-  private let mediaVoiceButtonView = UIView()
-  private let mediaVoiceButtonIconView = UIImageView()
+  private let mediaVoiceButtonView = VoicePlayProgressView()
   private let mediaTitleLabel = UILabel()
   private let mediaDetailLabel = UILabel()
   private let mediaWaveformView = VoiceWaveformView()
@@ -703,9 +910,15 @@ final class ChatListCell: UICollectionViewCell {
   private let timestampLabel = UILabel()
   private let statusLabel = UILabel()
   private let dayLabel = UILabel()
+  private let reactionPillView = UIView()
+  private let reactionLabel = UILabel()
   private var appearance = ChatListAppearance.fallback
   private var row: ChatListRow?
   private var isGhostHidden = false
+  private var externalVoiceMessageId: String?
+  private var externalVoiceIsPlaying = false
+  private var externalVoiceProgress: CGFloat = 0.0
+  var onVoiceBubbleTap: ((ChatListRow) -> Void)?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -719,7 +932,6 @@ final class ChatListCell: UICollectionViewCell {
     contentView.addSubview(mediaContainerView)
     mediaContainerView.addSubview(mediaPrimaryIconView)
     mediaContainerView.addSubview(mediaVoiceButtonView)
-    mediaVoiceButtonView.addSubview(mediaVoiceButtonIconView)
     mediaContainerView.addSubview(mediaTitleLabel)
     mediaContainerView.addSubview(mediaDetailLabel)
     mediaContainerView.addSubview(mediaWaveformView)
@@ -734,6 +946,9 @@ final class ChatListCell: UICollectionViewCell {
     metaContainerView.addSubview(statusLabel)
     contentView.addSubview(dayLabel)
 
+    contentView.addSubview(reactionPillView)
+    reactionPillView.addSubview(reactionLabel)
+
     messageLabel.numberOfLines = 0
     messageLabel.font = bubbleMessageFont
     messageLabel.textColor = .white
@@ -745,17 +960,14 @@ final class ChatListCell: UICollectionViewCell {
     mediaPrimaryIconView.tintColor = .white
     mediaPrimaryIconView.contentMode = .scaleAspectFit
 
-    mediaVoiceButtonView.backgroundColor = UIColor(white: 1.0, alpha: 0.22)
-    mediaVoiceButtonView.clipsToBounds = true
-    mediaVoiceButtonView.layer.cornerCurve = .continuous
+    mediaVoiceButtonView.clipsToBounds = false
     mediaVoiceButtonView.isUserInteractionEnabled = true
     let tap = UITapGestureRecognizer(target: self, action: #selector(handleVoiceTap))
     mediaVoiceButtonView.addGestureRecognizer(tap)
-
-    mediaVoiceButtonIconView.tintColor = .white
-    mediaVoiceButtonIconView.contentMode = .scaleAspectFit
-    mediaVoiceButtonIconView.image = UIImage(systemName: "play.fill")?.withConfiguration(
-      UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
+    mediaVoiceButtonView.applyStyle(
+      fillColor: UIColor(white: 1.0, alpha: 0.96),
+      iconTint: appearance.bubbleMeGradient.first ?? UIColor.systemBlue,
+      ringTint: UIColor.white.withAlphaComponent(0.65))
 
     mediaTitleLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
     mediaTitleLabel.textColor = .white
@@ -791,6 +1003,14 @@ final class ChatListCell: UICollectionViewCell {
     dayLabel.textAlignment = .center
     dayLabel.textColor = UIColor(white: 0.95, alpha: 0.9)
 
+    reactionPillView.backgroundColor = UIColor(white: 0.0, alpha: 0.25)
+    reactionPillView.layer.cornerRadius = 14
+    reactionPillView.layer.cornerCurve = .continuous
+    reactionPillView.clipsToBounds = true
+
+    reactionLabel.font = UIFont.systemFont(ofSize: 15)
+    reactionLabel.textAlignment = .center
+
     bubbleView.isHidden = true
     tailView.isHidden = true
     messageLabel.isHidden = true
@@ -808,6 +1028,7 @@ final class ChatListCell: UICollectionViewCell {
     timestampLabel.isHidden = true
     statusLabel.isHidden = true
     dayLabel.isHidden = true
+    reactionPillView.isHidden = true
   }
 
   required init?(coder: NSCoder) {
@@ -826,6 +1047,10 @@ final class ChatListCell: UICollectionViewCell {
       active: appearance.textColorThem.withAlphaComponent(0.95),
       inactive: appearance.textColorThem.withAlphaComponent(0.26)
     )
+    mediaVoiceButtonView.applyStyle(
+      fillColor: UIColor(white: 1.0, alpha: 0.96),
+      iconTint: appearance.bubbleMeGradient.first ?? UIColor.systemBlue,
+      ringTint: appearance.textColorThem.withAlphaComponent(0.68))
     setNeedsLayout()
   }
 
@@ -841,6 +1066,7 @@ final class ChatListCell: UICollectionViewCell {
       messageLabel.isHidden = true
       mediaContainerView.isHidden = true
       metaContainerView.isHidden = true
+      reactionPillView.isHidden = true
       mediaProgressSpinner.stopAnimating()
       mediaProgressOverlayView.isHidden = true
     case .message:
@@ -858,6 +1084,14 @@ final class ChatListCell: UICollectionViewCell {
       editedLabel.isHidden = !row.isEdited
       pinnedLabel.isHidden = !row.isPinned
       timestampLabel.text = row.timestamp
+
+      if let reactionEmoji = row.reactionEmoji, !reactionEmoji.isEmpty {
+        reactionPillView.isHidden = isGhostHidden
+        reactionLabel.text = reactionEmoji
+      } else {
+        reactionPillView.isHidden = true
+      }
+
       bubbleView.configure(
         isMe: row.isMe, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
       tailView.configure(
@@ -876,6 +1110,7 @@ final class ChatListCell: UICollectionViewCell {
       if row.visualKind == .voice {
         VoiceBubblePlaybackCoordinator.shared.bind(
           cell: self, messageId: row.messageId)
+        applyExternalVoicePlaybackIfNeeded()
       } else {
         VoiceBubblePlaybackCoordinator.shared.unbind(cell: self)
       }
@@ -891,11 +1126,16 @@ final class ChatListCell: UICollectionViewCell {
   override func prepareForReuse() {
     super.prepareForReuse()
     VoiceBubblePlaybackCoordinator.shared.unbind(cell: self)
+    onVoiceBubbleTap = nil
     row = nil
     isGhostHidden = false
     mediaProgressSpinner.stopAnimating()
     mediaProgressOverlayView.isHidden = true
     mediaProgressRingView.setProgress(nil)
+    reactionPillView.isHidden = true
+    externalVoiceMessageId = nil
+    externalVoiceIsPlaying = false
+    externalVoiceProgress = 0.0
     applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
     mediaWaveformView.setWaveform(nil)
     contentView.alpha = 1.0
@@ -981,6 +1221,18 @@ final class ChatListCell: UICollectionViewCell {
       )
     }
     layoutMetaLabels(for: row)
+
+    if !reactionPillView.isHidden {
+      let reactionSize = CGSize(width: 38.0, height: 28.0)
+      reactionLabel.frame = CGRect(
+        x: 0, y: 0, width: reactionSize.width, height: reactionSize.height)
+
+      let rx = row.isMe ? bubbleX + bubbleWidth - reactionSize.width + 4.0 : bubbleX - 4.0
+      let ry = bubbleY + bubbleHeight - 12.0
+      reactionPillView.frame = CGRect(
+        x: rx, y: ry, width: reactionSize.width, height: reactionSize.height)
+    }
+
     CATransaction.commit()
   }
 
@@ -1001,8 +1253,10 @@ final class ChatListCell: UICollectionViewCell {
 
     mediaTitleLabel.textColor = textColor
     mediaTitleLabel.textAlignment = .left
+    mediaTitleLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
     mediaDetailLabel.textColor = metaColor
     mediaDetailLabel.textAlignment = .right
+    mediaDetailLabel.font = UIFont.systemFont(ofSize: 11, weight: .regular)
     mediaContainerView.backgroundColor = UIColor(white: 0.0, alpha: 0.16)
 
     guard row.visualKind != .text else {
@@ -1015,16 +1269,24 @@ final class ChatListCell: UICollectionViewCell {
     switch row.visualKind {
     case .voice:
       mediaVoiceButtonView.isHidden = false
-      mediaTitleLabel.isHidden = false
+      mediaTitleLabel.isHidden = true
       mediaDetailLabel.isHidden = false
       mediaWaveformView.isHidden = false
-      mediaTitleLabel.text = row.messageType == "music" ? "Audio" : "Voice message"
       mediaDetailLabel.text = formatBubbleDuration(seconds: row.duration)
+      mediaDetailLabel.textAlignment = .left
+      mediaDetailLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
       mediaContainerView.backgroundColor = .clear
       mediaWaveformView.setWaveform(row.waveform)
       mediaWaveformView.applyColors(
         active: textColor.withAlphaComponent(0.95),
-        inactive: textColor.withAlphaComponent(0.25)
+        inactive: textColor.withAlphaComponent(0.34)
+      )
+      mediaVoiceButtonView.applyStyle(
+        fillColor: UIColor(white: 1.0, alpha: row.isMe ? 0.96 : 0.90),
+        iconTint: row.isMe
+          ? (appearance.bubbleMeGradient.first ?? UIColor.systemBlue)
+          : textColor.withAlphaComponent(0.95),
+        ringTint: textColor.withAlphaComponent(0.74)
       )
 
     case .video:
@@ -1071,6 +1333,13 @@ final class ChatListCell: UICollectionViewCell {
       break
     }
 
+    if row.visualKind == .voice {
+      mediaProgressOverlayView.isHidden = true
+      mediaProgressRingView.setProgress(nil)
+      mediaProgressSpinner.stopAnimating()
+      return
+    }
+
     if row.shouldShowUploadOverlay {
       mediaProgressOverlayView.isHidden = false
       let progress = row.uploadProgress
@@ -1109,7 +1378,6 @@ final class ChatListCell: UICollectionViewCell {
 
     mediaPrimaryIconView.frame = .zero
     mediaVoiceButtonView.frame = .zero
-    mediaVoiceButtonIconView.frame = .zero
     mediaWaveformView.frame = .zero
     mediaTitleLabel.frame = .zero
     mediaDetailLabel.frame = .zero
@@ -1117,43 +1385,29 @@ final class ChatListCell: UICollectionViewCell {
 
     switch row.visualKind {
     case .voice:
-      let insetX: CGFloat = 6.0
-      let buttonSize: CGFloat = 32.0
+      let insetX: CGFloat = 4.0
+      let buttonSize: CGFloat = 44.0
       mediaVoiceButtonView.frame = CGRect(
         x: insetX,
         y: floor((height - buttonSize) * 0.5),
         width: buttonSize,
         height: buttonSize
       )
-      mediaVoiceButtonView.layer.cornerRadius = buttonSize * 0.5
-      mediaVoiceButtonIconView.frame = CGRect(
-        x: floor((buttonSize - 16.0) * 0.5),
-        y: floor((buttonSize - 16.0) * 0.5),
-        width: 16.0,
-        height: 16.0
-      )
-
-      let textStartX = mediaVoiceButtonView.frame.maxX + 8.0
-      let rightInset: CGFloat = 6.0
-      let durationWidth: CGFloat = 44.0
-      mediaTitleLabel.frame = CGRect(
-        x: textStartX,
-        y: 3.0,
-        width: max(1.0, width - textStartX - rightInset - durationWidth),
-        height: 16.0
-      )
+      let textStartX = mediaVoiceButtonView.frame.maxX + 10.0
+      let rightInset: CGFloat = 8.0
+      let waveY: CGFloat = 10.0
+      let waveHeight: CGFloat = 16.0
       mediaDetailLabel.frame = CGRect(
-        x: width - rightInset - durationWidth,
-        y: 4.0,
-        width: durationWidth,
+        x: textStartX,
+        y: waveY + waveHeight + 2.0,
+        width: 56.0,
         height: 14.0
       )
-      let trackY: CGFloat = 25.0
       mediaWaveformView.frame = CGRect(
         x: textStartX,
-        y: trackY,
+        y: waveY,
         width: max(1.0, width - textStartX - rightInset),
-        height: 9.0
+        height: waveHeight
       )
 
     case .video, .videoNote, .media:
@@ -1210,16 +1464,44 @@ final class ChatListCell: UICollectionViewCell {
 
   @objc private func handleVoiceTap() {
     guard let row, row.visualKind == .voice else { return }
+    if let onVoiceBubbleTap {
+      onVoiceBubbleTap(row)
+      return
+    }
     VoiceBubblePlaybackCoordinator.shared.toggle(
       cell: self, messageId: row.messageId, mediaURL: row.mediaUrl
     )
   }
 
   fileprivate func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat) {
-    let symbol = isPlaying ? "pause.fill" : "play.fill"
-    mediaVoiceButtonIconView.image = UIImage(systemName: symbol)?.withConfiguration(
-      UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold))
+    mediaVoiceButtonView.setPlaybackState(isPlaying: isPlaying, progress: progress)
     mediaWaveformView.setPlayback(progress: progress, level: level, isPlaying: isPlaying)
+  }
+
+  func setExternalVoicePlayback(messageId: String?, isPlaying: Bool, progress: CGFloat) {
+    externalVoiceMessageId = messageId
+    externalVoiceIsPlaying = isPlaying
+    externalVoiceProgress = max(0.0, min(1.0, progress))
+    applyExternalVoicePlaybackIfNeeded()
+  }
+
+  private func applyExternalVoicePlaybackIfNeeded() {
+    guard let row, row.visualKind == .voice else { return }
+    let rowId = row.messageId ?? ""
+    let externalId = externalVoiceMessageId ?? ""
+    guard !rowId.isEmpty else {
+      applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
+      return
+    }
+    if rowId == externalId {
+      applyVoicePlaybackState(
+        isPlaying: externalVoiceIsPlaying,
+        progress: externalVoiceProgress,
+        level: externalVoiceIsPlaying ? 0.20 : 0.0
+      )
+    } else {
+      applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
+    }
   }
 
   private func layoutMetaLabels(for row: ChatListRow) {
@@ -1317,6 +1599,10 @@ final class ChatListCell: UICollectionViewCell {
       let tailRect = tailView.convert(tailView.bounds, to: contentView)
       captureRect = captureRect.union(tailRect)
     }
+    if !reactionPillView.isHidden {
+      let reactionRect = reactionPillView.convert(reactionPillView.bounds, to: contentView)
+      captureRect = captureRect.union(reactionRect)
+    }
     captureRect = captureRect.integral
 
     guard captureRect.width > 1.0, captureRect.height > 1.0 else {
@@ -1336,6 +1622,95 @@ final class ChatListCell: UICollectionViewCell {
     snapshot.frame = contentView.convert(captureRect, to: view)
     snapshot.clipsToBounds = false
     return snapshot
+  }
+
+  func transitionBubbleCaptureRects() -> (
+    bubbleBodyRect: CGRect, fullBubbleRect: CGRect, contentRect: CGRect
+  )? {
+    guard row?.kind == .message else {
+      return nil
+    }
+    contentView.layoutIfNeeded()
+
+    let bubbleBodyRect = bubbleView.convert(bubbleView.bounds, to: contentView).integral
+    guard bubbleBodyRect.width > 1.0, bubbleBodyRect.height > 1.0 else {
+      return nil
+    }
+    var fullBubbleRect = bubbleBodyRect
+    if !tailView.isHidden {
+      let tailRect = tailView.convert(tailView.bounds, to: contentView).integral
+      fullBubbleRect = fullBubbleRect.union(tailRect).integral
+    }
+
+    var contentRect = CGRect.null
+    if !messageLabel.isHidden {
+      contentRect = contentRect.union(messageLabel.frame)
+    }
+    if !mediaContainerView.isHidden {
+      contentRect = contentRect.union(mediaContainerView.frame)
+    }
+    if !metaContainerView.isHidden {
+      contentRect = contentRect.union(metaContainerView.frame)
+    }
+    if contentRect.isNull || contentRect.width <= 1.0 || contentRect.height <= 1.0 {
+      contentRect = bubbleBodyRect.insetBy(
+        dx: bubbleHorizontalPadding,
+        dy: min(bubbleTopPadding, bubbleBottomPadding)
+      )
+    }
+    contentRect = contentRect.integral
+    return (bubbleBodyRect, fullBubbleRect, contentRect)
+  }
+
+  func bubbleBackgroundSnapshotView(in view: UIView) -> UIView? {
+    guard row?.kind == .message else {
+      return nil
+    }
+    guard let capture = transitionBubbleCaptureRects() else {
+      return nil
+    }
+    let captureRect = capture.fullBubbleRect
+    guard captureRect.width > 1.0, captureRect.height > 1.0 else {
+      return nil
+    }
+
+    let messageWasHidden = messageLabel.isHidden
+    let mediaWasHidden = mediaContainerView.isHidden
+    let metaWasHidden = metaContainerView.isHidden
+
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    messageLabel.isHidden = true
+    mediaContainerView.isHidden = true
+    metaContainerView.isHidden = true
+    contentView.layoutIfNeeded()
+    CATransaction.commit()
+
+    defer {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      messageLabel.isHidden = messageWasHidden
+      mediaContainerView.isHidden = mediaWasHidden
+      metaContainerView.isHidden = metaWasHidden
+      contentView.layoutIfNeeded()
+      CATransaction.commit()
+    }
+
+    let format = UIGraphicsImageRendererFormat()
+    format.opaque = false
+    format.scale = UIScreen.main.scale
+    let renderer = UIGraphicsImageRenderer(size: captureRect.size, format: format)
+    let image = renderer.image { context in
+      context.cgContext.translateBy(x: -captureRect.minX, y: -captureRect.minY)
+      if !contentView.drawHierarchy(in: contentView.bounds, afterScreenUpdates: true) {
+        contentView.layer.render(in: context.cgContext)
+      }
+    }
+    let imageView = UIImageView(image: image)
+    imageView.frame = contentView.convert(captureRect, to: view)
+    imageView.contentMode = .scaleAspectFill
+    imageView.clipsToBounds = false
+    return imageView
   }
 }
 
@@ -1367,22 +1742,21 @@ final class BubbleTailView: UIView {
 
   func configure(isMe: Bool, visible: Bool, appearance: ChatListAppearance) {
     currentIsMe = isMe
+    let style = bubbleSurfaceStyle(isMe: isMe, appearance: appearance)
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     isHidden = !visible
 
     // MUST match BubbleBackgroundView.configure exactly so tail+bubble look identical.
-    // Bubble uses:  blur .systemThinMaterialDark α0.4  + gradient 0.85  (me)
-    //               blur .systemMaterialDark     α0.5  + fill    0.82   (them)
-    blurView.effect = UIBlurEffect(style: isMe ? .systemThinMaterialDark : .systemMaterialDark)
-    blurView.alpha = isMe ? 0.4 : 0.5
-    gradientLayer.isHidden = !isMe
-    gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-    gradientLayer.opacity = isMe ? 0.85 : 0.0
-    fillLayer.fillColor =
-      isMe
-      ? UIColor.clear.cgColor
-      : appearance.bubbleThemColor.withAlphaComponent(0.82).cgColor
+    blurView.isHidden = !visible || !style.showsBlur || style.blurAlpha <= 0.001
+    if !blurView.isHidden {
+      blurView.effect = UIBlurEffect(style: style.blurStyle)
+    }
+    blurView.alpha = style.blurAlpha
+    gradientLayer.isHidden = style.gradientOpacity <= 0.001
+    gradientLayer.colors = style.gradientColors
+    gradientLayer.opacity = style.gradientOpacity
+    fillLayer.fillColor = style.fillColor
 
     // For 'me': rotate CW 25° (tail curves right at bottom-right of bubble)
     // For 'them': flip horizontally + rotate CCW 25° (tail curves left at bottom-left)
@@ -1459,231 +1833,3 @@ final class BubbleTailView: UIView {
 }
 
 // MARK: - Send transition overlay helpers
-
-/// Builds the overlay container used by the native send transition.
-///
-/// The overlay contains:
-///   1) A source input/background ghost.
-///   2) A source text ghost.
-///   3) The destination bubble snapshot.
-///
-/// `SendTransitionState` then crossfades/morphs these layers with Telegram's
-/// split horizontal/vertical curves.
-enum SendTransitionOverlayFactory {
-  struct Result {
-    let container: UIView
-    let bubbleSnapshot: UIView
-    let sourceBackgroundSnapshot: UIView?
-    let sourceTextSnapshot: UIView?
-    let bubbleStartFrame: CGRect
-    let bubbleEndFrame: CGRect
-    let sourceBackgroundStartFrame: CGRect?
-    let sourceBackgroundEndFrame: CGRect?
-    let sourceTextStartFrame: CGRect?
-    let sourceTextEndFrame: CGRect?
-  }
-
-  private static func mapSourceRectToContainer(
-    _ sourceRect: CGRect,
-    motionSourceRect: CGRect,
-    targetRect: CGRect
-  ) -> CGRect {
-    let startContainerOriginY = motionSourceRect.maxY - targetRect.height
-    return CGRect(
-      x: sourceRect.minX - motionSourceRect.minX,
-      y: sourceRect.minY - startContainerOriginY,
-      width: max(1.0, sourceRect.width),
-      height: max(1.0, sourceRect.height)
-    )
-  }
-
-  private static func makeRenderedSnapshotView(
-    from sourceView: UIView,
-    captureRect: CGRect,
-    targetFrame: CGRect
-  ) -> UIView? {
-    guard captureRect.width > 1.0, captureRect.height > 1.0 else {
-      return nil
-    }
-
-    let format = UIGraphicsImageRendererFormat()
-    format.opaque = false
-    format.scale = UIScreen.main.scale
-
-    let renderer = UIGraphicsImageRenderer(size: captureRect.size, format: format)
-    let image = renderer.image { context in
-      context.cgContext.translateBy(x: -captureRect.minX, y: -captureRect.minY)
-      if !sourceView.drawHierarchy(in: sourceView.bounds, afterScreenUpdates: true) {
-        sourceView.layer.render(in: context.cgContext)
-      }
-    }
-
-    let imageView = UIImageView(image: image)
-    imageView.frame = targetFrame
-    imageView.backgroundColor = .clear
-    imageView.isOpaque = false
-    imageView.clipsToBounds = false
-    return imageView
-  }
-
-  static func make(
-    appearance: ChatListAppearance,
-    snapshotCell: ChatListCell,
-    targetBubbleRect: CGRect,
-    payload: SendTransitionPayload,
-    hostView: UIView
-  ) -> Result {
-    let motionSourceRect = (payload.backgroundStartRect ?? payload.startRect).integral
-    let container = UIView()
-    container.isUserInteractionEnabled = false
-    container.clipsToBounds = false
-
-    // Snapshot the real cell's content (bubble + tail).
-    let bubbleSnapshot: UIView
-    let bubbleRectInContent = snapshotCell.bubbleView.convert(
-      snapshotCell.bubbleView.bounds, to: snapshotCell.contentView)
-    var fullCaptureRect = bubbleRectInContent
-    if !snapshotCell.tailView.isHidden {
-      let tailRect = snapshotCell.tailView.convert(
-        snapshotCell.tailView.bounds, to: snapshotCell.contentView)
-      fullCaptureRect = fullCaptureRect.union(tailRect)
-    }
-    fullCaptureRect = fullCaptureRect.integral
-    let bubbleEndFrame = CGRect(
-      x: fullCaptureRect.minX - bubbleRectInContent.minX,
-      y: fullCaptureRect.minY - bubbleRectInContent.minY,
-      width: fullCaptureRect.width,
-      height: fullCaptureRect.height
-    )
-
-    if fullCaptureRect.width > 1.0, fullCaptureRect.height > 1.0,
-      let snapshot = snapshotCell.contentView.resizableSnapshotView(
-        from: fullCaptureRect,
-        afterScreenUpdates: true,
-        withCapInsets: .zero
-      )
-    {
-      snapshot.frame = bubbleEndFrame
-      bubbleSnapshot = snapshot
-    } else if let rendered = makeRenderedSnapshotView(
-      from: snapshotCell.contentView,
-      captureRect: fullCaptureRect,
-      targetFrame: bubbleEndFrame
-    ) {
-      bubbleSnapshot = rendered
-    } else {
-      // Fallback: solid color fill if snapshot fails
-      bubbleSnapshot = UIView(frame: bubbleEndFrame)
-      bubbleSnapshot.clipsToBounds = true
-      bubbleSnapshot.layer.cornerRadius = 18
-      let gradientLayer = CAGradientLayer()
-      gradientLayer.frame = bubbleSnapshot.bounds
-      gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-      gradientLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
-      gradientLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-      gradientLayer.cornerRadius = 18
-      bubbleSnapshot.layer.addSublayer(gradientLayer)
-    }
-
-    let bubbleStartFrame = mapSourceRectToContainer(
-      motionSourceRect,
-      motionSourceRect: motionSourceRect,
-      targetRect: targetBubbleRect
-    )
-
-    let sourceBackgroundStartFrame = bubbleStartFrame
-    var sourceBackgroundEndFrame = bubbleEndFrame
-    sourceBackgroundEndFrame.size.width = max(1.0, sourceBackgroundEndFrame.width - 7.0)
-
-    let sourceTextStartFrame = mapSourceRectToContainer(
-      payload.startRect.integral,
-      motionSourceRect: motionSourceRect,
-      targetRect: targetBubbleRect
-    )
-
-    let textEndHeight = max(
-      1.0,
-      min(
-        sourceTextStartFrame.height,
-        bubbleEndFrame.height - bubbleTopPadding - bubbleBottomPadding))
-    let sourceTextEndFrame = CGRect(
-      x: bubbleEndFrame.minX + bubbleHorizontalPadding,
-      y: bubbleEndFrame.minY + bubbleTopPadding,
-      width: max(1.0, bubbleEndFrame.width - bubbleHorizontalPadding * 2.0 - 8.0),
-      height: textEndHeight
-    )
-
-    // Source background ghost (input pill-ish look).
-    let sourceBackgroundSnapshot = UIView(frame: sourceBackgroundStartFrame)
-    sourceBackgroundSnapshot.layer.cornerCurve = .continuous
-    sourceBackgroundSnapshot.layer.cornerRadius = min(sourceBackgroundStartFrame.height * 0.5, 22.0)
-    sourceBackgroundSnapshot.layer.borderWidth = 1.0 / UIScreen.main.scale
-    sourceBackgroundSnapshot.layer.borderColor = UIColor(white: 1.0, alpha: 0.12).cgColor
-    sourceBackgroundSnapshot.backgroundColor = UIColor(white: 0.06, alpha: 0.22)
-    sourceBackgroundSnapshot.isUserInteractionEnabled = false
-
-    // If possible, replace the synthetic background with an actual snapshot of input pill.
-    let activeSourceBackgroundSnapshot: UIView
-    if motionSourceRect.width > 1.0, motionSourceRect.height > 1.0,
-      let sourceSnapshot = hostView.resizableSnapshotView(
-        from: motionSourceRect,
-        afterScreenUpdates: false,
-        withCapInsets: .zero
-      )
-    {
-      sourceSnapshot.frame = sourceBackgroundStartFrame
-      sourceSnapshot.layer.cornerCurve = .continuous
-      sourceSnapshot.layer.cornerRadius = sourceBackgroundSnapshot.layer.cornerRadius
-      sourceSnapshot.clipsToBounds = true
-      container.addSubview(sourceSnapshot)
-      activeSourceBackgroundSnapshot = sourceSnapshot
-    } else {
-      container.addSubview(sourceBackgroundSnapshot)
-      activeSourceBackgroundSnapshot = sourceBackgroundSnapshot
-    }
-
-    // Bubble starts hidden and fades in quickly.
-    bubbleSnapshot.layer.opacity = 0.0
-    container.addSubview(bubbleSnapshot)
-
-    // Source text ghost fades out as bubble text appears.
-    // Prefer the live snapshot captured from the input bar (pixel-accurate);
-    // fall back to a synthetic UILabel if the snapshot wasn't available.
-    let sourceTextSnapshot: UIView
-    if let liveSnapshot = payload.sourceTextContentView {
-      // Re-parent the live snapshot into the overlay container coordinate space.
-      let liveFrameInHost = liveSnapshot.frame
-      let startContainerOriginY = motionSourceRect.maxY - targetBubbleRect.height
-      liveSnapshot.frame = CGRect(
-        x: liveFrameInHost.minX - motionSourceRect.minX,
-        y: liveFrameInHost.minY - startContainerOriginY,
-        width: liveFrameInHost.width,
-        height: liveFrameInHost.height
-      )
-      sourceTextSnapshot = liveSnapshot
-    } else {
-      let label = UILabel(frame: sourceTextStartFrame)
-      label.font = bubbleMessageFont
-      label.textColor = appearance.textColorThem.withAlphaComponent(0.95)
-      label.textAlignment = .left
-      label.numberOfLines = 1
-      label.lineBreakMode = .byTruncatingTail
-      label.text = payload.text
-      sourceTextSnapshot = label
-    }
-    container.addSubview(sourceTextSnapshot)
-
-    return Result(
-      container: container,
-      bubbleSnapshot: bubbleSnapshot,
-      sourceBackgroundSnapshot: activeSourceBackgroundSnapshot,
-      sourceTextSnapshot: sourceTextSnapshot,
-      bubbleStartFrame: bubbleStartFrame,
-      bubbleEndFrame: bubbleEndFrame,
-      sourceBackgroundStartFrame: sourceBackgroundStartFrame,
-      sourceBackgroundEndFrame: sourceBackgroundEndFrame,
-      sourceTextStartFrame: sourceTextStartFrame,
-      sourceTextEndFrame: sourceTextEndFrame
-    )
-  }
-}

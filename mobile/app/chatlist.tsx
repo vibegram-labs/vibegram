@@ -65,6 +65,7 @@ import {
     mapMessagesToNativeRows,
     NativeChatSurface,
     type NativeChatAppearance,
+    type NativeSendTransitionPayload,
     type NativeChatSurfaceRef,
 } from '../src/native/chat';
 
@@ -2263,11 +2264,18 @@ export default function ChatListScreen({
                 const startY = resolvedBarY + 13;
                 const startWidth = Math.max(120, resolvedBarW - 64);
                 const startHeight = 40;
+                const startBackgroundX = startX;
+                const startBackgroundY = startY;
+                const startBackgroundWidth = startWidth;
+                const startBackgroundHeight = startHeight;
+                const startContentX = startX + 8;
+                const startContentY = startY + 8;
+                const startContentWidth = Math.max(1, startWidth - 16);
+                const startContentHeight = Math.max(1, startHeight - 16);
 
                 (async () => {
                     try {
-                        // Register transition BEFORE inserting row so list shift and morph stay in sync.
-                        await nativeSurfaceRef.current?.startSendTransition({
+                        const transitionPayload: NativeSendTransitionPayload = {
                             messageId,
                             text: currentText,
                             timestamp,
@@ -2275,7 +2283,22 @@ export default function ChatListScreen({
                             startY,
                             startWidth,
                             startHeight,
-                        });
+                            startBackgroundX,
+                            startBackgroundY,
+                            startBackgroundWidth,
+                            startBackgroundHeight,
+                            startContentX,
+                            startContentY,
+                            startContentWidth,
+                            startContentHeight,
+                            sourceScrollOffset: 0,
+                            sourceContainerX: startBackgroundX,
+                            sourceContainerY: startBackgroundY,
+                            sourceContainerWidth: startBackgroundWidth,
+                            sourceContainerHeight: startBackgroundHeight,
+                        };
+                        // Register transition BEFORE inserting row so list shift and morph stay in sync.
+                        await nativeSurfaceRef.current?.startSendTransition(transitionPayload);
                     } catch (error) {
                         console.error('[ChatList] startSendTransition failed', error);
                     } finally {

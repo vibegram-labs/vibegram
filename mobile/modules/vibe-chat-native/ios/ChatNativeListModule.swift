@@ -58,6 +58,10 @@ public class ChatNativeListModule: Module {
         view.setContentPaddingBottom(value)
       }
 
+      Prop("voicePlayback") { (view: ChatListView, payload: [String: Any]) in
+        view.setVoicePlayback(payload)
+      }
+
       Prop("inputBarEnabled") { (view: ChatListView, enabled: Bool) in
         view.setInputBarEnabled(enabled)
       }

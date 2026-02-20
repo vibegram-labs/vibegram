@@ -83,6 +83,7 @@ struct ChatListRow {
   let isEdited: Bool
   let isPinned: Bool
   let messageId: String?
+  let reactionEmoji: String?
   let shape: BubbleShape
   let messageType: String
   let mediaUrl: String?
@@ -137,6 +138,7 @@ struct ChatListRow {
       isEdited = false
       isPinned = false
       messageId = nil
+      reactionEmoji = nil
       shape = BubbleShape(
         isMe: false, showTail: false, borderTopLeftRadius: 18, borderTopRightRadius: 18,
         borderBottomLeftRadius: 18, borderBottomRightRadius: 18)
@@ -162,6 +164,7 @@ struct ChatListRow {
     isEdited = (message["isEdited"] as? Bool) ?? false
     isPinned = (message["isPinned"] as? Bool) ?? false
     messageId = message["id"] as? String
+    reactionEmoji = message["reactionEmoji"] as? String
     messageType = ((message["type"] as? String) ?? "text").lowercased()
     shape = BubbleShape.from(raw: message["bubbleShape"] as? [String: Any], isMe: isMe)
 
@@ -181,10 +184,11 @@ struct ChatListRow {
       mediaUrl1, mediaUrl2, mediaUrl3, mediaUrl4, mediaUrl5,
       metaUrl1, metaUrl2, metaUrl3, metaUrl4, metaUrl5,
     ]
-    mediaUrl = mediaUrlCandidates.compactMap { value in
-      guard let value, !value.isEmpty else { return nil }
-      return value
-    }.first
+    mediaUrl =
+      mediaUrlCandidates.compactMap { value in
+        guard let value, !value.isEmpty else { return nil }
+        return value
+      }.first
     fileName =
       (message["fileName"] as? String)
       ?? (message["file_name"] as? String)
@@ -252,7 +256,8 @@ private func parseWaveform(_ raw: Any?) -> [CGFloat]? {
     }
     return nil
   }
-  let normalized = mapped
+  let normalized =
+    mapped
     .filter { $0.isFinite }
     .map { max(0.0, min(1.0, $0)) }
   return normalized.isEmpty ? nil : normalized
@@ -292,7 +297,8 @@ func chatListRowContentEqual(_ lhs: ChatListRow, _ rhs: ChatListRow) -> Bool {
   return lhs.kind == rhs.kind && lhs.key == rhs.key && lhs.label == rhs.label
     && lhs.text == rhs.text && lhs.timestamp == rhs.timestamp && lhs.isMe == rhs.isMe
     && lhs.status == rhs.status && lhs.isEdited == rhs.isEdited && lhs.isPinned == rhs.isPinned
-    && lhs.messageId == rhs.messageId && lhs.messageType == rhs.messageType
+    && lhs.messageId == rhs.messageId && lhs.reactionEmoji == rhs.reactionEmoji
+    && lhs.messageType == rhs.messageType
     && lhs.mediaUrl == rhs.mediaUrl && lhs.fileName == rhs.fileName
     && optionalDoubleEqual(lhs.duration, rhs.duration) && lhs.isVideoNote == rhs.isVideoNote
     && optionalWaveformEqual(lhs.waveform, rhs.waveform)
@@ -304,12 +310,62 @@ struct SendTransitionPayload {
   let messageId: String
   let text: String
   let timestamp: String
+  /// Legacy source text rect in host coordinates.
+  /// Still accepted for backward compatibility with existing JS payloads.
   let startRect: CGRect
+  /// Legacy source background rect in host coordinates.
+  /// Still accepted for backward compatibility with existing JS payloads.
   let backgroundStartRect: CGRect?
-  /// Live snapshot of the input text view, captured before clearText().
-  /// When present the overlay factory uses this instead of a synthetic UILabel
-  /// for a pixel-accurate crossfade.
-  var sourceTextContentView: UIView?
+  /// Telegram-style source container rect in host coordinates.
+  /// This is the coordinate space for sourceBackgroundRectInContainer/sourceContentRectInContainer.
+  let sourceContainerRect: CGRect?
+  /// Source background rect in source-container local coordinates.
+  let sourceBackgroundRectInContainer: CGRect?
+  /// Source content rect in source-container local coordinates.
+  let sourceContentRectInContainer: CGRect?
+  /// Source text content scroll offset (used to align destination text motion).
+  let sourceScrollOffset: CGFloat
+  /// Optional live source background snapshot captured before input clear.
+  var sourceBackgroundSnapshotView: UIView?
+  /// Optional live source content snapshot captured before input clear.
+  var sourceContentSnapshotView: UIView?
+
+  var resolvedSourceContainerRect: CGRect {
+    if let sourceContainerRect {
+      return sourceContainerRect
+    }
+    if let backgroundStartRect {
+      return backgroundStartRect
+    }
+    return startRect
+  }
+
+  var resolvedSourceBackgroundRect: CGRect {
+    if let sourceContainerRect, let sourceBackgroundRectInContainer {
+      return CGRect(
+        x: sourceContainerRect.minX + sourceBackgroundRectInContainer.minX,
+        y: sourceContainerRect.minY + sourceBackgroundRectInContainer.minY,
+        width: sourceBackgroundRectInContainer.width,
+        height: sourceBackgroundRectInContainer.height
+      )
+    }
+    if let backgroundStartRect {
+      return backgroundStartRect
+    }
+    return startRect
+  }
+
+  var resolvedSourceContentRect: CGRect {
+    if let sourceContainerRect, let sourceContentRectInContainer {
+      return CGRect(
+        x: sourceContainerRect.minX + sourceContentRectInContainer.minX,
+        y: sourceContainerRect.minY + sourceContentRectInContainer.minY,
+        width: sourceContentRectInContainer.width,
+        height: sourceContentRectInContainer.height
+      )
+    }
+    return startRect
+  }
 
   /// Direct initializer for native send (no bridge, no parsing).
   init(
@@ -318,14 +374,35 @@ struct SendTransitionPayload {
     timestamp: String,
     startRect: CGRect,
     backgroundStartRect: CGRect? = nil,
-    sourceTextContentView: UIView? = nil
+    sourceContainerRect: CGRect? = nil,
+    sourceBackgroundRectInContainer: CGRect? = nil,
+    sourceContentRectInContainer: CGRect? = nil,
+    sourceScrollOffset: CGFloat = 0.0,
+    sourceBackgroundSnapshotView: UIView? = nil,
+    sourceContentSnapshotView: UIView? = nil
   ) {
     self.messageId = messageId
     self.text = text
     self.timestamp = timestamp
     self.startRect = startRect
-    self.backgroundStartRect = backgroundStartRect
-    self.sourceTextContentView = sourceTextContentView
+    if let backgroundStartRect {
+      self.backgroundStartRect = backgroundStartRect
+    } else if let sourceContainerRect, let sourceBackgroundRectInContainer {
+      self.backgroundStartRect = CGRect(
+        x: sourceContainerRect.minX + sourceBackgroundRectInContainer.minX,
+        y: sourceContainerRect.minY + sourceBackgroundRectInContainer.minY,
+        width: sourceBackgroundRectInContainer.width,
+        height: sourceBackgroundRectInContainer.height
+      )
+    } else {
+      self.backgroundStartRect = nil
+    }
+    self.sourceContainerRect = sourceContainerRect
+    self.sourceBackgroundRectInContainer = sourceBackgroundRectInContainer
+    self.sourceContentRectInContainer = sourceContentRectInContainer
+    self.sourceScrollOffset = sourceScrollOffset
+    self.sourceBackgroundSnapshotView = sourceBackgroundSnapshotView
+    self.sourceContentSnapshotView = sourceContentSnapshotView
   }
 
   init?(payload: [String: Any], hostView: UIView) {
@@ -344,6 +421,9 @@ struct SendTransitionPayload {
       }
       if let value = payload[key] as? Int {
         return CGFloat(value)
+      }
+      if let value = payload[key] as? String, let parsed = Double(value) {
+        return CGFloat(parsed)
       }
       return nil
     }
@@ -369,19 +449,79 @@ struct SendTransitionPayload {
 
     let textStartRect = rectInHost(x: startX, y: startY, width: startWidth, height: startHeight)
 
-    var backgroundStartRect: CGRect?
+    var parsedBackgroundStartRect: CGRect?
     if let bgX = number("startBackgroundX"),
       let bgY = number("startBackgroundY"),
       let bgWidth = number("startBackgroundWidth"),
       let bgHeight = number("startBackgroundHeight")
     {
-      backgroundStartRect = rectInHost(x: bgX, y: bgY, width: bgWidth, height: bgHeight)
+      parsedBackgroundStartRect = rectInHost(x: bgX, y: bgY, width: bgWidth, height: bgHeight)
     }
+
+    var parsedContentStartRect: CGRect?
+    if let contentX = number("startContentX"),
+      let contentY = number("startContentY"),
+      let contentWidth = number("startContentWidth"),
+      let contentHeight = number("startContentHeight")
+    {
+      parsedContentStartRect = rectInHost(
+        x: contentX,
+        y: contentY,
+        width: contentWidth,
+        height: contentHeight
+      )
+    }
+
+    var parsedSourceContainerRect: CGRect?
+    if let containerX = number("sourceContainerX"),
+      let containerY = number("sourceContainerY"),
+      let containerWidth = number("sourceContainerWidth"),
+      let containerHeight = number("sourceContainerHeight")
+    {
+      parsedSourceContainerRect = rectInHost(
+        x: containerX,
+        y: containerY,
+        width: containerWidth,
+        height: containerHeight
+      )
+    }
+
+    let sourceContainerRect =
+      parsedSourceContainerRect
+      ?? parsedBackgroundStartRect
+      ?? parsedContentStartRect
+      ?? textStartRect
+
+    let sourceBackgroundRectInContainer: CGRect? = {
+      guard let parsedBackgroundStartRect else { return nil }
+      return CGRect(
+        x: parsedBackgroundStartRect.minX - sourceContainerRect.minX,
+        y: parsedBackgroundStartRect.minY - sourceContainerRect.minY,
+        width: parsedBackgroundStartRect.width,
+        height: parsedBackgroundStartRect.height
+      )
+    }()
+
+    let resolvedContentStartRect = parsedContentStartRect ?? textStartRect
+    let sourceContentRectInContainer = CGRect(
+      x: resolvedContentStartRect.minX - sourceContainerRect.minX,
+      y: resolvedContentStartRect.minY - sourceContainerRect.minY,
+      width: resolvedContentStartRect.width,
+      height: resolvedContentStartRect.height
+    )
+
+    let sourceScrollOffset = number("sourceScrollOffset") ?? 0.0
 
     self.messageId = messageId
     self.text = text
     self.timestamp = timestamp
     self.startRect = textStartRect
-    self.backgroundStartRect = backgroundStartRect
+    self.backgroundStartRect = parsedBackgroundStartRect
+    self.sourceContainerRect = sourceContainerRect
+    self.sourceBackgroundRectInContainer = sourceBackgroundRectInContainer
+    self.sourceContentRectInContainer = sourceContentRectInContainer
+    self.sourceScrollOffset = sourceScrollOffset
+    self.sourceBackgroundSnapshotView = nil
+    self.sourceContentSnapshotView = nil
   }
 }

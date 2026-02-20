@@ -98,6 +98,26 @@ private final class ChatNativeTabButton: UIControl {
     badgeContainer.isHidden = true
   }
 
+  override var isHighlighted: Bool {
+    didSet {
+      let isPressed = isHighlighted
+      let scale: CGFloat = isPressed ? 0.88 : 1.0
+      let duration: TimeInterval = isPressed ? 0.1 : 0.22
+      let damping: CGFloat = isPressed ? 1.0 : 0.72
+
+      UIView.animate(
+        withDuration: duration,
+        delay: 0,
+        usingSpringWithDamping: damping,
+        initialSpringVelocity: 0.25,
+        options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+      ) {
+        self.iconView.transform = CGAffineTransform(scaleX: scale, y: scale)
+        self.alpha = isPressed ? 0.7 : 1.0
+      }
+    }
+  }
+
   func apply(
     item: ChatNativeTabItem,
     index: Int,
@@ -157,7 +177,8 @@ private final class ChatNativeVibeButton: UIControl {
 
     iconView.translatesAutoresizingMaskIntoConstraints = false
     iconView.contentMode = .scaleAspectFit
-    iconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 24, weight: .bold)
+    iconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+      pointSize: 24, weight: .bold)
     glassView.contentView.addSubview(iconView)
     NSLayoutConstraint.activate([
       iconView.centerXAnchor.constraint(equalTo: glassView.contentView.centerXAnchor),
@@ -165,6 +186,27 @@ private final class ChatNativeVibeButton: UIControl {
       iconView.widthAnchor.constraint(equalToConstant: 26),
       iconView.heightAnchor.constraint(equalToConstant: 26),
     ])
+  }
+
+  override var isHighlighted: Bool {
+    didSet {
+      let isPressed = isHighlighted
+      let scale: CGFloat = isPressed ? 0.88 : 1.0
+      let duration: TimeInterval = isPressed ? 0.1 : 0.22
+      let damping: CGFloat = isPressed ? 1.0 : 0.72
+      let glassPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
+
+      UIView.animate(
+        withDuration: duration,
+        delay: 0,
+        usingSpringWithDamping: damping,
+        initialSpringVelocity: 0.25,
+        options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+      ) {
+        self.iconView.transform = CGAffineTransform(scaleX: scale, y: scale)
+        self.glassView.contentView.backgroundColor = isPressed ? glassPressedOverlayColor : .clear
+      }
+    }
   }
 
   override func layoutSubviews() {
@@ -180,7 +222,8 @@ private final class ChatNativeVibeButton: UIControl {
   ) {
     let iconName = item.sfSymbol ?? "sparkles"
     iconView.image = UIImage(systemName: iconName)
-    iconView.tintColor = focused
+    iconView.tintColor =
+      focused
       ? activeTintColor
       : (isDark ? UIColor.white.withAlphaComponent(0.86) : UIColor.black.withAlphaComponent(0.78))
   }
@@ -190,6 +233,7 @@ public final class ChatNativeTabBarView: ExpoView {
   public var onIndexChange = EventDispatcher()
 
   private let backgroundBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterial))
+  private let containerStack = UIStackView()
   private let stack = UIStackView()
   private let vibeButton = ChatNativeVibeButton()
 
@@ -217,18 +261,24 @@ public final class ChatNativeTabBarView: ExpoView {
   private func setupView() {
     backgroundColor = .clear
 
+    containerStack.axis = .horizontal
+    containerStack.alignment = .center
+    containerStack.distribution = .fill
+    containerStack.spacing = 8
+    containerStack.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(containerStack)
+
+    NSLayoutConstraint.activate([
+      containerStack.topAnchor.constraint(equalTo: topAnchor, constant: 18),
+      containerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
+      containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
+      containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+    ])
+
     backgroundBlur.translatesAutoresizingMaskIntoConstraints = false
     backgroundBlur.layer.cornerRadius = 30
     backgroundBlur.layer.cornerCurve = .continuous
     backgroundBlur.clipsToBounds = true
-    addSubview(backgroundBlur)
-
-    NSLayoutConstraint.activate([
-      backgroundBlur.topAnchor.constraint(equalTo: topAnchor, constant: 18),
-      backgroundBlur.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-      backgroundBlur.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-      backgroundBlur.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
-    ])
 
     stack.axis = .horizontal
     stack.alignment = .fill
@@ -240,18 +290,22 @@ public final class ChatNativeTabBarView: ExpoView {
     NSLayoutConstraint.activate([
       stack.topAnchor.constraint(equalTo: backgroundBlur.contentView.topAnchor, constant: 4),
       stack.bottomAnchor.constraint(equalTo: backgroundBlur.contentView.bottomAnchor, constant: -4),
-      stack.leadingAnchor.constraint(equalTo: backgroundBlur.contentView.leadingAnchor, constant: 6),
-      stack.trailingAnchor.constraint(equalTo: backgroundBlur.contentView.trailingAnchor, constant: -6),
+      stack.leadingAnchor.constraint(
+        equalTo: backgroundBlur.contentView.leadingAnchor, constant: 6),
+      stack.trailingAnchor.constraint(
+        equalTo: backgroundBlur.contentView.trailingAnchor, constant: -6),
     ])
 
-    addSubview(vibeButton)
+    vibeButton.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
-      vibeButton.centerXAnchor.constraint(equalTo: centerXAnchor),
-      vibeButton.centerYAnchor.constraint(equalTo: backgroundBlur.topAnchor, constant: 8),
       vibeButton.widthAnchor.constraint(equalToConstant: 58),
       vibeButton.heightAnchor.constraint(equalToConstant: 58),
     ])
     vibeButton.addTarget(self, action: #selector(vibeTapped), for: .touchUpInside)
+
+    containerStack.addArrangedSubview(backgroundBlur)
+    containerStack.addArrangedSubview(vibeButton)
+
     vibeButton.isHidden = true
 
     applyChrome()
@@ -326,24 +380,11 @@ public final class ChatNativeTabBarView: ExpoView {
     }
 
     if !mainTabs.isEmpty {
-      let hasVibe = vibeTab != nil
-      let totalSlots = mainTabs.count + (hasVibe ? 1 : 0)
-      let spacerIndex = totalSlots / 2
-      var mainCursor = 0
-
-      for slot in 0..<totalSlots {
-        if hasVibe, slot == spacerIndex {
-          let spacer = UIView()
-          spacer.backgroundColor = .clear
-          stack.addArrangedSubview(spacer)
-          continue
-        }
-
-        guard mainCursor < mainTabs.count else { continue }
+      for i in 0..<mainTabs.count {
         let button = ChatNativeTabButton()
         button.addTarget(self, action: #selector(mainTabTapped(_:)), for: .touchUpInside)
-        let item = mainTabs[mainCursor]
-        let tabIndex = mainTabIndexes[mainCursor]
+        let item = mainTabs[i]
+        let tabIndex = mainTabIndexes[i]
         button.apply(
           item: item,
           index: tabIndex,
@@ -353,7 +394,6 @@ public final class ChatNativeTabBarView: ExpoView {
         )
         buttons.append(button)
         stack.addArrangedSubview(button)
-        mainCursor += 1
       }
     }
 
@@ -394,7 +434,8 @@ public final class ChatNativeTabBarView: ExpoView {
   private func applyChrome() {
     backgroundBlur.contentView.backgroundColor = .clear
     backgroundBlur.layer.borderWidth = 0.7
-    backgroundBlur.layer.borderColor = isDark
+    backgroundBlur.layer.borderColor =
+      isDark
       ? UIColor.white.withAlphaComponent(0.08).cgColor
       : UIColor.black.withAlphaComponent(0.06).cgColor
   }

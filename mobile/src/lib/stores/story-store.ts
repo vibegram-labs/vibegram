@@ -128,11 +128,11 @@ export const useStoryStore = create<StoryState>()(
                     if (response.success) {
                         set({ feed: response.feed, feedLoading: false })
                     } else {
-                        console.error('[StoryStore] Feed error:', response)
+                        console.warn('[StoryStore] Feed unavailable, keeping local state:', response)
                         set({ feedLoading: false })
                     }
                 } catch (error) {
-                    console.error('[StoryStore] Failed to load feed:', error)
+                    console.warn('[StoryStore] Failed to load feed (network/deferred):', error)
                     set({ feedLoading: false })
                 }
             },
@@ -144,10 +144,11 @@ export const useStoryStore = create<StoryState>()(
                     if (response.success) {
                         set({ myStories: response.stories, myStoriesLoading: false })
                     } else {
+                        console.warn('[StoryStore] My stories unavailable, keeping local state:', response)
                         set({ myStoriesLoading: false })
                     }
                 } catch (error) {
-                    console.error('[StoryStore] Failed to load my stories:', error)
+                    console.warn('[StoryStore] Failed to load my stories (network/deferred):', error)
                     set({ myStoriesLoading: false })
                 }
             },

@@ -31,7 +31,10 @@ import expo.modules.kotlin.views.ExpoView
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sin
+import kotlin.math.sqrt
 
 private const val LIST_BOTTOM_THRESHOLD = 40.0
 private const val SEND_DURATION_MS = 300L
@@ -71,7 +74,13 @@ private data class SendTransitionPayload(
   val text: String,
   val timestamp: String,
   val startRect: RectF,
-)
+  val startBackgroundRect: RectF? = null,
+  val startContentRect: RectF? = null,
+  val sourceScrollOffset: Float = 0f,
+) {
+  fun motionStartRect(): RectF = RectF(startBackgroundRect ?: startRect)
+  fun sourceContentRectResolved(): RectF = RectF(startContentRect ?: startRect)
+}
 
 private class NativeRowViewHolder(
   val container: FrameLayout,
@@ -127,7 +136,7 @@ private class VoiceWaveformView(context: Context) : View(context) {
     style = Paint.Style.FILL
     color = Color.argb(74, 255, 255, 255)
   }
-  private val barCount = 28
+  private val barCount = 34
   private var barEnvelope: FloatArray = makeDefaultEnvelope(barCount)
   private var playbackProgress = 0f
   private var level = 0f
@@ -162,7 +171,7 @@ private class VoiceWaveformView(context: Context) : View(context) {
       return
     }
     if (normalized.size == barCount) {
-      barEnvelope = normalized.toFloatArray()
+      barEnvelope = shapeEnvelope(smoothEnvelope(normalized.toFloatArray()))
       invalidate()
       return
     }
@@ -172,15 +181,23 @@ private class VoiceWaveformView(context: Context) : View(context) {
       val start = kotlin.math.floor(index * bucketSize).toInt()
       val end = min(normalized.size, kotlin.math.floor((index + 1) * bucketSize).toInt())
       if (start < end) {
-        var sum = 0f
-        for (i in start until end) sum += normalized[i]
-        next[index] = sum / (end - start).toFloat()
+        var sumSquares = 0f
+        var peak = 0f
+        for (i in start until end) {
+          val value = normalized[i]
+          sumSquares += value * value
+          if (value > peak) peak = value
+        }
+        val count = (end - start).toFloat()
+        val rms = sqrt(sumSquares / max(1f, count))
+        val energy = (rms * 0.58f) + (peak * 0.42f)
+        next[index] = energy.coerceIn(0f, 1f).toDouble().pow(0.76).toFloat().coerceIn(0.12f, 1f)
       } else {
         val clamped = min(max(0, start), normalized.size - 1)
         next[index] = normalized[clamped]
       }
     }
-    barEnvelope = next
+    barEnvelope = shapeEnvelope(smoothEnvelope(smoothEnvelope(next)))
     invalidate()
   }
 
@@ -198,12 +215,13 @@ private class VoiceWaveformView(context: Context) : View(context) {
       val base = barEnvelope[index]
       val pulse =
         if (isPlaying) {
-          (kotlin.math.sin((phase + (index * 0.62f)).toDouble()) * 0.08 + 0.92).toFloat()
+          (sin((phase + (index * 0.62f)).toDouble()) * 0.10 + 0.90).toFloat()
         } else {
           1.0f
         }
-      val liveBoost = if (isPlaying) level * 0.18f else 0f
-      val amplitude = ((base + liveBoost) * pulse).coerceIn(0.12f, 1f)
+      val spectralBias = (0.92f + (0.12f * sin((index * 0.52f).toDouble()).toFloat())).coerceIn(0.82f, 1.12f)
+      val liveBoost = if (isPlaying) level * 0.22f else 0f
+      val amplitude = ((base + liveBoost) * pulse * spectralBias).coerceIn(0.12f, 1f)
       val barHeight = minHeight + ((maxHeight - minHeight) * amplitude)
       val y = (height - barHeight) * 0.5f
       val paint = if (normalizedIndex < playbackProgress) activePaint else inactivePaint
@@ -211,6 +229,30 @@ private class VoiceWaveformView(context: Context) : View(context) {
       canvas.drawRoundRect(x, y, x + barWidth, y + barHeight, r, r, paint)
       x += barWidth + spacing
     }
+  }
+
+  private fun smoothEnvelope(values: FloatArray): FloatArray {
+    if (values.size <= 2) return values
+    val out = FloatArray(values.size)
+    for (i in values.indices) {
+      val left = values[max(0, i - 1)]
+      val center = values[i]
+      val right = values[min(values.size - 1, i + 1)]
+      out[i] = ((left * 0.2f) + (center * 0.6f) + (right * 0.2f)).coerceIn(0.12f, 1f)
+    }
+    return out
+  }
+
+  private fun shapeEnvelope(values: FloatArray): FloatArray {
+    if (values.isEmpty()) return values
+    val last = max(1f, (values.size - 1).toFloat())
+    val out = FloatArray(values.size)
+    for (i in values.indices) {
+      val t = i / last
+      val edgeAttenuation = 1f - (kotlin.math.abs(t - 0.5f) * 0.18f)
+      out[i] = (values[i].toDouble().pow(0.86).toFloat() * edgeAttenuation).coerceIn(0.12f, 1f)
+    }
+    return out
   }
 
   private fun makeDefaultEnvelope(count: Int): FloatArray {
@@ -246,6 +288,9 @@ private class NativeRowsAdapter(
   private var hiddenMessageId: String? = null
   private var appearance = ChatListAppearance()
   private val voicePlayback = VoicePlaybackCoordinator()
+  private var externalVoiceMessageId: String? = null
+  private var externalVoiceIsPlaying = false
+  private var externalVoiceProgress = 0f
 
   init {
     setHasStableIds(true)
@@ -384,7 +429,7 @@ private class NativeRowsAdapter(
     }
 
     private fun applyState(holder: NativeRowViewHolder, isPlaying: Boolean, progress: Float, level: Float) {
-      holder.voiceButton.text = if (isPlaying) "❚❚" else "▶"
+      holder.voiceButton.text = if (isPlaying) "⏸" else "▶"
       holder.voiceWaveView.updatePlayback(progress, level, isPlaying)
     }
 
@@ -457,6 +502,35 @@ private class NativeRowsAdapter(
     if (appearance.visualEquals(nextAppearance)) return
     appearance = nextAppearance
     notifyDataSetChanged()
+  }
+
+  fun setVoicePlayback(messageId: String?, isPlaying: Boolean, progress: Float) {
+    val clampedProgress = progress.coerceIn(0f, 1f)
+    if (
+      externalVoiceMessageId == messageId &&
+      externalVoiceIsPlaying == isPlaying &&
+      kotlin.math.abs(externalVoiceProgress - clampedProgress) < 0.001f
+    ) {
+      return
+    }
+
+    val previousMessageId = externalVoiceMessageId
+    externalVoiceMessageId = messageId
+    externalVoiceIsPlaying = isPlaying
+    externalVoiceProgress = clampedProgress
+
+    // Progress updates can be frequent; update visible holders directly first.
+    var updatedVisible = false
+    for (index in 0 until itemCount) {
+      val row = rows[index]
+      if (row.messageId == messageId || row.messageId == previousMessageId) {
+        notifyItemChanged(index)
+        updatedVisible = true
+      }
+    }
+    if (!updatedVisible) {
+      notifyDataSetChanged()
+    }
   }
 
   fun rowAt(position: Int): NativeRowItem? {
@@ -677,7 +751,17 @@ private class NativeRowsAdapter(
       voiceButton.setOnClickListener {
         voicePlayback.toggle(this, item)
       }
-      voicePlayback.bind(this, item)
+      val isExternallyActive =
+        externalVoiceMessageId != null &&
+          item.messageId != null &&
+          externalVoiceMessageId == item.messageId
+      if (isExternallyActive) {
+        voicePlayback.detach(this)
+        voiceWaveView.updatePlayback(externalVoiceProgress, if (externalVoiceIsPlaying) 0.2f else 0f, externalVoiceIsPlaying)
+        voiceButton.text = if (externalVoiceIsPlaying) "⏸" else "▶"
+      } else {
+        voicePlayback.bind(this, item)
+      }
     } else {
       textView.visibility = View.VISIBLE
       voiceContainer.visibility = View.GONE
@@ -908,6 +992,18 @@ class ChatListView(
     emitViewport()
   }
 
+  fun setVoicePlayback(payload: Map<String, Any?>) {
+    val messageId = payload["messageId"] as? String
+    val isPlaying = (payload["isPlaying"] as? Boolean) ?: false
+    val progressRaw =
+      when (val value = payload["progress"]) {
+        is Number -> value.toFloat()
+        is String -> value.toFloatOrNull() ?: 0f
+        else -> 0f
+      }
+    adapter.setVoicePlayback(messageId, isPlaying, progressRaw)
+  }
+
   fun applyTransactions(transactions: List<Map<String, Any?>>) {
     onNativeEvent(
       mapOf(
@@ -1053,25 +1149,61 @@ class ChatListView(
       return value.toFloat()
     }
 
-    val startX = number("startX") ?: return null
-    val startY = number("startY") ?: return null
-    val startWidth = number("startWidth") ?: return null
-    val startHeight = number("startHeight") ?: return null
+    fun rectFromPayload(
+      xKey: String,
+      yKey: String,
+      widthKey: String,
+      heightKey: String,
+    ): RectF? {
+      val x = number(xKey) ?: return null
+      val y = number(yKey) ?: return null
+      val width = number(widthKey) ?: return null
+      val height = number(heightKey) ?: return null
+      return RectF(x, y, x + width, y + height)
+    }
+
+    val startRectScreen =
+      rectFromPayload("startX", "startY", "startWidth", "startHeight")
+        ?: return null
+    val startBackgroundRectScreen =
+      rectFromPayload(
+        "startBackgroundX",
+        "startBackgroundY",
+        "startBackgroundWidth",
+        "startBackgroundHeight",
+      )
+    val startContentRectScreen =
+      rectFromPayload(
+        "startContentX",
+        "startContentY",
+        "startContentWidth",
+        "startContentHeight",
+      )
+    val sourceScrollOffset = number("sourceScrollOffset") ?: 0f
 
     val selfLocation = IntArray(2)
     getLocationOnScreen(selfLocation)
-    val rect = RectF(
-      startX - selfLocation[0],
-      startY - selfLocation[1],
-      startX - selfLocation[0] + startWidth,
-      startY - selfLocation[1] + startHeight,
-    )
+    fun screenToSelf(rect: RectF): RectF {
+      return RectF(
+        rect.left - selfLocation[0],
+        rect.top - selfLocation[1],
+        rect.right - selfLocation[0],
+        rect.bottom - selfLocation[1],
+      )
+    }
+
+    val rect = screenToSelf(startRectScreen)
+    val backgroundRect = startBackgroundRectScreen?.let(::screenToSelf)
+    val contentRect = startContentRectScreen?.let(::screenToSelf)
 
     return SendTransitionPayload(
       messageId = messageId,
       text = text,
       timestamp = timestamp,
       startRect = rect,
+      startBackgroundRect = backgroundRect,
+      startContentRect = contentRect,
+      sourceScrollOffset = sourceScrollOffset,
     )
   }
 
@@ -1081,23 +1213,45 @@ class ChatListView(
     val index = adapter.findMessageIndex(payload.messageId)
     if (index < 0) return
     val targetRect = resolveTargetRect(index) ?: return
+    val targetRow = adapter.rowAt(index)
+    val motionStartRect = payload.motionStartRect()
+    val sourceBackgroundRect = payload.startBackgroundRect ?: motionStartRect
+    val sourceContentRect = payload.sourceContentRectResolved()
 
     pendingSendTransition = null
     adapter.setHiddenMessageId(payload.messageId)
 
     val overlay = SendTransitionOverlayView(context, appearance).apply {
-      bind(payload.text, payload.timestamp)
-      updateProgress(0f)
-      updateFrame(payload.startRect)
+      bind(
+        text = payload.text,
+        timestamp = payload.timestamp,
+        isMe = targetRow?.isMe ?: true,
+        shape = targetRow?.shape ?: NativeBubbleShape(
+          showTail = true,
+          topLeft = 18f,
+          topRight = 18f,
+          bottomRight = 18f,
+          bottomLeft = 18f,
+        ),
+      )
+      setTransitionGeometry(
+        motionSourceRect = motionStartRect,
+        targetRect = targetRect,
+        sourceBackgroundRect = sourceBackgroundRect,
+        sourceContentRect = sourceContentRect,
+        sourceScrollOffset = payload.sourceScrollOffset,
+      )
+      updateProgress(0f, 0f, 0f)
+      updateFrame(motionStartRect)
     }
     overlayHost.addView(
       overlay,
       FrameLayout.LayoutParams(
-        payload.startRect.width().roundToInt().coerceAtLeast(1),
-        payload.startRect.height().roundToInt().coerceAtLeast(1),
+        motionStartRect.width().roundToInt().coerceAtLeast(1),
+        motionStartRect.height().roundToInt().coerceAtLeast(1),
       ).apply {
-        leftMargin = payload.startRect.left.roundToInt()
-        topMargin = payload.startRect.top.roundToInt()
+        leftMargin = motionStartRect.left.roundToInt()
+        topMargin = motionStartRect.top.roundToInt()
       },
     )
 
@@ -1143,15 +1297,23 @@ class ChatListView(
     val px = horizontalInterpolator.getInterpolation(transition.progress)
     val py = verticalInterpolator.getInterpolation(transition.progress)
 
-    val start = transition.payload.startRect
+    val start = transition.payload.motionStartRect()
     val target = transition.targetRect
     val x = lerp(start.left, target.left, px)
     val y = lerp(start.top, target.top, py) + transition.scrollCompensationY
     val w = lerp(start.width(), target.width(), px).coerceAtLeast(1f)
     val h = lerp(start.height(), target.height(), py).coerceAtLeast(1f)
 
-    transition.overlay.updateFrame(RectF(x, y, x + w, y + h))
-    transition.overlay.updateProgress(py)
+    val currentRect = RectF(x, y, x + w, y + h)
+    transition.overlay.updateFrame(currentRect)
+    transition.overlay.setTransitionGeometry(
+      motionSourceRect = start,
+      targetRect = target,
+      sourceBackgroundRect = transition.payload.startBackgroundRect ?: start,
+      sourceContentRect = transition.payload.sourceContentRectResolved(),
+      sourceScrollOffset = transition.payload.sourceScrollOffset,
+    )
+    transition.overlay.updateProgress(transition.progress, px, py)
   }
 
   private fun completeActiveTransition() {
@@ -1297,84 +1459,213 @@ private class SendTransitionOverlayView(
   context: Context,
   private val appearance: ChatListAppearance,
 ) : FrameLayout(context) {
-  private val background = View(context)
-  private val inputText = TextView(context)
-  private val bubbleText = TextView(context)
-  private val timeText = TextView(context)
+  private val clippingView = FrameLayout(context)
+  private val bubbleBackground = View(context)
+  private val bubbleTail = BubbleTailView(context)
+  private val sourceText = TextView(context)
+  private val targetText = TextView(context)
+  private val targetTime = TextView(context)
+
+  private var isMe = true
+  private var shape = NativeBubbleShape(
+    showTail = true,
+    topLeft = 18f,
+    topRight = 18f,
+    bottomRight = 18f,
+    bottomLeft = 18f,
+  )
+  private var sourceBackgroundFrame = RectF()
+  private var targetBackgroundFrame = RectF()
+  private var sourceContentFrame = RectF()
+  private var targetContentFrame = RectF()
+  private var sourceScrollOffset = 0f
 
   init {
     clipChildren = false
     clipToPadding = false
 
-    background.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-    addView(background)
+    clippingView.clipChildren = true
+    clippingView.clipToPadding = true
+    addView(clippingView)
+    clippingView.addView(bubbleBackground)
+    clippingView.addView(bubbleTail)
 
-    inputText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-    inputText.setTextColor(appearance.textColorMe)
-    inputText.setLineSpacing(0f, 1.1f)
+    sourceText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+    sourceText.setTextColor(appearance.textColorMe)
+    sourceText.setLineSpacing(0f, 1.1f)
+    sourceText.maxLines = 4
 
-    bubbleText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-    bubbleText.setTextColor(appearance.textColorMe)
-    bubbleText.setLineSpacing(0f, 1.1f)
+    targetText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+    targetText.setTextColor(appearance.textColorMe)
+    targetText.setLineSpacing(0f, 1.1f)
+    targetText.maxLines = 6
 
-    timeText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-    timeText.setTextColor(appearance.timeColorMe)
-    timeText.gravity = Gravity.END
+    targetTime.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+    targetTime.setTextColor(appearance.timeColorMe)
+    targetTime.gravity = Gravity.END
 
-    addView(
-      inputText,
-      LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-        leftMargin = dp(10)
-        rightMargin = dp(10)
-        topMargin = dp(7)
-      },
+    addView(sourceText)
+    addView(targetText)
+    addView(targetTime)
+  }
+
+  fun bind(text: String, timestamp: String, isMe: Boolean, shape: NativeBubbleShape) {
+    this.isMe = isMe
+    this.shape = shape
+    sourceText.text = text
+    targetText.text = text
+    targetTime.text = timestamp
+
+    sourceText.setTextColor(if (isMe) appearance.textColorMe else appearance.textColorThem)
+    targetText.setTextColor(if (isMe) appearance.textColorMe else appearance.textColorThem)
+    targetTime.setTextColor(if (isMe) appearance.timeColorMe else appearance.timeColorThem)
+
+    val drawable =
+      if (isMe) {
+        GradientDrawable(
+          GradientDrawable.Orientation.TL_BR,
+          appearance.bubbleMeGradient,
+        )
+      } else {
+        GradientDrawable().apply {
+          setColor(appearance.bubbleThemColor)
+        }
+      }
+    drawable.cornerRadii = floatArrayOf(
+      dpF(shape.topLeft), dpF(shape.topLeft),
+      dpF(shape.topRight), dpF(shape.topRight),
+      dpF(shape.bottomRight), dpF(shape.bottomRight),
+      dpF(shape.bottomLeft), dpF(shape.bottomLeft),
     )
-    addView(
-      bubbleText,
-      LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-        leftMargin = dp(10)
-        rightMargin = dp(10)
-        topMargin = dp(7)
-      },
+    bubbleBackground.background = drawable
+    bubbleTail.configure(
+      isMe = isMe,
+      color = if (isMe) appearance.bubbleMeGradient.lastOrNull() ?: Color.WHITE else appearance.bubbleThemColor,
+      visible = shape.showTail,
     )
-    addView(
-      timeText,
-      LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
-        leftMargin = dp(10)
-        rightMargin = dp(10)
-        bottomMargin = dp(5)
-      },
-    )
+  }
 
-    background.background = GradientDrawable(
-      GradientDrawable.Orientation.TL_BR,
-      appearance.bubbleMeGradient,
-    ).apply {
-      cornerRadii = floatArrayOf(
-        dpF(18), dpF(18),
-        dpF(18), dpF(18),
-        dpF(18), dpF(18),
-        dpF(18), dpF(18),
+  fun setTransitionGeometry(
+    motionSourceRect: RectF,
+    targetRect: RectF,
+    sourceBackgroundRect: RectF,
+    sourceContentRect: RectF,
+    sourceScrollOffset: Float,
+  ) {
+    this.sourceScrollOffset = sourceScrollOffset
+
+    val startContainerOriginY = motionSourceRect.bottom - targetRect.height()
+    fun mapRect(rect: RectF): RectF {
+      return RectF(
+        rect.left - motionSourceRect.left,
+        rect.top - startContainerOriginY,
+        rect.right - motionSourceRect.left,
+        rect.bottom - startContainerOriginY,
       )
     }
+
+    sourceBackgroundFrame = mapRect(sourceBackgroundRect)
+    sourceContentFrame = mapRect(sourceContentRect)
+    targetBackgroundFrame = RectF(0f, 0f, targetRect.width(), targetRect.height())
+
+    val contentHorizontalPadding = dpF(10f)
+    val contentTopPadding = dpF(7f)
+    val contentBottomPadding = dpF(7f)
+    val contentHeight = sourceContentFrame.height().coerceAtLeast(dpF(18f))
+      .coerceAtMost((targetBackgroundFrame.height() - contentTopPadding - contentBottomPadding).coerceAtLeast(dpF(18f)))
+    val contentWidth = (targetBackgroundFrame.width() - (contentHorizontalPadding * 2f)).coerceAtLeast(dpF(24f))
+    targetContentFrame = RectF(
+      contentHorizontalPadding,
+      contentTopPadding,
+      contentHorizontalPadding + contentWidth,
+      contentTopPadding + contentHeight,
+    )
   }
 
-  fun bind(text: String, timestamp: String) {
-    inputText.text = text
-    bubbleText.text = text
-    timeText.text = timestamp
+  fun updateProgress(progress: Float, horizontalProgress: Float, verticalProgress: Float) {
+    val normalizedProgress = progress.coerceIn(0f, 1f)
+    val px = horizontalProgress.coerceIn(0f, 1f)
+    val py = verticalProgress.coerceIn(0f, 1f)
+    val bgOpacity = (py / 0.27f).coerceIn(0f, 1f)
+    val sourceOpacity = (1f - (normalizedProgress / 0.34f)).coerceIn(0f, 1f)
+    val targetOpacity = (normalizedProgress / 0.27f).coerceIn(0f, 1f)
+
+    val envelopeFrame = RectF(
+      lerp(sourceBackgroundFrame.left, targetBackgroundFrame.left, px),
+      lerp(sourceBackgroundFrame.top, targetBackgroundFrame.top, py),
+      lerp(sourceBackgroundFrame.right, targetBackgroundFrame.right, px),
+      lerp(sourceBackgroundFrame.bottom, targetBackgroundFrame.bottom, py),
+    )
+    updateViewFrame(clippingView, envelopeFrame)
+
+    val backgroundFrameInEnvelope = RectF(
+      targetBackgroundFrame.left - envelopeFrame.left,
+      targetBackgroundFrame.top - envelopeFrame.top,
+      targetBackgroundFrame.right - envelopeFrame.left,
+      targetBackgroundFrame.bottom - envelopeFrame.top,
+    )
+    updateViewFrame(bubbleBackground, backgroundFrameInEnvelope)
+    bubbleBackground.alpha = bgOpacity
+
+    if (shape.showTail) {
+      val tailSize = dpF(29f)
+      val tailLeftInOverlay =
+        if (isMe) {
+          targetBackgroundFrame.right - dpF(1f)
+        } else {
+          targetBackgroundFrame.left - dpF(28f)
+        }
+      val tailTopInOverlay = targetBackgroundFrame.bottom - tailSize
+      val tailFrameInEnvelope = RectF(
+        tailLeftInOverlay - envelopeFrame.left,
+        tailTopInOverlay - envelopeFrame.top,
+        tailLeftInOverlay - envelopeFrame.left + tailSize,
+        tailTopInOverlay - envelopeFrame.top + tailSize,
+      )
+      updateViewFrame(bubbleTail, tailFrameInEnvelope)
+      bubbleTail.visibility = View.VISIBLE
+    } else {
+      bubbleTail.visibility = View.GONE
+    }
+
+    updateViewFrame(sourceText, sourceContentFrame)
+    sourceText.alpha = sourceOpacity
+
+    val widthDifference = targetBackgroundFrame.width() - sourceBackgroundFrame.width()
+    val sourceContentStartX = sourceContentFrame.left - (widthDifference * 0.22f)
+    val sourceContentStartY = sourceContentFrame.top - sourceScrollOffset
+    val currentLeft = lerp(sourceContentStartX, targetContentFrame.left, px)
+    val currentTop = lerp(sourceContentStartY, targetContentFrame.top, py)
+    val currentWidth = lerp(sourceContentFrame.width(), targetContentFrame.width(), px)
+    val currentHeight = lerp(sourceContentFrame.height(), targetContentFrame.height(), py)
+    val destinationContentFrame = RectF(
+      currentLeft,
+      currentTop,
+      currentLeft + currentWidth,
+      currentTop + currentHeight,
+    )
+
+    updateViewFrame(targetText, destinationContentFrame)
+    val timeWidth = dpF(46f)
+    val timeHeight = dpF(14f)
+    val timeFrame = RectF(
+      destinationContentFrame.right - timeWidth,
+      destinationContentFrame.bottom - timeHeight,
+      destinationContentFrame.right,
+      destinationContentFrame.bottom,
+    )
+    updateViewFrame(targetTime, timeFrame)
+    targetText.alpha = targetOpacity
+    targetTime.alpha = targetOpacity
   }
 
-  fun updateProgress(progress: Float) {
-    val p = progress.coerceIn(0f, 1f)
-    val bgOpacity = ((p - 0.1f) / 0.3f).coerceIn(0f, 1f)
-    val inputOpacity = (1f - (p / 0.24f)).coerceIn(0f, 1f)
-    val bubbleOpacity = ((p - 0.06f) / 0.28f).coerceIn(0f, 1f)
-
-    background.alpha = bgOpacity
-    inputText.alpha = inputOpacity
-    bubbleText.alpha = bubbleOpacity
-    timeText.alpha = bubbleOpacity
+  private fun updateViewFrame(view: View, rect: RectF) {
+    val lp = (view.layoutParams as? FrameLayout.LayoutParams) ?: FrameLayout.LayoutParams(1, 1)
+    lp.leftMargin = rect.left.roundToInt()
+    lp.topMargin = rect.top.roundToInt()
+    lp.width = max(1, rect.width().roundToInt())
+    lp.height = max(1, rect.height().roundToInt())
+    view.layoutParams = lp
   }
 
   fun updateFrame(rect: RectF) {
@@ -1394,4 +1685,13 @@ private class SendTransitionOverlayView(
     ).toInt()
 
   private fun dpF(value: Int): Float = dp(value).toFloat()
+
+  private fun dpF(value: Float): Float =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      context.resources.displayMetrics,
+    )
+
+  private fun lerp(a: Float, b: Float, t: Float): Float = a + ((b - a) * t)
 }

@@ -79,12 +79,18 @@ export const useMediaCacheStore = create<MediaCacheState>()(
                 set((state) => {
                     const now = Date.now();
                     const existing = state.tracks[track.video_id];
+                    const normalizedLocalUri = track.local_uri;
+                    const shouldPersistLocalUri =
+                        typeof normalizedLocalUri === 'string' &&
+                        normalizedLocalUri.length > 0 &&
+                        !normalizedLocalUri.includes('/tmp/');
 
                     return {
                         tracks: {
                             ...state.tracks,
                             [track.video_id]: {
                                 ...track,
+                                local_uri: shouldPersistLocalUri ? normalizedLocalUri : existing?.local_uri,
                                 cached_at: existing?.cached_at || now,
                                 play_count: existing?.play_count || 0,
                                 last_played_at: existing?.last_played_at,
@@ -109,6 +115,10 @@ export const useMediaCacheStore = create<MediaCacheState>()(
 
                 // If it's already a local file:// URI, just cache it directly without downloading
                 if (originalUrl.startsWith('file://')) {
+                    if (originalUrl.includes('/tmp/')) {
+                        console.log('[MediaCache] Local temp file detected, skipping persistent cache entry');
+                        return originalUrl;
+                    }
                     console.log('[MediaCache] Local file detected, caching directly');
                     state.cacheTrack({
                         ...track,

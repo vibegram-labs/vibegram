@@ -599,7 +599,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
     const handleOpenGlassDebug = useCallback(() => {
         safePress('openGlassDebug', () => {
-            router.push('/native-chat-mock');
+            router.push('/test-telegram-morph-native');
         });
     }, [router, safePress]);
 

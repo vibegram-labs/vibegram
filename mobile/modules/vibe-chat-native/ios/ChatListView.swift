@@ -40,6 +40,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var nativeOutgoingOrder: [String] = []
   private var isInternalScrollAdjustment = false
   private var isUpdatingBottomInset = false
+  private var activeVoicePlaybackMessageId: String?
+  private var activeVoicePlaybackIsPlaying = false
+  private var activeVoicePlaybackProgress: CGFloat = 0.0
+  private var lastViewportEmitTime: CFTimeInterval = 0.0
+  private var lastViewportPayload: (
+    contentHeight: CGFloat,
+    layoutHeight: CGFloat,
+    offsetY: CGFloat,
+    distanceFromBottom: CGFloat,
+    atBottom: Bool
+  )?
+  private let viewportEmitMinInterval: CFTimeInterval = 1.0 / 30.0
 
   private var hiddenMessageId: String?
   private var pendingSendTransition: SendTransitionPayload?
@@ -151,7 +163,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     guard previousHeight > 0.0, abs(previousHeight - currentHeight) > 0.5 else {
       updateBottomAnchorInset()
-      emitViewport()
+      emitViewport(force: true)
       maybeStartPendingSendTransition()
       return
     }
@@ -165,7 +177,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
     updateBottomAnchorInset()
     previousOffsetY = collectionView.contentOffset.y
-    emitViewport()
+    emitViewport(force: true)
     maybeStartPendingSendTransition()
   }
 
@@ -246,7 +258,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         self.restoreStationaryDistance(previousDistanceFromBottom)
       }
       self.previousOffsetY = self.collectionView.contentOffset.y
-      self.emitViewport()
+      self.emitViewport(force: true)
       self.finishRowsUpdate()
       self.maybeStartPendingSendTransition()
     }
@@ -298,34 +310,34 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       .sorted { $0.item < $1.item }
 
     let previousByKey = Dictionary(uniqueKeysWithValues: previousRows.map { ($0.key, $0) })
-    let previousIndexByKey = Dictionary(
-      uniqueKeysWithValues: previousRows.enumerated().map { ($0.element.key, $0.offset) })
-    let deletionIndexSet = Set(deletions.map(\.item))
+    let currentIndexByKey = Dictionary(
+      uniqueKeysWithValues: parsed.enumerated().map { ($0.element.key, $0.offset) })
     let reloads = parsed.compactMap { row -> IndexPath? in
-      guard let previous = previousByKey[row.key],
-        let oldIndex = previousIndexByKey[row.key],
-        !deletionIndexSet.contains(oldIndex)
+      guard let previous = previousByKey[row.key], let currentIndex = currentIndexByKey[row.key]
       else {
         return nil
       }
-      return chatListRowContentEqual(previous, row) ? nil : IndexPath(item: oldIndex, section: 0)
+      return chatListRowContentEqual(previous, row)
+        ? nil
+        : IndexPath(item: currentIndex, section: 0)
     }
+    let safeReloads = reloads.filter { $0.item >= 0 && $0.item < parsed.count }
 
-    guard !deletions.isEmpty || !insertions.isEmpty || !reloads.isEmpty else {
+    guard !deletions.isEmpty || !insertions.isEmpty || !safeReloads.isEmpty else {
       NSLog("[ChatListView] setRows — no changes, finalize only")
       applyDataSource()
       finalize(false)
       return
     }
 
-    if deletions.isEmpty && insertions.isEmpty && !reloads.isEmpty {
+    if deletions.isEmpty && insertions.isEmpty && !safeReloads.isEmpty {
       applyDataSource()
       // Telegram approach: content updates are INSTANT — no opacity, no
       // crossfade, no animation of any kind. Just swap the content.
       UIView.performWithoutAnimation {
         CATransaction.begin()
         CATransaction.setDisableActions(true)
-        for indexPath in reloads {
+        for indexPath in safeReloads {
           guard indexPath.item < rows.count else { continue }
           if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
             cell.applyAppearance(appearance)
@@ -346,7 +358,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       // updateBottomAnchorInset which can shift cells by 2-3px while additive
       // animations from a prior insertion are still in flight, causing flicker.
       previousOffsetY = collectionView.contentOffset.y
-      emitViewport()
+      emitViewport(force: true)
       finishRowsUpdate()
       maybeStartPendingSendTransition()
       return
@@ -354,7 +366,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     NSLog(
       "[ChatListView] setRows batchUpdate — del:%d ins:%d reload:%d (dataSource before: %d, after: %d)",
-      deletions.count, insertions.count, reloads.count, previousRows.count, parsed.count)
+      deletions.count, insertions.count, safeReloads.count, previousRows.count, parsed.count)
 
     let expectedAfterCount = previousRows.count + insertions.count - deletions.count
     guard expectedAfterCount == parsed.count else {
@@ -437,11 +449,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               if !insertions.isEmpty {
                 self.collectionView.insertItems(at: insertions)
               }
-              if !reloads.isEmpty {
+              if !safeReloads.isEmpty {
                 if #available(iOS 15.0, *) {
-                  self.collectionView.reconfigureItems(at: reloads)
+                  self.collectionView.reconfigureItems(at: safeReloads)
                 } else {
-                  self.collectionView.reloadItems(at: reloads)
+                  self.collectionView.reloadItems(at: safeReloads)
                 }
               }
             }, completion: nil)
@@ -472,11 +484,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           if !insertions.isEmpty {
             collectionView.insertItems(at: insertions)
           }
-          if !reloads.isEmpty {
+          if !safeReloads.isEmpty {
             if #available(iOS 15.0, *) {
-              collectionView.reconfigureItems(at: reloads)
+              collectionView.reconfigureItems(at: safeReloads)
             } else {
-              collectionView.reloadItems(at: reloads)
+              collectionView.reloadItems(at: safeReloads)
             }
           }
         },
@@ -639,13 +651,47 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   func setContentPaddingBottom(_ value: Double) {
+    // Native input mode owns bottom inset (bar height + keyboard height).
+    // Ignore external padding updates to prevent keyboard overlap regressions.
+    guard !inputBarEnabled else {
+      return
+    }
     let next = max(sectionBottomInset, CGFloat(value))
     if abs(next - contentPaddingBottom) <= 0.5 {
       return
     }
     contentPaddingBottom = next
     updateBottomAnchorInset()
-    emitViewport()
+    emitViewport(force: true)
+  }
+
+  func setVoicePlayback(_ payload: [String: Any]) {
+    let nextMessageId = payload["messageId"] as? String
+    let nextIsPlaying = (payload["isPlaying"] as? Bool) ?? false
+    let nextProgressRaw = payload["progress"] as? Double ?? 0.0
+    let nextProgress = max(0.0, min(1.0, CGFloat(nextProgressRaw)))
+
+    if activeVoicePlaybackMessageId == nextMessageId
+      && activeVoicePlaybackIsPlaying == nextIsPlaying
+      && abs(activeVoicePlaybackProgress - nextProgress) <= 0.001
+    {
+      return
+    }
+
+    activeVoicePlaybackMessageId = nextMessageId
+    activeVoicePlaybackIsPlaying = nextIsPlaying
+    activeVoicePlaybackProgress = nextProgress
+    applyVoicePlaybackToVisibleCells()
+  }
+
+  private func applyVoicePlaybackToVisibleCells() {
+    for case let cell as ChatListCell in collectionView.visibleCells {
+      cell.setExternalVoicePlayback(
+        messageId: activeVoicePlaybackMessageId,
+        isPlaying: activeVoicePlaybackIsPlaying,
+        progress: activeVoicePlaybackProgress
+      )
+    }
   }
 
   func applyTransactions(_ transactions: [[String: Any]]) {
@@ -670,7 +716,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         guard let self else { return }
         self.isInternalScrollAdjustment = false
         self.previousOffsetY = self.collectionView.contentOffset.y
-        self.emitViewport()
+        self.emitViewport(force: true)
       }
     } else {
       performInternalScrollAdjustment {
@@ -678,7 +724,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       }
       previousOffsetY = collectionView.contentOffset.y
       shouldAutoScroll = true
-      emitViewport()
+      emitViewport(force: true)
     }
   }
 
@@ -699,7 +745,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     collectionView.setContentOffset(CGPoint(x: 0.0, y: clampedOffset), animated: animated)
     previousOffsetY = clampedOffset
     shouldAutoScroll = false
-    emitViewport()
+    emitViewport(force: true)
   }
 
   func startSendTransition(_ payload: [String: Any]) {
@@ -727,6 +773,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     -> UICollectionViewCell
   {
     guard indexPath.item < rows.count else {
+      // Reconfigure paths may request an index that has just shifted during a
+      // batched delete+reload. Return the existing cell when present to avoid
+      // UIKit's "different cell during reconfigure" assertion.
+      if let existingCell = collectionView.cellForItem(at: indexPath) {
+        return existingCell
+      }
       return UICollectionViewCell()
     }
     guard
@@ -737,6 +789,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
     cell.applyAppearance(appearance)
     cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
+    // Removed onVoiceBubbleTap so iOS uses Native Audio playback for Voice bubbles (like Android)
+    cell.setExternalVoicePlayback(
+      messageId: activeVoicePlaybackMessageId,
+      isPlaying: activeVoicePlaybackIsPlaying,
+      progress: activeVoicePlaybackProgress
+    )
     // Telegram rule: cells are NEVER transparent. Force full opacity
     // and strip any UIKit-implicit opacity animation.
     cell.alpha = 1.0
@@ -1102,15 +1160,16 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       host: self,
       payload: payload,
       overlayContainer: overlayParts.container,
-      bubbleSnapshot: overlayParts.bubbleSnapshot,
+      clippingView: overlayParts.clippingView,
       sourceBackgroundSnapshot: overlayParts.sourceBackgroundSnapshot,
+      bubbleBackgroundSnapshot: overlayParts.bubbleBackgroundSnapshot,
+      destinationContentSnapshot: overlayParts.destinationContentSnapshot,
       sourceTextSnapshot: overlayParts.sourceTextSnapshot,
-      bubbleStartFrame: overlayParts.bubbleStartFrame,
-      bubbleEndFrame: overlayParts.bubbleEndFrame,
       sourceBackgroundStartFrame: overlayParts.sourceBackgroundStartFrame,
       sourceBackgroundEndFrame: overlayParts.sourceBackgroundEndFrame,
-      sourceTextStartFrame: overlayParts.sourceTextStartFrame,
-      sourceTextEndFrame: overlayParts.sourceTextEndFrame
+      sourceContentStartFrame: overlayParts.sourceContentStartFrame,
+      destinationContentFrame: overlayParts.destinationContentFrame,
+      sourceScrollOffset: overlayParts.sourceScrollOffset
     )
     activeSendTransition = state
     onNativeEvent(["type": "sendTransitionStarted", "messageId": payload.messageId])
@@ -1131,13 +1190,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // Start the additive animation from source rect → target rect.
     NSLog(
       "[ChatListView] sendTransition rects — source: (%.0f,%.0f %.0fx%.0f) target: (%.0f,%.0f %.0fx%.0f) bounds: %.0fx%.0f",
-      payload.startRect.minX, payload.startRect.minY, payload.startRect.width,
-      payload.startRect.height,
+      overlayParts.sourceRect.minX, overlayParts.sourceRect.minY, overlayParts.sourceRect.width,
+      overlayParts.sourceRect.height,
       settledTargetRect.minX, settledTargetRect.minY, settledTargetRect.width,
       settledTargetRect.height,
       bounds.width, bounds.height)
-    let motionSourceRect = payload.backgroundStartRect ?? payload.startRect
-    state.start(sourceRect: motionSourceRect, targetRect: settledTargetRect)
+    state.start(sourceRect: overlayParts.sourceRect, targetRect: settledTargetRect)
   }
 
   /// Called by scrollViewDidScroll to keep the overlay tracking the real cell.
@@ -1165,7 +1223,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     let revealedMessageId = hiddenMessageId
     hiddenMessageId = nil
-    if let revealedMessageId, let rowIndex = indexForMessage(revealedMessageId), rowIndex < rows.count
+    if let revealedMessageId, let rowIndex = indexForMessage(revealedMessageId),
+      rowIndex < rows.count
     {
       let indexPath = IndexPath(item: rowIndex, section: 0)
       UIView.performWithoutAnimation {
@@ -1198,7 +1257,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private var hasLoggedDispatcherStatus = false
-  private func emitViewport() {
+  private func emitViewport(force: Bool = false) {
     if !hasLoggedDispatcherStatus {
       hasLoggedDispatcherStatus = true
       NSLog("[ChatListView] EventDispatcher status — dispatchers initialized (non-nil)")
@@ -1207,13 +1266,40 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let layoutHeight = collectionView.bounds.height
     let offsetY = collectionView.contentOffset.y
     let distanceFromBottom = max(0.0, contentHeight - (offsetY + layoutHeight))
+    let atBottom = distanceFromBottom <= listBottomThreshold
+
+    let now = CACurrentMediaTime()
+    if !force, let last = lastViewportPayload {
+      let atBottomChanged = atBottom != last.atBottom
+      let payloadUnchanged =
+        abs(contentHeight - last.contentHeight) <= 0.5
+        && abs(layoutHeight - last.layoutHeight) <= 0.5
+        && abs(offsetY - last.offsetY) <= 0.5
+        && abs(distanceFromBottom - last.distanceFromBottom) <= 0.5
+        && !atBottomChanged
+      if payloadUnchanged {
+        return
+      }
+      if (now - lastViewportEmitTime) < viewportEmitMinInterval && !atBottomChanged {
+        return
+      }
+    }
+
+    lastViewportEmitTime = now
+    lastViewportPayload = (
+      contentHeight: contentHeight,
+      layoutHeight: layoutHeight,
+      offsetY: offsetY,
+      distanceFromBottom: distanceFromBottom,
+      atBottom: atBottom
+    )
 
     onViewportChanged([
       "contentHeight": contentHeight,
       "layoutHeight": layoutHeight,
       "offsetY": offsetY,
       "distanceFromBottom": distanceFromBottom,
-      "atBottom": distanceFromBottom <= listBottomThreshold,
+      "atBottom": atBottom,
     ])
   }
 
@@ -1475,7 +1561,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // Capture reply-to ID before dismissing the banner (dismissing clears it).
     let replyToMessageId = inputBar?.activeReplyToMessageId
 
-    NSLog("[ChatListView] handleNativeSend START — messageId: %@, text length: %lu, nativeSendEnabled: %@, replyTo: %@", messageId, text.count, nativeSendEnabled ? "true" : "false", replyToMessageId ?? "nil")
+    NSLog(
+      "[ChatListView] handleNativeSend START — messageId: %@, text length: %lu, nativeSendEnabled: %@, replyTo: %@",
+      messageId, text.count, nativeSendEnabled ? "true" : "false", replyToMessageId ?? "nil")
 
     // 1. Dismiss reply banner (non-animated, before layout measurement).
     inputBar?.dismissReplyBanner(animated: false)
@@ -1485,19 +1573,43 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     // 3. Compute source rects and capture live text snapshot (BEFORE clearing).
     let sourceRect: CGRect
-    let sourceBackgroundRect: CGRect?
-    let sourceTextContentView: UIView?
+    let sourceContainerRect: CGRect?
+    let sourceBackgroundRectInContainer: CGRect?
+    let sourceContentRectInContainer: CGRect?
+    let sourceScrollOffset: CGFloat
+    let sourceBackgroundSnapshotView: UIView?
+    let sourceContentSnapshotView: UIView?
     if let bar = inputBar {
-      // Text source for content crossfade.
-      sourceRect = bar.textRect(in: self)
-      // Pill/background source for bubble morph.
-      sourceBackgroundRect = bar.pillRect(in: self)
-      // Live rendered snapshot of input text for pixel-accurate crossfade.
-      sourceTextContentView = bar.textContentSnapshot(in: self)
+      if let capture = bar.captureSendTransition(in: self) {
+        sourceRect = CGRect(
+          x: capture.sourceContainerRect.minX + capture.sourceContentRectInContainer.minX,
+          y: capture.sourceContainerRect.minY + capture.sourceContentRectInContainer.minY,
+          width: capture.sourceContentRectInContainer.width,
+          height: capture.sourceContentRectInContainer.height
+        )
+        sourceContainerRect = capture.sourceContainerRect
+        sourceBackgroundRectInContainer = capture.sourceBackgroundRectInContainer
+        sourceContentRectInContainer = capture.sourceContentRectInContainer
+        sourceScrollOffset = capture.sourceScrollOffset
+        sourceBackgroundSnapshotView = capture.sourceBackgroundSnapshotView
+        sourceContentSnapshotView = capture.sourceContentSnapshotView
+      } else {
+        sourceRect = bar.textRect(in: self)
+        sourceContainerRect = nil
+        sourceBackgroundRectInContainer = nil
+        sourceContentRectInContainer = nil
+        sourceScrollOffset = 0.0
+        sourceBackgroundSnapshotView = bar.transitionBackgroundSnapshot(in: self)
+        sourceContentSnapshotView = bar.textContentSnapshot(in: self)
+      }
     } else {
       sourceRect = CGRect(x: 16, y: bounds.height - 60, width: bounds.width - 32, height: 44)
-      sourceBackgroundRect = nil
-      sourceTextContentView = nil
+      sourceContainerRect = nil
+      sourceBackgroundRectInContainer = nil
+      sourceContentRectInContainer = nil
+      sourceScrollOffset = 0.0
+      sourceBackgroundSnapshotView = nil
+      sourceContentSnapshotView = nil
     }
 
     // 4. Store pending transition so it starts when the cell arrives.
@@ -1506,8 +1618,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       text: text,
       timestamp: timestamp,
       startRect: sourceRect,
-      backgroundStartRect: sourceBackgroundRect,
-      sourceTextContentView: sourceTextContentView
+      sourceContainerRect: sourceContainerRect,
+      sourceBackgroundRectInContainer: sourceBackgroundRectInContainer,
+      sourceContentRectInContainer: sourceContentRectInContainer,
+      sourceScrollOffset: sourceScrollOffset,
+      sourceBackgroundSnapshotView: sourceBackgroundSnapshotView,
+      sourceContentSnapshotView: sourceContentSnapshotView
     )
     pendingSendTransition = payload
 
@@ -1586,6 +1702,15 @@ extension ChatListView: ChatInputBarDelegate {
       "duration": duration,
       "name": "voice-message.m4a",
       "waveform": waveform,
+    ])
+  }
+
+  func inputBarDidRecordVideoNote(uri: String, duration: Double) {
+    onNativeEvent([
+      "type": "attachmentVideoNote",
+      "uri": uri,
+      "duration": duration,
+      "name": "video-note.mov",
     ])
   }
 

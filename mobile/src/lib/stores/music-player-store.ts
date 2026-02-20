@@ -34,7 +34,11 @@ export const useMusicPlayerStore = create<MusicPlayerState>((set, get) => ({
     setTrack: (track) => {
         //If same track, just toggle expand? No, usually setTrack means play this.
         const current = get().currentTrack;
-        if (current?.preview_url === track.preview_url) {
+        const isSameTrack =
+            current?.preview_url === track.preview_url
+            && current?.id === track.id
+            && current?.source === track.source;
+        if (isSameTrack) {
             set({ isPlaying: true });
         } else {
             // Reset progress when switching tracks

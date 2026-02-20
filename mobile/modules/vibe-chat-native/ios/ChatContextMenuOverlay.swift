@@ -84,8 +84,8 @@ public final class ChatContextMenuOverlay: UIView {
       cornerRadius: 0
     )
 
-    self.reactionPicker = ReactionPickerView(appearance: appearance)
-    self.contextMenu = ContextMenuView(appearance: appearance)
+    self.reactionPicker = ReactionPickerView(appearance: appearance, messageId: messageId)
+    self.contextMenu = ContextMenuView(appearance: appearance, messageId: messageId)
 
     super.init(frame: .zero)
 
@@ -151,13 +151,12 @@ public final class ChatContextMenuOverlay: UIView {
     // Keep the action menu visually attached to the bubble (Telegram-like spacing).
     let menuGap: CGFloat = 1
 
+    // Keep the composition near the original bubble, don't center vertically
     // Total vertical space needed: picker above + bubble + menu below
     let totalHeight =
       pickerHeight + pickerGap + originalBubbleFrame.height + menuGap + menuHeight
 
-    // Try to center the composition vertically on screen
-    let screenMidY = bounds.midY
-    var compositionTop = screenMidY - totalHeight / 2
+    var compositionTop = originalBubbleFrame.minY - pickerHeight - pickerGap
 
     // Clamp to safe area
     compositionTop = max(safeTop, compositionTop)
@@ -332,6 +331,8 @@ final class ReactionPickerView: UIView {
   private let stack: UIStackView
   private let emojis = ["👍", "👎", "❤️", "🔥", "🎉", "💩"]
 
+  let messageId: String
+
   override var intrinsicContentSize: CGSize {
     let emojiCount = CGFloat(emojis.count)
     let buttonSize: CGFloat = 44
@@ -341,7 +342,8 @@ final class ReactionPickerView: UIView {
     return CGSize(width: width, height: buttonSize + 8)
   }
 
-  init(appearance: ChatListAppearance) {
+  init(appearance: ChatListAppearance, messageId: String) {
+    self.messageId = messageId
     // Liquid glass pill for reaction bar
     self.glassView = makeLiquidGlassView(
       style: appearance.backgroundMode == "dark" ? .systemThinMaterialDark : .systemThinMaterial,
@@ -401,7 +403,7 @@ final class ReactionPickerView: UIView {
         sender.transform = .identity
       }
     }
-    delegate?.contextMenuDidSelectReaction(emoji, messageId: "")
+    delegate?.contextMenuDidSelectReaction(emoji, messageId: messageId)
   }
 }
 
@@ -428,7 +430,10 @@ final class ContextMenuView: UIView {
     ActionItem(id: "delete", title: "Delete", iconName: "trash", isDestructive: true),
   ]
 
-  init(appearance: ChatListAppearance) {
+  let messageId: String
+
+  init(appearance: ChatListAppearance, messageId: String) {
+    self.messageId = messageId
     // Liquid glass card for action menu — same material as native iOS context menus
     self.glassView = makeLiquidGlassView(
       style: appearance.backgroundMode == "dark" ? .systemMaterialDark : .systemMaterial,
@@ -459,25 +464,17 @@ final class ContextMenuView: UIView {
       stack.trailingAnchor.constraint(equalTo: glassView.contentView.trailingAnchor),
     ])
 
-    for (index, action) in actions.enumerated() {
+    for action in actions {
       let row = ContextMenuRow(action: action)
       row.addTarget(self, action: #selector(didTapAction(_:)), for: .touchUpInside)
       stack.addArrangedSubview(row)
-
-      if index < actions.count - 1 {
-        let separator = UIView()
-        separator.backgroundColor = UIColor.separator.withAlphaComponent(0.5)
-        separator.translatesAutoresizingMaskIntoConstraints = false
-        separator.heightAnchor.constraint(equalToConstant: 0.5).isActive = true
-        stack.addArrangedSubview(separator)
-      }
     }
   }
 
   required init?(coder: NSCoder) { fatalError() }
 
   @objc private func didTapAction(_ sender: ContextMenuRow) {
-    delegate?.contextMenuDidSelectAction(sender.actionId, messageId: "")
+    delegate?.contextMenuDidSelectAction(sender.actionId, messageId: messageId)
   }
 }
 

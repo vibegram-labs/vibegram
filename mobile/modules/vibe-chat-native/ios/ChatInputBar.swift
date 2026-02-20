@@ -27,6 +27,7 @@ protocol ChatInputBarDelegate: AnyObject {
   func inputBarRecordingStateDidChange(isRecording: Bool, isLocked: Bool, mode: String)
   func inputBarRecordingDidCancel()
   func inputBarDidRecordVoice(uri: String, duration: Double, waveform: [Double])
+  func inputBarDidRecordVideoNote(uri: String, duration: Double)
   // Reply
   func inputBarReplyDismissed()
 }
@@ -87,22 +88,398 @@ final class FluidVADVisualizer: UIView {
   }
 
   @objc private func tick() {
+    time += 0.05
     for (i, l) in layers.enumerated() {
-      // Offset per layer for visual stacking (1-based index helps multiplier)
       let idx = CGFloat(i + 1)
-
-      // Calculate a base scale with some breathing room based purely on mic level.
-      // E.g., at level 0: layers stay slightly different sizes near 1.0.
-      // At level 1: layers scale out significantly more based on their index.
       let layerScale = 1.0 + (level * 0.4 * idx)
 
-      // Apply pure scaling from the center without translating
-      l.transform = CATransform3DMakeAffineTransform(
-        CGAffineTransform(scaleX: layerScale, y: layerScale)
-      )
+      let segments = 60
+      let path = UIBezierPath()
+      let baseRadius: CGFloat = (bounds.width / 2) * layerScale
+      let center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
 
-      // Optional: adjust opacity so outermost layers are fainter
+      for j in 0...segments {
+        let angle = CGFloat(j) * (2 * .pi) / CGFloat(segments)
+        let noiseConfig = 1.0 + CGFloat(i) * 0.2
+        let angleOffset = angle * CGFloat(3 + i)
+        let noise = sin(time * noiseConfig + angleOffset) * (level * 4.0 * idx)
+        let r = baseRadius + noise
+
+        let point = CGPoint(x: center.x + r * cos(angle), y: center.y + r * sin(angle))
+        if j == 0 {
+          path.move(to: point)
+        } else {
+          path.addLine(to: point)
+        }
+      }
+      path.close()
+
+      l.path = path.cgPath
+      l.transform = CATransform3DIdentity  // Explicitly reset transform since we drew a scaled path
       l.opacity = Float(max(0.2, 1.0 - (level * 0.3 * idx)))
+    }
+  }
+}
+
+private final class VideoNoteRecorderViewController: UIViewController,
+  AVCaptureFileOutputRecordingDelegate
+{
+  var onFinished: ((URL?, Double, Bool) -> Void)?
+
+  private let session = AVCaptureSession()
+  private let movieOutput = AVCaptureMovieFileOutput()
+  private let sessionQueue = DispatchQueue(label: "chat.video.note.session", qos: .userInitiated)
+  private var previewLayer: AVCaptureVideoPreviewLayer?
+  private let circleContainer = UIView()
+  private let hintLabel = UILabel()
+
+  private var startedAt: Date?
+  private var pendingSend = true
+  private var stopRequested = false
+  private var hasAppeared = false
+  private var didFinish = false
+  private var isSessionConfigured = false
+
+  private let progressLayer = CAShapeLayer()
+  private var displayLink: CADisplayLink?
+  private let maxDuration: TimeInterval = 60.0
+  private let closeButton = UIButton(type: .system)
+
+  override var prefersStatusBarHidden: Bool { true }
+  override var supportedInterfaceOrientations: UIInterfaceOrientationMask { .portrait }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = .clear
+    view.isUserInteractionEnabled = true
+
+    circleContainer.backgroundColor = .black
+    circleContainer.clipsToBounds = true
+    circleContainer.alpha = 0
+    circleContainer.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+    view.addSubview(circleContainer)
+
+    progressLayer.strokeColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0).cgColor
+    progressLayer.lineWidth = 4
+    progressLayer.fillColor = UIColor.clear.cgColor
+    progressLayer.lineCap = .round
+    progressLayer.strokeEnd = 0
+    // Put progress layer directly in view so it perfectly aligns over circleContainer without being clipped by it
+    view.layer.addSublayer(progressLayer)
+
+    let xCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .bold)
+    closeButton.setImage(UIImage(systemName: "xmark", withConfiguration: xCfg), for: .normal)
+    closeButton.tintColor = .white
+    closeButton.backgroundColor = UIColor(white: 0, alpha: 0.5)
+    closeButton.layer.cornerRadius = 20
+    closeButton.alpha = 0
+    closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
+    view.addSubview(closeButton)
+
+    hintLabel.text = "Recording Video Note..."
+    hintLabel.font = .systemFont(ofSize: 15, weight: .semibold)
+    hintLabel.textColor = UIColor.white.withAlphaComponent(0.92)
+    hintLabel.textAlignment = .center
+    hintLabel.numberOfLines = 1
+    hintLabel.alpha = 0
+    view.addSubview(hintLabel)
+  }
+
+  @objc private func closeTapped() {
+    stopRecording(send: false)
+  }
+
+  @objc private func updateProgress() {
+    guard let start = startedAt else { return }
+    let elapsed = Date().timeIntervalSince(start)
+    let progress = min(1.0, CGFloat(elapsed / maxDuration))
+    progressLayer.strokeEnd = progress
+    if elapsed >= maxDuration {
+      stopRecording(send: true)
+    }
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    let side = min(view.bounds.width - 52, 300)
+    let circleFrame = CGRect(
+      x: (view.bounds.width - side) * 0.5,
+      y: (view.bounds.height - side) * 0.5 - 20,
+      width: side,
+      height: side
+    )
+    circleContainer.frame = circleFrame
+    circleContainer.layer.cornerRadius = side * 0.5
+
+    let path = UIBezierPath(
+      arcCenter: CGPoint(x: circleFrame.midX, y: circleFrame.midY),
+      radius: (side * 0.5) + 3.0,
+      startAngle: -.pi / 2,
+      endAngle: (-.pi / 2) + (.pi * 2),
+      clockwise: true
+    )
+    progressLayer.path = path.cgPath
+
+    closeButton.frame = CGRect(
+      x: circleFrame.midX - 20,
+      y: circleFrame.maxY + 24,
+      width: 40,
+      height: 40
+    )
+
+    hintLabel.frame = CGRect(
+      x: 24,
+      y: closeButton.frame.maxY + 16,
+      width: view.bounds.width - 48,
+      height: 22
+    )
+    previewLayer?.frame = circleContainer.bounds
+  }
+
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    guard !hasAppeared else { return }
+    hasAppeared = true
+    UIView.animate(
+      withDuration: 0.28,
+      delay: 0,
+      usingSpringWithDamping: 0.86,
+      initialSpringVelocity: 0.36,
+      options: [.curveEaseOut, .beginFromCurrentState]
+    ) {
+      self.circleContainer.alpha = 1
+      self.circleContainer.transform = .identity
+      self.hintLabel.alpha = 1
+      self.closeButton.alpha = 1
+    }
+    beginRecordingFlow()
+  }
+
+  override func viewWillDisappear(_ animated: Bool) {
+    super.viewWillDisappear(animated)
+    displayLink?.invalidate()
+    displayLink = nil
+    if isBeingDismissed || isMovingFromParent {
+      stopSession()
+    }
+  }
+
+  func stopRecording(send: Bool) {
+    pendingSend = send
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      if self.movieOutput.isRecording {
+        self.movieOutput.stopRecording()
+      } else {
+        self.stopRequested = true
+      }
+    }
+  }
+
+  private func beginRecordingFlow() {
+    requestCapturePermissions { [weak self] videoGranted, audioGranted in
+      guard let self else { return }
+      guard videoGranted else {
+        self.finish(url: nil, duration: 0.0, shouldSend: false)
+        return
+      }
+      self.configureSessionIfNeeded(includeAudio: audioGranted)
+      self.startSessionAndRecording()
+    }
+  }
+
+  private func requestCapturePermissions(
+    completion: @escaping (_ videoGranted: Bool, _ audioGranted: Bool) -> Void
+  ) {
+    let completeOnMain: (Bool, Bool) -> Void = { video, audio in
+      DispatchQueue.main.async { completion(video, audio) }
+    }
+
+    let videoStatus = AVCaptureDevice.authorizationStatus(for: .video)
+    let audioStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+
+    func resolveAudio(givenVideo videoGranted: Bool) {
+      if audioStatus == .authorized {
+        completeOnMain(videoGranted, true)
+        return
+      }
+      if audioStatus == .notDetermined {
+        AVCaptureDevice.requestAccess(for: .audio) { granted in
+          completeOnMain(videoGranted, granted)
+        }
+        return
+      }
+      completeOnMain(videoGranted, false)
+    }
+
+    if videoStatus == .authorized {
+      resolveAudio(givenVideo: true)
+      return
+    }
+    if videoStatus == .notDetermined {
+      AVCaptureDevice.requestAccess(for: .video) { granted in
+        guard granted else {
+          completeOnMain(false, false)
+          return
+        }
+        let refreshedAudioStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if refreshedAudioStatus == .authorized {
+          completeOnMain(true, true)
+        } else if refreshedAudioStatus == .notDetermined {
+          AVCaptureDevice.requestAccess(for: .audio) { audioGranted in
+            completeOnMain(true, audioGranted)
+          }
+        } else {
+          completeOnMain(true, false)
+        }
+      }
+      return
+    }
+    completeOnMain(false, false)
+  }
+
+  private func configureSessionIfNeeded(includeAudio: Bool) {
+    sessionQueue.sync {
+      guard !isSessionConfigured else { return }
+
+      session.beginConfiguration()
+      if session.canSetSessionPreset(.vga640x480) {
+        session.sessionPreset = .vga640x480
+      }
+
+      if let videoDevice = AVCaptureDevice.default(
+        .builtInWideAngleCamera, for: .video, position: .front)
+        ?? AVCaptureDevice.default(for: .video),
+        let videoInput = try? AVCaptureDeviceInput(device: videoDevice),
+        session.canAddInput(videoInput)
+      {
+        session.addInput(videoInput)
+      }
+
+      if includeAudio,
+        let audioDevice = AVCaptureDevice.default(for: .audio),
+        let audioInput = try? AVCaptureDeviceInput(device: audioDevice),
+        session.canAddInput(audioInput)
+      {
+        session.addInput(audioInput)
+      }
+
+      if session.canAddOutput(movieOutput) {
+        session.addOutput(movieOutput)
+      }
+
+      if let connection = movieOutput.connection(with: .video) {
+        if connection.isVideoMirroringSupported {
+          connection.isVideoMirrored = true
+        }
+        if connection.isVideoStabilizationSupported {
+          connection.preferredVideoStabilizationMode = .auto
+        }
+      }
+
+      session.commitConfiguration()
+      isSessionConfigured = true
+
+      DispatchQueue.main.async {
+        let preview = AVCaptureVideoPreviewLayer(session: self.session)
+        preview.videoGravity = .resizeAspectFill
+        self.previewLayer?.removeFromSuperlayer()
+        self.previewLayer = preview
+        self.circleContainer.layer.insertSublayer(preview, at: 0)
+        self.view.setNeedsLayout()
+      }
+    }
+  }
+
+  private func startSessionAndRecording() {
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      guard self.isSessionConfigured else { return }
+      if !self.session.isRunning {
+        self.session.startRunning()
+      }
+      let fm = FileManager.default
+      let base =
+        fm.urls(for: .cachesDirectory, in: .userDomainMask).first
+        ?? fm.temporaryDirectory
+      let dir = base.appendingPathComponent("video-notes", isDirectory: true)
+      try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+      let outputURL =
+        dir
+        .appendingPathComponent("video-note-\(UUID().uuidString)")
+        .appendingPathExtension("mov")
+      self.startedAt = Date()
+
+      DispatchQueue.main.async {
+        self.displayLink?.invalidate()
+        self.displayLink = CADisplayLink(target: self, selector: #selector(self.updateProgress))
+        self.displayLink?.add(to: .main, forMode: .common)
+      }
+
+      self.movieOutput.startRecording(to: outputURL, recordingDelegate: self)
+    }
+  }
+
+  private func stopSession() {
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      if self.movieOutput.isRecording {
+        self.movieOutput.stopRecording()
+      }
+      if self.session.isRunning {
+        self.session.stopRunning()
+      }
+      DispatchQueue.main.async {
+        self.displayLink?.invalidate()
+        self.displayLink = nil
+      }
+    }
+  }
+
+  private func finish(url: URL?, duration: Double, shouldSend: Bool) {
+    guard !didFinish else { return }
+    didFinish = true
+
+    let callback = {
+      self.onFinished?(url, duration, shouldSend)
+    }
+
+    if presentingViewController != nil {
+      dismiss(animated: true) {
+        callback()
+      }
+    } else {
+      callback()
+    }
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput,
+    didStartRecordingTo fileURL: URL,
+    from connections: [AVCaptureConnection]
+  ) {
+    sessionQueue.async { [weak self] in
+      guard let self else { return }
+      guard self.stopRequested else { return }
+      self.movieOutput.stopRecording()
+    }
+  }
+
+  func fileOutput(
+    _ output: AVCaptureFileOutput,
+    didFinishRecordingTo outputFileURL: URL,
+    from connections: [AVCaptureConnection],
+    error: Error?
+  ) {
+    let elapsed = max(0.0, Date().timeIntervalSince(startedAt ?? Date()))
+    let shouldSend = pendingSend && error == nil
+    stopSession()
+    DispatchQueue.main.async {
+      self.finish(
+        url: shouldSend ? outputFileURL : nil,
+        duration: elapsed,
+        shouldSend: shouldSend
+      )
     }
   }
 }
@@ -199,6 +576,7 @@ final class ChatInputBar: UIView {
   private var gifPanelVisible = false
   private let defaultGifPanelHeight: CGFloat = 320
   private var lastKnownKeyboardHeight: CGFloat = 0
+  private var isVideoMode: Bool = false
   // Width progress for right action morph: 0 = mic, 1 = send.
   private var sendProgress: CGFloat = 0
   // Recording layout morph progress: 0 = regular, 1 = expanded left.
@@ -274,10 +652,29 @@ final class ChatInputBar: UIView {
   var isGifPanelPresented: Bool { gifPanelVisible }
 
   // Recording state
+  private enum RecordingMode {
+    case none
+    case voice
+    case video
+  }
+
   private var isRecording = false
   private var isLocked = false
+  private var recordingMode: RecordingMode = .none
+  private var isVideoRecordingActive = false
+  private var pendingVideoStopShouldSend = true
+  private var suppressNextMicTap = false
+  private weak var videoNoteRecorderController: VideoNoteRecorderViewController?
   private let feedback = UIImpactFeedbackGenerator(style: .medium)
   private let notificationFeedback = UINotificationFeedbackGenerator()
+
+  private func recordingModeString(_ mode: RecordingMode? = nil) -> String {
+    switch mode ?? recordingMode {
+    case .voice: return "voice"
+    case .video: return "video"
+    case .none: return "voice"
+    }
+  }
 
   func showReplyBanner(messageId: String, text: String, isMe: Bool) {
     replyBanner.layer.removeAllAnimations()
@@ -596,36 +993,193 @@ final class ChatInputBar: UIView {
     pillContainer.convert(pillContainer.bounds, to: view)
   }
 
+  struct SendTransitionCapture {
+    let sourceContainerRect: CGRect
+    let sourceBackgroundRectInContainer: CGRect
+    let sourceContentRectInContainer: CGRect
+    let sourceScrollOffset: CGFloat
+    let sourceBackgroundSnapshotView: UIView?
+    let sourceContentSnapshotView: UIView?
+  }
+
+  private func makeTextContentSnapshot() -> UIImageView? {
+    let textBounds = textView.bounds
+    guard textBounds.width > 1.0, textBounds.height > 1.0 else { return nil }
+    let previousTint = textView.tintColor
+    textView.tintColor = .clear
+    defer {
+      textView.tintColor = previousTint
+    }
+
+    let format = UIGraphicsImageRendererFormat()
+    format.opaque = false
+    format.scale = UIScreen.main.scale
+    let renderer = UIGraphicsImageRenderer(size: textBounds.size, format: format)
+    let image = renderer.image { context in
+      if !self.textView.drawHierarchy(in: self.textView.bounds, afterScreenUpdates: false) {
+        self.textView.layer.render(in: context.cgContext)
+      }
+    }
+    return UIImageView(image: image)
+  }
+
+  private func makeBackgroundSnapshot(captureRect: CGRect) -> UIImageView? {
+    guard captureRect.width > 1.0, captureRect.height > 1.0 else { return nil }
+
+    let hiddenStates = pillContainer.subviews.map { ($0, $0.isHidden) }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    for subview in pillContainer.subviews where subview !== pillGlass {
+      subview.isHidden = true
+    }
+    pillContainer.layoutIfNeeded()
+    CATransaction.commit()
+    defer {
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      for (subview, wasHidden) in hiddenStates {
+        subview.isHidden = wasHidden
+      }
+      pillContainer.layoutIfNeeded()
+      CATransaction.commit()
+    }
+
+    let format = UIGraphicsImageRendererFormat()
+    format.opaque = false
+    format.scale = UIScreen.main.scale
+    let renderer = UIGraphicsImageRenderer(size: captureRect.size, format: format)
+    let image = renderer.image { context in
+      context.cgContext.translateBy(x: -captureRect.minX, y: -captureRect.minY)
+      if !self.pillContainer.drawHierarchy(in: self.pillContainer.bounds, afterScreenUpdates: true) {
+        self.pillContainer.layer.render(in: context.cgContext)
+      }
+    }
+    let imageView = UIImageView(image: image)
+    imageView.backgroundColor = .clear
+    imageView.isOpaque = false
+    imageView.clipsToBounds = false
+    return imageView
+  }
+
+  /// Captures Telegram-style transition inputs in one call:
+  ///   - source container rect (host coords)
+  ///   - source background rect (container-local)
+  ///   - source content rect + snapshot (container-local)
+  ///   - source content scroll offset
+  func captureSendTransition(in view: UIView) -> SendTransitionCapture? {
+    guard !textView.bounds.isEmpty, !pillContainer.bounds.isEmpty else {
+      return nil
+    }
+    layoutIfNeeded()
+
+    let sourceContainerRect = pillContainer.convert(pillContainer.bounds.integral, to: view)
+    guard sourceContainerRect.width > 1.0, sourceContainerRect.height > 1.0 else {
+      return nil
+    }
+
+    // Keep full vertical extent so the start bubble doesn't look top-clipped.
+    let containerBounds = pillContainer.bounds.insetBy(dx: 1, dy: 0)
+    var backgroundRect = containerBounds
+    if !sendButton.isHidden, sendButton.alpha > 0.01 {
+      let maxX = max(backgroundRect.minX + 1.0, sendButton.frame.minX - 2.0)
+      backgroundRect.size.width = max(1.0, maxX - backgroundRect.minX)
+    }
+    backgroundRect = backgroundRect.intersection(containerBounds)
+    if backgroundRect.isNull || backgroundRect.width <= 1.0 || backgroundRect.height <= 1.0 {
+      backgroundRect = containerBounds
+    }
+
+    var contentRect = textView.frame
+    contentRect = contentRect.intersection(pillContainer.bounds.insetBy(dx: 1, dy: 1))
+    if contentRect.isNull || contentRect.width <= 1.0 || contentRect.height <= 1.0 {
+      contentRect = backgroundRect.insetBy(dx: 8, dy: 8)
+    }
+    let sourceBackgroundRectInContainer = backgroundRect.integral
+    let sourceContentRectInContainer = contentRect.integral
+
+    let sourceBackgroundSnapshotView: UIView? = {
+      guard let imageView = makeBackgroundSnapshot(captureRect: sourceBackgroundRectInContainer)
+      else { return nil }
+      imageView.frame = sourceBackgroundRectInContainer
+      return imageView
+    }()
+
+    let sourceContentSnapshotView: UIView? = {
+      guard let imageView = makeTextContentSnapshot() else { return nil }
+      imageView.frame = sourceContentRectInContainer
+      imageView.backgroundColor = .clear
+      imageView.isOpaque = false
+      imageView.clipsToBounds = false
+      return imageView
+    }()
+
+    return SendTransitionCapture(
+      sourceContainerRect: sourceContainerRect,
+      sourceBackgroundRectInContainer: sourceBackgroundRectInContainer,
+      sourceContentRectInContainer: sourceContentRectInContainer,
+      sourceScrollOffset: textView.contentOffset.y,
+      sourceBackgroundSnapshotView: sourceBackgroundSnapshotView,
+      sourceContentSnapshotView: sourceContentSnapshotView
+    )
+  }
+
+  /// Approximate Telegram's text-input background frame (without side action icons).
+  func transitionBackgroundRect(in view: UIView) -> CGRect {
+    if let capture = captureSendTransition(in: view) {
+      return CGRect(
+        x: capture.sourceContainerRect.minX + capture.sourceBackgroundRectInContainer.minX,
+        y: capture.sourceContainerRect.minY + capture.sourceBackgroundRectInContainer.minY,
+        width: capture.sourceBackgroundRectInContainer.width,
+        height: capture.sourceBackgroundRectInContainer.height
+      )
+    }
+    return pillRect(in: view)
+  }
+
+  /// Deprecated path kept for compatibility with existing call sites.
+  func transitionBackgroundSnapshot(in view: UIView) -> UIView? {
+    guard let capture = captureSendTransition(in: view) else { return nil }
+    if let snapshot = capture.sourceBackgroundSnapshotView {
+      snapshot.frame = CGRect(
+        x: capture.sourceContainerRect.minX + capture.sourceBackgroundRectInContainer.minX,
+        y: capture.sourceContainerRect.minY + capture.sourceBackgroundRectInContainer.minY,
+        width: capture.sourceBackgroundRectInContainer.width,
+        height: capture.sourceBackgroundRectInContainer.height
+      )
+      return snapshot
+    }
+    return nil
+  }
+
   /// Returns the frame of the text area in the given coordinate space (used for send transition source rect).
   func textRect(in view: UIView) -> CGRect {
-    textView.convert(textView.bounds, to: view)
+    if let capture = captureSendTransition(in: view) {
+      return CGRect(
+        x: capture.sourceContainerRect.minX + capture.sourceContentRectInContainer.minX,
+        y: capture.sourceContainerRect.minY + capture.sourceContentRectInContainer.minY,
+        width: capture.sourceContentRectInContainer.width,
+        height: capture.sourceContentRectInContainer.height
+      )
+    }
+    return textView.convert(textView.bounds, to: view)
   }
 
   /// Captures a live snapshot of the text view content for crossfade transitions.
   /// Returns a view positioned in the coordinate space of `view`, or nil if capture fails.
   func textContentSnapshot(in view: UIView) -> UIView? {
-    let textBounds = textView.bounds
-    guard textBounds.width > 1.0, textBounds.height > 1.0 else { return nil }
-    // Try resizable snapshot first (fastest, preserves subpixel rendering).
-    if let snapshot = textView.resizableSnapshotView(
-      from: textBounds,
-      afterScreenUpdates: false,
-      withCapInsets: .zero
-    ) {
-      snapshot.frame = textView.convert(textBounds, to: view)
-      return snapshot
+    guard let capture = captureSendTransition(in: view) else {
+      return nil
     }
-    // Fallback: render into image.
-    let format = UIGraphicsImageRendererFormat()
-    format.opaque = false
-    format.scale = UIScreen.main.scale
-    let renderer = UIGraphicsImageRenderer(size: textBounds.size, format: format)
-    let image = renderer.image { _ in
-      self.textView.drawHierarchy(in: self.textView.bounds, afterScreenUpdates: false)
+    guard let snapshot = capture.sourceContentSnapshotView else {
+      return nil
     }
-    let imageView = UIImageView(image: image)
-    imageView.frame = textView.convert(textBounds, to: view)
-    return imageView
+    snapshot.frame = CGRect(
+      x: capture.sourceContainerRect.minX + capture.sourceContentRectInContainer.minX,
+      y: capture.sourceContainerRect.minY + capture.sourceContentRectInContainer.minY,
+      width: capture.sourceContentRectInContainer.width,
+      height: capture.sourceContentRectInContainer.height
+    )
+    return snapshot
   }
 
   // MARK: - Layout
@@ -1006,6 +1560,9 @@ final class ChatInputBar: UIView {
     guard visible != gifPanelVisible else { return }
     if visible {
       maybePrepareGifPanel()
+      gifPanel.setPanelVisible(true)
+    } else {
+      gifPanel.setPanelVisible(false)
     }
 
     gifPanelVisible = visible
@@ -1061,15 +1618,28 @@ final class ChatInputBar: UIView {
   }
 
   @objc private func micTapped() {
+    if suppressNextMicTap {
+      suppressNextMicTap = false
+      return
+    }
     setGifPanelVisible(false, animated: true)
     if isRecording && isLocked {
-      finishRecording()
+      finishActiveRecording()
       return
     }
     if isRecording {
       return
     }
-    delegate?.inputBarDidTapAction()
+    if isVideoRecordingActive {
+      return
+    }
+
+    isVideoMode.toggle()
+    let iconName = isVideoMode ? "video.fill" : "mic.fill"
+    UIView.transition(with: micButton, duration: 0.2, options: .transitionCrossDissolve) {
+      let cfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+      self.micButton.setImage(UIImage(systemName: iconName, withConfiguration: cfg), for: .normal)
+    }
   }
 
   @objc private func sendTapped() {
@@ -1080,7 +1650,7 @@ final class ChatInputBar: UIView {
   }
 
   @objc private func cancelOverlayTapped() {
-    cancelRecording()
+    cancelActiveRecording()
   }
 
   private func findViewController() -> UIViewController? {
@@ -1144,33 +1714,108 @@ final class ChatInputBar: UIView {
   @objc private func handleMicGesture(_ g: UILongPressGestureRecognizer) {
     switch g.state {
     case .began:
-      recordingGestureStartPoint = g.location(in: self)
-      startRecording()
+      suppressNextMicTap = true
+      recordingGestureStartPoint = g.location(in: nil)
+      if isVideoMode {
+        startVideoRecording()
+      } else {
+        startVoiceRecording()
+      }
     case .changed:
       guard isRecording, !isLocked else { return }
+      if recordingMode == .video, let startedAt = recordingStartTime,
+        Date().timeIntervalSince(startedAt) < 0.22
+      {
+        return
+      }
 
-      let point = g.location(in: self)
+      let point = g.location(in: nil)
       let dy = point.y - recordingGestureStartPoint.y
       let dx = point.x - recordingGestureStartPoint.x
 
       lockPill.transform = CGAffineTransform(translationX: 0, y: min(0, dy + 6))
 
       if dy < -60 {
-        lockRecording()
+        lockActiveRecording()
       } else if dx < -100 {
-        cancelRecording()
+        cancelActiveRecording()
         g.isEnabled = false  // Cancel gesture
         g.isEnabled = true
       }
 
     case .ended:
       if isRecording && !isLocked {
-        finishRecording()
+        finishActiveRecording()
+      }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+        self?.suppressNextMicTap = false
       }
     case .cancelled, .failed:
-      cancelRecording()
+      cancelActiveRecording()
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+        self?.suppressNextMicTap = false
+      }
     default: break
     }
+  }
+
+  private func startVoiceRecording() {
+    recordingMode = .voice
+    startRecording()
+  }
+
+  private func startVideoRecording() {
+    recordingMode = .video
+    startRecording()
+  }
+
+  private func lockActiveRecording() {
+    lockRecording()
+  }
+
+  private func cancelActiveRecording() {
+    cancelRecording()
+  }
+
+  private func finishActiveRecording() {
+    finishRecording()
+  }
+
+  @discardableResult
+  private func startVideoNoteRecording() -> Bool {
+    guard !isVideoRecordingActive else { return false }
+    guard let hostVC = findViewController() else { return false }
+
+    isVideoRecordingActive = true
+
+    let recorder = VideoNoteRecorderViewController()
+    recorder.modalPresentationStyle = .overFullScreen
+    recorder.modalTransitionStyle = .crossDissolve
+    recorder.onFinished = { [weak self] url, duration, shouldSend in
+      guard let self else { return }
+      self.videoNoteRecorderController = nil
+      self.isVideoRecordingActive = false
+      if shouldSend, let url {
+        self.delegate?.inputBarDidRecordVideoNote(uri: url.absoluteString, duration: duration)
+      } else if self.pendingVideoStopShouldSend {
+        self.delegate?.inputBarRecordingDidCancel()
+      }
+      self.pendingVideoStopShouldSend = true
+    }
+    videoNoteRecorderController = recorder
+    hostVC.present(recorder, animated: true)
+    return true
+  }
+
+  private func stopVideoNoteRecording(send: Bool) {
+    guard isVideoRecordingActive else { return }
+    pendingVideoStopShouldSend = send
+
+    guard let recorder = videoNoteRecorderController else {
+      isVideoRecordingActive = false
+      return
+    }
+    recorder.stopRecording(send: send)
   }
 
   private func startRecording() {
@@ -1238,65 +1883,92 @@ final class ChatInputBar: UIView {
       self.micButton.alpha = 1
     }
 
-    micVADView.start()
+    if recordingMode == .video {
+      micVADView.stop()
+      guard startVideoNoteRecording() else {
+        isRecording = false
+        isLocked = false
+        recordingMode = .none
+        resetUI()
+        recordingTimer?.invalidate()
+        recordingTimer = nil
+        return
+      }
+    } else {
+      micVADView.start()
 
-    let outputURL = FileManager.default.temporaryDirectory
-      .appendingPathComponent("voice-\(UUID().uuidString)")
-      .appendingPathExtension("m4a")
-    recordingFileURL = outputURL
+      let fileManager = FileManager.default
+      let baseCacheDirectory =
+        fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+        ?? fileManager.temporaryDirectory
+      let voiceCacheDirectory = baseCacheDirectory.appendingPathComponent(
+        "voice-recordings", isDirectory: true)
+      try? fileManager.createDirectory(
+        at: voiceCacheDirectory, withIntermediateDirectories: true)
 
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      do {
-        try AVAudioSession.sharedInstance().setCategory(
-          .playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
-        try AVAudioSession.sharedInstance().setActive(true)
-        let settings: [String: Any] = [
-          AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
-          AVSampleRateKey: 44100.0,
-          AVNumberOfChannelsKey: 1,
-          AVEncoderBitRateKey: 96_000,
-          AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
-        ]
-        let recorder = try AVAudioRecorder(url: outputURL, settings: settings)
-        recorder.isMeteringEnabled = true
-        recorder.record()
+      let outputURL =
+        voiceCacheDirectory
+        .appendingPathComponent("voice-\(UUID().uuidString)")
+        .appendingPathExtension("m4a")
+      recordingFileURL = outputURL
 
-        DispatchQueue.main.async {
-          guard let self = self else { return }
-          if self.isRecording {
-            self.audioRecorder = recorder
-          } else {
-            recorder.stop()
-            DispatchQueue.global(qos: .userInitiated).async {
-              try? AVAudioSession.sharedInstance().setActive(
-                false, options: .notifyOthersOnDeactivation)
+      DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        do {
+          try AVAudioSession.sharedInstance().setCategory(
+            .playAndRecord, mode: .default, options: [.duckOthers, .defaultToSpeaker])
+          try AVAudioSession.sharedInstance().setActive(true)
+          let settings: [String: Any] = [
+            AVFormatIDKey: Int(kAudioFormatMPEG4AAC),
+            AVSampleRateKey: 44100.0,
+            AVNumberOfChannelsKey: 1,
+            AVEncoderBitRateKey: 96_000,
+            AVEncoderAudioQualityKey: AVAudioQuality.high.rawValue,
+          ]
+          let recorder = try AVAudioRecorder(url: outputURL, settings: settings)
+          recorder.isMeteringEnabled = true
+          recorder.record()
+
+          DispatchQueue.main.async {
+            guard let self = self else { return }
+            if self.isRecording {
+              self.audioRecorder = recorder
+            } else {
+              recorder.stop()
+              DispatchQueue.global(qos: .userInitiated).async {
+                try? AVAudioSession.sharedInstance().setActive(
+                  false, options: .notifyOthersOnDeactivation)
+              }
             }
           }
+        } catch {
+          print("Failed to start VAD audio recorder: \(error)")
         }
-      } catch {
-        print("Failed to start VAD audio recorder: \(error)")
+      }
+
+      vadTimer?.invalidate()
+      vadTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+        guard let self = self, self.isRecording else { return }
+        if let recorder = self.audioRecorder, recorder.isRecording {
+          recorder.updateMeters()
+          let db = recorder.averagePower(forChannel: 0)
+          let minDb: Float = -45.0
+          let level = max(0.0, min(1.0, CGFloat((db - minDb) / (-minDb))))
+          self.micVADView.level = level
+          self.recordingWaveformSamples.append(level)
+          if self.recordingWaveformSamples.count > 480 {
+            self.recordingWaveformSamples.removeFirst(self.recordingWaveformSamples.count - 480)
+          }
+        } else {
+          self.micVADView.level = 0
+        }
       }
     }
 
-    vadTimer?.invalidate()
-    vadTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-      guard let self = self, self.isRecording else { return }
-      if let recorder = self.audioRecorder, recorder.isRecording {
-        recorder.updateMeters()
-        let db = recorder.averagePower(forChannel: 0)
-        let minDb: Float = -45.0
-        let level = max(0.0, min(1.0, CGFloat((db - minDb) / (-minDb))))
-        self.micVADView.level = level
-        self.recordingWaveformSamples.append(level)
-        if self.recordingWaveformSamples.count > 480 {
-          self.recordingWaveformSamples.removeFirst(self.recordingWaveformSamples.count - 480)
-        }
-      } else {
-        self.micVADView.level = 0
-      }
-    }
-
-    delegate?.inputBarRecordingStateDidChange(isRecording: true, isLocked: false, mode: "voice")
+    delegate?.inputBarRecordingStateDidChange(
+      isRecording: true,
+      isLocked: false,
+      mode: recordingModeString()
+    )
   }
 
   private func updateTimer() {
@@ -1316,8 +1988,10 @@ final class ChatInputBar: UIView {
     isLocked = true
     notificationFeedback.notificationOccurred(.success)
 
-    vadTimer?.invalidate()
-    micVADView.stop()
+    if recordingMode == .voice {
+      vadTimer?.invalidate()
+      micVADView.stop()
+    }
 
     slideToCancelLabel.text = "Cancel"
     slideChevronView.isHidden = true
@@ -1332,6 +2006,7 @@ final class ChatInputBar: UIView {
       self.micButton.tintColor =
         self.appearance.bubbleMeGradient.first
         ?? self.appearance.textColorThem.withAlphaComponent(0.9)
+      self.micButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
     }
 
     stopRecordingHintAnimations()
@@ -1340,37 +2015,52 @@ final class ChatInputBar: UIView {
     setNeedsLayout()
     layoutIfNeeded()
 
-    delegate?.inputBarRecordingStateDidChange(isRecording: true, isLocked: true, mode: "voice")
+    delegate?.inputBarRecordingStateDidChange(
+      isRecording: true,
+      isLocked: true,
+      mode: recordingModeString()
+    )
   }
 
   private func cancelRecording() {
     guard isRecording else { return }
+    let modeString = recordingModeString()
+    let isVideoRecordingMode = recordingMode == .video
     isRecording = false
     isLocked = false
     notificationFeedback.notificationOccurred(.error)
 
+    if isVideoRecordingMode {
+      stopVideoNoteRecording(send: false)
+    }
     vadTimer?.invalidate()
     vadTimer = nil
     recordingTimer?.invalidate()
     recordingTimer = nil
     micVADView.stop()
 
-    // Setup animated UI
+    // Save dot starting point
     let dotStart = pillContainer.convert(recordingDot.center, to: self)
-    let dotEnd = contentRow.convert(attachButton.center, to: self)
 
+    // Create animated fake dot
     let animatedDot = UIView(frame: CGRect(x: 0, y: 0, width: 6, height: 6))
     animatedDot.backgroundColor = .systemRed
     animatedDot.layer.cornerRadius = 3
     animatedDot.center = dotStart
     addSubview(animatedDot)
 
+    // Layout updates and shrink UI immediately, hiding real dot.
     resetUI(revealAttach: false)
+
+    // The dot end is the normal untranslated position of attachButton, calculated after layout resets.
+    let dotEnd = contentRow.convert(attachButton.center, to: self)
 
     // Setup Glass Trash View replacing the plus icon
     let attachHeight = attachButton.bounds.height
     let trashContainer = UIView(frame: CGRect(x: 0, y: 0, width: sideSize, height: attachHeight))
     trashContainer.center = dotEnd
+    trashContainer.alpha = 0
+    trashContainer.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
     addSubview(trashContainer)
 
     let glassTarget = UIVisualEffectView()
@@ -1396,97 +2086,101 @@ final class ChatInputBar: UIView {
     trashIcon.center = CGPoint(x: sideSize / 2, y: attachHeight / 2)
     trashContainer.addSubview(trashIcon)
 
-    // Ensure dot is above the trash icon
     bringSubviewToFront(animatedDot)
 
-    let path = UIBezierPath()
-    path.move(to: dotStart)
-    path.addQuadCurve(
-      to: dotEnd, controlPoint: CGPoint(x: (dotStart.x + dotEnd.x) / 2, y: dotStart.y - 40))
+    // Animate Trash Container fading in slightly before the dot jumps
+    UIView.animate(withDuration: 0.2, delay: 0.1, options: .curveEaseOut) {
+      trashContainer.alpha = 1
+      trashContainer.transform = .identity
+    } completion: { _ in
+      // Step 1: Open door & jump
+      let path = UIBezierPath()
+      path.move(to: dotStart)
+      path.addQuadCurve(
+        to: dotEnd, controlPoint: CGPoint(x: (dotStart.x + dotEnd.x) / 2, y: dotStart.y - 40))
 
-    let jumpAnim = CAKeyframeAnimation(keyPath: "position")
-    jumpAnim.path = path.cgPath
-    jumpAnim.duration = 0.35
-    jumpAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      let jumpAnim = CAKeyframeAnimation(keyPath: "position")
+      jumpAnim.path = path.cgPath
+      jumpAnim.duration = 0.35
+      jumpAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
 
-    CATransaction.begin()
-    CATransaction.setCompletionBlock {
-      // Step 2: Dot is at the trash, make it fall in
-      UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseIn]) {
-        animatedDot.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
-        animatedDot.alpha = 0
-        // Trash "closes door" with a squish
-        trashIcon.transform = CGAffineTransform(scaleX: 0.8, y: 0.8).translatedBy(x: 0, y: 3)
-      } completion: { _ in
-        UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseOut]) {
-          trashIcon.transform = .identity
+      UIView.animate(withDuration: 0.2) {
+        // "Opening door" by lifting slightly
+        trashIcon.transform = CGAffineTransform(translationX: 0, y: -4).scaledBy(x: 1.1, y: 1.1)
+      }
+
+      CATransaction.begin()
+      CATransaction.setCompletionBlock {
+        // Step 2: Dot falls in, make it shrink
+        UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseIn]) {
+          animatedDot.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
+          animatedDot.alpha = 0
+          // Trash "closes door" with a squish
+          trashIcon.transform = CGAffineTransform(scaleX: 0.8, y: 0.8).translatedBy(x: 0, y: 3)
         } completion: { _ in
           animatedDot.removeFromSuperview()
-
-          // Step 3: Zigzag animation
-          let jumpDist: CGFloat = 3.0
-          let dur = 0.05
-          UIView.animate(withDuration: dur, delay: 0, options: .curveLinear) {
-            trashIcon.transform = CGAffineTransform(rotationAngle: -0.1).translatedBy(
-              x: -jumpDist, y: 0)
+          // Step 3: Bounce back to identity smoothly
+          UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseOut]) {
+            trashIcon.transform = .identity
           } completion: { _ in
-            UIView.animate(withDuration: dur, delay: 0, options: .curveLinear) {
-              trashIcon.transform = CGAffineTransform(rotationAngle: 0.1).translatedBy(
-                x: jumpDist, y: 0)
+            // Step 4: Reset back to plus icon
+            UIView.animate(withDuration: 0.2, delay: 0.2, options: .curveEaseInOut) {
+              trashContainer.alpha = 0
+              trashContainer.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
+              self.attachButton.alpha = 1
             } completion: { _ in
-              UIView.animate(withDuration: dur, delay: 0, options: .curveLinear) {
-                trashIcon.transform = CGAffineTransform(rotationAngle: -0.1).translatedBy(
-                  x: -jumpDist, y: 0)
-              } completion: { _ in
-                UIView.animate(withDuration: dur, delay: 0, options: .curveLinear) {
-                  trashIcon.transform = .identity
-                } completion: { _ in
-                  // Step 4: Reset back to plus icon
-                  UIView.animate(withDuration: 0.2, delay: 0.2, options: .curveEaseInOut) {
-                    trashContainer.alpha = 0
-                    trashContainer.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
-                    self.attachButton.alpha = 1
-                  } completion: { _ in
-                    trashContainer.removeFromSuperview()
-                  }
-                }
-              }
+              trashContainer.removeFromSuperview()
             }
           }
         }
       }
+      animatedDot.layer.add(jumpAnim, forKey: "jump")
+      animatedDot.center = dotEnd
+      CATransaction.commit()
     }
-    // Step 1: Open door & jump
-    UIView.animate(withDuration: 0.2) {
-      // Simulate "opening door" by lifting slightly
-      trashIcon.transform = CGAffineTransform(translationX: 0, y: -2).scaledBy(x: 1.1, y: 1.1)
-    }
-    animatedDot.layer.add(jumpAnim, forKey: "jump")
-    animatedDot.center = dotEnd
-    CATransaction.commit()
 
+    delegate?.inputBarRecordingStateDidChange(isRecording: false, isLocked: false, mode: modeString)
     delegate?.inputBarRecordingDidCancel()
+    recordingMode = .none
   }
 
   private func finishRecording() {
     guard isRecording else { return }
+    let modeString = recordingModeString()
+    let isVideoRecordingMode = recordingMode == .video
+
+    if !isVideoRecordingMode {
+      let dur = Date().timeIntervalSince(recordingStartTime ?? Date())
+      if audioRecorder == nil || dur <= 0.6 {
+        cancelRecording()
+        return
+      }
+    }
+
     isRecording = false
     isLocked = false
     notificationFeedback.notificationOccurred(.success)
 
     micVADView.stop()
-
-    audioRecorder?.stop()
-    let dur = Date().timeIntervalSince(recordingStartTime ?? Date())
-    let waveform = downsampleWaveform(recordingWaveformSamples, targetCount: 28)
-    let outputURI = recordingFileURL?.absoluteString ?? ""
-    if !outputURI.isEmpty {
-      delegate?.inputBarDidRecordVoice(uri: outputURI, duration: dur, waveform: waveform)
+    if isVideoRecordingMode {
+      stopVideoNoteRecording(send: true)
+    } else {
+      let dur = Date().timeIntervalSince(recordingStartTime ?? Date())
+      if let recorder = audioRecorder {
+        recorder.stop()
+        let waveform = downsampleWaveform(recordingWaveformSamples, targetCount: 28)
+        let outputURI = recordingFileURL?.absoluteString ?? ""
+        if !outputURI.isEmpty {
+          delegate?.inputBarDidRecordVoice(uri: outputURI, duration: dur, waveform: waveform)
+        }
+      }
     }
 
+    delegate?.inputBarRecordingStateDidChange(isRecording: false, isLocked: false, mode: modeString)
     resetUI()
     recordingTimer?.invalidate()
     recordingTimer = nil
+    recordingMode = .none
   }
 
   private func resetUI(revealAttach: Bool = true) {
@@ -1538,8 +2232,9 @@ final class ChatInputBar: UIView {
       self.micGlass.backgroundColor = .clear
 
       let micCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+      let iconName = self.isVideoMode ? "video.fill" : "mic.fill"
       self.micButton.setImage(
-        UIImage(systemName: "mic.fill", withConfiguration: micCfg), for: .normal)
+        UIImage(systemName: iconName, withConfiguration: micCfg), for: .normal)
       self.micButton.tintColor = self.appearance.textColorThem.withAlphaComponent(0.9)
 
       self.cancelOverlayButton.isHidden = true
@@ -1553,7 +2248,8 @@ final class ChatInputBar: UIView {
 
   private func downsampleWaveform(_ samples: [CGFloat], targetCount: Int) -> [Double] {
     guard targetCount > 0 else { return [] }
-    let sanitized = samples
+    let sanitized =
+      samples
       .map { max(0.0, min(1.0, $0)) }
       .filter { $0.isFinite }
     guard !sanitized.isEmpty else {

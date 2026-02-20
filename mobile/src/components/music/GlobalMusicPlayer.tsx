@@ -19,6 +19,19 @@ import Animated, { useSharedValue, useAnimatedStyle, withSpring, withTiming, wit
 const MaskedViewAny = MaskedView as any;
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+const isLocalFileUri = (uri?: string | null) => {
+    if (!uri || typeof uri !== 'string') return false;
+    return uri.startsWith('file://') || uri.startsWith('/');
+};
+
+const normalizeFileUri = (uri: string) => (uri.startsWith('file://') ? uri : `file://${uri}`);
+
+const fileBasename = (uri: string) => {
+    const normalized = uri.replace('file://', '');
+    const slash = normalized.lastIndexOf('/');
+    return slash >= 0 ? normalized.slice(slash + 1) : normalized;
+};
+
 const withAlpha = (color: string, alpha: number) => {
     if (!color) return `rgba(255, 255, 255, ${alpha})`;
     if (color.startsWith('#')) {
@@ -120,6 +133,7 @@ export const GlobalMusicPlayer = () => {
 
     const soundRef = useRef<Audio.Sound | null>(null);
     const [isLoaded, setIsLoaded] = useState(false);
+    const [reloadToken, setReloadToken] = useState(0);
     const [progress, setProgress] = useState(0);
     const [positionMs, setPositionMs] = useState(0);
     const [durationMs, setDurationMs] = useState(0);
@@ -175,9 +189,40 @@ export const GlobalMusicPlayer = () => {
         return `${minutes}:${seconds < 10 ? '0' : ''}${seconds}`;
     };
 
+    const resolveLocalPlayableUri = useCallback(async (rawUri: string) => {
+        const normalized = normalizeFileUri(rawUri);
+        const directInfo = await FileSystem.getInfoAsync(normalized);
+        if (directInfo.exists) {
+            return normalized;
+        }
+
+        const name = fileBasename(normalized);
+        const candidates = [
+            `${FileSystem.cacheDirectory || ''}voice-recordings/${name}`,
+            `${FileSystem.documentDirectory || ''}voice-recordings/${name}`,
+        ].filter((value) => value.length > 0);
+
+        for (const candidate of candidates) {
+            const info = await FileSystem.getInfoAsync(candidate);
+            if (info.exists) {
+                return candidate;
+            }
+        }
+
+        return null;
+    }, []);
+
     // Audio Logic - Proper cleanup and loading with lock
     const isLoadingRef = useRef(false);
     const currentTrackUrlRef = useRef<string | null>(null);
+    const requestAudioReload = useCallback((reason: string) => {
+        if (!currentTrack) return;
+        if (isLoadingRef.current) return;
+        console.log('[MusicPlayer] Requesting audio reload:', reason);
+        currentTrackUrlRef.current = null;
+        setIsLoaded(false);
+        setReloadToken((v) => v + 1);
+    }, [currentTrack]);
 
     useEffect(() => {
         let isMounted = true;
@@ -209,8 +254,23 @@ export const GlobalMusicPlayer = () => {
                 return;
             }
 
+            const isLocalSource = isLocalFileUri(streamUrl);
+            if (isLocalSource) {
+                const resolvedLocal = await resolveLocalPlayableUri(streamUrl);
+                if (!resolvedLocal) {
+                    console.warn('[MusicPlayer] Local audio file is no longer readable:', streamUrl);
+                    setIsLoaded(false);
+                    setIsPlaying(false);
+                    reset();
+                    return;
+                }
+                streamUrl = resolvedLocal;
+            }
+
+            const loadKey = streamUrl;
+
             // Prevent duplicate loads for same track
-            if (currentTrackUrlRef.current === streamUrl) {
+            if (currentTrackUrlRef.current === loadKey && soundRef.current && isLoaded) {
                 console.log('[MusicPlayer] Same track, skipping duplicate load');
                 return;
             }
@@ -228,7 +288,7 @@ export const GlobalMusicPlayer = () => {
             }
 
             isLoadingRef.current = true;
-            currentTrackUrlRef.current = streamUrl;
+            currentTrackUrlRef.current = loadKey;
 
             // Unload previous sound first
             if (soundRef.current) {
@@ -250,16 +310,19 @@ export const GlobalMusicPlayer = () => {
             }
 
             try {
-                // CHECK CACHE FIRST
+                // CHECK CACHE FIRST (skip for chat voice/local files; they are transient and should not
+                // be persisted in music cache state)
                 const trackId = currentTrack.video_id || currentTrack.id || streamUrl;
                 let uriToPlay = streamUrl;
                 let usedCache = false;
-                const cached = getTrack(trackId);
+                const shouldUseMusicCache = !isLocalFileUri(streamUrl) && currentTrack.source !== 'chat-voice';
+                const cached = shouldUseMusicCache ? getTrack(trackId) : undefined;
 
                 console.log('[MusicPlayer] Track ID:', trackId);
+                console.log('[MusicPlayer] Cache enabled:', shouldUseMusicCache);
                 console.log('[MusicPlayer] Cached track:', cached?.local_uri ? 'YES' : 'NO');
 
-                if (cached?.local_uri) {
+                if (shouldUseMusicCache && cached?.local_uri) {
                     console.log('[MusicPlayer] checking if cached file exists:', cached.local_uri);
                     const fileInfo = await FileSystem.getInfoAsync(cached.local_uri);
                     if (fileInfo.exists) {
@@ -267,10 +330,11 @@ export const GlobalMusicPlayer = () => {
                         usedCache = true;
                         console.log('[MusicPlayer] Using cached URI:', uriToPlay);
                     } else {
-                        console.warn('[MusicPlayer] Cached file not found despite being in cache store. Falling back to streamUrl.');
+                        console.warn('[MusicPlayer] Removing stale cached file reference:', cached.local_uri);
+                        try { removeTrack(trackId); } catch (_) { /* ignore */ }
                         uriToPlay = streamUrl;
                     }
-                } else {
+                } else if (shouldUseMusicCache) {
                     console.log('[MusicPlayer] Using stream URL:', uriToPlay);
                     // Cache metadata
                     cacheTrack({
@@ -291,6 +355,8 @@ export const GlobalMusicPlayer = () => {
                         play_count: 0,
                         cached_at: Date.now()
                     });
+                } else {
+                    console.log('[MusicPlayer] Using direct source URI (no cache):', uriToPlay);
                 }
 
                 if (!isMounted) {
@@ -303,9 +369,10 @@ export const GlobalMusicPlayer = () => {
                 const createSound = async (uri: string) => {
                     console.log('[MusicPlayer] Creating Audio.Sound with URI:', uri);
                     const progressUpdateIntervalMillis = currentTrack?.title === 'Voice Message' ? 50 : 220;
+                    const shouldPlayNow = !!useMusicPlayerStore.getState().isPlaying;
                     return Audio.Sound.createAsync(
                         { uri },
-                        { shouldPlay: true, progressUpdateIntervalMillis },
+                        { shouldPlay: shouldPlayNow, progressUpdateIntervalMillis },
                         (status) => {
                             if (!isMounted) return;
                             if (status.isLoaded) {
@@ -361,13 +428,13 @@ export const GlobalMusicPlayer = () => {
                 if (isMounted) {
                     soundRef.current = newSound;
                     setIsLoaded(true);
-                    setIsPlaying(true);
                     console.log('[MusicPlayer] Playback started');
                 } else {
                     // Cleanup if component unmounted during load
                     await newSound.unloadAsync();
                 }
             } catch (e) {
+                setIsLoaded(false);
                 console.error("[MusicPlayer] Audio Load Error:", e);
                 console.error("[MusicPlayer] Error details:", JSON.stringify(e, null, 2));
             } finally {
@@ -387,13 +454,16 @@ export const GlobalMusicPlayer = () => {
                 soundRef.current = null;
             }
         };
-    }, [currentTrack?.preview_url, currentTrack?.video_id]);
+    }, [currentTrack?.id, currentTrack?.preview_url, currentTrack?.video_id, currentTrack?.source, reloadToken, resolveLocalPlayableUri, reset, setIsPlaying, setStoreDuration, setStoreProgress, playNext, removeTrack, cacheTrack, downloadTrack, getTrack]);
 
     // Play/Pause control
     useEffect(() => {
         console.log('[MusicPlayer] Play/Pause effect triggered. isPlaying:', isPlaying, 'isLoaded:', isLoaded, 'soundRef exists:', !!soundRef.current);
         if (!soundRef.current || !isLoaded) {
             console.log('[MusicPlayer] Cannot play/pause: soundRef or isLoaded is missing');
+            if (isPlaying && currentTrack) {
+                requestAudioReload('play-request-before-loaded');
+            }
             return;
         }
 
@@ -408,7 +478,7 @@ export const GlobalMusicPlayer = () => {
                 .then((status) => console.log('[MusicPlayer] pauseAsync success, status:', status))
                 .catch((error) => console.error('[MusicPlayer] pauseAsync failed:', error));
         }
-    }, [isPlaying, isLoaded]);
+    }, [isPlaying, isLoaded, currentTrack, requestAudioReload]);
 
     // Debounced seek to prevent rapid seeking errors
     const seekTimeoutRef = useRef<NodeJS.Timeout | null>(null);
@@ -447,6 +517,15 @@ export const GlobalMusicPlayer = () => {
     const isDownloading = (downloadProgress !== undefined && downloadProgress < 1);
 
     const togglePlay = () => {
+        if (!soundRef.current || !isLoaded) {
+            if (isPlaying) {
+                setIsPlaying(false);
+                return;
+            }
+            setIsPlaying(true);
+            requestAudioReload('toggle-play-before-loaded');
+            return;
+        }
         console.log('[MusicPlayer] togglePlay pressed. Toggling from', isPlaying, 'to', !isPlaying);
         setIsPlaying(!isPlaying);
     };

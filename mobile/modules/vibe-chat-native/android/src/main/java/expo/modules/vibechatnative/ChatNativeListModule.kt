@@ -53,6 +53,10 @@ class ChatNativeListModule : Module() {
       Prop("contentPaddingBottom") { view: ChatListView, value: Double ->
         view.setContentPaddingBottom(value)
       }
+
+      Prop("voicePlayback") { view: ChatListView, payload: Map<String, Any?> ->
+        view.setVoicePlayback(payload)
+      }
     }
   }
 }

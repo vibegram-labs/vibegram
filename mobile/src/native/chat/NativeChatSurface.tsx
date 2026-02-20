@@ -2,7 +2,7 @@ import React, { forwardRef, useImperativeHandle, useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { getNativeChatListModule, isNativeChatEnabled } from './runtime';
-import type { NativeChatAppearance, NativeChatRow } from './types';
+import type { NativeChatAppearance, NativeChatRow, NativeSendTransitionPayload } from './types';
 
 let NativeChatListView: React.ComponentType<any> | null = null;
 
@@ -21,7 +21,7 @@ export interface NativeChatSurfaceRef {
   scrollToBottom: (animated?: boolean) => Promise<void>;
   scrollToMessage: (messageId: string, animated?: boolean, viewPosition?: number) => Promise<void>;
   applyTransactions: (transactions: Record<string, unknown>[]) => Promise<void>;
-  startSendTransition: (payload: Record<string, unknown>) => Promise<void>;
+  startSendTransition: (payload: NativeSendTransitionPayload) => Promise<void>;
 }
 
 interface NativeChatSurfaceProps {
@@ -29,6 +29,11 @@ interface NativeChatSurfaceProps {
   rows: NativeChatRow[];
   appearance?: NativeChatAppearance;
   contentPaddingBottom?: number;
+  voicePlayback?: {
+    messageId: string | null;
+    isPlaying: boolean;
+    progress: number;
+  };
   /** Enable native input bar (text field + send button). When true, keyboard is handled natively. */
   inputBarEnabled?: boolean;
   /** Placeholder text for the native input bar. */
@@ -43,7 +48,7 @@ interface NativeChatSurfaceProps {
 }
 
 export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurfaceProps>(
-  ({ surfaceId, rows, appearance, contentPaddingBottom, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
+  ({ surfaceId, rows, appearance, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
     const nativeListModule = useMemo(() => getNativeChatListModule(), []);
     const reportNativeError = (error: unknown, context: string) => {
       console.error(`[NativeChatSurface] ${context} failed`, error);
@@ -75,7 +80,7 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
           reportNativeError(error, 'applyTransactions');
         }
       },
-      startSendTransition: async (payload) => {
+      startSendTransition: async (payload: NativeSendTransitionPayload) => {
         if (!nativeListModule?.startSendTransition) return;
         try {
           await nativeListModule.startSendTransition(surfaceId, payload);
@@ -96,6 +101,7 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
         rows={rows}
         appearance={appearance}
         contentPaddingBottom={contentPaddingBottom}
+        voicePlayback={voicePlayback}
         inputBarEnabled={inputBarEnabled}
         inputPlaceholder={inputPlaceholder}
         nativeSendEnabled={nativeSendEnabled}

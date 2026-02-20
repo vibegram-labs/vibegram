@@ -47,6 +47,7 @@ export interface AgentConversation {
 export interface MusicTrack {
     video_id?: string;
     id?: string; // Some providers use id
+    source?: 'chat-voice' | 'chat-music' | 'music';
     title: string;
     artist: string;
     album?: string;
