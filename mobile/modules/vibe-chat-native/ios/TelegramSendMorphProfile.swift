@@ -338,10 +338,12 @@ enum SendTransitionOverlayFactory {
   ) -> UIView? {
     let wasBubbleHidden = snapshotCell.bubbleView.isHidden
     let wasTailHidden = snapshotCell.tailView.isHidden
+    let wasMetaHidden = snapshotCell.metaContainerView.isHidden
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     snapshotCell.bubbleView.isHidden = true
     snapshotCell.tailView.isHidden = true
+    snapshotCell.metaContainerView.isHidden = true
     snapshotCell.contentView.layoutIfNeeded()
     CATransaction.commit()
     defer {
@@ -349,6 +351,7 @@ enum SendTransitionOverlayFactory {
       CATransaction.setDisableActions(true)
       snapshotCell.bubbleView.isHidden = wasBubbleHidden
       snapshotCell.tailView.isHidden = wasTailHidden
+      snapshotCell.metaContainerView.isHidden = wasMetaHidden
       snapshotCell.contentView.layoutIfNeeded()
       CATransaction.commit()
     }

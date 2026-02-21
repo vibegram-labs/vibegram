@@ -154,6 +154,22 @@ const isValidBinaryMessageId = (value?: string | null) => {
     return BINARY_ID_RE.test(value);
 };
 
+const normalizeMessageIdValue = (value: unknown): string | null => {
+    if (typeof value === 'string') {
+        const trimmed = value.trim();
+        return trimmed.length > 0 ? trimmed : null;
+    }
+    if (typeof value === 'number' && Number.isFinite(value)) {
+        return String(value);
+    }
+    return null;
+};
+
+const normalizeOptionalStringId = (value: unknown): string | undefined => {
+    const normalized = normalizeMessageIdValue(value);
+    return normalized || undefined;
+};
+
 interface BubbleThemeSpec {
     meGradient: [string, string];
     themSolid: string;
@@ -178,6 +194,7 @@ interface Message extends ChatListBubbleMessage {
     replyToId?: string;
     isEdited?: boolean;
     editedAt?: number;
+    errorMessage?: string;
     timestampMs: number;
     isGhostHidden?: boolean;
     isOptimistic?: boolean;
@@ -1249,6 +1266,8 @@ export default function ChatListScreen({
     const queuedTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const recoveryTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const recoveryAttemptedRef = useRef<Set<string>>(new Set());
+    const nativeSendInFlightRef = useRef<Set<string>>(new Set());
+    const nativeSendRecentlyHandledRef = useRef<Map<string, number>>(new Map());
     const reactionCommitTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
     const deletingMessageIdsRef = useRef<Set<string>>(new Set());
     const deletedMessageIdsRef = useRef<Set<string>>(new Set());
@@ -1494,22 +1513,36 @@ export default function ChatListScreen({
             ? [...windowedSource].sort((a: any, b: any) => (a?.timestamp || 0) - (b?.timestamp || 0))
             : windowedSource;
 
-        const storeRows: Message[] = normalizedRows.map((m: any) => {
+        const storeRows: Message[] = [];
+        const indexById = new Map<string, number>();
+        for (let i = 0; i < normalizedRows.length; i++) {
+            const m: any = normalizedRows[i];
+            const rawId = m?.id ?? m?.message_id ?? m?.messageId;
+            const normalizedId = normalizeMessageIdValue(rawId);
+            if (!normalizedId) {
+                sendDebug('hydrate:drop:invalid-id', {
+                    effectiveChatId,
+                    rawId,
+                    index: i,
+                });
+                continue;
+            }
             const type = normalizeMessageType(m?.type);
             const timestampMs = typeof m?.timestamp === 'number'
                 ? m.timestamp
                 : new Date(m?.timestamp || Date.now()).getTime();
-            return {
-                id: m.id,
-                chatId: m.chatId || m.chat_id,
-                fromId: m.fromId || m.from_id,
+            const mapped: Message = {
+                id: normalizedId,
+                chatId: normalizeOptionalStringId(m.chatId || m.chat_id),
+                fromId: normalizeOptionalStringId(m.fromId || m.from_id) || '',
                 encryptedContent: m.encryptedContent || m.encrypted_content,
                 type,
                 text: getStoreMessageText(m, type),
-                isMe: (m.fromId || m.from_id) === user?.userId,
+                isMe: normalizeOptionalStringId(m.fromId || m.from_id) === user?.userId,
                 timestamp: formatUiTime(timestampMs),
                 timestampMs,
                 status: m.status as BubbleStatus,
+                errorMessage: typeof m.errorMessage === 'string' ? m.errorMessage : undefined,
                 isOptimistic: false,
                 mediaUrl: m.mediaUrl || m.media_url,
                 fileName: m.fileName || m.file_name,
@@ -1524,7 +1557,7 @@ export default function ChatListScreen({
                     : (Array.isArray(m.viewed_by) ? m.viewed_by : []),
                 isVideoNote: !!m.isVideoNote,
                 contact: m.contact,
-                replyToId: m.replyToId || m.reply_to_id,
+                replyToId: normalizeOptionalStringId(m.replyToId || m.reply_to_id),
                 isEdited: !!(m.isEdited || m.edited || m.extra?.isEdited),
                 editedAt: m.editedAt || m.edited_at || m.extra?.editedAt,
                 reactionEmoji: (
@@ -1541,7 +1574,20 @@ export default function ChatListScreen({
                         : undefined,
                 },
             };
-        });
+
+            const existingIndex = indexById.get(normalizedId);
+            if (existingIndex === undefined) {
+                indexById.set(normalizedId, storeRows.length);
+                storeRows.push(mapped);
+            } else {
+                // Keep row position stable while refreshing the latest payload for this ID.
+                storeRows[existingIndex] = {
+                    ...storeRows[existingIndex],
+                    ...mapped,
+                    id: normalizedId,
+                };
+            }
+        }
         const deletingIds = deletingMessageIdsRef.current;
         const deletedIds = deletedMessageIdsRef.current;
         const visibleStoreRows = storeRows.filter((row) => (
@@ -1592,6 +1638,8 @@ export default function ChatListScreen({
             recoveryTimersRef.current.forEach((timer) => clearTimeout(timer));
             recoveryTimersRef.current.clear();
             recoveryAttemptedRef.current.clear();
+            nativeSendInFlightRef.current.clear();
+            nativeSendRecentlyHandledRef.current.clear();
             reactionCommitTimersRef.current.forEach((timer) => clearTimeout(timer));
             reactionCommitTimersRef.current.clear();
         };
@@ -1645,6 +1693,30 @@ export default function ChatListScreen({
                 scheduleBackgroundRecovery(queued.chatId, queued.messageId);
             });
     }, [sendMessage, clearRecoveryTimer, scheduleBackgroundRecovery, isConnected]);
+
+    useEffect(() => {
+        if (!effectiveChatId || !isConnected) return;
+        for (const message of messages) {
+            if (!message.isMe) continue;
+            if (message.status !== 'error' && message.status !== 'pending') continue;
+            if (
+                message.status === 'error'
+                && typeof message.errorMessage === 'string'
+                && message.errorMessage.toLowerCase().includes('local media file is no longer available')
+            ) {
+                continue;
+            }
+            if (recoveryAttemptedRef.current.has(message.id)) continue;
+            if (recoveryTimersRef.current.has(message.id)) continue;
+            sendDebug('auto-retry:scheduled', {
+                chatId: effectiveChatId,
+                messageId: message.id,
+                type: message.type,
+                status: message.status,
+            });
+            scheduleBackgroundRecovery(effectiveChatId, message.id, message.status === 'error' ? 1200 : 2200);
+        }
+    }, [messages, effectiveChatId, isConnected, scheduleBackgroundRecovery, sendDebug]);
 
     const removeMessageLocally = useCallback((chatId: string, messageId: string) => {
         setMessages(prev => prev.filter((m) => m.id !== messageId));
@@ -1783,6 +1855,10 @@ export default function ChatListScreen({
         }
 
         if (action === 'resend') {
+            if (!message.isMe || (message.status !== 'error' && message.status !== 'pending' && message.status !== 'sending')) {
+                showToast('Only pending or failed outgoing messages can be resent', 'info');
+                return;
+            }
             clearRecoveryTimer(message.id);
             setMessages(prev => prev.map((m) => (
                 m.id === message.id ? { ...m, status: isConnected ? 'sending' : 'pending' } : m
@@ -1891,6 +1967,57 @@ export default function ChatListScreen({
             const replyToIdRaw = nativeEvent.replyToMessageId;
             const replyToId = typeof replyToIdRaw === 'string' ? replyToIdRaw : replyTo?.messageId;
             const existingId = typeof messageIdRaw === 'string' ? messageIdRaw : undefined;
+            if (existingId) {
+                const nowMs = Date.now();
+                nativeSendRecentlyHandledRef.current.forEach((handledAt, id) => {
+                    if (nowMs - handledAt > 60_000) {
+                        nativeSendRecentlyHandledRef.current.delete(id);
+                    }
+                });
+                if (nativeSendInFlightRef.current.has(existingId)) {
+                    sendDebug('nativeEvent:sendMessage:duplicate-inflight', {
+                        effectiveChatId,
+                        messageIdRaw,
+                    });
+                    return;
+                }
+                const handledAt = nativeSendRecentlyHandledRef.current.get(existingId);
+                if (typeof handledAt === 'number' && nowMs - handledAt < 12_000) {
+                    sendDebug('nativeEvent:sendMessage:duplicate-recent', {
+                        effectiveChatId,
+                        messageIdRaw,
+                        ageMs: nowMs - handledAt,
+                    });
+                    return;
+                }
+                const existingLocalMessage = messages.find((entry) => entry.id === existingId && entry.isMe);
+                if (existingLocalMessage) {
+                    const sameText = existingLocalMessage.text.trim() === textRaw.trim();
+                    const finalized =
+                        existingLocalMessage.status === 'sending'
+                        || existingLocalMessage.status === 'sent'
+                        || existingLocalMessage.status === 'delivered'
+                        || existingLocalMessage.status === 'read';
+                    if (sameText && finalized) {
+                        sendDebug('nativeEvent:sendMessage:duplicate-existing-row', {
+                            effectiveChatId,
+                            messageIdRaw,
+                            status: existingLocalMessage.status,
+                        });
+                        return;
+                    }
+                    if (!sameText && finalized) {
+                        sendDebug('nativeEvent:sendMessage:id-collision-blocked', {
+                            effectiveChatId,
+                            messageIdRaw,
+                            existingTextLength: existingLocalMessage.text.length,
+                            incomingTextLength: textRaw.length,
+                        });
+                        return;
+                    }
+                }
+                nativeSendInFlightRef.current.add(existingId);
+            }
             console.log('[Native] sendMessage proceeding', {
                 effectiveChatId,
                 messageIdRaw,
@@ -1913,6 +2040,9 @@ export default function ChatListScreen({
             )
                 .then(() => {
                     console.log('[Native] sendMessage success:', messageIdRaw);
+                    if (existingId) {
+                        nativeSendRecentlyHandledRef.current.set(existingId, Date.now());
+                    }
                     sendDebug('nativeEvent:sendMessage:resolved', {
                         effectiveChatId,
                         messageIdRaw,
@@ -1924,6 +2054,11 @@ export default function ChatListScreen({
                         messageIdRaw,
                         error: String(error),
                     });
+                })
+                .finally(() => {
+                    if (existingId) {
+                        nativeSendInFlightRef.current.delete(existingId);
+                    }
                 });
             if (replyToId) {
                 setReplyTo(null);
@@ -2048,7 +2183,7 @@ export default function ChatListScreen({
             if (!message) return;
             onReplySwipeHaptic?.();
             if (shouldUseNativeList) {
-                showToast('Reply composer is not available in native-only mode', 'info');
+                // Native surface already opens the reply banner in-place.
                 return;
             }
             openReplyComposer(message);
@@ -2715,80 +2850,80 @@ export default function ChatListScreen({
                     style={styles.inputStickyHost}
                 >
                     <View style={styles.inputStickyContainer}>
-                    <View style={[styles.footerMask, { height: footerMaskHeight }]} pointerEvents="none">
-                        <MaskedViewAny
-                            style={StyleSheet.absoluteFill}
-                            maskElement={<LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.92)']} locations={[0.1, 1]} style={StyleSheet.absoluteFill} />}
-                        >
-                            <BlurView
-                                intensity={25}
-                                tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(resolvedTheme.backgroundGradient?.[0] || '#000', 0.88) }]}
-                            />
-                        </MaskedViewAny>
-                    </View>
+                        <View style={[styles.footerMask, { height: footerMaskHeight }]} pointerEvents="none">
+                            <MaskedViewAny
+                                style={StyleSheet.absoluteFill}
+                                maskElement={<LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.92)']} locations={[0.1, 1]} style={StyleSheet.absoluteFill} />}
+                            >
+                                <BlurView
+                                    intensity={25}
+                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                    style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(resolvedTheme.backgroundGradient?.[0] || '#000', 0.88) }]}
+                                />
+                            </MaskedViewAny>
+                        </View>
 
                         <Animated.View
                             ref={inputBarRef}
                             style={[styles.inputBar, inputMarginStyle, { paddingBottom: bottomInsetPadding, paddingTop: inputVerticalPadding }]}
                         >
                             <Input
-                            autoFocus={false}
-                            text={text}
-                            setText={setText}
-                            onSend={handleSend}
-                            editable={!!effectiveChatId}
-                            focusTrigger={inputFocusTrigger}
-                            placeholder={effectiveChatId ? 'Message' : 'No active chat'}
-                            replyTo={replyTo}
-                            onCancelReply={() => setReplyTo(null)}
-                            editTarget={editTarget}
-                            onCancelEdit={() => setEditTarget(null)}
-                            onTypingStatusChange={onTypingStatusChange}
-                            onAttachImage={(uri, width, height) => {
-                                void sendAttachmentMessage('image', '', {
-                                    mediaUrl: uri,
-                                    width,
-                                    height,
-                                });
-                            }}
-                            onAttachFile={(uri, name) => {
-                                void sendAttachmentMessage('file', name || 'File', {
-                                    mediaUrl: uri,
-                                    fileName: name || 'file',
-                                });
-                            }}
-                            onAttachLocation={(coords) => {
-                                void sendAttachmentMessage(
-                                    'location',
-                                    `Location: ${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)}`,
-                                    {
-                                        latitude: coords.latitude,
-                                        longitude: coords.longitude,
-                                    }
-                                );
-                            }}
-                            onAttachContact={(contact) => {
-                                void sendAttachmentMessage(
-                                    'contact',
-                                    contact.username || contact.phoneNumber || 'Contact',
-                                    { contact }
-                                );
-                            }}
-                            onAttachVoice={(uri, durationSec, waveform) => {
-                                void sendAttachmentMessage('voice', '', {
-                                    mediaUrl: uri,
-                                    duration: durationSec,
-                                    fileName: 'voice-message.m4a',
-                                    waveform,
-                                });
-                            }}
-                            onVideoRecordStart={() => {
-                                onVideoNoteStart?.();
-                            }}
-                            onVideoRecordStop={(canceled) => {
-                                onVideoNoteStop?.(canceled);
-                            }}
+                                autoFocus={false}
+                                text={text}
+                                setText={setText}
+                                onSend={handleSend}
+                                editable={!!effectiveChatId}
+                                focusTrigger={inputFocusTrigger}
+                                placeholder={effectiveChatId ? 'Message' : 'No active chat'}
+                                replyTo={replyTo}
+                                onCancelReply={() => setReplyTo(null)}
+                                editTarget={editTarget}
+                                onCancelEdit={() => setEditTarget(null)}
+                                onTypingStatusChange={onTypingStatusChange}
+                                onAttachImage={(uri, width, height) => {
+                                    void sendAttachmentMessage('image', '', {
+                                        mediaUrl: uri,
+                                        width,
+                                        height,
+                                    });
+                                }}
+                                onAttachFile={(uri, name) => {
+                                    void sendAttachmentMessage('file', name || 'File', {
+                                        mediaUrl: uri,
+                                        fileName: name || 'file',
+                                    });
+                                }}
+                                onAttachLocation={(coords) => {
+                                    void sendAttachmentMessage(
+                                        'location',
+                                        `Location: ${coords.latitude.toFixed(5)}, ${coords.longitude.toFixed(5)}`,
+                                        {
+                                            latitude: coords.latitude,
+                                            longitude: coords.longitude,
+                                        }
+                                    );
+                                }}
+                                onAttachContact={(contact) => {
+                                    void sendAttachmentMessage(
+                                        'contact',
+                                        contact.username || contact.phoneNumber || 'Contact',
+                                        { contact }
+                                    );
+                                }}
+                                onAttachVoice={(uri, durationSec, waveform) => {
+                                    void sendAttachmentMessage('voice', '', {
+                                        mediaUrl: uri,
+                                        duration: durationSec,
+                                        fileName: 'voice-message.m4a',
+                                        waveform,
+                                    });
+                                }}
+                                onVideoRecordStart={() => {
+                                    onVideoNoteStart?.();
+                                }}
+                                onVideoRecordStop={(canceled) => {
+                                    onVideoNoteStop?.(canceled);
+                                }}
                                 onRecordingUiChange={onRecordingUiChange}
                             />
                         </Animated.View>

@@ -1,7 +1,7 @@
 import UIKit
 
-private let swipeReplyTrigger: CGFloat = 48.0
-private let swipeReplyMaxOffset: CGFloat = 72.0
+private let swipeReplyTrigger: CGFloat = 34.0
+private let swipeReplyMaxOffset: CGFloat = 88.0
 
 extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDelegate {
   func installInteractionGestures() {
@@ -42,19 +42,32 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     }
 
     let velocity = pan.velocity(in: collectionView)
-    // Keep default vertical scrolling as the dominant gesture.
-    return abs(velocity.x) > abs(velocity.y) * 1.2
+    let horizontal = abs(velocity.x)
+    let vertical = abs(velocity.y)
+    // Make swipe-to-reply easier to start while preserving regular vertical scroll.
+    return horizontal > vertical * 0.85
+  }
+
+  public func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer,
+    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+  ) -> Bool {
+    guard gestureRecognizer === swipeReplyPanGesture || otherGestureRecognizer === swipeReplyPanGesture
+    else { return false }
+    // Let collection scrolling continue while we still read horizontal drag progress.
+    return gestureRecognizer === collectionView.panGestureRecognizer
+      || otherGestureRecognizer === collectionView.panGestureRecognizer
   }
 
   @objc private func handleSwipeReplyPan(_ gesture: UIPanGestureRecognizer) {
     let location = gesture.location(in: collectionView)
-    let translationX = gesture.translation(in: collectionView).x
+    let translation = gesture.translation(in: collectionView)
 
     switch gesture.state {
     case .began:
       beginSwipeReply(at: location)
     case .changed:
-      updateSwipeReply(translationX: translationX)
+      updateSwipeReply(translation: translation)
     case .ended, .cancelled, .failed:
       finishSwipeReply()
     default:
@@ -83,13 +96,27 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     swipeReplyIsMe = row.isMe
   }
 
-  private func updateSwipeReply(translationX: CGFloat) {
+  private func updateSwipeReply(translation: CGPoint) {
     guard let indexPath = swipeReplyIndexPath else {
       return
     }
-    let directional = swipeReplyIsMe ? -translationX : translationX
+    // If vertical motion dominates, keep the cell steady so swipe feels responsive
+    // without fighting normal list scrolling.
+    let absX = abs(translation.x)
+    let absY = abs(translation.y)
+    if absY > absX * 1.15 {
+      if let cell = collectionView.cellForItem(at: indexPath) {
+        cell.contentView.transform = .identity
+      }
+      return
+    }
+
+    let directional = swipeReplyIsMe ? -translation.x : translation.x
     let clamped = max(0.0, min(swipeReplyMaxOffset, directional))
-    let signedOffset = clamped * (swipeReplyIsMe ? -1.0 : 1.0)
+    // Slight non-linear easing gives stronger immediate feedback at short drags.
+    let progress = clamped / swipeReplyMaxOffset
+    let eased = swipeReplyMaxOffset * pow(progress, 0.82)
+    let signedOffset = eased * (swipeReplyIsMe ? -1.0 : 1.0)
 
     if let cell = collectionView.cellForItem(at: indexPath) {
       cell.contentView.transform = CGAffineTransform(translationX: signedOffset, y: 0.0)
@@ -131,7 +158,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     }
     if animated {
       UIView.animate(
-        withDuration: 0.18, delay: 0.0, options: [.curveEaseOut, .beginFromCurrentState],
+        withDuration: 0.22, delay: 0.0, options: [.curveEaseOut, .beginFromCurrentState],
         animations: apply)
     } else {
       apply()

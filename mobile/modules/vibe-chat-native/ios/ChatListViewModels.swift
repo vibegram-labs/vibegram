@@ -163,7 +163,7 @@ struct ChatListRow {
     status = message["status"] as? String
     isEdited = (message["isEdited"] as? Bool) ?? false
     isPinned = (message["isPinned"] as? Bool) ?? false
-    messageId = message["id"] as? String
+    messageId = parseNonEmptyString(message["id"])
     reactionEmoji = message["reactionEmoji"] as? String
     messageType = ((message["type"] as? String) ?? "text").lowercased()
     shape = BubbleShape.from(raw: message["bubbleShape"] as? [String: Any], isMe: isMe)
@@ -233,6 +233,23 @@ private func parseDouble(_ raw: Any?) -> Double? {
   }
   if let value = raw as? String {
     return Double(value)
+  }
+  return nil
+}
+
+private func parseNonEmptyString(_ raw: Any?) -> String? {
+  if let value = raw as? String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+  if let value = raw as? NSNumber {
+    return value.stringValue
+  }
+  if let value = raw as? Int {
+    return String(value)
+  }
+  if let value = raw as? Double, value.isFinite {
+    return String(value)
   }
   return nil
 }

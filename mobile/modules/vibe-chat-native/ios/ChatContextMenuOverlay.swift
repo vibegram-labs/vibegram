@@ -426,6 +426,7 @@ final class ContextMenuView: UIView {
     ActionItem(
       id: "reply", title: "Reply", iconName: "arrowshape.turn.up.left", isDestructive: false),
     ActionItem(id: "copy", title: "Copy", iconName: "doc.on.doc", isDestructive: false),
+    ActionItem(id: "resend", title: "Resend", iconName: "arrow.clockwise", isDestructive: false),
     ActionItem(id: "pin", title: "Pin", iconName: "pin", isDestructive: false),
     ActionItem(id: "delete", title: "Delete", iconName: "trash", isDestructive: true),
   ]

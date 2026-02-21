@@ -8,6 +8,7 @@ class LiquidGlassView: ExpoView {
   private var glassInteractive: Bool = false
   private var pressFeedbackEnabled: Bool = true
   private var isPressFeedbackActive: Bool = false
+  private let glassPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
   private var glassTintColor: UIColor?
   private var glassTint: String?
   private var glassCornerRadius: CGFloat?
@@ -21,9 +22,10 @@ class LiquidGlassView: ExpoView {
     visualEffectView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     visualEffectView.isUserInteractionEnabled = false
     visualEffectView.backgroundColor = .clear
+    visualEffectView.layer.zPosition = -1
     backgroundColor = .clear
     addSubview(visualEffectView)
-    sendSubviewToBack(visualEffectView)
+    ensureEffectViewLayering()
     layer.cornerCurve = .continuous
     applyCornerStyling()
     applyCurrentEffect()
@@ -32,14 +34,14 @@ class LiquidGlassView: ExpoView {
   override func layoutSubviews() {
     super.layoutSubviews()
     visualEffectView.frame = bounds
-    ensureEffectViewBehindContent()
+    ensureEffectViewLayering()
     applyCornerStyling()
   }
 
   override func didAddSubview(_ subview: UIView) {
     super.didAddSubview(subview)
     guard subview !== visualEffectView else { return }
-    ensureEffectViewBehindContent()
+    ensureEffectViewLayering()
   }
 
   override func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
@@ -95,9 +97,9 @@ class LiquidGlassView: ExpoView {
     visualEffectView.clipsToBounds = radius > 0
   }
 
-  private func ensureEffectViewBehindContent() {
+  private func ensureEffectViewLayering() {
     if visualEffectView.superview === self {
-      sendSubviewToBack(visualEffectView)
+      bringSubviewToFront(visualEffectView)
     }
   }
 
@@ -118,10 +120,9 @@ class LiquidGlassView: ExpoView {
       options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
       self.transform = CGAffineTransform(scaleX: scale, y: scale)
-      self.alpha = isPressed ? 0.7 : 1.0
       self.visualEffectView.contentView.backgroundColor =
         isPressed
-        ? UIColor.white.withAlphaComponent(0.08)
+        ? self.glassPressedOverlayColor
         : .clear
     }
   }
@@ -129,7 +130,6 @@ class LiquidGlassView: ExpoView {
   private func resetPressFeedbackAppearance() {
     isPressFeedbackActive = false
     transform = .identity
-    alpha = 1.0
     visualEffectView.contentView.backgroundColor = .clear
   }
 

@@ -11,12 +11,14 @@ private struct ChatNativeTabItem {
 }
 
 private final class ChatNativeTabButton: UIControl {
+  private let pressedOverlayView = UIView()
   private let contentStack = UIStackView()
   private let iconContainer = UIView()
   private let iconView = UIImageView()
   private let badgeContainer = UIView()
   private let badgeLabel = UILabel()
   private let titleLabelView = UILabel()
+  private let pressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
 
   private(set) var tabIndex: Int = 0
 
@@ -33,6 +35,21 @@ private final class ChatNativeTabButton: UIControl {
   private func setup() {
     backgroundColor = .clear
     translatesAutoresizingMaskIntoConstraints = false
+
+    pressedOverlayView.translatesAutoresizingMaskIntoConstraints = false
+    pressedOverlayView.backgroundColor = pressedOverlayColor
+    pressedOverlayView.layer.cornerCurve = .continuous
+    pressedOverlayView.layer.cornerRadius = 14
+    pressedOverlayView.alpha = 0
+    pressedOverlayView.isUserInteractionEnabled = false
+    addSubview(pressedOverlayView)
+
+    NSLayoutConstraint.activate([
+      pressedOverlayView.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+      pressedOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+      pressedOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
+      pressedOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2),
+    ])
 
     contentStack.axis = .vertical
     contentStack.alignment = .center
@@ -102,7 +119,7 @@ private final class ChatNativeTabButton: UIControl {
   override var isHighlighted: Bool {
     didSet {
       let isPressed = isHighlighted
-      let scale: CGFloat = isPressed ? 0.94 : 1.0
+      let scale: CGFloat = isPressed ? 0.96 : 1.0
       let duration: TimeInterval = isPressed ? 0.1 : 0.22
       let damping: CGFloat = isPressed ? 1.0 : 0.72
 
@@ -115,6 +132,7 @@ private final class ChatNativeTabButton: UIControl {
       ) {
         self.iconView.transform = CGAffineTransform(scaleX: scale, y: scale)
         self.alpha = isPressed ? 0.7 : 1.0
+        self.pressedOverlayView.alpha = isPressed ? 1.0 : 0
       }
     }
   }
@@ -123,18 +141,26 @@ private final class ChatNativeTabButton: UIControl {
     item: ChatNativeTabItem,
     index: Int,
     focused: Bool,
+    resolvedIcon: UIImage?,
     activeTintColor: UIColor,
     inactiveTintColor: UIColor
   ) {
     tabIndex = index
 
-    let iconName = item.sfSymbol ?? "circle"
-    iconView.image = UIImage(systemName: iconName)
-    titleLabelView.text = item.title
+    if let resolvedIcon {
+      iconView.image = resolvedIcon.withRenderingMode(.alwaysOriginal)
+      iconView.tintColor = nil
+      iconView.alpha = focused ? 1.0 : 0.82
+    } else {
+      let iconName = item.sfSymbol ?? "circle"
+      iconView.image = UIImage(systemName: iconName)
+      let tint = focused ? activeTintColor : inactiveTintColor
+      iconView.tintColor = tint
+      iconView.alpha = 1.0
+    }
 
-    let tint = focused ? activeTintColor : inactiveTintColor
-    titleLabelView.textColor = tint
-    iconView.tintColor = tint
+    titleLabelView.text = item.title
+    titleLabelView.textColor = focused ? activeTintColor : inactiveTintColor
 
     if let badgeText = item.badge, !badgeText.isEmpty {
       badgeContainer.isHidden = false
@@ -195,7 +221,7 @@ private final class ChatNativeVibeButton: UIControl {
   override var isHighlighted: Bool {
     didSet {
       let isPressed = isHighlighted
-      let scale: CGFloat = isPressed ? 0.94 : 1.0
+      let scale: CGFloat = isPressed ? 0.96 : 1.0
       let duration: TimeInterval = isPressed ? 0.1 : 0.22
       let damping: CGFloat = isPressed ? 1.0 : 0.72
 
@@ -320,6 +346,11 @@ public final class ChatNativeTabBarView: ExpoView {
   private var inactiveTintColor = UIColor.systemGray
   private var isDark = false
   private let tabControlSide: CGFloat = 64
+  private let horizontalOuterPadding: CGFloat = 18
+  private let horizontalInnerPadding: CGFloat = 10
+  private let selectionFeedback = UISelectionFeedbackGenerator()
+  private var remoteIconCache: [String: UIImage] = [:]
+  private var remoteIconRequests: Set<String> = []
 
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
@@ -345,8 +376,8 @@ public final class ChatNativeTabBarView: ExpoView {
     NSLayoutConstraint.activate([
       containerStack.topAnchor.constraint(equalTo: topAnchor, constant: 18),
       containerStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -6),
-      containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 12),
-      containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -12),
+      containerStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: horizontalOuterPadding),
+      containerStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -horizontalOuterPadding),
     ])
 
     backgroundBlur.translatesAutoresizingMaskIntoConstraints = false
@@ -368,9 +399,9 @@ public final class ChatNativeTabBarView: ExpoView {
       stack.topAnchor.constraint(equalTo: backgroundBlur.contentView.topAnchor, constant: 4),
       stack.bottomAnchor.constraint(equalTo: backgroundBlur.contentView.bottomAnchor, constant: -4),
       stack.leadingAnchor.constraint(
-        equalTo: backgroundBlur.contentView.leadingAnchor, constant: 6),
+        equalTo: backgroundBlur.contentView.leadingAnchor, constant: horizontalInnerPadding),
       stack.trailingAnchor.constraint(
-        equalTo: backgroundBlur.contentView.trailingAnchor, constant: -6),
+        equalTo: backgroundBlur.contentView.trailingAnchor, constant: -horizontalInnerPadding),
     ])
 
     vibeButton.translatesAutoresizingMaskIntoConstraints = false
@@ -387,6 +418,7 @@ public final class ChatNativeTabBarView: ExpoView {
     containerStack.addArrangedSubview(vibeButton)
 
     vibeButton.isHidden = true
+    selectionFeedback.prepare()
 
     applyChrome()
   }
@@ -446,11 +478,19 @@ public final class ChatNativeTabBarView: ExpoView {
 
   @objc private func mainTabTapped(_ sender: UIControl) {
     guard let button = sender as? ChatNativeTabButton else { return }
+    if button.tabIndex != currentIndex {
+      selectionFeedback.selectionChanged()
+      selectionFeedback.prepare()
+    }
     onIndexChange(["index": button.tabIndex])
   }
 
   @objc private func vibeTapped() {
     guard let vibeTabIndex else { return }
+    if vibeTabIndex != currentIndex {
+      selectionFeedback.selectionChanged()
+      selectionFeedback.prepare()
+    }
     onIndexChange(["index": vibeTabIndex])
   }
 
@@ -473,6 +513,7 @@ public final class ChatNativeTabBarView: ExpoView {
           item: item,
           index: tabIndex,
           focused: tabIndex == currentIndex,
+          resolvedIcon: resolvedIcon(for: item),
           activeTintColor: activeTintColor,
           inactiveTintColor: inactiveTintColor
         )
@@ -499,6 +540,7 @@ public final class ChatNativeTabBarView: ExpoView {
         item: tabs[index],
         index: index,
         focused: index == currentIndex,
+        resolvedIcon: resolvedIcon(for: tabs[index]),
         activeTintColor: activeTintColor,
         inactiveTintColor: inactiveTintColor
       )
@@ -513,6 +555,75 @@ public final class ChatNativeTabBarView: ExpoView {
         isDark: isDark
       )
     }
+  }
+
+  private func resolvedIcon(for item: ChatNativeTabItem) -> UIImage? {
+    guard let iconUri = item.iconUri, !iconUri.isEmpty else {
+      return nil
+    }
+
+    if let cachedRemote = remoteIconCache[iconUri] {
+      return cachedRemote
+    }
+
+    if let localImage = localImageFromURI(iconUri) {
+      return localImage
+    }
+
+    guard let url = URL(string: iconUri), let scheme = url.scheme?.lowercased(),
+      scheme == "http" || scheme == "https"
+    else {
+      return nil
+    }
+
+    requestRemoteIcon(from: url, cacheKey: iconUri)
+    return nil
+  }
+
+  private func requestRemoteIcon(from url: URL, cacheKey: String) {
+    guard !remoteIconRequests.contains(cacheKey) else { return }
+    remoteIconRequests.insert(cacheKey)
+
+    URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.remoteIconRequests.remove(cacheKey)
+        guard let data, let image = UIImage(data: data) else { return }
+        self.remoteIconCache[cacheKey] = image
+        self.applySelection()
+      }
+    }.resume()
+  }
+
+  private func localImageFromURI(_ uriString: String) -> UIImage? {
+    guard !uriString.isEmpty else { return nil }
+
+    if let url = URL(string: uriString) {
+      if url.isFileURL {
+        let image = UIImage(contentsOfFile: url.path)
+        if image != nil { return image }
+      }
+
+      let filename = url.lastPathComponent
+      let base = (filename as NSString).deletingPathExtension
+      let ext = (filename as NSString).pathExtension
+      if !base.isEmpty, let path = Bundle.main.path(forResource: base, ofType: ext.isEmpty ? nil : ext) {
+        return UIImage(contentsOfFile: path)
+      }
+    }
+
+    if uriString.hasPrefix("/") {
+      let image = UIImage(contentsOfFile: uriString)
+      if image != nil { return image }
+    }
+
+    let localFilename = (uriString as NSString).lastPathComponent
+    let localBase = (localFilename as NSString).deletingPathExtension
+    if !localBase.isEmpty, let named = UIImage(named: localBase) {
+      return named
+    }
+
+    return UIImage(named: uriString)
   }
 
   private func applyChrome() {

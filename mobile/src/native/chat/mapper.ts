@@ -43,6 +43,17 @@ const formatTimeLabel = (timestampMs: number) => {
   return new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 };
 
+const normalizeRuntimeMessageId = (value: unknown): string | null => {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return String(value);
+  }
+  return null;
+};
+
 const resolveBubbleShape = (
   isMe: boolean,
   isSequenceStart: boolean,
@@ -74,6 +85,10 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
 
   for (let i = 0; i < messages.length; i++) {
     const current = messages[i];
+    const normalizedId = normalizeRuntimeMessageId(current.id);
+    if (!normalizedId) {
+      continue;
+    }
     const previous = i > 0 ? messages[i - 1] : undefined;
     const next = i < messages.length - 1 ? messages[i + 1] : undefined;
 
@@ -92,7 +107,7 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
     const isSequenceEnd = !next || next.isMe !== current.isMe;
 
     const payload: NativeChatMessagePayload = {
-      id: current.id,
+      id: normalizedId,
       chatId: current.chatId,
       fromId: current.fromId,
       timestampMs: current.timestampMs,
@@ -120,7 +135,7 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
 
     rows.push({
       kind: 'message',
-      key: `m-${current.id}`,
+      key: `m-${normalizedId}`,
       message: payload,
     });
   }

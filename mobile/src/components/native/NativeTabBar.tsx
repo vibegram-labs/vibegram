@@ -125,22 +125,33 @@ export default function NativeTabBar({
     if (nativeTabsAvailable && NativeChatTabsView && tabs.length > 0) {
         const normalizedIndex = Math.max(0, Math.min(currentIndex, tabs.length - 1));
 
-        const nativeTabs = tabs.map((tab) => ({
-            key: tab.key,
-            title: tab.title,
-            sfSymbol: tab.sfSymbol || tab.unfocusedSfSymbol || (isVibeTab(tab) ? 'sparkles' : 'circle'),
-            iconUri: tab.iconSource ? Image.resolveAssetSource(tab.iconSource)?.uri : undefined,
-            badge: tab.badge,
-            isVibe: isVibeTab(tab),
-        }));
+        const nativeTabs = tabs.map((tab) => {
+            const source = tab.iconSource;
+            let resolvedIconUri: string | undefined;
+            if (source && typeof source === 'object' && 'uri' in source && typeof (source as any).uri === 'string') {
+                resolvedIconUri = (source as any).uri;
+            } else if (source) {
+                resolvedIconUri = Image.resolveAssetSource(source)?.uri;
+            }
+
+            return {
+                key: tab.key,
+                title: tab.title,
+                sfSymbol: tab.sfSymbol || tab.unfocusedSfSymbol || (isVibeTab(tab) ? 'sparkles' : 'circle'),
+                iconUri: resolvedIconUri,
+                badge: tab.badge,
+                isVibe: isVibeTab(tab),
+            };
+        });
 
         const handleNativeIndexChange = (event: NativeSyntheticEvent<NativeTabPressPayload>) => {
             const payload: any = event?.nativeEvent ?? event;
-            const index = payload?.index;
-            if (typeof index !== 'number') {
+            const rawIndex = payload?.index ?? payload?.payload?.index;
+            const parsedIndex = typeof rawIndex === 'number' ? rawIndex : Number(rawIndex);
+            if (!Number.isFinite(parsedIndex)) {
                 return;
             }
-            const next = Math.max(0, Math.min(index, tabs.length - 1));
+            const next = Math.max(0, Math.min(Math.trunc(parsedIndex), tabs.length - 1));
             const targetTab = tabs[next];
             if (targetTab && isVibeTab(targetTab)) {
                 handleSeparateVibePress();
@@ -343,12 +354,15 @@ const styles = StyleSheet.create({
         width: '100%',
         paddingBottom: Platform.OS === 'ios' ? 10 : 8,
         paddingTop: 2,
+        paddingHorizontal: 14,
         alignItems: 'stretch',
         justifyContent: 'flex-end',
+        backgroundColor: 'transparent',
     },
     nativeTabsBar: {
         width: '100%',
         height: 96,
+        backgroundColor: 'transparent',
     },
 });
 

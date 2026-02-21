@@ -563,6 +563,7 @@ final class ChatInputBar: UIView {
 
   private let pillContainer = UIView()
   private let pillGlass = UIVisualEffectView(effect: nil)
+  private let pillTapOverlay = UIView()
   private let textView = UITextView()
   private let placeholderLabel = UILabel()
   private let gifButton = UIButton(type: .system)
@@ -616,7 +617,7 @@ final class ChatInputBar: UIView {
 
   // Appearance
   private var appearance = ChatListAppearance.fallback
-  private var pillTint: UIColor?
+  private var pillTint: UIColor? = ChatListAppearance.fallback.bubbleThemColor.withAlphaComponent(0.14)
 
   // MARK: Layout constants
   private let sideSize: CGFloat = 36
@@ -671,6 +672,7 @@ final class ChatInputBar: UIView {
   private weak var videoNoteRecorderController: VideoNoteRecorderViewController?
   private let feedback = UIImpactFeedbackGenerator(style: .medium)
   private let notificationFeedback = UINotificationFeedbackGenerator()
+  private let inputTapFeedback = UISelectionFeedbackGenerator()
 
   private func recordingModeString(_ mode: RecordingMode? = nil) -> String {
     switch mode ?? recordingMode {
@@ -682,9 +684,11 @@ final class ChatInputBar: UIView {
 
   func showReplyBanner(messageId: String, text: String, isMe: Bool) {
     replyBanner.layer.removeAllAnimations()
+    restorePillGlassVisualState()
     activeReplyToMessageId = messageId
     replySenderLabel.text = isMe ? "You" : "Reply"
     replyPreviewLabel.text = text
+    replyBanner.transform = .identity
     replyBannerVisible = true
     replyBanner.isHidden = false
     replyBanner.alpha = 1
@@ -724,26 +728,46 @@ final class ChatInputBar: UIView {
     }
 
     if animated {
+      restorePillGlassVisualState()
       replyBanner.alpha = 1
+      replyBanner.transform = .identity
       replyBanner.isHidden = false
       UIView.animate(
         withDuration: 0.22, delay: 0,
         options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState]
       ) {
+        self.replyBanner.alpha = 0
+        self.replyBanner.transform = CGAffineTransform(translationX: 0, y: -4)
         applyLayout()
       } completion: { _ in
         if !self.replyBannerVisible {
+          self.replyBanner.transform = .identity
           self.replyBanner.alpha = 0
           self.replyBanner.isHidden = true
+          self.restorePillGlassVisualState()
         }
       }
     } else {
+      replyBanner.transform = .identity
       replyBanner.alpha = 0
       replyBanner.isHidden = true
       UIView.performWithoutAnimation {
         applyLayout()
       }
+      restorePillGlassVisualState()
     }
+  }
+
+  private func restorePillGlassVisualState() {
+    pillContainer.isHidden = false
+    pillContainer.alpha = 1
+    pillContainer.backgroundColor = .clear
+    pillContainer.transform = .identity
+
+    pillGlass.isHidden = false
+    pillGlass.alpha = 1
+    pillTapOverlay.alpha = 0
+    refreshGlass()
   }
 
   @objc private func replyDismissTapped() {
@@ -819,6 +843,12 @@ final class ChatInputBar: UIView {
     pillGlass.clipsToBounds = true
     pillContainer.addSubview(pillGlass)
     pillContainer.sendSubviewToBack(pillGlass)
+
+    pillTapOverlay.isUserInteractionEnabled = false
+    pillTapOverlay.backgroundColor = glassPressedOverlayColor
+    pillTapOverlay.alpha = 0
+    pillTapOverlay.layer.cornerCurve = .continuous
+    pillContainer.addSubview(pillTapOverlay)
 
     // placeholder
     placeholderLabel.text = placeholder
@@ -933,6 +963,7 @@ final class ChatInputBar: UIView {
     micButton.isHidden = false
 
     configureGlassButtonPressFeedback()
+    configureInputTapFeedback()
     applyPlaceholder()
     refreshGlass()
   }
@@ -1323,6 +1354,7 @@ final class ChatInputBar: UIView {
     attachGlass.frame = attachButton.bounds
     micGlass.frame = micButton.bounds
     pillGlass.frame = pillContainer.bounds
+    pillTapOverlay.frame = pillContainer.bounds
     sendGradient.frame = sendButton.bounds
     sendGradient.cornerRadius = 16
 
@@ -1333,12 +1365,15 @@ final class ChatInputBar: UIView {
       // Use border radius for the pill instead of capsule, so it doesn't break banner layout
       pillGlass.layer.cornerRadius = pillContainer.layer.cornerRadius
       pillGlass.layer.cornerCurve = .continuous
+      pillTapOverlay.layer.cornerRadius = pillContainer.layer.cornerRadius
+      pillTapOverlay.layer.cornerCurve = .continuous
       pillContainer.layer.cornerCurve = .continuous
       lockPill.cornerConfiguration = .capsule()
     } else {
       attachGlass.layer.cornerRadius = sideSize / 2
       micGlass.layer.cornerRadius = sideSize / 2
       pillGlass.layer.cornerRadius = pillContainer.layer.cornerRadius
+      pillTapOverlay.layer.cornerRadius = pillContainer.layer.cornerRadius
       lockPill.layer.cornerRadius = lockPill.bounds.width / 2
     }
 
@@ -1399,6 +1434,49 @@ final class ChatInputBar: UIView {
     }
   }
 
+  private func configureInputTapFeedback() {
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handleInputTap(_:)))
+    tap.cancelsTouchesInView = false
+    tap.delaysTouchesBegan = false
+    tap.delegate = self
+    pillContainer.addGestureRecognizer(tap)
+    inputTapFeedback.prepare()
+  }
+
+  @objc private func handleInputTap(_ recognizer: UITapGestureRecognizer) {
+    guard recognizer.state == .ended else { return }
+    guard !isRecording else { return }
+    animateInputTapFeedback()
+  }
+
+  private func animateInputTapFeedback() {
+    let scale: CGFloat = 0.992
+    inputTapFeedback.selectionChanged()
+    inputTapFeedback.prepare()
+
+    UIView.animate(
+      withDuration: 0.1,
+      delay: 0,
+      usingSpringWithDamping: 1.0,
+      initialSpringVelocity: 0.25,
+      options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+    ) {
+      self.pillContainer.transform = CGAffineTransform(scaleX: scale, y: scale)
+      self.pillTapOverlay.alpha = 1
+    } completion: { _ in
+      UIView.animate(
+        withDuration: 0.22,
+        delay: 0,
+        usingSpringWithDamping: 0.72,
+        initialSpringVelocity: 0.25,
+        options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+      ) {
+        self.pillContainer.transform = .identity
+        self.pillTapOverlay.alpha = 0
+      }
+    }
+  }
+
   @objc private func handleButtonPressDown(_ sender: UIButton) {
     setButtonPressed(sender, isPressed: true)
   }
@@ -1413,6 +1491,7 @@ final class ChatInputBar: UIView {
 
     let duration: TimeInterval = isPressed ? 0.1 : 0.22
     let damping: CGFloat = isPressed ? 1.0 : 0.72
+    let standardTabScale: CGFloat = isPressed ? 0.96 : 1.0
     let iconScale: CGFloat = isPressed ? 0.9 : 1.0
     let iconY: CGFloat = isPressed ? 0.6 : 0
     let iconTransform = CGAffineTransform(translationX: 0, y: iconY).scaledBy(
@@ -1425,7 +1504,11 @@ final class ChatInputBar: UIView {
       initialSpringVelocity: 0.25,
       options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
-      button.imageView?.transform = isPressed ? iconTransform : .identity
+      if button === self.attachButton || button === self.micButton {
+        button.imageView?.transform = CGAffineTransform(scaleX: standardTabScale, y: standardTabScale)
+      } else {
+        button.imageView?.transform = isPressed ? iconTransform : .identity
+      }
 
       if button === self.attachButton {
         self.attachGlass.alpha = isPressed ? 0.92 : 1.0
@@ -2333,6 +2416,31 @@ extension ChatInputBar: UITextViewDelegate {
       return false
     }
     return true
+  }
+}
+
+extension ChatInputBar: UIGestureRecognizerDelegate {
+  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch)
+    -> Bool
+  {
+    guard gestureRecognizer.view === pillContainer else { return true }
+    guard let touchedView = touch.view else { return true }
+
+    if touchedView.isDescendant(of: gifButton)
+      || touchedView.isDescendant(of: sendButton)
+      || touchedView.isDescendant(of: replyDismissButton)
+      || touchedView.isDescendant(of: cancelOverlayButton)
+    {
+      return false
+    }
+    return true
+  }
+
+  func gestureRecognizer(
+    _ gestureRecognizer: UIGestureRecognizer,
+    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+  ) -> Bool {
+    true
   }
 }
 

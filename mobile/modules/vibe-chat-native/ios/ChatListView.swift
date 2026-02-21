@@ -44,13 +44,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var activeVoicePlaybackIsPlaying = false
   private var activeVoicePlaybackProgress: CGFloat = 0.0
   private var lastViewportEmitTime: CFTimeInterval = 0.0
-  private var lastViewportPayload: (
-    contentHeight: CGFloat,
-    layoutHeight: CGFloat,
-    offsetY: CGFloat,
-    distanceFromBottom: CGFloat,
-    atBottom: Bool
-  )?
+  private var lastViewportPayload:
+    (
+      contentHeight: CGFloat,
+      layoutHeight: CGFloat,
+      offsetY: CGFloat,
+      distanceFromBottom: CGFloat,
+      atBottom: Bool
+    )?
   private let viewportEmitMinInterval: CFTimeInterval = 1.0 / 30.0
 
   private var hiddenMessageId: String?
@@ -310,18 +311,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       .sorted { $0.item < $1.item }
 
     let previousByKey = Dictionary(uniqueKeysWithValues: previousRows.map { ($0.key, $0) })
-    let currentIndexByKey = Dictionary(
-      uniqueKeysWithValues: parsed.enumerated().map { ($0.element.key, $0.offset) })
+    let previousIndexByKey = Dictionary(
+      uniqueKeysWithValues: previousRows.enumerated().map { ($0.element.key, $0.offset) })
     let reloads = parsed.compactMap { row -> IndexPath? in
-      guard let previous = previousByKey[row.key], let currentIndex = currentIndexByKey[row.key]
+      guard let previous = previousByKey[row.key], let oldIndex = previousIndexByKey[row.key]
       else {
         return nil
       }
       return chatListRowContentEqual(previous, row)
         ? nil
-        : IndexPath(item: currentIndex, section: 0)
+        : IndexPath(item: oldIndex, section: 0)
     }
-    let safeReloads = reloads.filter { $0.item >= 0 && $0.item < parsed.count }
+    let safeReloads = reloads.filter { $0.item >= 0 && $0.item < previousRows.count }
 
     guard !deletions.isEmpty || !insertions.isEmpty || !safeReloads.isEmpty else {
       NSLog("[ChatListView] setRows — no changes, finalize only")
@@ -929,12 +930,28 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     guard
       (row["kind"] as? String) == "message",
       let message = row["message"] as? [String: Any],
-      let messageId = message["id"] as? String,
-      !messageId.isEmpty
+      let messageId = normalizedMessageId(message["id"])
     else {
       return nil
     }
     return messageId
+  }
+
+  private func normalizedMessageId(_ raw: Any?) -> String? {
+    if let value = raw as? String {
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    if let value = raw as? NSNumber {
+      return value.stringValue
+    }
+    if let value = raw as? Int {
+      return String(value)
+    }
+    if let value = raw as? Double, value.isFinite {
+      return String(value)
+    }
+    return nil
   }
 
   private func shouldSuppressMessageFromLayout(_ messageId: String?) -> Bool {
