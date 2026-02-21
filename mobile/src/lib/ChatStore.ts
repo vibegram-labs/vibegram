@@ -2981,6 +2981,32 @@ export const useChatStore = create<ChatState>()(
                             try { sendChannel.leave(); } catch { /* ignore */ }
                         };
                         const payload = {
+                            pushPreview: (() => {
+                                const trimmed = (typeof text === 'string' ? text.trim() : '');
+                                if (trimmed.length > 0) {
+                                    return trimmed.length > 160 ? `${trimmed.slice(0, 159)}…` : trimmed;
+                                }
+                                switch (type) {
+                                    case 'image':
+                                        return 'Photo';
+                                    case 'video':
+                                        return 'Video';
+                                    case 'voice':
+                                        return 'Voice message';
+                                    case 'music':
+                                        return 'Audio';
+                                    case 'file':
+                                        return 'File';
+                                    case 'location':
+                                        return 'Location';
+                                    case 'contact':
+                                        return 'Contact';
+                                    case 'gif':
+                                        return 'GIF';
+                                    default:
+                                        return '';
+                                }
+                            })(),
                             id: msgId,
                             fromId: auth.userId,
                             encryptedContent: encrypted,

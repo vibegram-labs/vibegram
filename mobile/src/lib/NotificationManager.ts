@@ -5,13 +5,30 @@ import { Platform } from 'react-native';
 
 // Configure how notifications behave when received in foreground
 Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-        shouldShowAlert: true, // Show banner even when app is open
-        shouldPlaySound: true,
-        shouldSetBadge: true,
-        shouldShowBanner: true,
-        shouldShowList: true,
-    }),
+    handleNotification: async (notification) => {
+        const data = notification.request.content.data as Record<string, unknown> | undefined;
+        const type = typeof data?.type === 'string' ? data.type : '';
+        const isIncomingCall = type === 'call-start';
+
+        // For incoming calls, use in-app native overlay instead of foreground banner.
+        if (isIncomingCall) {
+            return {
+                shouldShowAlert: false,
+                shouldPlaySound: false,
+                shouldSetBadge: false,
+                shouldShowBanner: false,
+                shouldShowList: false,
+            };
+        }
+
+        return {
+            shouldShowAlert: true, // Show banner even when app is open
+            shouldPlaySound: true,
+            shouldSetBadge: true,
+            shouldShowBanner: true,
+            shouldShowList: true,
+        };
+    },
 });
 
 export const requestPermissionsAndGetToken = async (): Promise<string | undefined> => {

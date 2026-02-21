@@ -72,22 +72,39 @@ defmodule Vibe.Notifications do
       from_user_id = payload["fromUserId"] || payload["from_user_id"] || payload["from_id"]
       sender = if is_binary(from_user_id), do: Accounts.get_user(from_user_id), else: nil
       sender_name = (sender && (sender.name || sender.username)) || @default_message_title
+      sender_image = sender && sender.profile_image
+      message_type = payload["type"] || "text"
+      message_body = resolve_message_body(payload, message_type)
 
       data = %{
         type: "new_message",
         chatId: payload["chatId"] || payload["chat_id"],
         messageId: payload["messageId"] || payload["message_id"],
-        fromUserId: from_user_id
+        fromUserId: from_user_id,
+        fromUserName: sender_name,
+        fromUserImage: sender_image,
+        messageType: message_type
       }
 
-      message = %{
+      base_message = %{
         to: push_token,
         sound: "default",
         priority: "high",
         title: sender_name,
-        body: payload["body"] || "You have a new message",
+        body: message_body,
         data: data
       }
+
+      message =
+        case sender_image do
+          value when is_binary(value) and value != "" ->
+            base_message
+            |> Map.put(:mutableContent, true)
+            |> Map.put(:richContent, %{image: value})
+
+          _ ->
+            base_message
+        end
 
       request =
         Finch.build(
@@ -134,6 +151,38 @@ defmodule Vibe.Notifications do
   end
 
   defp normalize_call_type(_), do: "voice"
+
+  defp resolve_message_body(payload, message_type) do
+    body =
+      case payload["body"] || payload["text"] do
+        value when is_binary(value) -> String.trim(value)
+        _ -> ""
+      end
+
+    if body != "" do
+      truncate_text(body, 160)
+    else
+      case to_string(message_type || "text") do
+        "image" -> "Photo"
+        "video" -> "Video"
+        "voice" -> "Voice message"
+        "music" -> "Audio"
+        "file" -> "File"
+        "location" -> "Location"
+        "contact" -> "Contact"
+        "gif" -> "GIF"
+        _ -> "You have a new message"
+      end
+    end
+  end
+
+  defp truncate_text(text, max_len) when is_binary(text) and is_integer(max_len) do
+    if String.length(text) > max_len do
+      String.slice(text, 0, max_len - 1) <> "…"
+    else
+      text
+    end
+  end
 
   defp log_expo_push_result(kind, to_user_id, body) do
     with {:ok, decoded} <- Jason.decode(body || ""),

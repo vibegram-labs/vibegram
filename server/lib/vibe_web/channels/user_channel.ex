@@ -116,7 +116,15 @@ defmodule VibeWeb.UserChannel do
       |> Map.put("from_user_image", from_user_image)
 
     VibeWeb.Endpoint.broadcast!("user:#{to_user_id}", "call-start", enriched_payload)
-    _ = Notifications.send_incoming_call_push(to_user_id, enriched_payload)
+
+    recipient_online = map_size(VibeWeb.Presence.list("user:#{to_user_id}")) > 0
+    if recipient_online do
+      Logger.info(
+        "[UserChannel] call push skipped (recipient online) to_user=#{to_user_id} call_id=#{call_id}"
+      )
+    else
+      _ = Notifications.send_incoming_call_push(to_user_id, enriched_payload)
+    end
     {:noreply, socket}
   end
 

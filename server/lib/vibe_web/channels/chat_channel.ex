@@ -77,11 +77,19 @@ defmodule VibeWeb.ChatChannel do
                     "[ChatChannel] push skipped (muted chat) recipient=#{p.user_id} chat_id=#{chat_id} message_id=#{data["id"]}"
                   )
                 else
+                  push_body =
+                    case data["pushPreview"] || data["push_preview"] || data["textPreview"] || data["text_preview"] do
+                      value when is_binary(value) and value != "" -> value
+                      _ -> nil
+                    end
+
                   _ =
                     Notifications.send_message_push(p.user_id, %{
                       "chat_id" => chat_id,
                       "message_id" => data["id"],
-                      "from_id" => user_id
+                      "from_id" => user_id,
+                      "type" => data["type"],
+                      "body" => push_body
                     })
                 end
               end
