@@ -8,6 +8,10 @@ interface NotificationState {
     notificationsEnabled: boolean;
     pushToken: string | null;
     isInitializing: boolean;
+    initStartedAt: number | null;
+    pendingInitRequested: boolean;
+    pendingInitForceSync: boolean;
+    pendingInitReasons: string[];
     lastSyncedToken: string | null;
     lastSyncedUserId: string | null;
     lastSyncedAt: number | null;
@@ -16,6 +20,7 @@ interface NotificationState {
 }
 
 const PUSH_TOKEN_RESYNC_INTERVAL_MS = 10 * 60 * 1000;
+const INIT_STALE_TIMEOUT_MS = 45 * 1000;
 
 export const useNotificationStore = create<NotificationState>()(
     persist(
@@ -23,6 +28,10 @@ export const useNotificationStore = create<NotificationState>()(
             notificationsEnabled: true, // Default to true
             pushToken: null,
             isInitializing: false,
+            initStartedAt: null,
+            pendingInitRequested: false,
+            pendingInitForceSync: false,
+            pendingInitReasons: [],
             lastSyncedToken: null,
             lastSyncedUserId: null,
             lastSyncedAt: null,
@@ -40,6 +49,10 @@ export const useNotificationStore = create<NotificationState>()(
                             await updateProfileInfo({ pushToken: '' });
                             set({
                                 pushToken: null,
+                                initStartedAt: null,
+                                pendingInitRequested: false,
+                                pendingInitForceSync: false,
+                                pendingInitReasons: [],
                                 lastSyncedToken: null,
                                 lastSyncedUserId: user.userId,
                                 lastSyncedAt: Date.now(),
@@ -53,8 +66,8 @@ export const useNotificationStore = create<NotificationState>()(
 
             initNotifications: async (options = {}) => {
                 const { forceSync = false, reason = 'unknown' } = options;
-                const { notificationsEnabled, isInitializing } = get();
-                if (!notificationsEnabled || isInitializing) {
+                const { notificationsEnabled, isInitializing, initStartedAt } = get();
+                if (!notificationsEnabled) {
                     console.log('[NotificationStore] initNotifications skipped', {
                         notificationsEnabled,
                         isInitializing,
@@ -63,7 +76,50 @@ export const useNotificationStore = create<NotificationState>()(
                     return;
                 }
 
-                set({ isInitializing: true });
+                if (isInitializing) {
+                    const isStale =
+                        !initStartedAt || (Date.now() - initStartedAt) > INIT_STALE_TIMEOUT_MS;
+                    if (isStale) {
+                        console.warn('[NotificationStore] Detected stale notification init lock; resetting', {
+                            reason,
+                            initStartedAt,
+                        });
+                        set({
+                            isInitializing: false,
+                            initStartedAt: null,
+                            pendingInitRequested: false,
+                            pendingInitForceSync: false,
+                            pendingInitReasons: [],
+                        });
+                    } else {
+                    set((state) => {
+                        const hasReason = state.pendingInitReasons.includes(reason);
+                        const pendingInitReasons = hasReason
+                            ? state.pendingInitReasons
+                            : [...state.pendingInitReasons, reason];
+
+                        return {
+                            pendingInitRequested: true,
+                            pendingInitForceSync: state.pendingInitForceSync || forceSync,
+                            pendingInitReasons,
+                        };
+                    });
+
+                    console.log('[NotificationStore] initNotifications queued while initializing', {
+                        reason,
+                        forceSync,
+                    });
+                    return;
+                    }
+                }
+
+                set({
+                    isInitializing: true,
+                    initStartedAt: Date.now(),
+                    pendingInitRequested: false,
+                    pendingInitForceSync: false,
+                    pendingInitReasons: [],
+                });
                 try {
                     console.log('[NotificationStore] Requesting permissions and token...', {
                         reason,
@@ -118,13 +174,56 @@ export const useNotificationStore = create<NotificationState>()(
                 } catch (error) {
                     console.error('[NotificationStore] Failed to initialize notifications:', error);
                 } finally {
-                    set({ isInitializing: false });
+                    set({
+                        isInitializing: false,
+                        initStartedAt: null,
+                    });
+
+                    const { pendingInitRequested, pendingInitForceSync, pendingInitReasons } = get();
+                    if (pendingInitRequested) {
+                        set({
+                            pendingInitRequested: false,
+                            pendingInitForceSync: false,
+                            pendingInitReasons: [],
+                        });
+                        const queuedReason = pendingInitReasons.length > 0
+                            ? `queued:${pendingInitReasons.join(',')}`
+                            : 'queued';
+                        setTimeout(() => {
+                            get().initNotifications({
+                                forceSync: pendingInitForceSync,
+                                reason: queuedReason,
+                            });
+                        }, 0);
+                    }
                 }
             },
         }),
         {
             name: 'notification-storage',
             storage: createJSONStorage(() => AsyncStorage),
+            version: 2,
+            migrate: (persistedState: any) => {
+                return {
+                    notificationsEnabled: persistedState?.notificationsEnabled ?? true,
+                    pushToken: typeof persistedState?.pushToken === 'string' ? persistedState.pushToken : null,
+                    isInitializing: false,
+                    initStartedAt: null,
+                    pendingInitRequested: false,
+                    pendingInitForceSync: false,
+                    pendingInitReasons: [],
+                    lastSyncedToken: typeof persistedState?.lastSyncedToken === 'string' ? persistedState.lastSyncedToken : null,
+                    lastSyncedUserId: typeof persistedState?.lastSyncedUserId === 'string' ? persistedState.lastSyncedUserId : null,
+                    lastSyncedAt: typeof persistedState?.lastSyncedAt === 'number' ? persistedState.lastSyncedAt : null,
+                };
+            },
+            partialize: (state) => ({
+                notificationsEnabled: state.notificationsEnabled,
+                pushToken: state.pushToken,
+                lastSyncedToken: state.lastSyncedToken,
+                lastSyncedUserId: state.lastSyncedUserId,
+                lastSyncedAt: state.lastSyncedAt,
+            }),
         }
     )
 );

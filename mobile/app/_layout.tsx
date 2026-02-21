@@ -174,6 +174,7 @@ export default function RootLayout() {
         // Register for Push Notifications even if socket is already connected.
         // This guarantees iOS permission/token sync on cold starts.
         useNotificationStore.getState().initNotifications({
+          forceSync: true,
           reason: 'app_boot',
         });
         // Check WebRTC availability for calls (safe in Expo Go - will just report false)
