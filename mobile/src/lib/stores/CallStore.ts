@@ -39,6 +39,49 @@ export interface CallParticipant {
     userImage?: string;
 }
 
+const asNonEmptyString = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+};
+
+const normalizeCallType = (value: unknown): CallType => {
+    const raw = asNonEmptyString(value)?.toLowerCase();
+    return raw === 'video' ? 'video' : 'voice';
+};
+
+const normalizeIncomingCallPayload = (
+    payload: Record<string, unknown> | null | undefined
+): CallState['incomingCallData'] | null => {
+    if (!payload) return null;
+    const fromUserId =
+        asNonEmptyString(payload.fromUserId) ||
+        asNonEmptyString(payload.from_user_id) ||
+        asNonEmptyString(payload.callerId) ||
+        asNonEmptyString(payload.caller_id);
+    const callId =
+        asNonEmptyString(payload.callId) ||
+        asNonEmptyString(payload.call_id);
+    if (!fromUserId || !callId) return null;
+    return {
+        fromUserId,
+        fromUserName:
+            asNonEmptyString(payload.fromUserName) ||
+            asNonEmptyString(payload.from_user_name) ||
+            asNonEmptyString(payload.callerName) ||
+            asNonEmptyString(payload.caller_name) ||
+            fromUserId.slice(0, 8),
+        fromUserImage:
+            asNonEmptyString(payload.fromUserImage) ||
+            asNonEmptyString(payload.from_user_image) ||
+            asNonEmptyString(payload.callerImage) ||
+            asNonEmptyString(payload.caller_image) ||
+            undefined,
+        callType: normalizeCallType(payload.callType || payload.call_type),
+        callId,
+    };
+};
+
 interface CallState {
     // WebRTC availability
     isWebRTCAvailable: boolean;
@@ -95,6 +138,7 @@ interface CallActions {
     startCall: (remoteUser: CallParticipant, type: CallType, socket: any) => Promise<boolean>;
 
     // Incoming calls
+    handleIncomingCallPayload: (payload: Record<string, unknown> | null | undefined) => boolean;
     handleIncomingCall: (data: CallState['incomingCallData']) => void;
     acceptCall: (socket: any) => Promise<boolean>;
     declineCall: (socket: any) => void;
@@ -110,9 +154,9 @@ interface CallActions {
     updateDuration: () => void;
 
     // WebRTC signaling handlers
-    handleCallAccepted: () => Promise<void>;
+    handleCallAccepted: (payload?: Record<string, unknown>) => Promise<void>;
     handleWebRTCSignal: (data: any) => Promise<void>;
-    handleCallEnded: () => void;
+    handleCallEnded: (payload?: Record<string, unknown>) => void;
 
     // Reset
     resetCall: () => void;
@@ -219,6 +263,26 @@ export const useCallStore = create<CallState & CallActions>()(
                 };
             };
 
+            const resolveSignalingChannel = (socketOverride?: any) => {
+                if (socketOverride && typeof socketOverride.push === 'function') {
+                    return socketOverride;
+                }
+                const storedChannel = get().signalingChannel;
+                if (storedChannel && typeof storedChannel.push === 'function') {
+                    return storedChannel;
+                }
+                try {
+                    const { getUserChannel } = require('../ChatStore');
+                    const globalChannel = getUserChannel?.();
+                    if (globalChannel && typeof globalChannel.push === 'function') {
+                        return globalChannel;
+                    }
+                } catch {
+                    // Ignore cyclic import resolution failures.
+                }
+                return null;
+            };
+
             return {
                 ...initialState,
 
@@ -243,6 +307,7 @@ export const useCallStore = create<CallState & CallActions>()(
 
             startCall: async (remoteUser, type, socket) => {
                 const { isWebRTCAvailable, callStatus } = get();
+                const channel = resolveSignalingChannel(socket);
 
                 if (!isWebRTCAvailable) {
                     console.warn('[CallStore] WebRTC not available, cannot start call');
@@ -252,7 +317,7 @@ export const useCallStore = create<CallState & CallActions>()(
                     console.warn('[CallStore] Already in a call, status:', callStatus);
                     return false;
                 }
-                if (!socket || typeof socket.push !== 'function') {
+                if (!channel) {
                     console.warn('[CallStore] User channel unavailable, cannot trigger call-start');
                     return false;
                 }
@@ -266,7 +331,7 @@ export const useCallStore = create<CallState & CallActions>()(
                     callStatus: 'ringing',
                     remoteUser,
                     isVideoEnabled: type === 'video',
-                    signalingChannel: socket,
+                    signalingChannel: channel,
                 });
 
                 try {
@@ -280,10 +345,10 @@ export const useCallStore = create<CallState & CallActions>()(
                         markCallFailed();
                         return false;
                     }
-                    bindSignalingCallbacks(socket);
+                    bindSignalingCallbacks(channel);
                     set({ hasLocalStream: true });
 
-                    socket.push('call-start', {
+                    channel.push('call-start', {
                         toUserId: remoteUser.userId,
                         callId,
                         callType: type,
@@ -294,7 +359,7 @@ export const useCallStore = create<CallState & CallActions>()(
                         const current = get();
                         if (current.callId === callId && current.callStatus === 'ringing') {
                             console.log('[CallStore] Ringing timeout, ending call');
-                            get().endCall(socket);
+                            get().endCall(channel);
                         }
                     }, 30000);
 
@@ -306,33 +371,65 @@ export const useCallStore = create<CallState & CallActions>()(
                 }
             },
 
+            handleIncomingCallPayload: (payload) => {
+                const normalized = normalizeIncomingCallPayload(payload);
+                if (!normalized) return false;
+                get().handleIncomingCall(normalized);
+                return true;
+            },
+
             handleIncomingCall: (data) => {
-                const { callStatus } = get();
-                if (callStatus !== 'idle' || !data) return;
+                const normalized = normalizeIncomingCallPayload(data as Record<string, unknown>);
+                if (!normalized) return;
+                const current = get();
+                const isSameIncomingCall =
+                    current.callDirection === 'incoming' &&
+                    current.callStatus === 'ringing' &&
+                    current.callId === normalized.callId;
+
+                if (current.callStatus !== 'idle' && !isSameIncomingCall) return;
+
+                if (isSameIncomingCall) {
+                    const mergedIncoming = {
+                        ...(current.incomingCallData || normalized),
+                        ...normalized,
+                    };
+                    set({
+                        incomingCallData: mergedIncoming,
+                        remoteUser: {
+                            userId: mergedIncoming.fromUserId,
+                            userName: mergedIncoming.fromUserName,
+                            userImage: mergedIncoming.fromUserImage,
+                        },
+                        callType: mergedIncoming.callType,
+                    });
+                    return;
+                }
 
                 set({
-                    incomingCallData: data,
+                    incomingCallData: normalized,
                     callStatus: 'ringing',
                     callDirection: 'incoming',
-                    callId: data.callId,
-                    callType: data.callType,
+                    callId: normalized.callId,
+                    callType: normalized.callType,
                     remoteUser: {
-                        userId: data.fromUserId,
-                        userName: data.fromUserName,
-                        userImage: data.fromUserImage,
+                        userId: normalized.fromUserId,
+                        userName: normalized.fromUserName,
+                        userImage: normalized.fromUserImage,
                     },
                 });
             },
 
             acceptCall: async (socket) => {
                 const { incomingCallData, isWebRTCAvailable, callType } = get();
+                const channel = resolveSignalingChannel(socket);
                 if (!incomingCallData || !isWebRTCAvailable) return false;
-                if (!socket || typeof socket.push !== 'function') {
+                if (!channel) {
                     console.warn('[CallStore] User channel unavailable, cannot accept call');
                     return false;
                 }
 
-                set({ callStatus: 'connecting', signalingChannel: socket });
+                set({ callStatus: 'connecting', signalingChannel: channel });
 
                 try {
                     // Pre-fetch TURN credentials in parallel with media init
@@ -344,10 +441,10 @@ export const useCallStore = create<CallState & CallActions>()(
                         markCallFailed();
                         return false;
                     }
-                    bindSignalingCallbacks(socket);
+                    bindSignalingCallbacks(channel);
                     set({ hasLocalStream: true });
 
-                    socket.push('call-accepted', {
+                    channel.push('call-accepted', {
                         toUserId: incomingCallData.fromUserId,
                         callId: incomingCallData.callId,
                     });
@@ -361,7 +458,7 @@ export const useCallStore = create<CallState & CallActions>()(
 
             declineCall: (socket) => {
                 const { incomingCallData, callId, remoteUser, callType, callDirection, signalingChannel } = get();
-                const channel = socket || signalingChannel;
+                const channel = resolveSignalingChannel(socket || signalingChannel);
 
                 if (incomingCallData && channel && typeof channel.push === 'function') {
                     channel.push('call-end', {
@@ -387,36 +484,53 @@ export const useCallStore = create<CallState & CallActions>()(
                 get().resetCall();
             },
 
-            handleCallAccepted: async () => {
-                const { callDirection, remoteUser, signalingChannel } = get();
+            handleCallAccepted: async (payload) => {
+                const current = get();
+                const { callDirection, remoteUser, callId } = current;
+                const acceptedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
+                if (acceptedCallId && callId && acceptedCallId !== callId) return;
                 if (callDirection !== 'outgoing' || !remoteUser) return;
-                if (!signalingChannel || typeof signalingChannel.push !== 'function') {
+                const channel = resolveSignalingChannel(current.signalingChannel);
+                if (!channel) {
                     console.warn('[CallStore] Missing signaling channel after call acceptance');
                     markCallFailed();
                     return;
                 }
 
-                set({ callStatus: 'connecting' });
+                set({ callStatus: 'connecting', signalingChannel: channel });
 
                 try {
-                    bindSignalingCallbacks(signalingChannel);
+                    bindSignalingCallbacks(channel);
                     const forceRelay = shouldForceRelay();
                     const offer = await WebRTCService.createOffer(forceRelay);
                     if (!offer) throw new Error('Failed to create offer');
                 } catch (e) {
                     console.error('[CallStore] Failed to create offer:', e);
-                    get().endCall(signalingChannel);
+                    get().endCall(channel);
                 }
             },
 
             handleWebRTCSignal: async (data) => {
-                const { type, sdp, candidate } = data;
+                const { callId, callStatus } = get();
+                const signalCallId = asNonEmptyString(data?.callId) || asNonEmptyString(data?.call_id);
+                if (signalCallId && callId && signalCallId !== callId) {
+                    return;
+                }
+                if (callStatus === 'idle' || callStatus === 'ended') {
+                    return;
+                }
+
+                const type = asNonEmptyString(data?.type);
+                const sdp = data?.sdp;
+                const candidate = data?.candidate;
                 try {
                     bindSignalingCallbacks();
                     const forceRelay = shouldForceRelay();
                     if (type === 'offer') {
+                        if (!sdp) return;
                         await WebRTCService.handleOffer(sdp, forceRelay);
                     } else if (type === 'answer') {
+                        if (!sdp) return;
                         await WebRTCService.handleAnswer(sdp);
                         set({ callStatus: 'active', callStartTime: Date.now() });
                         WebRTCService.startBandwidthMonitor();
@@ -428,8 +542,12 @@ export const useCallStore = create<CallState & CallActions>()(
                 }
             },
 
-            handleCallEnded: () => {
+            handleCallEnded: (payload) => {
                 const { callId, remoteUser, callType, callDirection, callStatus, callDuration } = get();
+                const endedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
+                if (endedCallId && callId && endedCallId !== callId) {
+                    return;
+                }
 
                 // Save to history before resetting
                 if (callId && remoteUser) {
@@ -454,7 +572,7 @@ export const useCallStore = create<CallState & CallActions>()(
 
             endCall: (socket) => {
                 const { remoteUser, callId, callType, callDirection, callStatus, callDuration, signalingChannel } = get();
-                const channel = socket || signalingChannel;
+                const channel = resolveSignalingChannel(socket || signalingChannel);
 
                 if (remoteUser && channel && typeof channel.push === 'function') {
                     channel.push('call-end', {

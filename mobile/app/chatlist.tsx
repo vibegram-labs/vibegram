@@ -1441,19 +1441,12 @@ export default function ChatListScreen({
     useEffect(() => {
         if (!effectiveChatId) return;
         const chat = useChatStore.getState().chats.find(c => c.chatId === effectiveChatId);
-        if (!chat || chat.messages.length === 0) {
-            sendDebug('loadMessages:trigger', {
-                effectiveChatId,
-                chatFound: !!chat,
-                localMessages: chat?.messages?.length ?? 0,
-            });
-            loadMessages(effectiveChatId);
-        } else {
-            sendDebug('loadMessages:skip-cache-hit', {
-                effectiveChatId,
-                localMessages: chat.messages.length,
-            });
-        }
+        sendDebug('loadMessages:trigger', {
+            effectiveChatId,
+            chatFound: !!chat,
+            localMessages: chat?.messages?.length ?? 0,
+        });
+        loadMessages(effectiveChatId);
     }, [effectiveChatId, loadMessages]);
 
     useEffect(() => {
@@ -1913,20 +1906,14 @@ export default function ChatListScreen({
                 return { chats: updatedChats };
             });
         }
-        if (sourcePoint && Number.isFinite(sourcePoint.x) && Number.isFinite(sourcePoint.y)) {
+        if (!shouldUseNativeList && sourcePoint && Number.isFinite(sourcePoint.x) && Number.isFinite(sourcePoint.y)) {
             spawnReactionFx(emoji, message, sourcePoint.x, sourcePoint.y);
         }
-    }, [effectiveChatId, spawnReactionFx]);
+    }, [effectiveChatId, shouldUseNativeList, spawnReactionFx]);
 
     const handleNativeSurfaceEvent = useCallback((event: { nativeEvent: Record<string, unknown> } | Record<string, unknown>) => {
-        console.log('[RN] handleNativeSurfaceEvent called', { event });
         const nativeEvent = extractNativePayload(event);
         const type = typeof nativeEvent.type === 'string' ? nativeEvent.type : '';
-        console.log('[RN] nativeEvent extracted', {
-            type,
-            keys: Object.keys(nativeEvent),
-            payload: nativeEvent,
-        });
         sendDebug('nativeEvent:received', {
             type: type || '(missing)',
             keys: Object.keys(nativeEvent),
@@ -1945,13 +1932,6 @@ export default function ChatListScreen({
         if (type === 'sendMessage') {
             const textRaw = nativeEvent.text;
             const messageIdRaw = nativeEvent.messageId;
-            console.log('[Native] sendMessage event received', {
-                textRaw,
-                messageIdRaw,
-                effectiveChatId,
-                textType: typeof textRaw,
-                messageIdType: typeof messageIdRaw,
-            });
             if (typeof textRaw !== 'string' || !effectiveChatId) {
                 sendDebug('nativeEvent:sendMessage:blocked', {
                     textType: typeof textRaw,
@@ -2018,13 +1998,6 @@ export default function ChatListScreen({
                 }
                 nativeSendInFlightRef.current.add(existingId);
             }
-            console.log('[Native] sendMessage proceeding', {
-                effectiveChatId,
-                messageIdRaw,
-                existingId,
-                replyToId,
-                textLength: textRaw.length,
-            });
             sendDebug('nativeEvent:sendMessage', {
                 effectiveChatId,
                 messageIdRaw,
@@ -2039,7 +2012,6 @@ export default function ChatListScreen({
                 existingId
             )
                 .then(() => {
-                    console.log('[Native] sendMessage success:', messageIdRaw);
                     if (existingId) {
                         nativeSendRecentlyHandledRef.current.set(existingId, Date.now());
                     }
@@ -2203,6 +2175,15 @@ export default function ChatListScreen({
             const sourcePoint = Number.isFinite(sourceX) && Number.isFinite(sourceY)
                 ? { x: sourceX as number, y: sourceY as number }
                 : undefined;
+            if (shouldUseNativeList && sourcePoint) {
+                void nativeSurfaceRef.current?.playReactionFx({
+                    emoji: emojiRaw,
+                    x: sourcePoint.x,
+                    y: sourcePoint.y,
+                });
+                commitReactionLocally(emojiRaw, message);
+                return;
+            }
             commitReactionLocally(emojiRaw, message, sourcePoint);
             return;
         }

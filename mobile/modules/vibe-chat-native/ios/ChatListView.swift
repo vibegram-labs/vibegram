@@ -764,6 +764,28 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     maybeStartPendingSendTransition()
   }
 
+  func playReactionFx(_ payload: [String: Any]) {
+    guard let emojiRaw = payload["emoji"] as? String else { return }
+    let emoji = emojiRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !emoji.isEmpty else { return }
+    guard
+      let pointX = payloadCGFloat(payload["x"] ?? payload["sourceX"]),
+      let pointY = payloadCGFloat(payload["y"] ?? payload["sourceY"])
+    else {
+      return
+    }
+
+    var localPoint = CGPoint(x: pointX, y: pointY)
+    if let window {
+      localPoint = convert(localPoint, from: window)
+    }
+    localPoint.x = min(max(localPoint.x, -32.0), bounds.width + 32.0)
+    localPoint.y = min(max(localPoint.y, -32.0), bounds.height + 32.0)
+
+    let color = resolvedReactionFxColor(payload["color"])
+    renderNativeReactionFxBurst(emoji: emoji, at: localPoint, tintColor: color)
+  }
+
   public func collectionView(
     _ collectionView: UICollectionView, numberOfItemsInSection section: Int
   ) -> Int {
@@ -923,6 +945,108 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     block()
     DispatchQueue.main.async { [weak self] in
       self?.isInternalScrollAdjustment = false
+    }
+  }
+
+  private func payloadCGFloat(_ value: Any?) -> CGFloat? {
+    if let number = value as? NSNumber {
+      return CGFloat(number.doubleValue)
+    }
+    if let number = value as? Double {
+      return CGFloat(number)
+    }
+    if let number = value as? Int {
+      return CGFloat(number)
+    }
+    if let text = value as? String, let parsed = Double(text) {
+      return CGFloat(parsed)
+    }
+    return nil
+  }
+
+  private func resolvedReactionFxColor(_ value: Any?) -> UIColor {
+    if let raw = value as? String, let color = parseReactionFxColor(raw) {
+      return color
+    }
+    return (appearance.bubbleMeGradient.last ?? UIColor.white).withAlphaComponent(0.95)
+  }
+
+  private func parseReactionFxColor(_ raw: String) -> UIColor? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("#") else { return nil }
+    var hex = String(trimmed.dropFirst())
+    if hex.count == 3 {
+      hex = hex.map { "\($0)\($0)" }.joined()
+    }
+    guard hex.count == 6 else { return nil }
+    var value: UInt64 = 0
+    guard Scanner(string: hex).scanHexInt64(&value) else { return nil }
+    let r = CGFloat((value & 0xFF0000) >> 16) / 255.0
+    let g = CGFloat((value & 0x00FF00) >> 8) / 255.0
+    let b = CGFloat(value & 0x0000FF) / 255.0
+    return UIColor(red: r, green: g, blue: b, alpha: 1.0)
+  }
+
+  private func renderNativeReactionFxBurst(emoji: String, at point: CGPoint, tintColor: UIColor) {
+    let container = UIView(frame: bounds)
+    container.clipsToBounds = false
+    container.isUserInteractionEnabled = false
+    transitionOverlayHost.addSubview(container)
+
+    let emojiLabel = UILabel()
+    emojiLabel.text = emoji
+    emojiLabel.font = UIFont.systemFont(ofSize: 30)
+    emojiLabel.sizeToFit()
+    emojiLabel.center = point
+    emojiLabel.alpha = 0.0
+    emojiLabel.transform = CGAffineTransform(scaleX: 0.74, y: 0.74)
+    container.addSubview(emojiLabel)
+
+    UIView.animateKeyframes(
+      withDuration: 0.52,
+      delay: 0.0,
+      options: [.calculationModeCubic, .beginFromCurrentState]
+    ) {
+      UIView.addKeyframe(withRelativeStartTime: 0.0, relativeDuration: 0.25) {
+        emojiLabel.alpha = 1.0
+        emojiLabel.transform = CGAffineTransform(scaleX: 1.18, y: 1.18)
+      }
+      UIView.addKeyframe(withRelativeStartTime: 0.24, relativeDuration: 0.76) {
+        emojiLabel.alpha = 0.0
+        emojiLabel.center = CGPoint(x: point.x, y: point.y - 32.0)
+        emojiLabel.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+      }
+    }
+
+    let particleCount = 11
+    for index in 0..<particleCount {
+      let dotSize = CGFloat.random(in: 3.4...6.2)
+      let dot = UIView(frame: CGRect(x: 0, y: 0, width: dotSize, height: dotSize))
+      dot.layer.cornerRadius = dotSize * 0.5
+      dot.backgroundColor = tintColor.withAlphaComponent(CGFloat.random(in: 0.72...0.95))
+      dot.center = point
+      container.addSubview(dot)
+
+      let angle = (CGFloat(index) / CGFloat(max(1, particleCount))) * (.pi * 2.0)
+      let radial = CGFloat.random(in: 24.0...58.0)
+      let dx = cos(angle) * radial
+      let dy = (sin(angle) * radial * 0.72) - CGFloat.random(in: 14.0...26.0)
+
+      UIView.animate(
+        withDuration: 0.44,
+        delay: Double(index % 4) * 0.015,
+        options: [.curveEaseOut, .beginFromCurrentState]
+      ) {
+        dot.center = CGPoint(x: point.x + dx, y: point.y + dy)
+        dot.alpha = 0.0
+        dot.transform = CGAffineTransform(scaleX: 0.35, y: 0.35)
+      } completion: { _ in
+        dot.removeFromSuperview()
+      }
+    }
+
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) {
+      container.removeFromSuperview()
     }
   }
 

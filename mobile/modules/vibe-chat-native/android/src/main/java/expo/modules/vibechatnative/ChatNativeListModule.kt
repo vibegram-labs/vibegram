@@ -35,6 +35,10 @@ class ChatNativeListModule : Module() {
       ChatListRegistry.view(surfaceId)?.startSendTransition(payload)
     }
 
+    AsyncFunction("playReactionFx") { surfaceId: String, payload: Map<String, Any?> ->
+      ChatListRegistry.view(surfaceId)?.playReactionFx(payload)
+    }
+
     View(ChatListView::class) {
       Events("onViewportChanged", "onNativeEvent")
 

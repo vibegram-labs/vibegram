@@ -257,6 +257,7 @@ const decryptMessageContent = async (
     privateKey: string,
     encryptedContent: string,
     isFromMe: boolean,
+    chatId: string = 'unknown_chat'
 ): Promise<string> => {
     try {
         const result = await decryptMessagesBatch({
@@ -270,7 +271,8 @@ const decryptMessageContent = async (
             ],
         });
         return result.messages.single || '';
-    } catch {
+    } catch (e: any) {
+        console.warn(`[ChatStore] decryptMessageContent failed for chat ${chatId}:`, e);
         return '';
     }
 };
@@ -936,7 +938,7 @@ const handleMessageEditedPayload = async (
     if (auth?.keyPair?.privateKey && existingMsg) {
         try {
             const isFromMe = (existingMsg.fromId || '').toUpperCase() === (auth.userId || '').toUpperCase();
-            const decrypted = await decryptMessageContent(auth.keyPair.privateKey, encryptedContent, isFromMe);
+            const decrypted = await decryptMessageContent(auth.keyPair.privateKey, encryptedContent, isFromMe, chatId);
             if (decrypted) {
                 parsedPatch = parseDecryptedContent(decrypted);
             }
@@ -1378,20 +1380,29 @@ export const useChatStore = create<ChatState>()(
                                 // Dynamic import to avoid crashes if CallStore fails to load
                                 const { useCallStore } = require('./stores/CallStore');
                                 const callStore = useCallStore.getState();
-
-                                // Get caller info from our chats
-                                const { chats } = get();
-                                const callerChat = chats.find(c =>
-                                    c.friendId?.toUpperCase() === (payload.fromUserId || '').toUpperCase()
-                                );
-
-                                callStore.handleIncomingCall({
-                                    fromUserId: payload.fromUserId,
-                                    fromUserName: callerChat?.friendName || payload.fromUserId?.slice(0, 8) || 'Unknown',
-                                    fromUserImage: callerChat?.friendImage,
-                                    callType: payload.callType || 'voice',
-                                    callId: payload.callId,
-                                });
+                                const handled = callStore.handleIncomingCallPayload(payload);
+                                if (!handled) {
+                                    // Fallback enrichment from chat list when backend payload has minimal fields.
+                                    const fromUserId =
+                                        (typeof payload?.fromUserId === 'string' ? payload.fromUserId : '') ||
+                                        (typeof payload?.from_user_id === 'string' ? payload.from_user_id : '');
+                                    const callId =
+                                        (typeof payload?.callId === 'string' ? payload.callId : '') ||
+                                        (typeof payload?.call_id === 'string' ? payload.call_id : '');
+                                    if (fromUserId && callId) {
+                                        const { chats } = get();
+                                        const callerChat = chats.find(c =>
+                                            c.friendId?.toUpperCase() === fromUserId.toUpperCase()
+                                        );
+                                        callStore.handleIncomingCall({
+                                            fromUserId,
+                                            fromUserName: callerChat?.friendName || fromUserId.slice(0, 8),
+                                            fromUserImage: callerChat?.friendImage,
+                                            callType: payload?.callType === 'video' || payload?.call_type === 'video' ? 'video' : 'voice',
+                                            callId,
+                                        });
+                                    }
+                                }
                             } catch (e) {
                                 console.warn('[ChatStore] Call handling failed (WebRTC not available?):', e);
                             }
@@ -1402,7 +1413,7 @@ export const useChatStore = create<ChatState>()(
                             // console.log('[ChatStore] Call accepted:', payload);
                             try {
                                 const { useCallStore } = require('./stores/CallStore');
-                                useCallStore.getState().handleCallAccepted();
+                                useCallStore.getState().handleCallAccepted(payload);
                             } catch (e) {
                                 console.warn('[ChatStore] Call accepted handling failed:', e);
                             }
@@ -1413,7 +1424,7 @@ export const useChatStore = create<ChatState>()(
                             // console.log('[ChatStore] Call ended:', payload);
                             try {
                                 const { useCallStore } = require('./stores/CallStore');
-                                useCallStore.getState().handleCallEnded();
+                                useCallStore.getState().handleCallEnded(payload);
                             } catch (e) {
                                 console.warn('[ChatStore] Call end handling failed:', e);
                             }
@@ -1506,6 +1517,12 @@ export const useChatStore = create<ChatState>()(
                             }
                         }
                         mergedMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                        console.log(`[ChatStore-TargetLog] User ${auth?.userId} loaded chat ${c.chatId}. API returned ${serverMessages.length} msgs. Merged result is ${mergedMessages.length} msgs.`);
+                        const undecryptableCount = mergedMessages.filter(m => m.encryptedContent && !m.plaintext).length;
+                        if (undecryptableCount > 0) {
+                            console.log(`[ChatStore-TargetLog] Out of ${mergedMessages.length} msgs, ${undecryptableCount} need decryption/rendering.`);
+                        }
+
                         chatStoreMessageLog('loadChats:merged', {
                             chatId: c.chatId,
                             localCount: localMessages.length,
@@ -1521,7 +1538,7 @@ export const useChatStore = create<ChatState>()(
                             try {
                                 if (auth?.keyPair?.privateKey) {
                                     const isFromMe = (lastMsg.fromId || '').toUpperCase() === (auth.userId || '').toUpperCase();
-                                    const decrypted = await decryptMessageContent(auth.keyPair.privateKey, lastMsg.encryptedContent, isFromMe);
+                                    const decrypted = await decryptMessageContent(auth.keyPair.privateKey, lastMsg.encryptedContent, isFromMe, c.chatId);
                                     if (decrypted) {
                                         const parsed = parseDecryptedContent(decrypted);
                                         Object.assign(lastMsg, parsed);
@@ -1582,7 +1599,7 @@ export const useChatStore = create<ChatState>()(
                                     });
 
                                 channel.on("message", async (payload: any) => {
-                                    // console.log(`[ChatStore] Received message on ${topic}:`, payload.id);
+                                    console.log(`[ChatStore-TargetLog] Realtime msg received on ${topic}: ${payload.id}, type: ${payload.type}. hasPlaintext: ${!!payload.plaintext}, encryptedContent: ${!!payload.encryptedContent}`);
                                     const incomingId = payload?.id || payload?.message_id;
 
                                     // Ignore current user's own messages (we handle them optimistically)
@@ -1602,7 +1619,7 @@ export const useChatStore = create<ChatState>()(
                                     if (currentAuth?.keyPair?.privateKey && newMsg.encryptedContent) {
                                         try {
                                             const isFromMe = (newMsg.fromId || '').toUpperCase() === (currentAuth.userId || '').toUpperCase();
-                                            const decrypted = await decryptMessageContent(currentAuth.keyPair.privateKey, newMsg.encryptedContent, isFromMe);
+                                            const decrypted = await decryptMessageContent(currentAuth.keyPair.privateKey, newMsg.encryptedContent, isFromMe, chat.chatId);
                                             if (decrypted) {
                                                 const parsed = parseDecryptedContent(decrypted);
                                                 Object.assign(newMsg, parsed);
@@ -1982,7 +1999,7 @@ export const useChatStore = create<ChatState>()(
                                             const sess = AuthManager.getInstance().getSession();
                                             if (sess?.keyPair?.privateKey && serverMsg.encryptedContent) {
                                                 const isFromMe = serverMsg.fromId === sess.userId;
-                                                const decrypted = await decryptMessageContent(sess.keyPair.privateKey, serverMsg.encryptedContent, isFromMe);
+                                                const decrypted = await decryptMessageContent(sess.keyPair.privateKey, serverMsg.encryptedContent, isFromMe, chatId);
                                                 if (decrypted) {
                                                     decryptedPayload = parseDecryptedContent(decrypted);
                                                 }
@@ -2255,7 +2272,7 @@ export const useChatStore = create<ChatState>()(
                         const sess = AuthManager.getInstance().getSession();
                         if (sess?.keyPair?.privateKey) {
                             const isFromMe = (msg.fromId || '').toUpperCase() === (sess.userId || '').toUpperCase();
-                            const decrypted = await decryptMessageContent(sess.keyPair.privateKey, msg.encryptedContent, isFromMe);
+                            const decrypted = await decryptMessageContent(sess.keyPair.privateKey, msg.encryptedContent, isFromMe, chatId);
                             const parsed = parseDecryptedContent(decrypted || '');
                             if (typeof parsed.plaintext === 'string') {
                                 recoveredText = parsed.plaintext;
@@ -2438,13 +2455,6 @@ export const useChatStore = create<ChatState>()(
             },
 
             sendMessage: async (chatId, text, type: Message['type'] = 'text', metadata: any = {}, existingId?: string) => {
-                console.log('[ChatStore] sendMessage called', {
-                    chatId,
-                    textLength: text.length,
-                    type,
-                    existingId,
-                    existingIdType: typeof existingId,
-                });
                 const auth = AuthManager.getInstance().getSession();
                 if (!auth) {
                     console.warn('[ChatStore] sendMessage - no auth session');
@@ -2455,12 +2465,6 @@ export const useChatStore = create<ChatState>()(
                 let msgId = normalizedExistingId || Crypto.randomUUID();
                 let staleExistingId = existingId && existingId !== msgId ? existingId : undefined;
                 const now = Date.now();
-                console.log('[ChatStore] sendMessage ID resolution', {
-                    existingId,
-                    isValidBinaryId: !!normalizedExistingId,
-                    normalizedExistingId,
-                    msgId,
-                });
 
                 // Check Connection
                 const { isConnected } = get();
@@ -2963,14 +2967,8 @@ export const useChatStore = create<ChatState>()(
                         ephemeralChannel = await tryOpenDirectChatChannel(chatId);
                         if (ephemeralChannel) {
                             channel = ephemeralChannel;
-                            console.log('[ChatStore] Using direct channel fallback for send', { chatId });
                         }
                     }
-                    console.log('[ChatStore] Channel lookup', {
-                        chatId,
-                        hasChannel: !!channel,
-                        channelsCount: chatChannels.size,
-                    });
                     if (channel) {
                         const sendChannel = channel;
                         const isEphemeralChannel = sendChannel === ephemeralChannel;
@@ -2991,12 +2989,6 @@ export const useChatStore = create<ChatState>()(
                             latitude: null,
                             longitude: null
                         };
-                        console.log('[ChatStore] Sending message via Channel', {
-                            msgId,
-                            chatId,
-                            type,
-                            encryptedContentLength: encrypted.length,
-                        });
                         chatStoreLog('[ChatStore] Sending message payload meta:', {
                             id: payload.id,
                             type: payload.type,
@@ -3013,11 +3005,6 @@ export const useChatStore = create<ChatState>()(
 
                         sendChannel.push("message", payload).receive("ok", () => {
                             releaseEphemeralChannel();
-                            console.log('[ChatStore] Channel push OK received', {
-                                msgId,
-                                chatId,
-                                latency: Date.now() - startPush,
-                            });
                             get().clearUploadProgress(msgId);
                             const ackTime = Date.now();
                             chatStoreLog('[Timing] Channel Ack received:', ackTime, 'Latency:', ackTime - startPush, 'ms');
@@ -3227,12 +3214,11 @@ export const useChatStore = create<ChatState>()(
                 const cachedCount = Array.isArray(cachedChat?.messages) ? cachedChat!.messages.length : 0;
                 if (cachedCount > 0) {
                     if (__DEV__) {
-                        console.log('[ChatStore][HistoryDebug] loadMessages skipped (cache-first)', {
+                        console.log('[ChatStore][HistoryDebug] loadMessages executing (previously skipped cache-first)', {
                             chatId,
                             cachedCount,
                         });
                     }
-                    return;
                 }
 
                 const run = (async () => {
@@ -3328,11 +3314,41 @@ export const useChatStore = create<ChatState>()(
                             });
 
                             // Then add server messages that don't exist locally
+                            const newServerMessages: Message[] = [];
                             serverMsgMap.forEach((msg, id) => {
                                 if (!seenIds.has(id)) {
-                                    mergedMessages.push(msg);
+                                    newServerMessages.push(msg);
                                 }
                             });
+
+                            if (newServerMessages.length > 0 && auth?.keyPair?.privateKey) {
+                                try {
+                                    const itemsToDecrypt = newServerMessages
+                                        .filter(m => m.encryptedContent)
+                                        .map(m => ({
+                                            id: m.id,
+                                            encryptedContent: m.encryptedContent!,
+                                            isFromMe: (m.fromId || '').toUpperCase() === (auth.userId || '').toUpperCase()
+                                        }));
+
+                                    if (itemsToDecrypt.length > 0) {
+                                        const decryptedBatch = await decryptMessagesBatch({
+                                            privateKey: auth.keyPair.privateKey,
+                                            items: itemsToDecrypt
+                                        });
+                                        newServerMessages.forEach(msg => {
+                                            if (decryptedBatch.messages[msg.id]) {
+                                                const parsed = parseDecryptedContent(decryptedBatch.messages[msg.id]);
+                                                Object.assign(msg, parsed);
+                                            }
+                                        });
+                                    }
+                                } catch (e) {
+                                    console.warn('[ChatStore] bulk decryption failed in loadMessages', e);
+                                }
+                            }
+
+                            mergedMessages.push(...newServerMessages);
 
                             // Sort by timestamp
                             mergedMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));

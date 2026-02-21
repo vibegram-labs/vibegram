@@ -126,6 +126,7 @@ export interface NativeChatListModule {
     viewPosition?: number,
   ) => Promise<void>;
   startSendTransition?: (surfaceId: string, payload: NativeSendTransitionPayload) => Promise<void>;
+  playReactionFx?: (surfaceId: string, payload: NativeReactionFxPayload) => Promise<void>;
 }
 
 export interface NativeSendTransitionPayload {
@@ -149,6 +150,15 @@ export interface NativeSendTransitionPayload {
   sourceContainerY?: number;
   sourceContainerWidth?: number;
   sourceContainerHeight?: number;
+}
+
+export interface NativeReactionFxPayload {
+  emoji: string;
+  x?: number;
+  y?: number;
+  sourceX?: number;
+  sourceY?: number;
+  color?: string;
 }
 
 export interface NativeChatRuntimeInfo {

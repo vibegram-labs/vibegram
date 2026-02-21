@@ -51,28 +51,64 @@ export default function RootLayout() {
   // Notification listeners — receive + tap
   const notificationListener = useRef<Notifications.EventSubscription | null>(null);
   const responseListener = useRef<Notifications.EventSubscription | null>(null);
+  const handledNotificationIdsRef = useRef<Set<string>>(new Set());
+
+  const handleNotificationData = (data: Record<string, unknown> | undefined): boolean => {
+    return useCallStore.getState().handleIncomingCallPayload(data);
+  };
 
   useEffect(() => {
     // Foreground notification received
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
-      const data = notification.request.content.data as Record<string, string> | undefined;
+      const data = notification.request.content.data as Record<string, unknown> | undefined;
       console.log('[Notifications] Received in foreground:', data);
+      if (handleNotificationData(data)) {
+        return;
+      }
       // If we're already in the chat that sent this notification, suppress it
       const { useChatStore } = require('../src/lib/ChatStore');
       const activeChatId = useChatStore.getState().activeChatId;
-      if (data?.chatId && data.chatId === activeChatId) {
+      const chatId = typeof data?.chatId === 'string' ? data.chatId : null;
+      if (chatId && chatId === activeChatId) {
         Notifications.dismissNotificationAsync(notification.request.identifier);
       }
     });
 
     // User tapped on notification — navigate to chat
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
-      const data = response.notification.request.content.data as Record<string, string> | undefined;
+      const id = response.notification.request.identifier;
+      if (handledNotificationIdsRef.current.has(id)) return;
+      handledNotificationIdsRef.current.add(id);
+      const data = response.notification.request.content.data as Record<string, unknown> | undefined;
       console.log('[Notifications] Tapped:', data);
-      if (data?.chatId) {
-        router.push({ pathname: '/chat' as any, params: { id: data.chatId } });
+      if (handleNotificationData(data)) {
+        return;
+      }
+      const chatId = typeof data?.chatId === 'string' ? data.chatId : null;
+      if (chatId) {
+        router.push({ pathname: '/chat' as any, params: { id: chatId } });
       }
     });
+
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        if (!response) return;
+        const id = response.notification.request.identifier;
+        if (handledNotificationIdsRef.current.has(id)) return;
+        handledNotificationIdsRef.current.add(id);
+        const data = response.notification.request.content.data as Record<string, unknown> | undefined;
+        console.log('[Notifications] Last response:', data);
+        if (handleNotificationData(data)) {
+          return;
+        }
+        const chatId = typeof data?.chatId === 'string' ? data.chatId : null;
+        if (chatId) {
+          router.push({ pathname: '/chat' as any, params: { id: chatId } });
+        }
+      })
+      .catch((error) => {
+        console.warn('[Notifications] Failed to read last response', error);
+      });
 
     return () => {
       notificationListener.current?.remove();
@@ -112,12 +148,13 @@ export default function RootLayout() {
         });
       }
       // Initialize socket after auth is ready
-      if (session && !useChatStore.getState().isConnected) {
-        useChatStore.getState().initSocket()
-
-        // Register for Push Notifications via notif store
+      if (session) {
+        if (!useChatStore.getState().isConnected) {
+          useChatStore.getState().initSocket()
+        }
+        // Register for Push Notifications even if socket is already connected.
+        // This guarantees iOS permission/token sync on cold starts.
         useNotificationStore.getState().initNotifications();
-
         // Check WebRTC availability for calls (safe in Expo Go - will just report false)
         useCallStore.getState().checkWebRTCAvailability().then(available => {
           console.log('[Layout] WebRTC available for calls:', available);

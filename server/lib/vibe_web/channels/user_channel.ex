@@ -2,6 +2,7 @@ defmodule VibeWeb.UserChannel do
   use VibeWeb, :channel
   alias VibeWeb.Presence
   alias Vibe.Accounts
+  alias Vibe.Notifications
 
   @impl true
   def join("user:" <> user_id, _payload, socket) do
@@ -77,9 +78,45 @@ defmodule VibeWeb.UserChannel do
 
   @impl true
   def handle_in("call-start", %{"toUserId" => to_user_id} = payload, socket) do
-    # Relay to target user
-    payload = Map.put(payload, "fromUserId", socket.assigns.user_id)
-    VibeWeb.Endpoint.broadcast!("user:#{to_user_id}", "call-start", payload)
+    caller = Accounts.get_user(socket.assigns.user_id)
+
+    call_id =
+      payload["callId"] ||
+        payload["call_id"] ||
+        "call_#{System.system_time(:millisecond)}_#{System.unique_integer([:positive])}"
+
+    call_type =
+      case String.downcase(to_string(payload["callType"] || payload["call_type"] || "voice")) do
+        "video" -> "video"
+        _ -> "voice"
+      end
+
+    from_user_name =
+      payload["fromUserName"] ||
+        payload["from_user_name"] ||
+        (caller && (caller.name || caller.username)) ||
+        socket.assigns.user_id
+
+    from_user_image =
+      payload["fromUserImage"] ||
+        payload["from_user_image"] ||
+        (caller && caller.profile_image)
+
+    enriched_payload =
+      payload
+      |> Map.put("fromUserId", socket.assigns.user_id)
+      |> Map.put("from_user_id", socket.assigns.user_id)
+      |> Map.put("callId", call_id)
+      |> Map.put("call_id", call_id)
+      |> Map.put("callType", call_type)
+      |> Map.put("call_type", call_type)
+      |> Map.put("fromUserName", from_user_name)
+      |> Map.put("from_user_name", from_user_name)
+      |> Map.put("fromUserImage", from_user_image)
+      |> Map.put("from_user_image", from_user_image)
+
+    VibeWeb.Endpoint.broadcast!("user:#{to_user_id}", "call-start", enriched_payload)
+    _ = Notifications.send_incoming_call_push(to_user_id, enriched_payload)
     {:noreply, socket}
   end
 

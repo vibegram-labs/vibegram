@@ -7,6 +7,7 @@ import {
     TouchableOpacity,
     Dimensions,
     StatusBar,
+    Platform,
 } from 'react-native';
 import Animated, {
     useSharedValue,
@@ -290,17 +291,21 @@ export default function ActiveCallScreen() {
 
     // --- VIDEO CALL UI ---
     if (isVideoCall) {
-        const FullView = localIsFull ? localStreamUrl : remoteStreamUrl;
-        const MiniView = localIsFull ? remoteStreamUrl : localStreamUrl;
-        const isMiniMirror = localIsFull ? false : isFrontCamera;
-        const isFullMirror = localIsFull ? isFrontCamera : false;
+        const fullShowsLocal = localIsFull;
+        const FullView = fullShowsLocal ? localStreamUrl : remoteStreamUrl;
+        const MiniView = fullShowsLocal ? remoteStreamUrl : localStreamUrl;
+        const isMiniMirror = fullShowsLocal ? false : isFrontCamera;
+        const isFullMirror = fullShowsLocal ? isFrontCamera : false;
 
         const renderVideoContent = (isMinimizedMode = false) => (
             <View style={[StyleSheet.absoluteFill, isMinimizedMode && { borderRadius: 24, overflow: 'hidden' }]}>
                 {FullView && RTCView ? (
                     <RTCView
                         streamURL={FullView}
-                        style={StyleSheet.absoluteFill}
+                        style={[
+                            StyleSheet.absoluteFill,
+                            !fullShowsLocal && Platform.OS === 'ios' ? styles.remoteUnmirrored : undefined,
+                        ]}
                         objectFit="cover"
                         mirror={isFullMirror}
                     />
@@ -566,5 +571,8 @@ const styles = StyleSheet.create({
         borderRadius: 12,
         justifyContent: 'center',
         alignItems: 'center',
-    }
+    },
+    remoteUnmirrored: {
+        transform: [{ scaleX: 1 }],
+    },
 });

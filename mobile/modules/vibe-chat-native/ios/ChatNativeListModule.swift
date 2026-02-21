@@ -41,6 +41,12 @@ public class ChatNativeListModule: Module {
       }
     }
 
+    AsyncFunction("playReactionFx") { (surfaceId: String, payload: [String: Any]) in
+      DispatchQueue.main.async {
+        ChatListRegistry.shared.view(for: surfaceId)?.playReactionFx(payload)
+      }
+    }
+
     View(ChatListView.self) {
       Prop("surfaceId") { (view: ChatListView, surfaceId: String) in
         view.surfaceId = surfaceId

@@ -2,7 +2,12 @@ import React, { forwardRef, useImperativeHandle, useMemo } from 'react';
 import { StyleSheet, View } from 'react-native';
 
 import { getNativeChatListModule, isNativeChatEnabled } from './runtime';
-import type { NativeChatAppearance, NativeChatRow, NativeSendTransitionPayload } from './types';
+import type {
+  NativeChatAppearance,
+  NativeChatRow,
+  NativeReactionFxPayload,
+  NativeSendTransitionPayload,
+} from './types';
 
 let NativeChatListView: React.ComponentType<any> | null = null;
 
@@ -22,6 +27,7 @@ export interface NativeChatSurfaceRef {
   scrollToMessage: (messageId: string, animated?: boolean, viewPosition?: number) => Promise<void>;
   applyTransactions: (transactions: Record<string, unknown>[]) => Promise<void>;
   startSendTransition: (payload: NativeSendTransitionPayload) => Promise<void>;
+  playReactionFx: (payload: NativeReactionFxPayload) => Promise<void>;
 }
 
 interface NativeChatSurfaceProps {
@@ -86,6 +92,14 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
           await nativeListModule.startSendTransition(surfaceId, payload);
         } catch (error) {
           reportNativeError(error, 'startSendTransition');
+        }
+      },
+      playReactionFx: async (payload: NativeReactionFxPayload) => {
+        if (!nativeListModule?.playReactionFx) return;
+        try {
+          await nativeListModule.playReactionFx(surfaceId, payload);
+        } catch (error) {
+          reportNativeError(error, 'playReactionFx');
         }
       },
     }), [nativeListModule, surfaceId, onNativeError]);

@@ -29,6 +29,7 @@ import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import kotlin.math.abs
+import kotlin.math.cos
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.pow
@@ -1057,6 +1058,37 @@ class ChatListView(
     maybeStartPendingTransition()
   }
 
+  fun playReactionFx(payload: Map<String, Any?>) {
+    val emoji = (payload["emoji"] as? String)?.trim().orEmpty()
+    if (emoji.isEmpty()) return
+
+    val sourceX = parseFloatValue(payload["x"]) ?: parseFloatValue(payload["sourceX"]) ?: return
+    val sourceY = parseFloatValue(payload["y"]) ?: parseFloatValue(payload["sourceY"]) ?: return
+
+    val selfLocation = IntArray(2)
+    getLocationOnScreen(selfLocation)
+    val localX = (sourceX - selfLocation[0]).coerceIn(-40f, width + 40f)
+    val localY = (sourceY - selfLocation[1]).coerceIn(-40f, height + 40f)
+    val color = resolveReactionFxColor(payload["color"])
+
+    val burst = ReactionBurstOverlayView(context)
+    overlayHost.addView(
+      burst,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT,
+      ),
+    )
+    burst.play(
+      emoji = emoji,
+      x = localX,
+      y = localY,
+      color = color,
+    ) {
+      overlayHost.removeView(burst)
+    }
+  }
+
   private fun parseRows(input: List<Map<String, Any?>>): List<NativeRowItem> {
     val output = ArrayList<NativeRowItem>(input.size)
 
@@ -1436,6 +1468,24 @@ class ChatListView(
     }
   }
 
+  private fun parseFloatValue(raw: Any?): Float? {
+    return when (raw) {
+      is Number -> raw.toFloat()
+      is String -> raw.toFloatOrNull()
+      else -> null
+    }
+  }
+
+  private fun resolveReactionFxColor(raw: Any?): Int {
+    val fallback = appearance.bubbleMeGradient.lastOrNull() ?: Color.WHITE
+    val value = raw as? String ?: return fallback
+    return try {
+      Color.parseColor(value)
+    } catch (_: IllegalArgumentException) {
+      fallback
+    }
+  }
+
   private fun parseWaveform(raw: Any?): List<Float>? {
     val list = raw as? List<*> ?: return null
     if (list.isEmpty()) return null
@@ -1453,6 +1503,102 @@ class ChatListView(
   }
 
   private fun lerp(a: Float, b: Float, t: Float): Float = a + ((b - a) * t)
+}
+
+private class ReactionBurstOverlayView(context: Context) : FrameLayout(context) {
+  init {
+    clipChildren = false
+    clipToPadding = false
+    isClickable = false
+    isFocusable = false
+  }
+
+  fun play(
+    emoji: String,
+    x: Float,
+    y: Float,
+    color: Int,
+    onDone: () -> Unit,
+  ) {
+    val emojiView =
+      TextView(context).apply {
+        text = emoji
+        textSize = 30f
+        alpha = 0f
+        scaleX = 0.74f
+        scaleY = 0.74f
+      }
+    addView(emojiView, LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT))
+    emojiView.measure(MeasureSpec.UNSPECIFIED, MeasureSpec.UNSPECIFIED)
+    emojiView.x = x - (emojiView.measuredWidth * 0.5f)
+    emojiView.y = y - (emojiView.measuredHeight * 0.5f)
+
+    emojiView.animate()
+      .alpha(1f)
+      .scaleX(1.18f)
+      .scaleY(1.18f)
+      .setDuration(120L)
+      .withEndAction {
+        emojiView.animate()
+          .translationYBy(-dpF(32f))
+          .alpha(0f)
+          .scaleX(0.9f)
+          .scaleY(0.9f)
+          .setDuration(340L)
+          .start()
+      }
+      .start()
+
+    val particleCount = 11
+    for (index in 0 until particleCount) {
+      val size = dpF(3.2f + ((index % 4) * 0.9f))
+      val dot =
+        View(context).apply {
+          alpha = 0.94f
+          background =
+            GradientDrawable().apply {
+              shape = GradientDrawable.OVAL
+              setColor(withAlpha(color, 0.94f - ((index % 3) * 0.08f)))
+            }
+        }
+      addView(dot, LayoutParams(size.roundToInt().coerceAtLeast(2), size.roundToInt().coerceAtLeast(2)))
+      dot.x = x - (size * 0.5f)
+      dot.y = y - (size * 0.5f)
+
+      val angle = ((Math.PI * 2.0 * index) / particleCount.toDouble()).toFloat()
+      val radial = dpF(24f + ((index % 5) * 6f))
+      val dx = (cos(angle.toDouble()) * radial).toFloat()
+      val dy = ((sin(angle.toDouble()) * radial * 0.72) - dpF(14f + ((index % 4) * 3f))).toFloat()
+
+      dot.animate()
+        .translationXBy(dx)
+        .translationYBy(dy)
+        .alpha(0f)
+        .scaleX(0.35f)
+        .scaleY(0.35f)
+        .setStartDelay((index % 4) * 14L)
+        .setDuration(430L)
+        .setInterpolator(verticalInterpolator)
+        .withEndAction { removeView(dot) }
+        .start()
+    }
+
+    postDelayed({
+      onDone()
+    }, 620L)
+  }
+
+  private fun withAlpha(color: Int, alpha: Float): Int {
+    val a = (alpha.coerceIn(0f, 1f) * 255f).roundToInt()
+    return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
+  }
+
+  private fun dpF(value: Float): Float =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      context.resources.displayMetrics,
+    )
 }
 
 private class SendTransitionOverlayView(

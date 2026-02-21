@@ -65,6 +65,16 @@ defmodule VibeWeb.UserController do
         update_attrs =
           %{}
           |> Map.merge(if params["profileImage"], do: %{profile_image: params["profileImage"]}, else: %{})
+          |> Map.merge(
+            if Map.has_key?(params, "pushToken"),
+              do: %{push_token: params["pushToken"]},
+              else: %{}
+          )
+          |> Map.merge(
+            if Map.has_key?(params, "push_token"),
+              do: %{push_token: params["push_token"]},
+              else: %{}
+          )
           |> Map.merge(phone_attrs)
           |> Map.merge(if params["name"], do: %{name: params["name"]}, else: %{})
           |> Map.merge(if params["username"], do: %{username: params["username"]}, else: %{})
@@ -90,6 +100,7 @@ defmodule VibeWeb.UserController do
             username: updated_user.username,
             name: updated_user.name,
             profileImage: updated_user.profile_image,
+            pushToken: updated_user.push_token,
             phoneNumber: updated_user.phone_number,
             showLastSeen: updated_user.show_last_seen,
             showOnlineStatus: updated_user.show_online_status,

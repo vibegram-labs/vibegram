@@ -14,6 +14,7 @@ defmodule Vibe.Accounts.User do
     field :token_expires_at, :utc_datetime  # SECURITY: Token expiration
     field :secure_id, :string
     field :profile_image, :string
+    field :push_token, :string
     field :is_online, :boolean, default: false, virtual: true
     field :last_seen, :utc_datetime
     field :phone_number, :string
@@ -65,7 +66,7 @@ defmodule Vibe.Accounts.User do
     |> cast(attrs, [
       :id, :username, :name, :password_hash, :public_key, :identity_key,
       :encrypted_private_key, :device_id, :login_token, :token_expires_at, :secure_id,
-      :profile_image, :signed_pre_key_id, :signed_pre_key, :signed_pre_key_signature,
+      :profile_image, :push_token, :signed_pre_key_id, :signed_pre_key, :signed_pre_key_signature,
       :supports_advanced, :phone_number, :tier, :referral_code, :referral_count,
       :business_profile_enabled, :auto_reply_enabled, :auto_reply_message,
       :business_hours_start, :business_hours_end, :show_last_seen, :show_online_status,
