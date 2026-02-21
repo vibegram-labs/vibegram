@@ -1855,8 +1855,8 @@ export default function ChatListScreen({
         }
 
         if (action === 'resend') {
-            if (!message.isMe || (message.status !== 'error' && message.status !== 'pending' && message.status !== 'sending')) {
-                showToast('Only pending or failed outgoing messages can be resent', 'info');
+            if (!message.isMe || message.status !== 'error') {
+                showToast('Only failed outgoing messages can be resent', 'info');
                 return;
             }
             clearRecoveryTimer(message.id);

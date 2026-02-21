@@ -2,7 +2,7 @@ import UIKit
 
 public protocol ChatContextMenuOverlayDelegate: AnyObject {
   func contextMenuDidDismiss(overlay: ChatContextMenuOverlay)
-  func contextMenuDidSelectReaction(_ reaction: String, messageId: String)
+  func contextMenuDidSelectReaction(_ reaction: String, messageId: String, sourcePoint: CGPoint?)
   func contextMenuDidSelectAction(_ actionId: String, messageId: String)
 }
 
@@ -67,7 +67,8 @@ public final class ChatContextMenuOverlay: UIView {
     messageId: String,
     bubbleSnapshot: UIView,
     bubbleFrame: CGRect,
-    appearance: ChatListAppearance
+    appearance: ChatListAppearance,
+    showResendAction: Bool
   ) {
     self.messageId = messageId
     self.bubbleSnapshot = bubbleSnapshot
@@ -85,7 +86,11 @@ public final class ChatContextMenuOverlay: UIView {
     )
 
     self.reactionPicker = ReactionPickerView(appearance: appearance, messageId: messageId)
-    self.contextMenu = ContextMenuView(appearance: appearance, messageId: messageId)
+    self.contextMenu = ContextMenuView(
+      appearance: appearance,
+      messageId: messageId,
+      showResendAction: showResendAction
+    )
 
     super.init(frame: .zero)
 
@@ -135,8 +140,10 @@ public final class ChatContextMenuOverlay: UIView {
   /// Returns the final bubble frame (may be shifted from original).
   @discardableResult
   private func layoutMenus() -> CGRect {
-    let safeTop = safeAreaInsets.top + 8
-    let safeBottom = bounds.height - safeAreaInsets.bottom - 8
+    let safeTop = safeAreaInsets.top + 10
+    let safeBottom = bounds.height - safeAreaInsets.bottom - 10
+    let safeLeft: CGFloat = 12
+    let safeRight = bounds.width - 12
 
     // Measure reaction picker
     let pickerSize = reactionPicker.intrinsicContentSize
@@ -144,46 +151,63 @@ public final class ChatContextMenuOverlay: UIView {
     let pickerGap: CGFloat = 8
 
     // Measure context menu
-    let menuWidth: CGFloat = 250
+    let menuWidth: CGFloat = min(268, bounds.width - 24)
     let menuHeight = contextMenu.systemLayoutSizeFitting(
       CGSize(width: menuWidth, height: UIView.layoutFittingCompressedSize.height)
     ).height
     // Keep the action menu visually attached to the bubble (Telegram-like spacing).
     let menuGap: CGFloat = 1
 
-    // Keep the composition near the original bubble, don't center vertically
-    // Total vertical space needed: picker above + bubble + menu below
-    let totalHeight =
-      pickerHeight + pickerGap + originalBubbleFrame.height + menuGap + menuHeight
-
-    var compositionTop = originalBubbleFrame.minY - pickerHeight - pickerGap
-
-    // Clamp to safe area
-    compositionTop = max(safeTop, compositionTop)
-    if compositionTop + totalHeight > safeBottom {
-      compositionTop = safeBottom - totalHeight
-      compositionTop = max(safeTop, compositionTop)
-    }
-
-    // Compute each element's Y
-    let pickerY = compositionTop
-    let bubbleY = pickerY + pickerHeight + pickerGap
-    let menuY = bubbleY + originalBubbleFrame.height + menuGap
-
-    // Horizontal alignment: align to bubble's leading/trailing edge
+    // Horizontal alignment: align to bubble edge, then clamp to viewport.
     let isRightAligned = originalBubbleFrame.midX > bounds.midX
 
-    // Reaction picker: align to bubble edge, clamped to screen
+    // Reaction picker: align to bubble edge, clamped to viewport
     let pickerWidth = min(pickerSize.width, bounds.width - 32)
     let pickerX: CGFloat
     if isRightAligned {
-      pickerX = max(16, originalBubbleFrame.maxX - pickerWidth)
+      pickerX = max(safeLeft, originalBubbleFrame.maxX - pickerWidth)
     } else {
-      pickerX = min(bounds.width - pickerWidth - 16, originalBubbleFrame.minX)
+      pickerX = min(safeRight - pickerWidth, originalBubbleFrame.minX)
     }
-    reactionPicker.frame = CGRect(x: pickerX, y: pickerY, width: pickerWidth, height: pickerHeight)
 
-    // Bubble: keep original X, shift Y to new position
+    // Vertical placement prefers original bubble Y, then shifts minimally to fit picker+menu.
+    var bubbleY = originalBubbleFrame.minY
+    var pickerY = bubbleY - pickerHeight - pickerGap
+    var menuY = bubbleY + originalBubbleFrame.height + menuGap
+
+    if menuY + menuHeight > safeBottom {
+      menuY = bubbleY - menuGap - menuHeight
+    }
+    if menuY < safeTop {
+      menuY = safeTop
+    }
+    if pickerY < safeTop {
+      let shiftDown = safeTop - pickerY
+      bubbleY += shiftDown
+      pickerY += shiftDown
+      menuY += shiftDown
+    }
+    if menuY + menuHeight > safeBottom {
+      let shiftUp = (menuY + menuHeight) - safeBottom
+      bubbleY -= shiftUp
+      pickerY -= shiftUp
+      menuY -= shiftUp
+    }
+    if pickerY < safeTop {
+      let shiftDown = safeTop - pickerY
+      bubbleY += shiftDown
+      pickerY += shiftDown
+      menuY += shiftDown
+    }
+
+    reactionPicker.frame = CGRect(
+      x: pickerX,
+      y: pickerY,
+      width: pickerWidth,
+      height: pickerHeight
+    )
+
+    // Bubble: keep original X, shift Y to computed safe position.
     let finalBubbleFrame = CGRect(
       x: originalBubbleFrame.minX,
       y: bubbleY,
@@ -195,11 +219,16 @@ public final class ChatContextMenuOverlay: UIView {
     // Context menu: align to bubble edge
     let menuX: CGFloat
     if isRightAligned {
-      menuX = max(16, finalBubbleFrame.maxX - menuWidth)
+      menuX = max(safeLeft, finalBubbleFrame.maxX - menuWidth)
     } else {
-      menuX = min(bounds.width - menuWidth - 16, finalBubbleFrame.minX)
+      menuX = min(safeRight - menuWidth, finalBubbleFrame.minX)
     }
-    contextMenu.frame = CGRect(x: menuX, y: menuY, width: menuWidth, height: menuHeight)
+    contextMenu.frame = CGRect(
+      x: max(safeLeft, min(safeRight - menuWidth, menuX)),
+      y: max(safeTop, min(safeBottom - menuHeight, menuY)),
+      width: menuWidth,
+      height: menuHeight
+    )
 
     return finalBubbleFrame
   }
@@ -313,8 +342,12 @@ extension ChatContextMenuOverlay: UIGestureRecognizerDelegate {
 extension ChatContextMenuOverlay: ChatContextMenuOverlayDelegate {
   public func contextMenuDidDismiss(overlay: ChatContextMenuOverlay) {}
 
-  public func contextMenuDidSelectReaction(_ reaction: String, messageId _: String) {
-    delegate?.contextMenuDidSelectReaction(reaction, messageId: messageId)
+  public func contextMenuDidSelectReaction(
+    _ reaction: String,
+    messageId _: String,
+    sourcePoint: CGPoint?
+  ) {
+    delegate?.contextMenuDidSelectReaction(reaction, messageId: messageId, sourcePoint: sourcePoint)
   }
 
   public func contextMenuDidSelectAction(_ actionId: String, messageId _: String) {
@@ -403,7 +436,11 @@ final class ReactionPickerView: UIView {
         sender.transform = .identity
       }
     }
-    delegate?.contextMenuDidSelectReaction(emoji, messageId: messageId)
+    let sourcePoint = sender.convert(
+      CGPoint(x: sender.bounds.midX, y: sender.bounds.midY),
+      to: nil
+    )
+    delegate?.contextMenuDidSelectReaction(emoji, messageId: messageId, sourcePoint: sourcePoint)
   }
 }
 
@@ -422,23 +459,35 @@ final class ContextMenuView: UIView {
     let isDestructive: Bool
   }
 
-  private let actions: [ActionItem] = [
-    ActionItem(
-      id: "reply", title: "Reply", iconName: "arrowshape.turn.up.left", isDestructive: false),
-    ActionItem(id: "copy", title: "Copy", iconName: "doc.on.doc", isDestructive: false),
-    ActionItem(id: "resend", title: "Resend", iconName: "arrow.clockwise", isDestructive: false),
-    ActionItem(id: "pin", title: "Pin", iconName: "pin", isDestructive: false),
-    ActionItem(id: "delete", title: "Delete", iconName: "trash", isDestructive: true),
-  ]
+  private let actions: [ActionItem]
 
   let messageId: String
 
-  init(appearance: ChatListAppearance, messageId: String) {
+  init(appearance: ChatListAppearance, messageId: String, showResendAction: Bool) {
     self.messageId = messageId
+    var resolvedActions: [ActionItem] = [
+      ActionItem(
+        id: "reply", title: "Reply", iconName: "arrowshape.turn.up.left", isDestructive: false),
+      ActionItem(id: "copy", title: "Copy", iconName: "doc.on.doc", isDestructive: false),
+      ActionItem(id: "pin", title: "Pin", iconName: "pin", isDestructive: false),
+      ActionItem(id: "delete", title: "Delete", iconName: "trash", isDestructive: true),
+    ]
+    if showResendAction {
+      resolvedActions.insert(
+        ActionItem(
+          id: "resend",
+          title: "Resend",
+          iconName: "arrow.clockwise",
+          isDestructive: false
+        ),
+        at: 2
+      )
+    }
+    self.actions = resolvedActions
     // Liquid glass card for action menu — same material as native iOS context menus
     self.glassView = makeLiquidGlassView(
       style: appearance.backgroundMode == "dark" ? .systemMaterialDark : .systemMaterial,
-      cornerRadius: 12,
+      cornerRadius: 18,
       capsuleCorners: false
     )
     self.stack = UIStackView()
@@ -452,6 +501,9 @@ final class ContextMenuView: UIView {
     stack.spacing = 0
     stack.translatesAutoresizingMaskIntoConstraints = false
     glassView.contentView.addSubview(stack)
+
+    glassView.layer.borderColor = UIColor.white.withAlphaComponent(0.15).cgColor
+    glassView.layer.borderWidth = 1.0
 
     NSLayoutConstraint.activate([
       glassView.topAnchor.constraint(equalTo: topAnchor),
@@ -495,10 +547,10 @@ final class ContextMenuRow: UIControl {
     backgroundColor = .clear
 
     titleLabel.text = action.title
-    titleLabel.font = UIFont.systemFont(ofSize: 17)
+    titleLabel.font = UIFont.systemFont(ofSize: 16.5, weight: .regular)
     titleLabel.textColor = action.isDestructive ? .systemRed : .label
 
-    let config = UIImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+    let config = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
     if let image = UIImage(systemName: action.iconName, withConfiguration: config) {
       iconView.image = image
       iconView.tintColor = action.isDestructive ? .systemRed : .label
@@ -512,15 +564,16 @@ final class ContextMenuRow: UIControl {
     iconView.translatesAutoresizingMaskIntoConstraints = false
 
     NSLayoutConstraint.activate([
-      heightAnchor.constraint(equalToConstant: 44),
+      heightAnchor.constraint(equalToConstant: 46),
 
-      titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
-      titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-
-      iconView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+      iconView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
       iconView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: 22),
-      iconView.heightAnchor.constraint(equalToConstant: 22),
+      iconView.widthAnchor.constraint(equalToConstant: 18),
+      iconView.heightAnchor.constraint(equalToConstant: 18),
+
+      titleLabel.leadingAnchor.constraint(equalTo: iconView.trailingAnchor, constant: 12),
+      titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+      titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -14),
     ])
   }
 

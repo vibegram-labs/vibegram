@@ -197,7 +197,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
       messageId: messageId,
       bubbleSnapshot: bubbleSnapshot,
       bubbleFrame: bubbleFrame,
-      appearance: resolvedAppearance()
+      appearance: resolvedAppearance(),
+      showResendAction: row.isMe && (row.status?.lowercased() == "error")
     )
     overlay.delegate = self
     window.addSubview(overlay)
@@ -206,8 +207,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     // Animate In
     overlay.animateIn()
 
-    // Hide the original cell's bubble while the overlay is showing
-    cell.alpha = 0.0
+    // Hide only the original bubble layer while extracted overlay is visible.
+    cell.setContextMenuExtracted(true)
     contextMenuHostCell = cell
     contextMenuHostCellOriginalTransform = cell.transform
 
@@ -226,17 +227,19 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
   // MARK: - ChatContextMenuOverlayDelegate
 
   public func contextMenuDidDismiss(overlay: ChatContextMenuOverlay) {
-    UIView.animate(withDuration: 0.2) {
-      if let cell = self.contextMenuHostCell {
-        cell.alpha = 1.0
-        cell.transform = self.contextMenuHostCellOriginalTransform
-      }
+    if let cell = contextMenuHostCell as? ChatListCell {
+      cell.setContextMenuExtracted(false)
+      cell.transform = contextMenuHostCellOriginalTransform
     }
     contextMenuHostCell = nil
     customContextMenuOverlay = nil
   }
 
-  public func contextMenuDidSelectReaction(_ reaction: String, messageId: String) {
+  public func contextMenuDidSelectReaction(
+    _ reaction: String,
+    messageId: String,
+    sourcePoint: CGPoint?
+  ) {
     // The overlay dismisses itself in animateOut, but we trigger it here if not already dismissing?
     // Wait, the delegate method is called on tap. The overlay is still present.
     // The overlay code calls delegate then... nothing.
@@ -246,14 +249,19 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     // Use the overlay's messageId directly as it's the source of truth
     guard let overlay = customContextMenuOverlay else { return }
 
-    onNativeEvent([
-      "type": "addReaction",
-      "reaction": reaction,
+    var payload: [String: Any] = [
+      "type": "contextMenuReaction",
+      "emoji": reaction,
       "messageId": overlay.messageId,
-    ])
+    ]
+    if let sourcePoint {
+      payload["sourceX"] = sourcePoint.x
+      payload["sourceY"] = sourcePoint.y
+    }
+    onNativeEvent(payload)
   }
 
-  public func contextMenuDidSelectAction(_ actionId: String, messageId: String) {
+  public func contextMenuDidSelectAction(_ actionId: String, messageId _: String) {
     customContextMenuOverlay?.animateOut(completion: nil)
 
     guard let overlay = customContextMenuOverlay else { return }
@@ -279,7 +287,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     let cleanup = { [weak self] in
       overlay.removeFromSuperview()
       self?.customContextMenuOverlay = nil
-      if let hostCell = self?.contextMenuHostCell {
+      if let hostCell = self?.contextMenuHostCell as? ChatListCell {
+        hostCell.setContextMenuExtracted(false)
         hostCell.transform = self?.contextMenuHostCellOriginalTransform ?? .identity
         self?.contextMenuHostCell = nil
         self?.contextMenuHostCellOriginalTransform = .identity

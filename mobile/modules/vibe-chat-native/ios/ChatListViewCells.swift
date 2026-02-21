@@ -190,6 +190,20 @@ private let bubbleStatusSlotWidth: CGFloat = 16.0
 private let bubbleStatusSlotHeight: CGFloat = 14.0
 private let bubbleStatusCheckStrokeWidth: CGFloat = 1.55
 
+private func pixelRound(_ value: CGFloat) -> CGFloat {
+  let scale = max(UIScreen.main.scale, 1.0)
+  return (value * scale).rounded() / scale
+}
+
+private func pixelAlignedRect(_ rect: CGRect) -> CGRect {
+  CGRect(
+    x: pixelRound(rect.origin.x),
+    y: pixelRound(rect.origin.y),
+    width: pixelRound(rect.size.width),
+    height: pixelRound(rect.size.height)
+  )
+}
+
 private func bubbleStatusCheckImage(double: Bool, color: UIColor) -> UIImage? {
   let size = CGSize(width: bubbleStatusSlotWidth, height: bubbleStatusSlotHeight)
   let renderer = UIGraphicsImageRenderer(size: size)
@@ -917,6 +931,7 @@ final class ChatListCell: UICollectionViewCell {
   private var appearance = ChatListAppearance.fallback
   private var row: ChatListRow?
   private var isGhostHidden = false
+  private var isContextMenuExtracted = false
   private var externalVoiceMessageId: String?
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress: CGFloat = 0.0
@@ -1125,7 +1140,9 @@ final class ChatListCell: UICollectionViewCell {
       messageLabel.alpha = 1.0
       mediaContainerView.alpha = 1.0
       metaContainerView.alpha = 0.72
+      reactionPillView.alpha = 1.0
     }
+    applyContextMenuExtractionIfNeeded()
     setNeedsLayout()
   }
 
@@ -1148,6 +1165,8 @@ final class ChatListCell: UICollectionViewCell {
     statusImageView.image = nil
     statusLabel.isHidden = true
     statusLabel.text = nil
+    isContextMenuExtracted = false
+    applyContextMenuExtractionIfNeeded()
     contentView.alpha = 1.0
     contentView.transform = .identity
     // Strip any residual UIKit animations from the previous lifecycle.
@@ -1180,12 +1199,12 @@ final class ChatListCell: UICollectionViewCell {
     let bubbleHeight = metrics.bubbleHeight
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
-    let bubbleFrame = CGRect(
+    let bubbleFrame = pixelAlignedRect(CGRect(
       x: floor(bubbleX),
       y: floor(bubbleY),
       width: ceil(bubbleWidth),
       height: ceil(bubbleHeight)
-    ).integral
+    ))
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
@@ -1205,36 +1224,36 @@ final class ChatListCell: UICollectionViewCell {
     }
 
     if metrics.isMediaLayout {
-      let mediaFrame = CGRect(
+      let mediaFrame = pixelAlignedRect(CGRect(
         x: bubbleFrame.minX + bubbleHorizontalPadding,
         y: bubbleFrame.minY + bubbleTopPadding,
         width: metrics.contentWidth,
         height: metrics.mediaHeight
-      ).integral
+      ))
       mediaContainerView.frame = mediaFrame
       messageLabel.frame = .zero
-      metaContainerView.frame = CGRect(
+      metaContainerView.frame = pixelAlignedRect(CGRect(
         x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
         y: mediaFrame.maxY + bubbleMetaTopSpacing,
         width: metrics.metaWidth,
         height: bubbleMetaHeight
-      ).integral
+      ))
       mediaProgressOverlayView.frame = mediaContainerView.bounds
       layoutMediaSubviews(for: row, in: mediaContainerView.bounds)
     } else {
       mediaContainerView.frame = .zero
-      messageLabel.frame = CGRect(
+      messageLabel.frame = pixelAlignedRect(CGRect(
         x: bubbleFrame.minX + bubbleHorizontalPadding,
         y: bubbleFrame.minY + bubbleTopPadding + max(0.0, metrics.bodyHeight - metrics.textHeight),
         width: metrics.messageWidth,
         height: metrics.textHeight
-      ).integral
-      metaContainerView.frame = CGRect(
+      ))
+      metaContainerView.frame = pixelAlignedRect(CGRect(
         x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
         y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
         width: metrics.metaWidth,
         height: bubbleMetaHeight
-      ).integral
+      ))
     }
     layoutMetaLabels(for: row)
 
@@ -1551,20 +1570,18 @@ final class ChatListCell: UICollectionViewCell {
 
     place(timestampLabel, width: widths.timestamp)
     let statusY = floor((bubbleMetaHeight - bubbleStatusSlotHeight) * 0.5)
-    let statusFrame = CGRect(
+    let statusFrame = pixelAlignedRect(CGRect(
       x: cursorX,
       y: statusY,
       width: bubbleStatusSlotWidth,
       height: bubbleStatusSlotHeight
-    ).integral
+    ))
     statusLabel.frame = statusFrame
     statusImageView.frame = statusFrame
   }
 
   private func configureStatus(for newRow: ChatListRow, baseColor: UIColor) {
-    let oldStatus = self.row?.status?.lowercased()
     let newStatus = newRow.status?.lowercased()
-    let shouldAnimate = self.row?.key == newRow.key && oldStatus != newStatus && oldStatus != nil
 
     statusLabel.text = nil
     statusLabel.textColor = baseColor
@@ -1602,13 +1619,21 @@ final class ChatListCell: UICollectionViewCell {
       break
     }
 
-    if shouldAnimate {
-      let transition = CATransition()
-      transition.duration = 0.25
-      transition.type = .fade
-      statusLabel.layer.add(transition, forKey: "statusFade")
-      statusImageView.layer.add(transition, forKey: "statusIconFade")
-    }
+  }
+
+  func setContextMenuExtracted(_ extracted: Bool) {
+    isContextMenuExtracted = extracted
+    applyContextMenuExtractionIfNeeded()
+  }
+
+  private func applyContextMenuExtractionIfNeeded() {
+    let alpha: CGFloat = isContextMenuExtracted ? 0.0 : 1.0
+    bubbleView.alpha = alpha
+    tailView.alpha = alpha
+    messageLabel.alpha = isContextMenuExtracted ? 0.0 : 1.0
+    mediaContainerView.alpha = isContextMenuExtracted ? 0.0 : 1.0
+    metaContainerView.alpha = isContextMenuExtracted ? 0.0 : 0.72
+    reactionPillView.alpha = alpha
   }
 
   private func resolvedMetaColor(for textColor: UIColor) -> UIColor {
