@@ -71,20 +71,26 @@ defmodule Vibe.Notifications do
          true <- push_token != "" do
       from_user_id = payload["fromUserId"] || payload["from_user_id"] || payload["from_id"]
       sender = if is_binary(from_user_id), do: Accounts.get_user(from_user_id), else: nil
-      sender_name = (sender && (sender.name || sender.username)) || @default_message_title
-      sender_image = sender && sender.profile_image
+      sender_name_raw = (sender && (sender.name || sender.username)) || @default_message_title
+      sender_name = truncate_text(sender_name_raw, 64)
+      sender_image = normalize_push_image(sender && sender.profile_image)
       message_type = payload["type"] || "text"
       message_body = resolve_message_body(payload, message_type)
 
-      data = %{
+      base_data = %{
         type: "new_message",
         chatId: payload["chatId"] || payload["chat_id"],
         messageId: payload["messageId"] || payload["message_id"],
         fromUserId: from_user_id,
         fromUserName: sender_name,
-        fromUserImage: sender_image,
         messageType: message_type
       }
+
+      data =
+        case sender_image do
+          value when is_binary(value) and value != "" -> Map.put(base_data, :fromUserImage, value)
+          _ -> base_data
+        end
 
       base_message = %{
         to: push_token,
@@ -183,6 +189,28 @@ defmodule Vibe.Notifications do
       text
     end
   end
+
+  # APNs payload must stay compact. Only include remote avatar URLs.
+  # Base64/data-URI profile images are too large and trigger 413 PayloadTooLarge.
+  defp normalize_push_image(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" ->
+        nil
+
+      String.length(trimmed) > 512 ->
+        nil
+
+      String.starts_with?(String.downcase(trimmed), ["http://", "https://"]) ->
+        trimmed
+
+      true ->
+        nil
+    end
+  end
+
+  defp normalize_push_image(_), do: nil
 
   defp log_expo_push_result(kind, to_user_id, body) do
     with {:ok, decoded} <- Jason.decode(body || ""),
