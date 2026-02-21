@@ -127,15 +127,17 @@ defmodule Vibe.Notifications do
       }
 
       message =
-        case sender_image do
-          value when is_binary(value) and value != "" ->
-            base_message
-            |> Map.put(:mutableContent, true)
-            |> Map.put(:richContent, %{image: value})
+        base_message
+        |> Map.put(:mutableContent, true)
+        |> then(fn payload_map ->
+          case sender_image do
+            value when is_binary(value) and value != "" ->
+              Map.put(payload_map, :richContent, %{image: value})
 
-          _ ->
-            base_message
-        end
+            _ ->
+              payload_map
+          end
+        end)
 
       request =
         Finch.build(

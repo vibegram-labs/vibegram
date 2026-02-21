@@ -13,7 +13,6 @@ Notifications.setNotificationHandler({
         // For incoming calls, use in-app native overlay instead of foreground banner.
         if (isIncomingCall) {
             return {
-                shouldShowAlert: false,
                 shouldPlaySound: false,
                 shouldSetBadge: false,
                 shouldShowBanner: false,
@@ -22,7 +21,6 @@ Notifications.setNotificationHandler({
         }
 
         return {
-            shouldShowAlert: true, // Show banner even when app is open
             shouldPlaySound: true,
             shouldSetBadge: true,
             shouldShowBanner: true,
