@@ -39,6 +39,7 @@ defmodule VibeWeb.Router do
     get "/info", ApiController, :info
     get "/servers", ApiController, :servers
     get "/vapid-key", ApiController, :vapid_key
+    get "/push/avatar/:user_id", PushAvatarController, :show
   end
 
   scope "/api", VibeWeb do

@@ -14,23 +14,47 @@ defmodule Vibe.Notifications do
          push_token when is_binary(push_token) <- normalized_push_token(to_user.push_token),
          true <- push_token != "" do
       call_type = normalize_call_type(payload["callType"] || payload["call_type"])
-      caller_name = payload["fromUserName"] || payload["from_user_name"] || payload["fromUserId"] || "Unknown"
+      from_user_id = payload["fromUserId"] || payload["from_user_id"]
+      caller_name = payload["fromUserName"] || payload["from_user_name"] || from_user_id || "Unknown"
+      caller_image =
+        normalize_push_image(
+          payload["fromUserImage"] || payload["from_user_image"],
+          from_user_id
+        )
 
-      message = %{
+      base_data = %{
+        type: "call-start",
+        callId: payload["callId"] || payload["call_id"],
+        callType: call_type,
+        fromUserId: from_user_id,
+        fromUserName: caller_name
+      }
+
+      data =
+        case caller_image do
+          value when is_binary(value) and value != "" -> Map.put(base_data, :fromUserImage, value)
+          _ -> base_data
+        end
+
+      base_message = %{
         to: push_token,
         sound: "default",
         priority: "high",
         title: caller_name,
         body: "Incoming #{call_type} call",
-        data: %{
-          type: "call-start",
-          callId: payload["callId"] || payload["call_id"],
-          callType: call_type,
-          fromUserId: payload["fromUserId"] || payload["from_user_id"],
-          fromUserName: payload["fromUserName"] || payload["from_user_name"],
-          fromUserImage: payload["fromUserImage"] || payload["from_user_image"]
-        }
+        data: data
       }
+
+      message =
+        case caller_image do
+          value when is_binary(value) and value != "" ->
+            base_message
+            |> Map.put(:mutableContent, true)
+            |> Map.put(:richContent, %{image: value})
+
+          _ ->
+            base_message
+        end
 
       request =
         Finch.build(
@@ -73,7 +97,7 @@ defmodule Vibe.Notifications do
       sender = if is_binary(from_user_id), do: Accounts.get_user(from_user_id), else: nil
       sender_name_raw = (sender && (sender.name || sender.username)) || @default_message_title
       sender_name = truncate_text(sender_name_raw, 64)
-      sender_image = normalize_push_image(sender && sender.profile_image)
+      sender_image = normalize_push_image(sender && sender.profile_image, from_user_id)
       message_type = payload["type"] || "text"
       message_body = resolve_message_body(payload, message_type)
 
@@ -190,27 +214,39 @@ defmodule Vibe.Notifications do
     end
   end
 
-  # APNs payload must stay compact. Only include remote avatar URLs.
-  # Base64/data-URI profile images are too large and trigger 413 PayloadTooLarge.
-  defp normalize_push_image(value) when is_binary(value) do
+  # APNs payload must stay compact.
+  # For inline/base64 avatars we switch to a compact API URL and let the iOS
+  # notification service extension fetch/attach the image.
+  defp normalize_push_image(value, from_user_id) when is_binary(value) do
     trimmed = String.trim(value)
 
     cond do
       trimmed == "" ->
         nil
 
-      String.length(trimmed) > 512 ->
-        nil
-
       String.starts_with?(String.downcase(trimmed), ["http://", "https://"]) ->
-        trimmed
+        if String.length(trimmed) <= 1024 do
+          trimmed
+        else
+          nil
+        end
 
       true ->
-        nil
+        avatar_proxy_url(from_user_id)
     end
   end
 
-  defp normalize_push_image(_), do: nil
+  defp normalize_push_image(_value, from_user_id), do: avatar_proxy_url(from_user_id)
+
+  defp avatar_proxy_url(user_id) when is_binary(user_id) and user_id != "" do
+    base_url = String.trim_trailing(VibeWeb.Endpoint.url(), "/")
+    encoded_user_id = URI.encode_www_form(user_id)
+    "#{base_url}/api/push/avatar/#{encoded_user_id}"
+  rescue
+    _ -> nil
+  end
+
+  defp avatar_proxy_url(_), do: nil
 
   defp log_expo_push_result(kind, to_user_id, body) do
     with {:ok, decoded} <- Jason.decode(body || ""),
