@@ -188,6 +188,44 @@ private let bubbleMetaInlineSpacing: CGFloat = 6.0
 private let bubbleMetaItemGap: CGFloat = 3.0
 private let bubbleStatusSlotWidth: CGFloat = 16.0
 private let bubbleStatusSlotHeight: CGFloat = 14.0
+private let bubbleStatusCheckStrokeWidth: CGFloat = 1.55
+
+private func bubbleStatusCheckImage(double: Bool, color: UIColor) -> UIImage? {
+  let size = CGSize(width: bubbleStatusSlotWidth, height: bubbleStatusSlotHeight)
+  let renderer = UIGraphicsImageRenderer(size: size)
+  return renderer.image { ctx in
+    let sx = size.width / 24.0
+    let sy = size.height / 24.0
+
+    func point(_ x: CGFloat, _ y: CGFloat) -> CGPoint {
+      CGPoint(x: x * sx, y: y * sy)
+    }
+
+    let lineWidth = bubbleStatusCheckStrokeWidth * min(sx, sy) * 1.6
+    color.setStroke()
+
+    let firstPath = UIBezierPath()
+    firstPath.move(to: point(4.0, 12.9))
+    firstPath.addLine(to: point(7.14286, 16.5))
+    firstPath.addLine(to: point(15.0, 7.5))
+    firstPath.lineWidth = lineWidth
+    firstPath.lineCapStyle = .round
+    firstPath.lineJoinStyle = .round
+    firstPath.stroke()
+
+    if double {
+      let secondPath = UIBezierPath()
+      secondPath.move(to: point(20.0, 7.5625))
+      secondPath.addLine(to: point(11.4283, 16.5625))
+      secondPath.addLine(to: point(11.0, 16.0))
+      secondPath.lineWidth = lineWidth
+      secondPath.lineCapStyle = .round
+      secondPath.lineJoinStyle = .round
+      secondPath.stroke()
+    }
+    ctx.cgContext.flush()
+  }.withRenderingMode(.alwaysOriginal)
+}
 
 struct ChatMessageBubbleLayoutMetrics {
   let bubbleWidth: CGFloat
@@ -867,10 +905,11 @@ final class ChatListCell: UICollectionViewCell {
   private let mediaProgressOverlayView = UIView()
   private let mediaProgressRingView = BubbleUploadProgressView()
   private let mediaProgressSpinner = UIActivityIndicatorView(style: .medium)
-  private let metaContainerView = UIView()
+  let metaContainerView = UIView()
   private let editedLabel = UILabel()
   private let pinnedLabel = UILabel()
   private let timestampLabel = UILabel()
+  private let statusImageView = UIImageView()
   private let statusLabel = UILabel()
   private let dayLabel = UILabel()
   private let reactionPillView = UIView()
@@ -906,6 +945,7 @@ final class ChatListCell: UICollectionViewCell {
     metaContainerView.addSubview(editedLabel)
     metaContainerView.addSubview(pinnedLabel)
     metaContainerView.addSubview(timestampLabel)
+    metaContainerView.addSubview(statusImageView)
     metaContainerView.addSubview(statusLabel)
     contentView.addSubview(dayLabel)
 
@@ -959,6 +999,8 @@ final class ChatListCell: UICollectionViewCell {
     pinnedLabel.font = bubbleMetaFont
     timestampLabel.font = bubbleMetaFont
     timestampLabel.textColor = UIColor(white: 1.0, alpha: 0.72)
+    statusImageView.contentMode = .scaleAspectFit
+    statusImageView.isHidden = true
     statusLabel.font = bubbleMetaStatusFont
     statusLabel.textAlignment = .center
 
@@ -989,6 +1031,7 @@ final class ChatListCell: UICollectionViewCell {
     editedLabel.isHidden = true
     pinnedLabel.isHidden = true
     timestampLabel.isHidden = true
+    statusImageView.isHidden = true
     statusLabel.isHidden = true
     dayLabel.isHidden = true
     reactionPillView.isHidden = true
@@ -1101,6 +1144,10 @@ final class ChatListCell: UICollectionViewCell {
     externalVoiceProgress = 0.0
     applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
     mediaWaveformView.setWaveform(nil)
+    statusImageView.isHidden = true
+    statusImageView.image = nil
+    statusLabel.isHidden = true
+    statusLabel.text = nil
     contentView.alpha = 1.0
     contentView.transform = .identity
     // Strip any residual UIKit animations from the previous lifecycle.
@@ -1133,17 +1180,23 @@ final class ChatListCell: UICollectionViewCell {
     let bubbleHeight = metrics.bubbleHeight
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
+    let bubbleFrame = CGRect(
+      x: floor(bubbleX),
+      y: floor(bubbleY),
+      width: ceil(bubbleWidth),
+      height: ceil(bubbleHeight)
+    ).integral
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
 
-    bubbleView.frame = CGRect(x: bubbleX, y: bubbleY, width: bubbleWidth, height: bubbleHeight)
+    bubbleView.frame = bubbleFrame
     if row.shape.showTail && !isGhostHidden {
       // IMPORTANT: tailView has a rotation+flip transform applied, so we MUST NOT
       // set .frame (undefined behavior per Apple docs). Use bounds + center instead.
       let tailSize: CGFloat = 29
-      let tailX = row.isMe ? bubbleX + bubbleWidth - 1 : bubbleX - 28
-      let tailY = bubbleY + bubbleHeight - tailSize
+      let tailX = row.isMe ? bubbleFrame.maxX - 1 : bubbleFrame.minX - 28
+      let tailY = bubbleFrame.maxY - tailSize
       tailView.bounds = CGRect(origin: .zero, size: CGSize(width: tailSize, height: tailSize))
       tailView.center = CGPoint(x: tailX + tailSize * 0.5, y: tailY + tailSize * 0.5)
       tailView.isHidden = false
@@ -1153,35 +1206,35 @@ final class ChatListCell: UICollectionViewCell {
 
     if metrics.isMediaLayout {
       let mediaFrame = CGRect(
-        x: bubbleX + bubbleHorizontalPadding,
-        y: bubbleY + bubbleTopPadding,
+        x: bubbleFrame.minX + bubbleHorizontalPadding,
+        y: bubbleFrame.minY + bubbleTopPadding,
         width: metrics.contentWidth,
         height: metrics.mediaHeight
-      )
+      ).integral
       mediaContainerView.frame = mediaFrame
       messageLabel.frame = .zero
       metaContainerView.frame = CGRect(
-        x: bubbleX + bubbleWidth - bubbleHorizontalPadding - metrics.metaWidth,
+        x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
         y: mediaFrame.maxY + bubbleMetaTopSpacing,
         width: metrics.metaWidth,
         height: bubbleMetaHeight
-      )
+      ).integral
       mediaProgressOverlayView.frame = mediaContainerView.bounds
       layoutMediaSubviews(for: row, in: mediaContainerView.bounds)
     } else {
       mediaContainerView.frame = .zero
       messageLabel.frame = CGRect(
-        x: bubbleX + bubbleHorizontalPadding,
-        y: bubbleY + bubbleTopPadding + max(0.0, metrics.bodyHeight - metrics.textHeight),
+        x: bubbleFrame.minX + bubbleHorizontalPadding,
+        y: bubbleFrame.minY + bubbleTopPadding + max(0.0, metrics.bodyHeight - metrics.textHeight),
         width: metrics.messageWidth,
         height: metrics.textHeight
-      )
+      ).integral
       metaContainerView.frame = CGRect(
         x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
-        y: bubbleY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
+        y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
         width: metrics.metaWidth,
         height: bubbleMetaHeight
-      )
+      ).integral
     }
     layoutMetaLabels(for: row)
 
@@ -1190,8 +1243,8 @@ final class ChatListCell: UICollectionViewCell {
       reactionLabel.frame = CGRect(
         x: 0, y: 0, width: reactionSize.width, height: reactionSize.height)
 
-      let rx = row.isMe ? bubbleX + bubbleWidth - reactionSize.width + 4.0 : bubbleX - 4.0
-      let ry = bubbleY + bubbleHeight - 12.0
+      let rx = row.isMe ? bubbleFrame.maxX - reactionSize.width + 4.0 : bubbleFrame.minX - 4.0
+      let ry = bubbleFrame.maxY - 12.0
       reactionPillView.frame = CGRect(
         x: rx, y: ry, width: reactionSize.width, height: reactionSize.height)
     }
@@ -1497,35 +1550,64 @@ final class ChatListCell: UICollectionViewCell {
     }
 
     place(timestampLabel, width: widths.timestamp)
-    place(statusLabel, width: bubbleStatusSlotWidth, height: bubbleStatusSlotHeight, centered: true)
+    let statusY = floor((bubbleMetaHeight - bubbleStatusSlotHeight) * 0.5)
+    let statusFrame = CGRect(
+      x: cursorX,
+      y: statusY,
+      width: bubbleStatusSlotWidth,
+      height: bubbleStatusSlotHeight
+    ).integral
+    statusLabel.frame = statusFrame
+    statusImageView.frame = statusFrame
   }
 
-  private func configureStatus(for row: ChatListRow, baseColor: UIColor) {
+  private func configureStatus(for newRow: ChatListRow, baseColor: UIColor) {
+    let oldStatus = self.row?.status?.lowercased()
+    let newStatus = newRow.status?.lowercased()
+    let shouldAnimate = self.row?.key == newRow.key && oldStatus != newStatus && oldStatus != nil
+
     statusLabel.text = nil
     statusLabel.textColor = baseColor
     statusLabel.font = bubbleMetaStatusFont
-    statusLabel.isHidden = false
+    statusLabel.isHidden = true
+    statusImageView.image = nil
+    statusImageView.isHidden = true
 
-    guard row.isMe else {
+    guard newRow.isMe else {
       return
     }
 
-    switch row.status?.lowercased() {
+    switch newStatus {
     case "pending":
       statusLabel.font = bubbleMetaPendingFont
       statusLabel.text = "◷"
+      statusLabel.isHidden = false
     case "sent":
-      statusLabel.text = "✓"
+      statusImageView.image = bubbleStatusCheckImage(double: false, color: baseColor)
+      statusImageView.isHidden = false
     case "delivered":
-      statusLabel.text = "✓✓"
+      statusImageView.image = bubbleStatusCheckImage(double: true, color: baseColor)
+      statusImageView.isHidden = false
     case "read":
-      statusLabel.text = "✓✓"
-      statusLabel.textColor = UIColor(red: 0.0, green: 0.64, blue: 1.0, alpha: 1.0)
+      statusImageView.image = bubbleStatusCheckImage(
+        double: true,
+        color: UIColor(red: 0.0, green: 0.64, blue: 1.0, alpha: 1.0)
+      )
+      statusImageView.isHidden = false
     case "error":
       statusLabel.text = "!"
       statusLabel.textColor = UIColor(red: 1.0, green: 0.48, blue: 0.48, alpha: 1.0)
+      statusLabel.isHidden = false
     default:
       break
+    }
+
+    if shouldAnimate {
+      let transition = CATransition()
+      transition.duration = 0.25
+      transition.type = .fade
+      statusLabel.layer.add(transition, forKey: "statusFade")
+      statusImageView.layer.add(transition, forKey: "statusIconFade")
     }
   }
 
@@ -1639,13 +1721,11 @@ final class ChatListCell: UICollectionViewCell {
 
     let messageWasHidden = messageLabel.isHidden
     let mediaWasHidden = mediaContainerView.isHidden
-    let metaWasHidden = metaContainerView.isHidden
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     messageLabel.isHidden = true
     mediaContainerView.isHidden = true
-    metaContainerView.isHidden = true
     contentView.layoutIfNeeded()
     CATransaction.commit()
 
@@ -1654,7 +1734,6 @@ final class ChatListCell: UICollectionViewCell {
       CATransaction.setDisableActions(true)
       messageLabel.isHidden = messageWasHidden
       mediaContainerView.isHidden = mediaWasHidden
-      metaContainerView.isHidden = metaWasHidden
       contentView.layoutIfNeeded()
       CATransaction.commit()
     }

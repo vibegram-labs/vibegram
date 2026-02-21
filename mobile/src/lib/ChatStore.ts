@@ -19,8 +19,15 @@ const CHATSTORE_DEBUG = false;
 const chatStoreLog = (...args: any[]) => {
     if (CHATSTORE_DEBUG) console.log(...args);
 };
+const CHATSTORE_MESSAGE_FLOW_DEBUG = true;
+const chatStoreMessageLog = (...args: any[]) => {
+    if (CHATSTORE_MESSAGE_FLOW_DEBUG || CHATSTORE_DEBUG) {
+        console.log('[ChatStore][MsgFlow]', ...args);
+    }
+};
 const MEDIA_UPLOAD_DEFERRED = 'MEDIA_UPLOAD_DEFERRED';
 const MEDIA_LOCAL_FILE_MISSING = 'MEDIA_LOCAL_FILE_MISSING';
+const LOCAL_MEDIA_MISSING_USER_MESSAGE = 'Local media file is no longer available. Please record/select again.';
 const RETRY_DISPATCH_GAP_MS = 320;
 const STALE_SENDING_RETRY_MS = 14_000;
 
@@ -34,6 +41,13 @@ const isRecoverableSendError = (error: unknown) => {
         message.includes('timeout') ||
         message.includes('transport_close') ||
         message.includes('upload') ||
+        message.includes('channel') ||
+        message.includes('socket') ||
+        message.includes('public key') ||
+        message.includes('encryption key') ||
+        message.includes('could not get encryption key') ||
+        message.includes('not joined') ||
+        message.includes('temporarily unavailable') ||
         message.includes(MEDIA_UPLOAD_DEFERRED.toLowerCase())
     );
 };
@@ -57,6 +71,72 @@ const ensureReadableLocalUri = async (uri: string): Promise<string | null> => {
     const info = await FileSystem.getInfoAsync(normalizedUri);
     if (!(info as any)?.exists) return null;
     return normalizedUri;
+};
+
+const hasPermanentLocalMediaError = (message?: Pick<Message, 'errorMessage'> | null): boolean => {
+    const errorText = String(message?.errorMessage || '').toLowerCase();
+    if (!errorText) return false;
+    return (
+        errorText.includes(MEDIA_LOCAL_FILE_MISSING.toLowerCase()) ||
+        errorText.includes('local media file is no longer available')
+    );
+};
+
+const durableOutgoingMediaPath = (messageId: string, sourceUri: string, type?: Message['type']): string | null => {
+    const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory;
+    if (!baseDir) return null;
+    const ext = guessMediaExtension(sourceUri, type);
+    return `${baseDir}outgoing-media/${messageId}.${ext}`;
+};
+
+const ensureDurableOutgoingLocalUri = async (
+    sourceUri: string,
+    messageId: string,
+    type?: Message['type'],
+): Promise<string | null> => {
+    const normalizedSource = normalizeFileUri(sourceUri);
+    const targetUri = durableOutgoingMediaPath(messageId, normalizedSource, type);
+
+    if (targetUri) {
+        const targetInfo = await FileSystem.getInfoAsync(targetUri);
+        if ((targetInfo as any)?.exists) {
+            return targetUri;
+        }
+    }
+
+    const readableSource = await ensureReadableLocalUri(normalizedSource);
+    if (!readableSource) return null;
+    if (!targetUri) return readableSource;
+    if (readableSource === targetUri) return readableSource;
+
+    const dirParts = targetUri.split('/');
+    dirParts.pop();
+    const targetDir = dirParts.join('/');
+    try {
+        await FileSystem.makeDirectoryAsync(targetDir, { intermediates: true });
+    } catch {
+        // ignore mkdir race
+    }
+
+    try {
+        await FileSystem.copyAsync({ from: readableSource, to: targetUri });
+        chatStoreMessageLog('media:durable-copy', {
+            messageId,
+            type,
+            from: readableSource,
+            to: targetUri,
+        });
+        return targetUri;
+    } catch (copyError) {
+        chatStoreMessageLog('media:durable-copy-failed-using-source', {
+            messageId,
+            type,
+            from: readableSource,
+            to: targetUri,
+            error: String(copyError),
+        });
+        return readableSource;
+    }
 };
 
 
@@ -241,7 +321,7 @@ interface ChatState {
     clearUploadProgress: (messageId: string) => void;
     cancelUpload: (chatId: string, messageId: string) => void;
     markViewOnceViewed: (chatId: string, messageId: string) => void;
-    retryMessage: (chatId: string, messageId: string) => void;
+    retryMessage: (chatId: string, messageId: string) => Promise<void>;
     deleteFailedMessage: (chatId: string, messageId: string) => void;
 }
 
@@ -307,10 +387,35 @@ const isValidBinaryId = (value?: string | null): boolean => {
 };
 
 const isRetryableMessage = (message: Message, now = Date.now()): boolean => {
+    if (message.status === 'error' && hasPermanentLocalMediaError(message)) return false;
     if (message.status === 'pending' || message.status === 'error') return true;
     if (message.status === 'sending') {
         const sentAt = typeof message.timestamp === 'number' ? message.timestamp : now;
         return now - sentAt > STALE_SENDING_RETRY_MS;
+    }
+    return false;
+};
+
+const isChatChannelWritable = (channel?: Channel | null): boolean => {
+    if (!channel) return false;
+    const state = (channel as any)?.state;
+    return state === 'joined' || state === 'joining';
+};
+
+const waitForChatChannelReady = async (
+    chatId: string,
+    get: any,
+    maxAttempts = 9,
+    waitMs = 170,
+): Promise<boolean> => {
+    if (!socket?.isConnected()) return false;
+    if (isChatChannelWritable(chatChannels.get(chatId))) return true;
+
+    scheduleChannelResync(get, 120);
+    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        await sleep(waitMs);
+        if (!socket?.isConnected()) return false;
+        if (isChatChannelWritable(chatChannels.get(chatId))) return true;
     }
     return false;
 };
@@ -323,8 +428,19 @@ const runChatRetryPump = async (chatId: string, get: any) => {
 
     pendingRetryPumpRunning.add(chatId);
     try {
-        const state = get();
-        const chat = state.chats.find((c: Chat) => c.chatId === chatId);
+        const initialState = get();
+        const initialChat = initialState.chats.find((c: Chat) => c.chatId === chatId);
+        if (!initialChat) return;
+
+        const channelReady = await waitForChatChannelReady(chatId, get);
+        if (!channelReady) {
+            chatStoreMessageLog('retry:channel-not-ready', { chatId });
+            scheduleChatRetryFlush(chatId, get, 1300);
+            return;
+        }
+
+        const latestState = get();
+        const chat = latestState.chats.find((c: Chat) => c.chatId === chatId);
         if (!chat) return;
 
         const now = Date.now();
@@ -340,7 +456,7 @@ const runChatRetryPump = async (chatId: string, get: any) => {
             const latestMessage = latestChat?.messages.find((m: Message) => m.id === message.id);
             if (!latestMessage || !isRetryableMessage(latestMessage)) continue;
 
-            get().retryMessage(chatId, message.id);
+            await get().retryMessage(chatId, message.id);
             await sleep(RETRY_DISPATCH_GAP_MS);
         }
     } finally {
@@ -512,6 +628,258 @@ const chooseMostAdvancedStatus = (
     return statusRank(serverStatus) > statusRank(localStatus)
         ? (serverStatus || 'sent')
         : (localStatus || serverStatus || 'sent');
+};
+
+const isPendingLikeStatus = (status?: Message['status']) => (
+    status === 'sending' || status === 'pending' || status === 'error'
+);
+
+const normalizeComparableText = (value?: string | null) => (
+    typeof value === 'string' ? value.trim() : ''
+);
+
+const doesOutgoingPayloadMatchMessage = (
+    existing: Message,
+    text: string,
+    type: Message['type'],
+    metadata: any,
+): boolean => {
+    if (existing.type !== type) {
+        return false;
+    }
+
+    const sameReply = (existing.replyToId || '') === (metadata?.replyToId || '');
+    if (!sameReply) {
+        return false;
+    }
+
+    if (type === 'text') {
+        return normalizeComparableText(existing.plaintext) === normalizeComparableText(text);
+    }
+
+    const sameText = normalizeComparableText(existing.plaintext) === normalizeComparableText(text);
+    const existingMedia = typeof existing.mediaUrl === 'string' ? existing.mediaUrl : '';
+    const metadataMedia = typeof metadata?.mediaUrl === 'string' ? metadata.mediaUrl : '';
+    const sameMedia = !existingMedia || !metadataMedia || existingMedia === metadataMedia;
+    const sameFileName =
+        !existing.fileName || !metadata?.fileName || existing.fileName === metadata.fileName;
+    const existingDuration = typeof existing.duration === 'number' ? existing.duration : null;
+    const metadataDuration = typeof metadata?.duration === 'number' ? metadata.duration : null;
+    const sameDuration =
+        existingDuration == null || metadataDuration == null
+            ? true
+            : Math.abs(existingDuration - metadataDuration) <= 0.35;
+
+    return sameText && sameMedia && sameFileName && sameDuration;
+};
+
+const messageTimestamp = (message?: Message | null) => (
+    typeof message?.timestamp === 'number' ? message.timestamp : 0
+);
+
+const isMessageFromUser = (message: Message, myUserId?: string | null) => (
+    !!myUserId && (message.fromId || '').toUpperCase() === myUserId.toUpperCase()
+);
+
+const isLikelyOutgoingDuplicate = (
+    existing: Message,
+    incoming: Message,
+    myUserId?: string | null,
+): boolean => {
+    if (!isMessageFromUser(existing, myUserId) || !isMessageFromUser(incoming, myUserId)) {
+        return false;
+    }
+    if (!isPendingLikeStatus(existing.status)) {
+        return false;
+    }
+    if (existing.type !== incoming.type) {
+        return false;
+    }
+
+    const timeDelta = Math.abs(messageTimestamp(existing) - messageTimestamp(incoming));
+    if (timeDelta > 5 * 60 * 1000) {
+        return false;
+    }
+
+    if (existing.encryptedContent && incoming.encryptedContent && existing.encryptedContent === incoming.encryptedContent) {
+        return true;
+    }
+
+    if (incoming.type === 'text') {
+        const localText = normalizeComparableText(existing.plaintext);
+        const incomingText = normalizeComparableText(incoming.plaintext);
+        if (!localText || !incomingText) return false;
+        return localText === incomingText && (existing.replyToId || '') === (incoming.replyToId || '');
+    }
+
+    if (existing.mediaUrl && incoming.mediaUrl && existing.mediaUrl === incoming.mediaUrl) {
+        return true;
+    }
+    if (existing.fileName && incoming.fileName && existing.fileName === incoming.fileName) {
+        const existingDuration = Number(existing.duration || 0);
+        const incomingDuration = Number(incoming.duration || 0);
+        return Math.abs(existingDuration - incomingDuration) <= 1.0;
+    }
+    if ((incoming.type === 'voice' || incoming.type === 'music' || incoming.type === 'video') && existing.duration && incoming.duration) {
+        return Math.abs(existing.duration - incoming.duration) <= 0.35;
+    }
+
+    return false;
+};
+
+const mergeIncomingWithExistingMessage = (
+    existing: Message,
+    incoming: Message,
+    myUserId?: string | null,
+    outgoingReconcile = false,
+): Message => {
+    const incomingFromMe = isMessageFromUser(incoming, myUserId);
+    const fallbackIncomingStatus: Message['status'] =
+        incoming.status || (incomingFromMe ? 'sent' : 'delivered');
+    const mergedStatus = chooseMostAdvancedStatus(existing.status, fallbackIncomingStatus);
+
+    return {
+        ...existing,
+        ...incoming,
+        id: incoming.id || existing.id,
+        encryptedContent: incoming.encryptedContent || existing.encryptedContent || '',
+        timestamp: outgoingReconcile
+            ? (messageTimestamp(existing) || messageTimestamp(incoming) || Date.now())
+            : (messageTimestamp(incoming) || messageTimestamp(existing) || Date.now()),
+        status: mergedStatus,
+        plaintext: incoming.plaintext ?? existing.plaintext,
+        mediaUrl: incoming.mediaUrl ?? existing.mediaUrl,
+        fileName: incoming.fileName ?? existing.fileName,
+        fileSize: incoming.fileSize ?? existing.fileSize,
+        latitude: incoming.latitude ?? existing.latitude,
+        longitude: incoming.longitude ?? existing.longitude,
+        duration: incoming.duration ?? existing.duration,
+        replyToId: incoming.replyToId ?? existing.replyToId,
+        contact: incoming.contact ?? existing.contact,
+        caption: incoming.caption ?? existing.caption,
+        viewOnce: incoming.viewOnce ?? existing.viewOnce,
+        viewedBy: incoming.viewedBy ?? existing.viewedBy,
+        isVideoNote: incoming.isVideoNote ?? existing.isVideoNote,
+        mediaKey: incoming.mediaKey ?? existing.mediaKey,
+        isEdited: incoming.isEdited ?? existing.isEdited,
+        editedAt: incoming.editedAt ?? existing.editedAt,
+        errorMessage: mergedStatus === 'error'
+            ? (incoming.errorMessage || existing.errorMessage)
+            : undefined,
+        extra: {
+            ...(existing.extra || {}),
+            ...(incoming.extra || {}),
+        },
+    };
+};
+
+const upsertIncomingMessage = (
+    messages: Message[],
+    incoming: Message,
+    myUserId?: string | null,
+): {
+    messages: Message[];
+    inserted: boolean;
+    changed: boolean;
+    reconciledFromMessageId?: string;
+} => {
+    const exactIndex = messages.findIndex((m) => m.id === incoming.id);
+    if (exactIndex >= 0) {
+        const merged = mergeIncomingWithExistingMessage(messages[exactIndex], incoming, myUserId);
+        const shouldPrunePendingTwin =
+            isMessageFromUser(merged, myUserId) && !isPendingLikeStatus(merged.status);
+        const nextMessages = messages
+            .map((m, idx) => (idx === exactIndex ? merged : m))
+            .filter((m, idx) => {
+                if (idx === exactIndex) return true;
+                if (m.id === incoming.id) return false;
+                if (shouldPrunePendingTwin && isLikelyOutgoingDuplicate(m, merged, myUserId)) {
+                    return false;
+                }
+                return true;
+            });
+        const removedCount = messages.length - nextMessages.length;
+        chatStoreMessageLog('upsert:exact', {
+            messageId: incoming.id,
+            status: merged.status,
+            removedCount,
+            countBefore: messages.length,
+            countAfter: nextMessages.length,
+        });
+        return {
+            messages: nextMessages,
+            inserted: false,
+            changed: true,
+        };
+    }
+
+    let reconcileIndex = -1;
+    let reconcileScore = Number.POSITIVE_INFINITY;
+    for (let i = 0; i < messages.length; i++) {
+        const candidate = messages[i];
+        if (!isLikelyOutgoingDuplicate(candidate, incoming, myUserId)) continue;
+        const score = Math.abs(messageTimestamp(candidate) - messageTimestamp(incoming));
+        if (score < reconcileScore) {
+            reconcileScore = score;
+            reconcileIndex = i;
+        }
+    }
+
+    if (reconcileIndex >= 0) {
+        const existing = messages[reconcileIndex];
+        const merged = mergeIncomingWithExistingMessage(existing, incoming, myUserId, true);
+        const shouldPrunePendingTwin =
+            isMessageFromUser(merged, myUserId) && !isPendingLikeStatus(merged.status);
+        const nextMessages = messages
+            .map((m, idx) => (idx === reconcileIndex ? merged : m))
+            .filter((m, idx) => {
+                if (idx === reconcileIndex) return true;
+                if (m.id === incoming.id) return false;
+                if (shouldPrunePendingTwin && isLikelyOutgoingDuplicate(m, merged, myUserId)) {
+                    return false;
+                }
+                return true;
+            });
+        const removedCount = messages.length - nextMessages.length;
+        chatStoreMessageLog('upsert:reconcile', {
+            fromMessageId: existing.id,
+            toMessageId: incoming.id,
+            type: incoming.type,
+            status: merged.status,
+            removedCount,
+            countBefore: messages.length,
+            countAfter: nextMessages.length,
+        });
+        return {
+            messages: nextMessages,
+            inserted: false,
+            changed: true,
+            reconciledFromMessageId: existing.id,
+        };
+    }
+
+    chatStoreMessageLog('upsert:insert', {
+        messageId: incoming.id,
+        type: incoming.type,
+        status: incoming.status,
+        countBefore: messages.length,
+        countAfter: messages.length + 1,
+    });
+    return {
+        messages: [...messages, incoming],
+        inserted: true,
+        changed: true,
+    };
+};
+
+const pruneOfflineQueue = (
+    offlineQueue: Message[],
+    ...messageIds: Array<string | undefined>
+): Message[] => {
+    const targets = new Set(messageIds.filter((id): id is string => typeof id === 'string' && id.length > 0));
+    if (targets.size === 0) return offlineQueue;
+    const nextQueue = offlineQueue.filter((message) => !targets.has(message.id));
+    return nextQueue.length === offlineQueue.length ? offlineQueue : nextQueue;
 };
 
 const applyMessageEditedInChats = (
@@ -834,11 +1202,16 @@ export const useChatStore = create<ChatState>()(
                     const seenIds = new Set<string>();
                     const toRetry: Message[] = [];
                     for (const msg of [...offlineQueue, ...pendingMessages]) {
+                        if (!isRetryableMessage(msg)) continue;
                         if (msg.id && !seenIds.has(msg.id)) {
                             seenIds.add(msg.id);
                             toRetry.push(msg);
                         }
                     }
+
+                    const nextQueueMap = new Map<string, Message>();
+                    toRetry.forEach((msg) => nextQueueMap.set(msg.id, msg));
+                    set({ offlineQueue: Array.from(nextQueueMap.values()) });
 
                     if (toRetry.length > 0) {
                         const retryChatIds = Array.from(
@@ -859,7 +1232,6 @@ export const useChatStore = create<ChatState>()(
                             scheduleChatRetryFlush(retryChatId, get, 1200 + (index * 180));
                         });
                     }
-                    set({ offlineQueue: [] });
 
                     // IMPORTANT: Clear all channel references on reconnect
                     // This ensures we re-join with fresh handlers
@@ -869,15 +1241,9 @@ export const useChatStore = create<ChatState>()(
                     chatChannels.clear();
                     // console.log('[ChatStore] Cleared old channels, will re-join');
 
-                    // Small delay to ensure socket is fully ready before joining channels.
-                    // Debounced so reconnect/new_message bursts don't block JS with repeated reloads.
-                    // Rate limit: Don't reload if we just loaded < 15s ago (prevents reconnect loops)
-                    const { lastChatsLoad } = get();
-                    if (!lastChatsLoad || Date.now() - lastChatsLoad > 15000) {
-                        scheduleLoadChats(100);
-                    } else {
-                        // console.log('[ChatStore] Skipping loadChats on reconnect (rate limited)');
-                    }
+                    // Re-join chat channels on every reconnect.
+                    // We clear channel refs above, so skipping this leaves retry queue without writable channels.
+                    scheduleLoadChats(100);
 
                     // Join User Channel for signaling/status.
                     // Recreate it on reconnect if an old instance is stuck in a non-joined state.
@@ -1119,17 +1485,35 @@ export const useChatStore = create<ChatState>()(
 
                         const localMessages = existing?.messages || [];
 
-                        // IMPORTANT: Always prefer local messages if they exist
-                        // because local messages have plaintext
-                        let mergedMessages = localMessages;
-
-                        // Only add server messages that we don't have locally
+                        // Merge server history into local state with ID-reconcile support.
+                        // This prevents "sent+error duplicate" rows when backend rewrites IDs.
+                        let mergedMessages = [...localMessages];
+                        let mergeInsertedCount = 0;
+                        let mergeReconciledCount = 0;
                         for (const serverMsg of serverMessages) {
-                            const existsLocally = localMessages.some(lm => lm.id === serverMsg.id);
-                            if (!existsLocally) {
-                                mergedMessages = [...mergedMessages, serverMsg];
+                            const mergeResult = upsertIncomingMessage(
+                                mergedMessages,
+                                serverMsg,
+                                auth?.userId || null,
+                            );
+                            if (mergeResult.changed) {
+                                if (mergeResult.reconciledFromMessageId) {
+                                    mergeReconciledCount += 1;
+                                } else if (mergeResult.inserted) {
+                                    mergeInsertedCount += 1;
+                                }
+                                mergedMessages = mergeResult.messages;
                             }
                         }
+                        mergedMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                        chatStoreMessageLog('loadChats:merged', {
+                            chatId: c.chatId,
+                            localCount: localMessages.length,
+                            serverCount: serverMessages.length,
+                            mergedCount: mergedMessages.length,
+                            inserted: mergeInsertedCount,
+                            reconciled: mergeReconciledCount,
+                        });
 
                         // DECRYPT LAST MESSAGE FOR PREVIEW if needed
                         const lastMsg = mergedMessages[mergedMessages.length - 1];
@@ -1199,11 +1583,16 @@ export const useChatStore = create<ChatState>()(
 
                                 channel.on("message", async (payload: any) => {
                                     // console.log(`[ChatStore] Received message on ${topic}:`, payload.id);
+                                    const incomingId = payload?.id || payload?.message_id;
 
                                     // Ignore current user's own messages (we handle them optimistically)
                                     // UNLESS it's a confirmation/echo with updated server ID (not implemented yet)
                                     // For now we rely on dedup logic
-                                    if (recentlyProcessedMsgIds.has(payload.id)) return;
+                                    if (incomingId && recentlyProcessedMsgIds.has(incomingId)) return;
+                                    if (incomingId) {
+                                        recentlyProcessedMsgIds.add(incomingId);
+                                        setTimeout(() => recentlyProcessedMsgIds.delete(incomingId), 10000);
+                                    }
 
                                     // Add to store
                                     const newMsg = normalizeMessage(payload);
@@ -1229,37 +1618,69 @@ export const useChatStore = create<ChatState>()(
                                         get().sendDeliveryReceipt(chat.chatId, newMsg.id);
                                     }
 
-                                    const { chats: currentChats } = get();
+                                    const { chats: currentChats, offlineQueue } = get();
                                     const idx = currentChats.findIndex(c => c.chatId === chat.chatId);
+                                    if (idx < 0) return;
 
-                                    if (idx > -1) {
-                                        // Check duplicate
-                                        if (currentChats[idx].messages.some(m => m.id === newMsg.id)) return;
+                                    const updated = [...currentChats];
+                                    const messagesBeforeCount = updated[idx].messages.length;
+                                    const upsert = upsertIncomingMessage(
+                                        updated[idx].messages,
+                                        newMsg,
+                                        currentAuth?.userId || null,
+                                    );
+                                    if (!upsert.changed) return;
 
-                                        const updated = [...currentChats];
-                                        updated[idx] = {
-                                            ...updated[idx],
-                                            messages: [...updated[idx].messages, newMsg],
-                                            lastMessage: newMsg,
-                                            unreadCount: (updated[idx].unreadCount || 0) + 1
-                                        };
-                                        // Move to top
-                                        updated.sort((a, b) => {
-                                            if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-                                            return (b.lastMessage?.timestamp || 0) - (a.lastMessage?.timestamp || 0);
-                                        });
+                                    const isMe = isMessageFromUser(newMsg, currentAuth?.userId || null);
+                                    const nextMessages = upsert.messages;
+                                    const nextUnreadCount = isMe || !upsert.inserted
+                                        ? (updated[idx].unreadCount || 0)
+                                        : ((updated[idx].unreadCount || 0) + 1);
+                                    updated[idx] = {
+                                        ...updated[idx],
+                                        messages: nextMessages,
+                                        lastMessage: nextMessages[nextMessages.length - 1] || updated[idx].lastMessage,
+                                        unreadCount: nextUnreadCount,
+                                    };
 
+                                    // Move to top
+                                    updated.sort((a, b) => {
+                                        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
+                                        return (b.lastMessage?.timestamp || 0) - (a.lastMessage?.timestamp || 0);
+                                    });
+
+                                    const nextQueue = pruneOfflineQueue(
+                                        offlineQueue,
+                                        newMsg.id,
+                                        upsert.reconciledFromMessageId,
+                                    );
+                                    if (nextQueue === offlineQueue) {
                                         set({ chats: updated });
-                                        if (newMsg.fromId !== currentAuth?.userId && !extractPublicKey(updated[idx])) {
-                                            warmFriendPublicKey(chat.chatId, updated[idx].friendId, set, get).catch(() => { });
-                                        }
-                                        // Determine sound
-                                        const isMe = newMsg.fromId === currentAuth?.userId;
-                                        if (isMe) {
-                                            SoundManager.play('sent'); // Confirmation from server
-                                        } else if (!updated[idx].muted) {
-                                            SoundManager.play('received');
-                                        }
+                                    } else {
+                                        set({ chats: updated, offlineQueue: nextQueue });
+                                    }
+
+                                    chatStoreMessageLog('realtime:applied', {
+                                        chatId: chat.chatId,
+                                        messageId: newMsg.id,
+                                        type: newMsg.type,
+                                        inserted: upsert.inserted,
+                                        reconciledFrom: upsert.reconciledFromMessageId,
+                                        messagesBefore: messagesBeforeCount,
+                                        messagesAfter: nextMessages.length,
+                                        queueBefore: offlineQueue.length,
+                                        queueAfter: nextQueue.length,
+                                        isMe,
+                                    });
+
+                                    const nextChat = updated.find((entry) => entry.chatId === chat.chatId);
+                                    if (!isMe && nextChat && !extractPublicKey(nextChat)) {
+                                        warmFriendPublicKey(chat.chatId, nextChat.friendId, set, get).catch(() => { });
+                                    }
+                                    if (isMe) {
+                                        SoundManager.play('sent'); // Confirmation from server
+                                    } else if (!(nextChat?.muted)) {
+                                        SoundManager.play('received');
                                     }
                                 });
 
@@ -1540,55 +1961,92 @@ export const useChatStore = create<ChatState>()(
                                 channel.on("message", (payload: any) => {
                                     const deobfuscated = deobfuscatePayload(payload);
                                     const serverMsg = deobfuscated.encryptedContent ? deobfuscated : payload;
+                                    const incomingId = serverMsg.id || serverMsg.message_id;
 
-                                    if (!serverMsg.id || !serverMsg.fromId) return;
+                                    if (!incomingId || !serverMsg.fromId) return;
 
                                     // Synchronous dedup check
-                                    if (recentlyProcessedMsgIds.has(serverMsg.id)) return;
-                                    recentlyProcessedMsgIds.add(serverMsg.id);
-                                    setTimeout(() => recentlyProcessedMsgIds.delete(serverMsg.id), 10000);
+                                    if (recentlyProcessedMsgIds.has(incomingId)) return;
+                                    recentlyProcessedMsgIds.add(incomingId);
+                                    setTimeout(() => recentlyProcessedMsgIds.delete(incomingId), 10000);
 
                                     (async () => {
                                         console.log('[ChatStore] New Message in new chat:', serverMsg.id);
-                                        const currentChats = get().chats;
-                                        const existingChatIdx = currentChats.find(c => c.chatId === chatId);
-                                        if (existingChatIdx?.messages.some(m => m.id === serverMsg.id)) return;
+                                        const { chats: currentChats, offlineQueue } = get();
+                                        const idx = currentChats.findIndex(c => c.chatId === chatId);
+                                        if (idx < 0) return;
 
                                         // PRE-DECRYPT the message
-                                        let plaintext: string | undefined = undefined;
+                                        let decryptedPayload: Partial<Message> = {};
                                         try {
                                             const sess = AuthManager.getInstance().getSession();
                                             if (sess?.keyPair?.privateKey && serverMsg.encryptedContent) {
                                                 const isFromMe = serverMsg.fromId === sess.userId;
-                                                plaintext = await decryptMessageContent(sess.keyPair.privateKey, serverMsg.encryptedContent, isFromMe);
+                                                const decrypted = await decryptMessageContent(sess.keyPair.privateKey, serverMsg.encryptedContent, isFromMe);
+                                                if (decrypted) {
+                                                    decryptedPayload = parseDecryptedContent(decrypted);
+                                                }
                                             }
                                         } catch (e) {
                                             console.warn('[ChatStore] Pre-decrypt failed in startChat:', e);
                                         }
 
-                                        const msg: Message = {
-                                            id: serverMsg.id,
-                                            fromId: serverMsg.fromId,
-                                            chatId: chatId,
-                                            encryptedContent: serverMsg.encryptedContent,
-                                            type: serverMsg.type || 'text',
-                                            timestamp: serverMsg.timestamp || Date.now(),
-                                            plaintext: plaintext, // Already decrypted
-                                            status: 'delivered'
+                                        const msg = normalizeMessage({
+                                            ...serverMsg,
+                                            chatId,
+                                            status: serverMsg.status || 'delivered',
+                                        });
+                                        if (Object.keys(decryptedPayload).length > 0) {
+                                            Object.assign(msg, decryptedPayload);
+                                        }
+
+                                        const updated = [...currentChats];
+                                        const messagesBeforeCount = updated[idx].messages.length;
+                                        const upsert = upsertIncomingMessage(
+                                            updated[idx].messages,
+                                            msg,
+                                            auth.userId,
+                                        );
+                                        if (!upsert.changed) return;
+
+                                        const isMe = isMessageFromUser(msg, auth.userId);
+                                        const nextMessages = upsert.messages;
+                                        const nextUnreadCount = isMe || !upsert.inserted
+                                            ? (updated[idx].unreadCount || 0)
+                                            : ((updated[idx].unreadCount || 0) + 1);
+                                        updated[idx] = {
+                                            ...updated[idx],
+                                            messages: nextMessages,
+                                            lastMessage: nextMessages[nextMessages.length - 1] || updated[idx].lastMessage,
+                                            unreadCount: nextUnreadCount,
                                         };
 
-                                        const idx = currentChats.findIndex(c => c.chatId === chatId);
-                                        if (idx > -1) {
-                                            const updated = [...currentChats];
-                                            updated[idx] = {
-                                                ...updated[idx],
-                                                messages: [...updated[idx].messages, msg],
-                                                lastMessage: msg
-                                            };
+                                        const nextQueue = pruneOfflineQueue(
+                                            offlineQueue,
+                                            msg.id,
+                                            upsert.reconciledFromMessageId,
+                                        );
+                                        if (nextQueue === offlineQueue) {
                                             set({ chats: updated });
-                                            if (msg.fromId !== auth.userId && !extractPublicKey(updated[idx])) {
-                                                warmFriendPublicKey(chatId, updated[idx].friendId, set, get).catch(() => { });
-                                            }
+                                        } else {
+                                            set({ chats: updated, offlineQueue: nextQueue });
+                                        }
+
+                                        chatStoreMessageLog('startChat:realtimeApplied', {
+                                            chatId,
+                                            messageId: msg.id,
+                                            type: msg.type,
+                                            inserted: upsert.inserted,
+                                            reconciledFrom: upsert.reconciledFromMessageId,
+                                            messagesBefore: messagesBeforeCount,
+                                            messagesAfter: nextMessages.length,
+                                            queueBefore: offlineQueue.length,
+                                            queueAfter: nextQueue.length,
+                                            isMe,
+                                        });
+
+                                        if (!isMe && !extractPublicKey(updated[idx])) {
+                                            warmFriendPublicKey(chatId, updated[idx].friendId, set, get).catch(() => { });
                                         }
                                     })();
                                 });
@@ -1765,6 +2223,15 @@ export const useChatStore = create<ChatState>()(
                 if (!chat) return;
                 const msg = chat.messages.find(m => m.id === messageId);
                 if (!msg || (msg.status !== 'error' && msg.status !== 'pending' && msg.status !== 'sending')) return;
+                if (hasPermanentLocalMediaError(msg)) {
+                    chatStoreMessageLog('retry:skipped-permanent-local-media-error', {
+                        chatId,
+                        messageId,
+                        type: msg.type,
+                        mediaUrl: msg.mediaUrl,
+                    });
+                    return;
+                }
 
                 const existingId = isValidBinaryId(msg.id) ? msg.id : undefined;
                 if (!existingId) {
@@ -1835,22 +2302,26 @@ export const useChatStore = create<ChatState>()(
                 }
 
                 // Re-send using recovered plaintext and existing metadata.
-                void get().sendMessage(chatId, recoveredText, msg.type, {
-                    mediaUrl: msg.mediaUrl,
-                    fileName: msg.fileName,
-                    fileSize: msg.fileSize,
-                    latitude: msg.latitude,
-                    longitude: msg.longitude,
-                    duration: msg.duration,
-                    contact: msg.contact,
-                    replyToId: msg.replyToId,
-                    caption: msg.caption,
-                    viewOnce: msg.viewOnce,
-                    isVideoNote: msg.isVideoNote,
-                    width: msg.extra?.width,
-                    height: msg.extra?.height,
-                    waveform: msg.extra?.waveform,
-                }, existingId);
+                try {
+                    await get().sendMessage(chatId, recoveredText, msg.type, {
+                        mediaUrl: msg.mediaUrl,
+                        fileName: msg.fileName,
+                        fileSize: msg.fileSize,
+                        latitude: msg.latitude,
+                        longitude: msg.longitude,
+                        duration: msg.duration,
+                        contact: msg.contact,
+                        replyToId: msg.replyToId,
+                        caption: msg.caption,
+                        viewOnce: msg.viewOnce,
+                        isVideoNote: msg.isVideoNote,
+                        width: msg.extra?.width,
+                        height: msg.extra?.height,
+                        waveform: msg.extra?.waveform,
+                    }, existingId);
+                } catch (e) {
+                    console.warn('[ChatStore] retryMessage send failed:', e);
+                }
             },
 
             deleteFailedMessage: (chatId, messageId) => {
@@ -1981,8 +2452,8 @@ export const useChatStore = create<ChatState>()(
                 }
 
                 const normalizedExistingId = isValidBinaryId(existingId) ? existingId : undefined;
-                const msgId = normalizedExistingId || Crypto.randomUUID();
-                const staleExistingId = existingId && existingId !== msgId ? existingId : undefined;
+                let msgId = normalizedExistingId || Crypto.randomUUID();
+                let staleExistingId = existingId && existingId !== msgId ? existingId : undefined;
                 const now = Date.now();
                 console.log('[ChatStore] sendMessage ID resolution', {
                     existingId,
@@ -1994,39 +2465,72 @@ export const useChatStore = create<ChatState>()(
                 // Check Connection
                 const { isConnected } = get();
 
-                // 1. IMMEDIATE Optimistic Update - show message before encryption
-                const optimisticMsg: Message = {
-                    id: msgId,
-                    fromId: auth.userId,
-                    chatId: chatId,
-                    encryptedContent: '',
-                    type: type,
-                    timestamp: now,
-                    plaintext: text,
-                    mediaUrl: metadata.mediaUrl,
-                    fileName: metadata.fileName,
-                    fileSize: metadata.fileSize,
-                    latitude: metadata.latitude,
-                    longitude: metadata.longitude,
-                    duration: metadata.duration,
-                    contact: metadata.contact,
-                    replyToId: metadata.replyToId,
-                    caption: metadata.caption,
-                    viewOnce: metadata.viewOnce,
-                    viewedBy: [],
-                    isVideoNote: metadata.isVideoNote,
-                    extra: {
-                        width: metadata.width,
-                        height: metadata.height,
-                        waveform: metadata.waveform,
-                    },
-                    status: isConnected ? 'sending' : 'pending'
-                };
-
                 // Add to chats state immediately
                 const { chats } = get();
                 const chatIndex = chats.findIndex(c => c.chatId === chatId);
                 if (chatIndex > -1) {
+                    const existingMessage = chats[chatIndex].messages.find((m) => m.id === msgId);
+                    if (existingMessage) {
+                        const samePayload = doesOutgoingPayloadMatchMessage(existingMessage, text, type, metadata);
+                        if (
+                            samePayload
+                            && (
+                                existingMessage.status === 'sent'
+                                || existingMessage.status === 'delivered'
+                                || existingMessage.status === 'read'
+                            )
+                        ) {
+                            chatStoreMessageLog('send:dedup-skip-existing', {
+                                chatId,
+                                messageId: msgId,
+                                type,
+                                status: existingMessage.status,
+                            });
+                            return;
+                        }
+                        if (!samePayload) {
+                            const previousId = msgId;
+                            msgId = Crypto.randomUUID();
+                            staleExistingId = undefined;
+                            chatStoreMessageLog('send:id-collision-regenerated', {
+                                chatId,
+                                previousId,
+                                regeneratedId: msgId,
+                                type,
+                                existingStatus: existingMessage.status,
+                            });
+                        }
+                    }
+
+                    // 1. IMMEDIATE Optimistic Update - show message before encryption
+                    const optimisticMsg: Message = {
+                        id: msgId,
+                        fromId: auth.userId,
+                        chatId: chatId,
+                        encryptedContent: '',
+                        type: type,
+                        timestamp: now,
+                        plaintext: text,
+                        mediaUrl: metadata.mediaUrl,
+                        fileName: metadata.fileName,
+                        fileSize: metadata.fileSize,
+                        latitude: metadata.latitude,
+                        longitude: metadata.longitude,
+                        duration: metadata.duration,
+                        contact: metadata.contact,
+                        replyToId: metadata.replyToId,
+                        caption: metadata.caption,
+                        viewOnce: metadata.viewOnce,
+                        viewedBy: [],
+                        isVideoNote: metadata.isVideoNote,
+                        extra: {
+                            width: metadata.width,
+                            height: metadata.height,
+                            waveform: metadata.waveform,
+                        },
+                        status: isConnected ? 'sending' : 'pending'
+                    };
+
                     const updatedChats = [...chats];
                     // Handle potential duplicate/retry by filtering
                     const msgs = updatedChats[chatIndex].messages.filter(m => m.id !== msgId && m.id !== staleExistingId);
@@ -2042,6 +2546,8 @@ export const useChatStore = create<ChatState>()(
                         return (b.lastMessage?.timestamp || 0) - (a.lastMessage?.timestamp || 0);
                     });
                     set({ chats: updatedChats });
+                } else {
+                    throw new Error('Chat not found');
                 }
 
                 // 1.5 Normalize/Persist local media URI before queueing or upload.
@@ -2050,7 +2556,7 @@ export const useChatStore = create<ChatState>()(
                 const isLocalFile = resolvedMediaUrl && (resolvedMediaUrl.startsWith('file://') || resolvedMediaUrl.startsWith('/'));
                 const isMediaType = ['image', 'video', 'voice', 'music', 'file'].includes(type) || metadata.mediaUrl;
 
-                const syncOptimisticMediaUri = (nextUri: string) => {
+                const syncOptimisticMessagePatch = (patch: Partial<Message>) => {
                     const nextChats = get().chats;
                     const nextChatIndex = nextChats.findIndex((c) => c.chatId === chatId);
                     if (nextChatIndex === -1) return;
@@ -2058,9 +2564,25 @@ export const useChatStore = create<ChatState>()(
                     let changed = false;
                     const updatedChats = [...nextChats];
                     const updatedMessages = updatedChats[nextChatIndex].messages.map((m) => {
-                        if (m.id !== msgId || m.mediaUrl === nextUri) return m;
+                        if (m.id !== msgId) return m;
+                        const patchExtra = patch.extra as Record<string, unknown> | undefined;
+                        const hasDirectChange = Object.entries(patch).some(([key, value]) => {
+                            if (key === 'extra') return false;
+                            return (m as any)[key] !== value;
+                        });
+                        const hasExtraChange = !!patchExtra && Object.entries(patchExtra).some(([key, value]) => (
+                            (m.extra || {})[key] !== value
+                        ));
+                        if (!hasDirectChange && !hasExtraChange) return m;
                         changed = true;
-                        return { ...m, mediaUrl: nextUri };
+                        return {
+                            ...m,
+                            ...patch,
+                            extra: {
+                                ...(m.extra || {}),
+                                ...(patch.extra || {}),
+                            },
+                        };
                     });
 
                     if (!changed) return;
@@ -2072,9 +2594,13 @@ export const useChatStore = create<ChatState>()(
                     set({ chats: updatedChats });
                 };
 
+                const syncOptimisticMediaUri = (nextUri: string) => {
+                    syncOptimisticMessagePatch({ mediaUrl: nextUri });
+                };
+
                 if (isLocalFile && isMediaType) {
-                    const readableUri = await ensureReadableLocalUri(resolvedMediaUrl);
-                    if (!readableUri) {
+                    const durableUri = await ensureDurableOutgoingLocalUri(resolvedMediaUrl, msgId, type);
+                    if (!durableUri) {
                         console.warn('[ChatStore] Local media file is not readable:', resolvedMediaUrl);
                         const latestChats = get().chats;
                         const idx = latestChats.findIndex((c) => c.chatId === chatId);
@@ -2087,7 +2613,7 @@ export const useChatStore = create<ChatState>()(
                                         ? {
                                             ...m,
                                             status: 'error' as const,
-                                            errorMessage: 'Local media file is no longer available. Please record/select again.',
+                                            errorMessage: LOCAL_MEDIA_MISSING_USER_MESSAGE,
                                         }
                                         : m
                                 )),
@@ -2098,17 +2624,34 @@ export const useChatStore = create<ChatState>()(
                         return;
                     }
 
-                    resolvedMediaUrl = readableUri;
-                    metadata.mediaUrl = readableUri;
-                    syncOptimisticMediaUri(readableUri);
+                    resolvedMediaUrl = durableUri;
+                    metadata.mediaUrl = durableUri;
+                    syncOptimisticMediaUri(durableUri);
+                    chatStoreMessageLog('send:local-media-ready', {
+                        chatId,
+                        messageId: msgId,
+                        type,
+                        mediaUri: durableUri,
+                    });
                 }
+                const originalLocalMediaUri = isLocalFile && isMediaType
+                    ? metadata.mediaUrl
+                    : undefined;
 
                 if (!isConnected) {
                     console.log('[ChatStore] Offline, queuing message:', msgId);
                     const { offlineQueue } = get();
                     const queuedMessage = get().chats
                         .find((c) => c.chatId === chatId)
-                        ?.messages.find((m) => m.id === msgId) || optimisticMsg;
+                        ?.messages.find((m) => m.id === msgId);
+                    if (!queuedMessage) {
+                        chatStoreMessageLog('send:offline-queue-missing-row', {
+                            chatId,
+                            messageId: msgId,
+                            type,
+                        });
+                        return;
+                    }
                     const nextQueueMap = new Map<string, Message>();
                     offlineQueue.forEach((m) => nextQueueMap.set(m.id, m));
                     nextQueueMap.set(msgId, queuedMessage);
@@ -2191,8 +2734,12 @@ export const useChatStore = create<ChatState>()(
 
                                 if (uploadedUrl) {
                                     resolvedMediaUrl = uploadedUrl;
-                                    const originalUri = metadata.mediaUrl?.startsWith('file://') ? metadata.mediaUrl : `file://${metadata.mediaUrl}`;
-                                    useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                    metadata.mediaUrl = uploadedUrl;
+                                    syncOptimisticMessagePatch({ mediaUrl: uploadedUrl, mediaKey });
+                                    if (typeof originalLocalMediaUri === 'string' && originalLocalMediaUri.length > 0) {
+                                        const originalUri = originalLocalMediaUri.startsWith('file://') ? originalLocalMediaUri : `file://${originalLocalMediaUri}`;
+                                        useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                    }
                                     console.log('[ChatStore] Large media encrypted & uploaded, URL:', resolvedMediaUrl);
                                 } else {
                                     throw new Error(MEDIA_UPLOAD_DEFERRED);
@@ -2211,8 +2758,12 @@ export const useChatStore = create<ChatState>()(
                                 );
                                 if (uploadedUrl) {
                                     resolvedMediaUrl = uploadedUrl;
-                                    const originalUri = metadata.mediaUrl?.startsWith('file://') ? metadata.mediaUrl : `file://${metadata.mediaUrl}`;
-                                    useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                    metadata.mediaUrl = uploadedUrl;
+                                    syncOptimisticMessagePatch({ mediaUrl: uploadedUrl, mediaKey });
+                                    if (typeof originalLocalMediaUri === 'string' && originalLocalMediaUri.length > 0) {
+                                        const originalUri = originalLocalMediaUri.startsWith('file://') ? originalLocalMediaUri : `file://${originalLocalMediaUri}`;
+                                        useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                    }
                                 } else {
                                     throw new Error(MEDIA_UPLOAD_DEFERRED);
                                 }
@@ -2300,10 +2851,14 @@ export const useChatStore = create<ChatState>()(
 
                             if (uploadedUrl) {
                                 resolvedMediaUrl = uploadedUrl;
+                                metadata.mediaUrl = uploadedUrl;
+                                syncOptimisticMessagePatch({ mediaUrl: uploadedUrl, mediaKey });
 
                                 // Optimization: Map encrypted URL to original local file for sender display
-                                const originalUri = metadata.mediaUrl?.startsWith('file://') ? metadata.mediaUrl : `file://${metadata.mediaUrl}`;
-                                useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                if (typeof originalLocalMediaUri === 'string' && originalLocalMediaUri.length > 0) {
+                                    const originalUri = originalLocalMediaUri.startsWith('file://') ? originalLocalMediaUri : `file://${originalLocalMediaUri}`;
+                                    useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
+                                }
 
                                 console.log('[ChatStore] Encrypted media uploaded, URL:', resolvedMediaUrl);
                             } else {
@@ -2390,6 +2945,9 @@ export const useChatStore = create<ChatState>()(
                                     ? {
                                         ...m,
                                         encryptedContent: encrypted,
+                                        mediaUrl: resolvedMediaUrl || m.mediaUrl,
+                                        mediaKey: mediaKey || m.mediaKey,
+                                        errorMessage: undefined,
                                         status: (m.status === 'pending' ? 'pending' : 'sending') as Message['status'],
                                     }
                                     : m
@@ -2492,7 +3050,20 @@ export const useChatStore = create<ChatState>()(
                             });
                             get().clearUploadProgress(msgId);
                             console.error('[ChatStore] Message send failed:', err);
-                            const transient = !get().isConnected || !!(err && (err.reason === 'closed' || err.reason === 'timeout' || err.reason === 'transport_close'));
+                            const reason = String(err?.reason || '').toLowerCase();
+                            const transient =
+                                !get().isConnected ||
+                                isRecoverableSendError(err) ||
+                                reason === 'closed' ||
+                                reason === 'timeout' ||
+                                reason === 'transport_close';
+                            chatStoreMessageLog('send:pushError', {
+                                chatId,
+                                messageId: msgId,
+                                reason,
+                                transient,
+                                connected: get().isConnected,
+                            });
                             // Keep transient transport failures pending for auto-retry.
                             const latestChats = get().chats;
                             const idx = latestChats.findIndex(c => c.chatId === chatId);
@@ -2616,7 +3187,7 @@ export const useChatStore = create<ChatState>()(
                                         ...m,
                                         status: nextStatus,
                                         errorMessage: localFileMissing
-                                            ? 'Local media file is no longer available. Please record/select again.'
+                                            ? LOCAL_MEDIA_MISSING_USER_MESSAGE
                                             : m.errorMessage,
                                     }
                                     : m
