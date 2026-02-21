@@ -1349,6 +1349,7 @@ export const useChatStore = create<ChatState>()(
 
                         // Listen for new message notification (for chats we might not have yet or deleted)
                         userChannel.on('new_message', (payload: any) => {
+                            console.log('[ChatStore] user:new_message received', payload);
                             const msgId = payload.message_id || payload.messageId;
                             if (msgId && recentlyProcessedMsgIds.has(msgId)) return;
                             // console.log('[ChatStore] New message notification:', payload);

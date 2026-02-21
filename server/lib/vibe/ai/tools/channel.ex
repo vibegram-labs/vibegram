@@ -5,6 +5,7 @@ defmodule Vibe.AI.Tools.Channel do
 
   require Logger
   alias Vibe.Chat
+  alias Vibe.Notifications
 
   def post_to_channel(input, user_id) do
     channel_id = input["channel_id"]
@@ -50,6 +51,13 @@ defmodule Vibe.AI.Tools.Channel do
                   message_id: message_id,
                   timestamp: timestamp
                 })
+
+                _ =
+                  Notifications.send_message_push(pid, %{
+                    "chat_id" => channel_id,
+                    "from_id" => user_id,
+                    "message_id" => message_id
+                  })
               end
             end)
 

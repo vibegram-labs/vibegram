@@ -1,6 +1,8 @@
 defmodule VibeWeb.ChatChannel do
   use VibeWeb, :channel
   alias Vibe.Chat
+  alias Vibe.Notifications
+  require Logger
 
   @impl true
   def join("chat:" <> chat_id, _payload, socket) do
@@ -54,6 +56,9 @@ defmodule VibeWeb.ChatChannel do
           {:ok, _msg} ->
             # Batch-fetch all participants with settings in ONE query (no N+1)
             participants = Chat.get_all_participant_settings(chat_id)
+            Logger.info(
+              "[ChatChannel] message persisted chat_id=#{chat_id} sender=#{user_id} participants=#{length(participants)} message_id=#{data["id"]}"
+            )
 
             Enum.each(participants, fn p ->
               if p.user_id != user_id do
@@ -66,12 +71,24 @@ defmodule VibeWeb.ChatChannel do
                   timestamp: data["timestamp"],
                   muted: p.muted || false
                 })
+
+                if p.muted do
+                  Logger.info(
+                    "[ChatChannel] push skipped (muted chat) recipient=#{p.user_id} chat_id=#{chat_id} message_id=#{data["id"]}"
+                  )
+                else
+                  _ =
+                    Notifications.send_message_push(p.user_id, %{
+                      "chat_id" => chat_id,
+                      "message_id" => data["id"],
+                      "from_id" => user_id
+                    })
+                end
               end
             end)
 
           {:error, changeset} ->
             # Log persistence failure but don't crash
-            require Logger
             Logger.error("Message persistence failed: #{inspect(changeset)}")
         end
       end)

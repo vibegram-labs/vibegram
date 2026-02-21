@@ -58,10 +58,29 @@ export default function RootLayout() {
   };
 
   useEffect(() => {
+    Notifications.getPermissionsAsync()
+      .then((perm) => {
+        console.log('[Notifications] Permission snapshot', {
+          status: perm.status,
+          granted: perm.granted,
+          canAskAgain: perm.canAskAgain,
+          iosStatus: (perm as any)?.ios?.status,
+          iosAllowsAlert: (perm as any)?.ios?.allowsAlert,
+          iosAllowsBadge: (perm as any)?.ios?.allowsBadge,
+          iosAllowsSound: (perm as any)?.ios?.allowsSound,
+        });
+      })
+      .catch((err) => console.warn('[Notifications] Permission snapshot failed', err));
+
     // Foreground notification received
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
       const data = notification.request.content.data as Record<string, unknown> | undefined;
-      console.log('[Notifications] Received in foreground:', data);
+      console.log('[Notifications] Received in foreground:', {
+        id: notification.request.identifier,
+        title: notification.request.content.title,
+        body: notification.request.content.body,
+        data,
+      });
       if (handleNotificationData(data)) {
         return;
       }

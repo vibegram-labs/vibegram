@@ -292,20 +292,23 @@ export default function ActiveCallScreen() {
     // --- VIDEO CALL UI ---
     if (isVideoCall) {
         const fullShowsLocal = localIsFull;
+        const fullIsLocal = fullShowsLocal;
+        const miniIsLocal = !fullShowsLocal;
         const FullView = fullShowsLocal ? localStreamUrl : remoteStreamUrl;
         const MiniView = fullShowsLocal ? remoteStreamUrl : localStreamUrl;
-        const isMiniMirror = fullShowsLocal ? false : isFrontCamera;
-        const isFullMirror = fullShowsLocal ? isFrontCamera : false;
+        // iOS remote front-camera frames can arrive mirrored depending on capturer path.
+        // Use RTCView's native mirror prop (not style transforms) to compensate.
+        const shouldCompensateRemoteMirror = Platform.OS === 'ios';
+        const isFullMirror = fullIsLocal ? isFrontCamera : shouldCompensateRemoteMirror;
+        const isMiniMirror = miniIsLocal ? isFrontCamera : shouldCompensateRemoteMirror;
 
         const renderVideoContent = (isMinimizedMode = false) => (
             <View style={[StyleSheet.absoluteFill, isMinimizedMode && { borderRadius: 24, overflow: 'hidden' }]}>
                 {FullView && RTCView ? (
                     <RTCView
+                        key={`full-${fullIsLocal ? 'local' : 'remote'}-${isFullMirror ? 'm1' : 'm0'}-${FullView}`}
                         streamURL={FullView}
-                        style={[
-                            StyleSheet.absoluteFill,
-                            !fullShowsLocal && Platform.OS === 'ios' ? styles.remoteUnmirrored : undefined,
-                        ]}
+                        style={StyleSheet.absoluteFill}
                         objectFit="cover"
                         mirror={isFullMirror}
                     />
@@ -356,6 +359,7 @@ export default function ActiveCallScreen() {
                         <Animated.View style={[styles.pipContainer, pipAnimatedStyle]}>
                             <TouchableOpacity activeOpacity={1} onPress={swapFeeds} style={StyleSheet.absoluteFill}>
                                 <RTCView
+                                    key={`mini-${miniIsLocal ? 'local' : 'remote'}-${isMiniMirror ? 'm1' : 'm0'}-${MiniView}`}
                                     streamURL={MiniView}
                                     style={{ width: '100%', height: '100%' }}
                                     objectFit="cover"
@@ -571,8 +575,5 @@ const styles = StyleSheet.create({
         borderRadius: 12,
         justifyContent: 'center',
         alignItems: 'center',
-    },
-    remoteUnmirrored: {
-        transform: [{ scaleX: 1 }],
     },
 });

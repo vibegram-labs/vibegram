@@ -15,7 +15,15 @@ Notifications.setNotificationHandler({
 });
 
 export const requestPermissionsAndGetToken = async (): Promise<string | undefined> => {
+    console.log('[NotificationManager] init', {
+        platform: Platform.OS,
+        isDevice: Device.isDevice,
+        appOwnership: Constants.appOwnership,
+        executionEnvironment: Constants.executionEnvironment,
+    });
+
     if (Platform.OS === 'android') {
+        console.log('[NotificationManager] configuring Android channel: default');
         await Notifications.setNotificationChannelAsync('default', {
             name: 'default',
             importance: Notifications.AndroidImportance.MAX,
@@ -25,38 +33,59 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
     }
 
     // NOTE: Device check removed for Simulator testing
-    const { status: existingStatus } = await Notifications.getPermissionsAsync();
+    const existing = await Notifications.getPermissionsAsync();
+    const { status: existingStatus } = existing;
+    console.log('[NotificationManager] permission status before request', {
+        status: existing.status,
+        canAskAgain: existing.canAskAgain,
+        granted: existing.granted,
+        iosStatus: (existing as any)?.ios?.status,
+        iosAllowsAlert: (existing as any)?.ios?.allowsAlert,
+        iosAllowsBadge: (existing as any)?.ios?.allowsBadge,
+        iosAllowsSound: (existing as any)?.ios?.allowsSound,
+    });
     let finalStatus = existingStatus;
 
     if (existingStatus !== 'granted') {
-        const { status } = await Notifications.requestPermissionsAsync({
+        const requested = await Notifications.requestPermissionsAsync({
             ios: {
                 allowAlert: true,
                 allowBadge: true,
                 allowSound: true,
             },
         });
-        finalStatus = status;
+        finalStatus = requested.status;
+        console.log('[NotificationManager] permission status after request', {
+            status: requested.status,
+            canAskAgain: requested.canAskAgain,
+            granted: requested.granted,
+            iosStatus: (requested as any)?.ios?.status,
+            iosAllowsAlert: (requested as any)?.ios?.allowsAlert,
+            iosAllowsBadge: (requested as any)?.ios?.allowsBadge,
+            iosAllowsSound: (requested as any)?.ios?.allowsSound,
+        });
     }
 
     if (finalStatus !== 'granted') {
-        console.log('Failed to get push token for push notification!');
+        console.log('[NotificationManager] push permission not granted');
         return undefined;
     }
 
     try {
         const projectId = Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
         if (!projectId) {
-            console.log('Project ID not found in Constants');
+            console.log('[NotificationManager] projectId missing in Constants');
+        } else {
+            console.log('[NotificationManager] using projectId', projectId);
         }
 
         const tokenData = await Notifications.getExpoPushTokenAsync({
             projectId,
         });
-        console.log('Expo Push Token:', tokenData.data);
+        console.log('[NotificationManager] Expo push token acquired', tokenData.data);
         return tokenData.data;
     } catch (e) {
-        console.log('Error fetching push token:', e);
+        console.log('[NotificationManager] Error fetching Expo push token', e);
         return undefined;
     }
 };

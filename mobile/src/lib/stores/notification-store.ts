@@ -20,6 +20,7 @@ export const useNotificationStore = create<NotificationState>()(
             isInitializing: false,
 
             setNotificationsEnabled: async (enabled: boolean) => {
+                console.log('[NotificationStore] setNotificationsEnabled', { enabled });
                 set({ notificationsEnabled: enabled });
                 if (enabled) {
                     await get().initNotifications();
@@ -38,7 +39,13 @@ export const useNotificationStore = create<NotificationState>()(
 
             initNotifications: async () => {
                 const { notificationsEnabled, isInitializing } = get();
-                if (!notificationsEnabled || isInitializing) return;
+                if (!notificationsEnabled || isInitializing) {
+                    console.log('[NotificationStore] initNotifications skipped', {
+                        notificationsEnabled,
+                        isInitializing,
+                    });
+                    return;
+                }
 
                 set({ isInitializing: true });
                 try {
@@ -50,10 +57,20 @@ export const useNotificationStore = create<NotificationState>()(
 
                         // Sync with backend via AuthStore
                         const { user, updateProfileInfo } = useAuthStore.getState();
-                        if (user && updateProfileInfo && user.pushToken !== token) {
-                            console.log('[NotificationStore] Syncing token with backend');
+                        if (!user || !updateProfileInfo) {
+                            console.log('[NotificationStore] Cannot sync token yet (missing user or updateProfileInfo)');
+                        } else if (user.pushToken !== token) {
+                            console.log('[NotificationStore] Syncing token with backend', {
+                                userId: user.userId,
+                                hadToken: !!user.pushToken,
+                            });
                             await updateProfileInfo({ pushToken: token });
+                            console.log('[NotificationStore] Token sync completed');
+                        } else {
+                            console.log('[NotificationStore] Token already synced, skipping profile update');
                         }
+                    } else {
+                        console.log('[NotificationStore] No push token returned from NotificationManager');
                     }
                 } catch (error) {
                     console.error('[NotificationStore] Failed to initialize notifications:', error);

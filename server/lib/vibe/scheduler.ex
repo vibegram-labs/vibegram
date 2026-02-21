@@ -9,6 +9,7 @@ defmodule Vibe.Scheduler do
   require Logger
 
   alias Vibe.Chat
+  alias Vibe.Notifications
 
   # ── Client API ──────────────────────────────────────────────────
 
@@ -176,6 +177,13 @@ defmodule Vibe.Scheduler do
                   message_id: message_id,
                   timestamp: timestamp
                 })
+
+                _ =
+                  Notifications.send_message_push(participant_id, %{
+                    "chat_id" => post.channel_id,
+                    "from_id" => post.user_id,
+                    "message_id" => message_id
+                  })
               end
             end)
 

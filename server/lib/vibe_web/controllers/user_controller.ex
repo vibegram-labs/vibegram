@@ -1,6 +1,7 @@
 defmodule VibeWeb.UserController do
   use VibeWeb, :controller
   alias Vibe.Accounts
+  require Logger
   @max_contact_match_numbers 500
 
   def show(conn, %{"id" => id}) do
@@ -94,6 +95,12 @@ defmodule VibeWeb.UserController do
 
         with user when not is_nil(user) <- Accounts.get_user(id),
              {:ok, updated_user} <- Accounts.update_user(user, update_attrs) do
+          if Map.has_key?(update_attrs, :push_token) do
+            Logger.info(
+              "[UserController] push_token updated user_id=#{updated_user.id} token_present=#{is_binary(updated_user.push_token) and String.trim(updated_user.push_token) != ""}"
+            )
+          end
+
           json(conn, %{
             success: true,
             userId: updated_user.id,
