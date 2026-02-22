@@ -97,10 +97,19 @@ defmodule Vibe.Notifications do
       sender = if is_binary(from_user_id), do: Accounts.get_user(from_user_id), else: nil
       sender_name_raw = (sender && (sender.name || sender.username)) || @default_message_title
       sender_name = truncate_text(sender_name_raw, 64)
-      sender_image = normalize_push_image(sender && sender.profile_image, from_user_id)
-      mutable_content_enabled = is_binary(sender_image) and sender_image != ""
       message_type = payload["type"] || "text"
+      message_type_normalized = message_type |> to_string() |> String.downcase()
       message_body = resolve_message_body(payload, message_type)
+      sender_image = normalize_push_image(sender && sender.profile_image, from_user_id)
+      media_preview_image =
+        if message_type_normalized in ["image", "video", "gif"] do
+          resolve_push_media_image(payload)
+        else
+          nil
+        end
+      mutable_content_enabled =
+        (is_binary(sender_image) and sender_image != "")
+        or (is_binary(media_preview_image) and media_preview_image != "")
 
       base_data = %{
         type: "new_message",
@@ -130,7 +139,7 @@ defmodule Vibe.Notifications do
         base_message
         |> Map.put(:mutableContent, true)
         |> then(fn payload_map ->
-          case sender_image do
+          case media_preview_image do
             value when is_binary(value) and value != "" ->
               Map.put(payload_map, :richContent, %{image: value})
 
@@ -148,7 +157,7 @@ defmodule Vibe.Notifications do
         )
 
       Logger.info(
-        "[Notifications] Sending message push to_user=#{to_user_id} chat_id=#{data.chatId} message_id=#{data.messageId} from_user=#{from_user_id} mutable_content=#{mutable_content_enabled} image_present=#{mutable_content_enabled}"
+        "[Notifications] Sending message push to_user=#{to_user_id} chat_id=#{data.chatId} message_id=#{data.messageId} from_user=#{from_user_id} mutable_content=#{mutable_content_enabled} avatar_present=#{is_binary(sender_image) and sender_image != ""} media_preview_present=#{is_binary(media_preview_image) and media_preview_image != ""} message_type=#{message_type_normalized}"
       )
 
       case Finch.request(request, Vibe.Finch, receive_timeout: 7_000) do
@@ -208,6 +217,48 @@ defmodule Vibe.Notifications do
       end
     end
   end
+
+  defp resolve_push_media_image(payload) when is_map(payload) do
+    candidate =
+      payload["media_image"] ||
+      payload["mediaImage"] ||
+      payload["media_url"] ||
+      payload["mediaUrl"] ||
+      map_value(payload["richContent"], "image") ||
+      map_value(payload["_richContent"], "image")
+
+    case candidate do
+      value when is_binary(value) ->
+        trimmed = String.trim(value)
+
+        cond do
+          trimmed == "" ->
+            nil
+
+          String.starts_with?(String.downcase(trimmed), ["http://", "https://"]) ->
+            if String.length(trimmed) <= 2048 do
+              trimmed
+            else
+              Logger.warning(
+                "[Notifications] media preview image URL too long length=#{String.length(trimmed)}"
+              )
+
+              nil
+            end
+
+          true ->
+            nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp resolve_push_media_image(_), do: nil
+
+  defp map_value(value, key) when is_map(value), do: value[key]
+  defp map_value(_value, _key), do: nil
 
   defp truncate_text(text, max_len) when is_binary(text) and is_integer(max_len) do
     if String.length(text) > max_len do

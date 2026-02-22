@@ -89,7 +89,8 @@ defmodule VibeWeb.ChatChannel do
                       "message_id" => data["id"],
                       "from_id" => user_id,
                       "type" => data["type"],
-                      "body" => push_body
+                      "body" => push_body,
+                      "media_url" => data["mediaUrl"] || data["media_url"]
                     })
                 end
               end
