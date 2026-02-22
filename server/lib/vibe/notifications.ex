@@ -120,10 +120,21 @@ defmodule Vibe.Notifications do
         messageType: message_type
       }
 
-      data =
+      data_with_avatar =
         case sender_image do
           value when is_binary(value) and value != "" -> Map.put(base_data, :fromUserImage, value)
           _ -> base_data
+        end
+
+      data =
+        case media_preview_image do
+          value when is_binary(value) and value != "" ->
+            data_with_avatar
+            |> Map.put(:mediaImage, value)
+            |> Map.put(:mediaUrl, value)
+
+          _ ->
+            data_with_avatar
         end
 
       base_message = %{
@@ -141,7 +152,9 @@ defmodule Vibe.Notifications do
         |> then(fn payload_map ->
           case media_preview_image do
             value when is_binary(value) and value != "" ->
-              Map.put(payload_map, :richContent, %{image: value})
+              payload_map
+              |> Map.put(:richContent, %{image: value})
+              |> Map.put(:image, value)
 
             _ ->
               payload_map
