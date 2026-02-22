@@ -343,8 +343,8 @@ public final class ChatNativeTabBarView: ExpoView {
   private let containerStack = UIStackView()
   private let stack = UIStackView()
 
-  // The animated active tab pill
-  private let activePillGlass = UIVisualEffectView(effect: nil)
+  // The animated active tab pill (plain tinted capsule; no extra blur view)
+  private let activePillView = UIView()
   private var activePillCenterXConstraint: NSLayoutConstraint?
   private var activePillWidthConstraint: NSLayoutConstraint?
 
@@ -406,11 +406,12 @@ public final class ChatNativeTabBarView: ExpoView {
     backgroundBlur.clipsToBounds = true
     backgroundBlur.isUserInteractionEnabled = true
 
-    activePillGlass.translatesAutoresizingMaskIntoConstraints = false
-    activePillGlass.isUserInteractionEnabled = false
-    activePillGlass.clipsToBounds = true
-    activePillGlass.layer.cornerCurve = .continuous
-    backgroundBlur.contentView.addSubview(activePillGlass)
+    activePillView.translatesAutoresizingMaskIntoConstraints = false
+    activePillView.isUserInteractionEnabled = false
+    activePillView.clipsToBounds = true
+    activePillView.layer.cornerCurve = .continuous
+    activePillView.backgroundColor = .clear
+    backgroundBlur.contentView.addSubview(activePillView)
 
     stack.axis = .horizontal
     stack.alignment = .fill
@@ -431,15 +432,15 @@ public final class ChatNativeTabBarView: ExpoView {
       stack.trailingAnchor.constraint(
         equalTo: backgroundBlur.contentView.trailingAnchor, constant: -horizontalInnerPadding),
 
-      activePillGlass.topAnchor.constraint(
+      activePillView.topAnchor.constraint(
         equalTo: backgroundBlur.contentView.topAnchor, constant: segmentVerticalInset),
-      activePillGlass.bottomAnchor.constraint(
+      activePillView.bottomAnchor.constraint(
         equalTo: backgroundBlur.contentView.bottomAnchor, constant: -segmentVerticalInset),
     ])
 
     // Initial dummy constraints for pill width/X
-    activePillWidthConstraint = activePillGlass.widthAnchor.constraint(equalToConstant: 0)
-    activePillCenterXConstraint = activePillGlass.centerXAnchor.constraint(
+    activePillWidthConstraint = activePillView.widthAnchor.constraint(equalToConstant: 0)
+    activePillCenterXConstraint = activePillView.centerXAnchor.constraint(
       equalTo: backgroundBlur.contentView.leadingAnchor)
     activePillWidthConstraint?.isActive = true
     activePillCenterXConstraint?.isActive = true
@@ -602,11 +603,11 @@ public final class ChatNativeTabBarView: ExpoView {
   private func animatePillToActiveTab() {
     layoutIfNeeded()
     guard let targetButton = buttons.first(where: { $0.tabIndex == currentIndex }) else {
-      activePillGlass.alpha = 0
+      activePillView.alpha = 0
       return
     }
 
-    activePillGlass.alpha = 1
+    activePillView.alpha = 1
     let buttonCenter = targetButton.convert(
       CGPoint(x: targetButton.bounds.midX, y: targetButton.bounds.midY),
       to: backgroundBlur.contentView)
@@ -615,7 +616,7 @@ public final class ChatNativeTabBarView: ExpoView {
     activePillWidthConstraint?.constant = max(
       0, targetButton.bounds.width - (activePillHorizontalInset * 2))
     activePillCenterXConstraint?.isActive = false
-    activePillCenterXConstraint = activePillGlass.centerXAnchor.constraint(
+    activePillCenterXConstraint = activePillView.centerXAnchor.constraint(
       equalTo: backgroundBlur.contentView.leadingAnchor, constant: buttonCenter.x)
     activePillCenterXConstraint?.isActive = true
 
@@ -631,10 +632,10 @@ public final class ChatNativeTabBarView: ExpoView {
 
   public override func layoutSubviews() {
     super.layoutSubviews()
-    let radius = activePillGlass.bounds.height / 2
-    activePillGlass.layer.cornerRadius = radius
+    let radius = activePillView.bounds.height / 2
+    activePillView.layer.cornerRadius = radius
     if #available(iOS 26.0, *) {
-      activePillGlass.cornerConfiguration = .uniformCorners(radius: .fixed(Double(radius)))
+      activePillView.cornerConfiguration = .uniformCorners(radius: .fixed(Double(radius)))
     }
   }
 
@@ -717,24 +718,20 @@ public final class ChatNativeTabBarView: ExpoView {
 
       // Match UISegmentedControl selectedSegmentTintColor more closely:
       // plain tinted capsule over the glass container (no extra glass inside the pill).
-      activePillGlass.effect = nil
-      activePillGlass.backgroundColor = .clear
-      activePillGlass.contentView.backgroundColor =
+      activePillView.backgroundColor =
         isDark
         ? UIColor.white.withAlphaComponent(0.16)
         : UIColor.black.withAlphaComponent(0.10)
     } else {
       backgroundBlur.effect = UIBlurEffect(style: .systemThinMaterial)
 
-      activePillGlass.effect = nil
-      activePillGlass.backgroundColor = .clear
-      activePillGlass.contentView.backgroundColor =
+      activePillView.backgroundColor =
         isDark
         ? UIColor.white.withAlphaComponent(0.16)
         : UIColor.black.withAlphaComponent(0.10)
     }
     backgroundBlur.backgroundColor = .clear
-    activePillGlass.backgroundColor = .clear
+    // Keep the root view and the blur host transparent; only the active pill paints.
     backgroundBlur.contentView.backgroundColor = .clear
     backgroundBlur.layer.borderWidth = 0.7
     backgroundBlur.layer.borderColor =

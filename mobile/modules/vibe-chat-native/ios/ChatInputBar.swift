@@ -105,9 +105,11 @@ private final class VideoNoteRecorderViewController: UIViewController,
   private let movieOutput = AVCaptureMovieFileOutput()
   private let sessionQueue = DispatchQueue(label: "chat.video.note.session", qos: .userInitiated)
   private var previewLayer: AVCaptureVideoPreviewLayer?
-  private let backdropBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
+  private let backdropBlur = UIVisualEffectView(
+    effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
   private let circleContainer = UIView()
-  private let circleLoadingBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterialDark))
+  private let circleLoadingBlur = UIVisualEffectView(
+    effect: UIBlurEffect(style: .systemMaterialDark))
   private let circleLoadingShade = UIView()
   private let circleSpinner = UIActivityIndicatorView(style: .large)
   private let hintLabel = UILabel()
@@ -273,7 +275,7 @@ private final class VideoNoteRecorderViewController: UIViewController,
 
   override func viewDidDisappear(_ animated: Bool) {
     super.viewDidDisappear(animated)
-    if (isBeingDismissed || isMovingFromParent), !didFinish {
+    if isBeingDismissed || isMovingFromParent, !didFinish {
       finish(url: nil, duration: 0.0, shouldSend: false)
     }
   }
@@ -689,8 +691,14 @@ final class ChatInputBar: UIView {
   private let cancelOverlayButton = UIButton(type: .custom)
 
   // Attachment sheet
-  private var attachmentSheet: ChatAttachmentSheet?
+  private var attachmentSheet: ChatAttachmentMenuController?
   private let glassPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
+
+  // Background Mask (for fade-out blur behind input)
+  private let backgroundMaskView = UIView()
+  private let backgroundBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+  private let backgroundOverlayView = UIView()
+  private let backgroundGradientLayer = CAGradientLayer()
 
   // Appearance
   private var appearance = ChatListAppearance.fallback
@@ -703,6 +711,8 @@ final class ChatInputBar: UIView {
   private let topVPad: CGFloat = 6
   private let bottomVPad: CGFloat = 5
   private let panelGapV: CGFloat = 6
+  private let composerSafeBottomReduction: CGFloat = 6
+  private let backgroundMaskTopOverlap: CGFloat = 0
   private let minPillH: CGFloat = 40
   private let maxPillH: CGFloat = 120
   private let textInsetH: CGFloat = 12
@@ -892,6 +902,20 @@ final class ChatInputBar: UIView {
   // MARK: - Setup
 
   private func setupViews() {
+    // ── 0. Background Masked Blur ─────────────────────────────────────────
+    backgroundMaskView.isUserInteractionEnabled = false
+    addSubview(backgroundMaskView)
+
+    backgroundMaskView.addSubview(backgroundBlurView)
+    backgroundBlurView.contentView.addSubview(backgroundOverlayView)
+
+    backgroundGradientLayer.colors = [
+      UIColor.clear.cgColor,
+      UIColor.black.withAlphaComponent(0.92).cgColor,
+    ]
+    backgroundGradientLayer.locations = [0.1, 1.0]
+    backgroundMaskView.layer.mask = backgroundGradientLayer
+
     // ── 1. Content row ────────────────────────────────────────────────────
     // No full-bar glass. The bar background is transparent; each element
     // has its own glass surface.
@@ -1082,6 +1106,18 @@ final class ChatInputBar: UIView {
     lockView.tintColor = a.textColorThem.withAlphaComponent(0.95)
     lockArrowView.tintColor = a.textColorThem.withAlphaComponent(0.95)
 
+    // Evaluate if theme is light or dark based on textColorThem luminance roughly
+    var white: CGFloat = 0
+    if a.textColorThem.getWhite(&white, alpha: nil) {
+      let isDark = white > 0.5
+      backgroundBlurView.effect = UIBlurEffect(style: isDark ? .dark : .light)
+    } else {
+      backgroundBlurView.effect = UIBlurEffect(style: .regular)
+    }
+
+    let baseColor = a.wallpaperGradient.first ?? UIColor.black
+    backgroundOverlayView.backgroundColor = baseColor.withAlphaComponent(0.88)
+
     refreshGlass()
     CATransaction.commit()
   }
@@ -1268,7 +1304,10 @@ final class ChatInputBar: UIView {
     guard w > 0 else { return }
     maybePrepareGifPanel()
 
-    let safeBottom = max(0, bottomSafeAreaInset)
+    // Keep the composer slightly closer to the bottom while still respecting
+    // the home indicator area.
+    let safeBottomReduction = gifPanelVisible ? 0 : composerSafeBottomReduction
+    let safeBottom = max(0, bottomSafeAreaInset - safeBottomReduction)
     let clampedSendProgress = max(0.0, min(1.0, sendProgress))
     let clampedRecordingExpand = max(0.0, min(1.0, recordingExpandProgress))
     let micVisibility = max(0.0, min(1.0, 1.0 - clampedSendProgress))
@@ -1305,6 +1344,12 @@ final class ChatInputBar: UIView {
     textView.isScrollEnabled = textH > maxPillH - textInsetV * 2
 
     // ── View frames (CAN animate when triggered from UIView.animate) ──
+    let blurExtraY = backgroundMaskTopOverlap
+    let blurTotalH = barHeight + blurExtraY
+    backgroundMaskView.frame = CGRect(x: 0, y: -blurExtraY, width: w, height: blurTotalH)
+    backgroundBlurView.frame = backgroundMaskView.bounds
+    backgroundOverlayView.frame = backgroundBlurView.bounds
+
     let rowY = topVPad
     let rowH = pillH
     contentRow.frame = CGRect(x: 0, y: rowY, width: w, height: rowH)
@@ -1458,6 +1503,8 @@ final class ChatInputBar: UIView {
       pillTapOverlay.layer.cornerRadius = pillContainer.layer.cornerRadius
       lockPill.layer.cornerRadius = lockPill.bounds.width / 2
     }
+
+    backgroundGradientLayer.frame = backgroundMaskView.bounds
 
     refreshGlass()
     // Ensure icons render above per-button glass surfaces.
@@ -1738,7 +1785,13 @@ final class ChatInputBar: UIView {
       delegate?.inputBarDidTapAttachment()
       return
     }
-    let sheet = ChatAttachmentSheet(appearance: appearance)
+    let sheet = ChatAttachmentMenuController(appearance: appearance)
+    sheet.sourceButtonView = attachButton
+    if let window = vc.view.window {
+      sheet.sourceButtonFrameInWindow = attachButton.convert(attachButton.bounds, to: window)
+    } else {
+      sheet.sourceButtonFrameInWindow = attachButton.convert(attachButton.bounds, to: nil)
+    }
     sheet.onSelectImage = { [weak self] uri in self?.delegate?.inputBarDidSelectImage(uri: uri) }
     sheet.onSelectFile = { [weak self] uri, name in
       self?.delegate?.inputBarDidSelectFile(uri: uri, name: name)
@@ -2180,6 +2233,18 @@ final class ChatInputBar: UIView {
     // Save dot starting point
     let dotStart = pillContainer.convert(recordingDot.center, to: self)
 
+    // Layout updates and shrink UI immediately, hiding real dot.
+    resetUI(revealAttach: false)
+
+    // Re-calculate layout to get accurate attachButton frames back at identity
+    layoutIfNeeded()
+
+    // The dot end is the normal untranslated position of attachButton
+    let attachHeight = attachButton.bounds.height
+    let dotEndX = attachButton.frame.minX + sideSize / 2
+    let dotEndY = contentRow.frame.minY + attachHeight / 2
+    let dotEnd = CGPoint(x: dotEndX, y: dotEndY)
+
     // Create animated fake dot
     let animatedDot = UIView(frame: CGRect(x: 0, y: 0, width: 6, height: 6))
     animatedDot.backgroundColor = .systemRed
@@ -2187,14 +2252,7 @@ final class ChatInputBar: UIView {
     animatedDot.center = dotStart
     addSubview(animatedDot)
 
-    // Layout updates and shrink UI immediately, hiding real dot.
-    resetUI(revealAttach: false)
-
-    // The dot end is the normal untranslated position of attachButton, calculated after layout resets.
-    let dotEnd = contentRow.convert(attachButton.center, to: self)
-
     // Setup Glass Trash View replacing the plus icon
-    let attachHeight = attachButton.bounds.height
     let trashContainer = UIView(frame: CGRect(x: 0, y: 0, width: sideSize, height: attachHeight))
     trashContainer.center = dotEnd
     trashContainer.alpha = 0
@@ -2214,6 +2272,10 @@ final class ChatInputBar: UIView {
     glassTarget.isUserInteractionEnabled = false
     trashContainer.addSubview(glassTarget)
 
+    let trashIconContainer = UIView(frame: CGRect(x: 0, y: 0, width: 24, height: 24))
+    trashIconContainer.center = CGPoint(x: sideSize / 2, y: attachHeight / 2)
+    trashContainer.addSubview(trashIconContainer)
+
     let trashIcon = UIImageView(
       image: UIImage(
         systemName: "trash",
@@ -2221,13 +2283,13 @@ final class ChatInputBar: UIView {
       )
     )
     trashIcon.tintColor = .systemRed
-    trashIcon.center = CGPoint(x: sideSize / 2, y: attachHeight / 2)
-    trashContainer.addSubview(trashIcon)
+    trashIcon.frame = trashIconContainer.bounds
+    trashIconContainer.addSubview(trashIcon)
 
     bringSubviewToFront(animatedDot)
 
     // Animate Trash Container fading in slightly before the dot jumps
-    UIView.animate(withDuration: 0.2, delay: 0.1, options: .curveEaseOut) {
+    UIView.animate(withDuration: 0.2, delay: 0.05, options: .curveEaseOut) {
       trashContainer.alpha = 1
       trashContainer.transform = .identity
     } completion: { _ in
@@ -2235,37 +2297,49 @@ final class ChatInputBar: UIView {
       let path = UIBezierPath()
       path.move(to: dotStart)
 
-      let jumpHeight: CGFloat = 80
+      let jumpHeight: CGFloat = 40
+      // Ensure the curve goes "up and over"
       let controlY = min(dotStart.y, dotEnd.y) - jumpHeight
+      let controlX = (dotStart.x + dotEnd.x) / 2
       path.addQuadCurve(
-        to: dotEnd, controlPoint: CGPoint(x: (dotStart.x + dotEnd.x) / 2, y: controlY))
+        to: dotEnd, controlPoint: CGPoint(x: controlX, y: controlY))
 
       let jumpAnim = CAKeyframeAnimation(keyPath: "position")
       jumpAnim.path = path.cgPath
       jumpAnim.duration = 0.35
-      jumpAnim.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      // Use EaseIn to accelerate into the trash can
+      jumpAnim.timingFunction = CAMediaTimingFunction(name: .easeIn)
 
-      UIView.animate(withDuration: 0.2) {
-        // "Opening door" by lifting slightly
-        trashIcon.transform = CGAffineTransform(translationX: 0, y: -4).scaledBy(x: 1.1, y: 1.1)
+      // Open Trash Can Lid (Translate Up + Scale)
+      UIView.animate(
+        withDuration: 0.25, delay: 0, usingSpringWithDamping: 0.7, initialSpringVelocity: 0.2,
+        options: .curveEaseOut
+      ) {
+        trashIconContainer.transform = CGAffineTransform(translationX: 0, y: -4).scaledBy(
+          x: 1.15, y: 1.15)
       }
 
       CATransaction.begin()
       CATransaction.setCompletionBlock {
-        // Step 2: Dot falls in, make it shrink
-        UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseIn]) {
+        // Step 2: Dot falls in, make it shrink rapidly
+        UIView.animate(withDuration: 0.1, delay: 0, options: [.curveLinear]) {
           animatedDot.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
           animatedDot.alpha = 0
-          // Trash "closes door" with a squish
-          trashIcon.transform = CGAffineTransform(scaleX: 0.9, y: 0.9).translatedBy(x: 0, y: 2)
+
+          // Trash "closes door" with a sudden drop
+          trashIconContainer.transform = CGAffineTransform(translationX: 0, y: 2).scaledBy(
+            x: 0.9, y: 0.9)
         } completion: { _ in
           animatedDot.removeFromSuperview()
-          // Step 3: Bounce back to identity smoothly
-          UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseOut]) {
-            trashIcon.transform = .identity
+          // Step 3: Bounce back to identity smoothly (Trash settles)
+          UIView.animate(
+            withDuration: 0.15, delay: 0, usingSpringWithDamping: 0.5, initialSpringVelocity: 0.5,
+            options: [.curveEaseOut]
+          ) {
+            trashIconContainer.transform = .identity
           } completion: { _ in
             // Step 4: Reset back to plus icon
-            UIView.animate(withDuration: 0.2, delay: 0.1, options: .curveEaseInOut) {
+            UIView.animate(withDuration: 0.2, delay: 0.2, options: .curveEaseInOut) {
               trashContainer.alpha = 0
               trashContainer.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
               self.attachButton.alpha = 1

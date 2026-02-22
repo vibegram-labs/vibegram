@@ -76,7 +76,7 @@ private fun parseColor(value: String?): Int? {
   val v = value.trim().lowercase()
   return try {
     when {
-      v.startsWith("#") -> Color.parseColor(v)
+      v.startsWith("#") -> parseHexColor(v)
       v.startsWith("rgba(") -> parseRgba(v)
       v.startsWith("rgb(") -> parseRgb(v)
       else -> null
@@ -84,6 +84,25 @@ private fun parseColor(value: String?): Int? {
   } catch (_: Throwable) {
     null
   }
+}
+
+private fun parseHexColor(value: String): Int? {
+  // JS often sends #RRGGBBAA while Android Color.parseColor expects #AARRGGBB.
+  if (value.length == 9 && value.startsWith("#")) {
+    val rrggbbaa = value.substring(1)
+    val aarrggbb = rrggbbaa.substring(6, 8) + rrggbbaa.substring(0, 6)
+    return Color.parseColor("#$aarrggbb")
+  }
+  if (value.length == 5 && value.startsWith("#")) {
+    // Convert #RGBA -> #AARRGGBB
+    val rgba = value.substring(1)
+    val r = "${rgba[0]}${rgba[0]}"
+    val g = "${rgba[1]}${rgba[1]}"
+    val b = "${rgba[2]}${rgba[2]}"
+    val a = "${rgba[3]}${rgba[3]}"
+    return Color.parseColor("#$a$r$g$b")
+  }
+  return Color.parseColor(value)
 }
 
 private fun parseRgb(value: String): Int? {

@@ -1,6 +1,6 @@
 
 import React, { useMemo } from 'react';
-import { StyleSheet, View, useWindowDimensions } from 'react-native';
+import { PixelRatio, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { Canvas, Rect, Shader, Skia } from '@shopify/react-native-skia';
 import { useSharedValue, useDerivedValue, withRepeat, withTiming, Easing } from 'react-native-reanimated';
 
@@ -9,11 +9,13 @@ import { useSharedValue, useDerivedValue, withRepeat, withTiming, Easing } from 
 const SKSL_SHADER = `
 uniform float2 iResolution;
 uniform float iTime;
+uniform float iPixelRatio;
 uniform vec3 glowColor;
 uniform vec3 cyanColor;
 
 half4 main(float2 fragCoord) {
-    vec2 uv = fragCoord.xy / iResolution.xy;
+    vec2 fragPx = fragCoord.xy * iPixelRatio;
+    vec2 uv = fragPx / iResolution.xy;
     
     // Slower, more elegant movement
     float t = iTime * 0.02;
@@ -42,7 +44,7 @@ half4 main(float2 fragCoord) {
         vec3 blobCol = mix(cyanColor, glowColor, gradientMix);
         
         // Subtle film grain
-        float grain = fract(sin(dot(uv * 500.0 + t, vec2(12.9898, 78.233))) * 43758.5453);
+        float grain = fract(sin(dot(fragPx * 0.9 + vec2(t * 9.0, t * 5.0), vec2(12.9898, 78.233))) * 43758.5453);
         blobCol += (grain - 0.5) * 0.05;
         
         // Intensity slightly reduced for the larger size
@@ -78,6 +80,7 @@ export const EdgeGlowBackground = ({
     cyanColor = '#2DD4BF',
 }: EdgeGlowProps) => {
     const { width, height } = useWindowDimensions();
+    const pixelRatio = PixelRatio.get();
     const time = useSharedValue(0);
 
     const runtimeEffect = useMemo(() => Skia.RuntimeEffect.Make(SKSL_SHADER), []);
@@ -94,11 +97,12 @@ export const EdgeGlowBackground = ({
     }, []);
 
     const uniforms = useDerivedValue(() => ({
-        iResolution: [width, height],
+        iResolution: [width * pixelRatio, height * pixelRatio],
         iTime: time.value,
+        iPixelRatio: pixelRatio,
         glowColor: glow.value,
         cyanColor: cyan.value,
-    }), [width, height, time, glow, cyan]);
+    }), [width, height, pixelRatio, time, glow, cyan]);
 
     if (!runtimeEffect) {
         return null;

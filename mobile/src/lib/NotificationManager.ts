@@ -1,33 +1,82 @@
 import * as Device from 'expo-device';
-import * as Notifications from 'expo-notifications';
 import Constants from 'expo-constants';
 import { Platform } from 'react-native';
 
-// Configure how notifications behave when received in foreground
-Notifications.setNotificationHandler({
-    handleNotification: async (notification) => {
-        const data = notification.request.content.data as Record<string, unknown> | undefined;
-        const type = typeof data?.type === 'string' ? data.type : '';
-        const isIncomingCall = type === 'call-start';
+type ExpoNotificationsModule = typeof import('expo-notifications');
 
-        // For incoming calls, use in-app native overlay instead of foreground banner.
-        if (isIncomingCall) {
-            return {
-                shouldPlaySound: false,
-                shouldSetBadge: false,
-                shouldShowBanner: false,
-                shouldShowList: false,
-            };
+let notificationsModulePromise: Promise<ExpoNotificationsModule | null> | null = null;
+let notificationHandlerConfigured = false;
+let warnedExpoGoUnsupported = false;
+
+const isExpoGoAndroid = (): boolean =>
+    Platform.OS === 'android' &&
+    (Constants.appOwnership === 'expo' || `${Constants.executionEnvironment}` === 'storeClient');
+
+async function getNotificationsModule(): Promise<ExpoNotificationsModule | null> {
+    if (isExpoGoAndroid()) {
+        if (!warnedExpoGoUnsupported) {
+            warnedExpoGoUnsupported = true;
+            console.log('[NotificationManager] Skipping expo-notifications remote push in Expo Go (Android)');
         }
+        return null;
+    }
 
-        return {
-            shouldPlaySound: true,
-            shouldSetBadge: true,
-            shouldShowBanner: true,
-            shouldShowList: true,
-        };
-    },
-});
+    if (!notificationsModulePromise) {
+        notificationsModulePromise = import('expo-notifications')
+            .then((mod) => mod)
+            .catch((error) => {
+                console.warn('[NotificationManager] Failed to load expo-notifications', error);
+                return null;
+            });
+    }
+    return notificationsModulePromise;
+}
+
+function ensureNotificationHandlerConfigured(Notifications: ExpoNotificationsModule) {
+    if (notificationHandlerConfigured) return;
+    notificationHandlerConfigured = true;
+
+    // Configure how notifications behave when received in foreground
+    Notifications.setNotificationHandler({
+        handleNotification: async (notification: any) => {
+            const data = notification.request.content.data as Record<string, unknown> | undefined;
+            const type = typeof data?.type === 'string' ? data.type : '';
+            const typeNormalized = type.trim().toLowerCase();
+            const isIncomingCall =
+                typeNormalized === 'call-start' ||
+                typeNormalized === 'call_start' ||
+                typeNormalized === 'incoming-call' ||
+                typeNormalized === 'incoming_call' ||
+                // Fallback for payloads that omit event type but include call identifiers.
+                (!!(data && (
+                    typeof data.callId === 'string' ||
+                    typeof (data as any).call_id === 'string'
+                )) && !!(data && (
+                    typeof data.fromUserId === 'string' ||
+                    typeof (data as any).from_user_id === 'string' ||
+                    typeof (data as any).callerId === 'string' ||
+                    typeof (data as any).caller_id === 'string'
+                )));
+
+            // For incoming calls, use in-app native overlay instead of foreground banner.
+            if (isIncomingCall) {
+                return {
+                    shouldPlaySound: false,
+                    shouldSetBadge: false,
+                    shouldShowBanner: false,
+                    shouldShowList: false,
+                };
+            }
+
+            return {
+                shouldPlaySound: true,
+                shouldSetBadge: true,
+                shouldShowBanner: true,
+                shouldShowList: true,
+            };
+        },
+    });
+}
 
 export const requestPermissionsAndGetToken = async (): Promise<string | undefined> => {
     console.log('[NotificationManager] init', {
@@ -36,6 +85,12 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
         appOwnership: Constants.appOwnership,
         executionEnvironment: Constants.executionEnvironment,
     });
+
+    const Notifications = await getNotificationsModule();
+    if (!Notifications) {
+        return undefined;
+    }
+    ensureNotificationHandlerConfigured(Notifications);
 
     if (Platform.OS === 'android') {
         console.log('[NotificationManager] configuring Android channel: default');

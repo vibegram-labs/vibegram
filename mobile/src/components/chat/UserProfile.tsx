@@ -119,7 +119,7 @@ const Card = ({ children, style }: { children: React.ReactNode; style?: any }) =
     );
 };
 
-const ActionCard = ({
+const ActionPill = ({
     icon,
     label,
     onPress,
@@ -130,27 +130,21 @@ const ActionCard = ({
     onPress?: () => void;
     disabled?: boolean;
 }) => {
-    const { colors, effectiveTheme } = useThemeStore();
-    const cardBg = effectiveTheme === 'dark'
-        ? withAlpha(colors.card, 0.82)
-        : withAlpha(colors.card, 0.94);
+    const { colors } = useThemeStore();
     return (
         <TouchableOpacity
             onPress={onPress}
             disabled={disabled || !onPress}
-            activeOpacity={0.75}
-            style={[st.actionCardWrap, disabled && { opacity: 0.45 }]}
+            activeOpacity={0.7}
+            style={[st.actionPillWrap, disabled && { opacity: 0.45 }]}
         >
             <View
-                style={[
-                    st.actionCard,
-                    {
-                        backgroundColor: cardBg,
-                    },
-                ]}
+                style={[st.actionPill, { backgroundColor: withAlpha(colors.card, 0.92) }]}
             >
-                {React.cloneElement(icon as any, { size: 22, color: colors.primary, strokeWidth: 2.2 })}
-                <Text style={[st.actionLabel, { color: colors.primary }]}>{label}</Text>
+                <View style={st.actionPillContent}>
+                    {React.cloneElement(icon as any, { size: 24, color: colors.text, strokeWidth: 2 })}
+                    <Text style={[st.actionPillLabel, { color: colors.text }]}>{label}</Text>
+                </View>
             </View>
         </TouchableOpacity>
     );
@@ -488,16 +482,16 @@ export default function UserProfile({
                 </View>
 
                 <View style={st.actionsRow}>
-                    <ActionCard icon={<Bell />} label={isMuted ? 'Unmute' : 'Mute'} onPress={onToggleMute} disabled={!onToggleMute} />
-                    <ActionCard icon={<Search />} label="Search" onPress={openSearchInChat} />
-                    <ActionCard icon={<Phone />} label="Call" onPress={onAudioCall} disabled={!onAudioCall} />
-                    <ActionCard icon={<Video />} label="Video" onPress={onVideoCall} disabled={!onVideoCall} />
+                    <ActionPill icon={<Bell />} label={isMuted ? 'Unmute' : 'Mute'} onPress={onToggleMute} disabled={!onToggleMute} />
+                    <ActionPill icon={<Search />} label="Search" onPress={openSearchInChat} />
+                    <ActionPill icon={<Phone />} label="Call" onPress={onAudioCall} disabled={!onAudioCall} />
+                    <ActionPill icon={<Video />} label="Video" onPress={onVideoCall} disabled={!onVideoCall} />
                 </View>
 
                 <View style={st.section}>
                     <Card>
-                        <ListRow title="Username" subtitle={`@${username}`} valueColor={colors.primary} onPress={copyUsername} />
-                        {bio ? <ListRow title="Bio" subtitle={bio} last /> : <ListRow title="Info" subtitle="Tap username to copy" last />}
+                        <ListRow title="Username" subtitle={`@${username}`} valueColor={colors.primary} onPress={copyUsername} last={!bio} />
+                        {bio ? <ListRow title="Bio" subtitle={bio} last /> : null}
                     </Card>
                 </View>
 
@@ -505,12 +499,7 @@ export default function UserProfile({
                     {tabs.length > 0 ? (
                         <>
                             <View style={st.tabsContainerWrap}>
-                                <SafeLiquidGlass
-                                    style={st.tabsContainer}
-                                    blurIntensity={20}
-                                    tint={isDark ? 'dark' : 'light'}
-                                >
-                                    <View style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(colors.card, isDark ? 0.42 : 0.66) }]} />
+                                <View style={[st.tabsContainer, { backgroundColor: withAlpha(colors.card, 0.92) }]}>
                                     <ScrollView
                                         horizontal
                                         showsHorizontalScrollIndicator={false}
@@ -525,7 +514,7 @@ export default function UserProfile({
                                             />
                                         ))}
                                     </ScrollView>
-                                </SafeLiquidGlass>
+                                </View>
                             </View>
 
                             <View style={{ marginTop: 14 }}>
@@ -650,21 +639,25 @@ const st = StyleSheet.create({
 
     actionsRow: {
         flexDirection: 'row',
-        paddingHorizontal: 14,
-        gap: 10,
+        paddingHorizontal: 16,
+        gap: 8,
         marginBottom: 20,
     },
-    actionCardWrap: {
+    actionPillWrap: {
         flex: 1,
     },
-    actionCard: {
-        height: 68,
+    actionPill: {
+        height: 64,
         borderRadius: 16,
+        overflow: 'hidden',
+    },
+    actionPillContent: {
+        flex: 1,
         alignItems: 'center',
         justifyContent: 'center',
         gap: 6,
     },
-    actionLabel: {
+    actionPillLabel: {
         fontSize: 13,
         fontWeight: '500',
         letterSpacing: 0.2,
@@ -693,12 +686,11 @@ const st = StyleSheet.create({
     },
 
     tabsContainerWrap: {
-        alignItems: 'center',
+        paddingHorizontal: 16,
     },
     tabsContainer: {
-        borderRadius: 22,
+        borderRadius: 20,
         overflow: 'hidden',
-        maxWidth: SCREEN_W - 52,
     },
     tabsScroll: {
         paddingHorizontal: 6,

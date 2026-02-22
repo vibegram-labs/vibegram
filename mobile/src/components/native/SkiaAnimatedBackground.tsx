@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { StyleSheet, View, useWindowDimensions } from 'react-native';
+import { PixelRatio, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { Canvas, Rect, Shader, Skia } from '@shopify/react-native-skia';
 import { useSharedValue, useDerivedValue, withRepeat, withTiming, Easing } from 'react-native-reanimated';
 
@@ -8,12 +8,14 @@ import { useSharedValue, useDerivedValue, withRepeat, withTiming, Easing } from 
 const SKSL_SHADER = `
 uniform float2 iResolution;
 uniform float iTime;
+uniform float iPixelRatio;
 uniform vec3 baseColor;
 uniform vec3 glowColor;
 uniform vec3 cyanColor;
 
 half4 main(float2 fragCoord) {
-    vec2 uv = fragCoord.xy / iResolution.xy;
+    vec2 fragPx = fragCoord.xy * iPixelRatio;
+    vec2 uv = fragPx / iResolution.xy;
     
     // 1. Solid base color
     vec3 col = baseColor;
@@ -54,7 +56,7 @@ half4 main(float2 fragCoord) {
         
         // 3. Film grain - Luxurious texture
         // Kept subtle and only on the blob
-        float grain = fract(sin(dot(uv * 500.0 + t, vec2(12.9898, 78.233))) * 43758.5453);
+        float grain = fract(sin(dot(fragPx * 0.9 + vec2(t * 11.0, t * 7.0), vec2(12.9898, 78.233))) * 43758.5453);
         col += (grain - 0.5) * 0.06 * blob;
     }
     
@@ -89,6 +91,7 @@ export const SkiaAnimatedBackground = ({
     backgroundColor = '#000000'
 }: SkiaAnimatedBackgroundProps) => {
     const { width, height } = useWindowDimensions();
+    const pixelRatio = PixelRatio.get();
     const time = useSharedValue(0);
 
     const runtimeEffect = useMemo(() => Skia.RuntimeEffect.Make(SKSL_SHADER), []);
@@ -106,12 +109,13 @@ export const SkiaAnimatedBackground = ({
     }, []);
 
     const uniforms = useDerivedValue(() => ({
-        iResolution: [width, height],
+        iResolution: [width * pixelRatio, height * pixelRatio],
         iTime: time.value,
+        iPixelRatio: pixelRatio,
         baseColor: base.value,
         glowColor: glow.value,
         cyanColor: cyan.value,
-    }), [width, height, time, base, glow, cyan]);
+    }), [width, height, pixelRatio, time, base, glow, cyan]);
 
     if (!runtimeEffect) {
         return <View style={[StyleSheet.absoluteFill, { backgroundColor }]} />;

@@ -1,6 +1,7 @@
 import React, { useEffect } from 'react'
-import { View, Text, StyleSheet, TouchableOpacity, Pressable } from 'react-native'
+import { View, Text, StyleSheet, TouchableOpacity, Pressable, Platform, I18nManager } from 'react-native'
 import { useRouter } from 'expo-router'
+import { useTranslation } from 'react-i18next'
 import { StatusBar } from 'expo-status-bar'
 import Animated, {
     useSharedValue,
@@ -15,6 +16,7 @@ import SafeLiquidGlass from '../../src/components/native/SafeLiquidGlass'
 export default function WelcomeScreen() {
     const { colors, effectiveTheme } = useThemeStore()
     const router = useRouter()
+    const { t } = useTranslation()
 
     const fadeAnim = useSharedValue(0)
     const slideAnim = useSharedValue(30)
@@ -42,39 +44,36 @@ export default function WelcomeScreen() {
                 <View style={styles.headerSpacer} />
 
                 <View style={styles.header}>
-
-                    <Text style={[styles.tagline, { color: colors.text }]}>
-                        Connect freely. Chat securely.
+                    <Text style={[styles.tagline, { color: colors.text, textAlign: 'center' }]}>
+                        {t('auth.connectFreely')}
                     </Text>
                 </View>
 
                 <View style={styles.actions}>
                     <View style={styles.buttonWrapper}>
-                        <SafeLiquidGlass style={StyleSheet.absoluteFill} blurIntensity={20}>
-                            <Pressable
-                                onPress={() => router.push('/(auth)/signin')}
-                                style={({ pressed }) => [
-                                    styles.primaryButton,
-                                    { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1 }
-                                ]}
-                            >
-                                <Text style={styles.primaryButtonText}>Sign In</Text>
-                            </Pressable>
-                        </SafeLiquidGlass>
+                        <SafeLiquidGlass style={[StyleSheet.absoluteFill, { borderRadius: 30 }]} blurIntensity={20} pointerEvents="none" />
+                        <Pressable
+                            onPress={() => router.push('/(auth)/signin')}
+                            style={({ pressed }) => [
+                                styles.primaryButton,
+                                { backgroundColor: colors.primary, opacity: pressed ? 0.8 : 1, borderRadius: 30 }
+                            ]}
+                        >
+                            <Text style={styles.primaryButtonText}>{t('auth.signIn')}</Text>
+                        </Pressable>
                     </View>
 
                     <View style={styles.buttonWrapper}>
-                        <SafeLiquidGlass style={StyleSheet.absoluteFill} blurIntensity={15}>
-                            <Pressable
-                                onPress={() => router.push('/(auth)/signup')}
-                                style={({ pressed }) => [
-                                    styles.secondaryButton,
-                                    { backgroundColor: colors.card, opacity: pressed ? 0.8 : 1 }
-                                ]}
-                            >
-                                <Text style={[styles.secondaryButtonText, { color: colors.text }]}>Create Account</Text>
-                            </Pressable>
-                        </SafeLiquidGlass>
+                        <SafeLiquidGlass style={[StyleSheet.absoluteFill, { borderRadius: 30 }]} blurIntensity={15} pointerEvents="none" />
+                        <Pressable
+                            onPress={() => router.push('/(auth)/signup')}
+                            style={({ pressed }) => [
+                                styles.secondaryButton,
+                                { backgroundColor: colors.card, opacity: pressed ? 0.8 : 1, borderRadius: 30 }
+                            ]}
+                        >
+                            <Text style={[styles.secondaryButtonText, { color: colors.text }]}>{t('auth.signUp')}</Text>
+                        </Pressable>
                     </View>
                 </View>
             </Animated.View>
@@ -102,17 +101,17 @@ const styles = StyleSheet.create({
         gap: 12,
     },
     logoText: {
-        fontSize: 56,
-
-        letterSpacing: -2,
+        fontSize: Platform.OS === 'android' ? 42 : 56,
+        fontWeight: '900',
+        letterSpacing: Platform.OS === 'android' ? -0.5 : -2,
         textAlign: 'center',
     },
     tagline: {
-        fontSize: 18,
-
+        fontSize: Platform.OS === 'android' ? 14 : 18,
         textAlign: 'center',
-        opacity: 0.7,
-        letterSpacing: 0.5,
+        opacity: 0.8,
+        letterSpacing: 0,
+        fontWeight: Platform.OS === 'android' ? '400' : '500',
     },
     actions: {
         flex: 1,

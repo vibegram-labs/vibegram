@@ -54,12 +54,28 @@ class ChatNativeListModule : Module() {
         view.setAppearance(appearance)
       }
 
+      Prop("contentPaddingTop") { view: ChatListView, value: Double ->
+        view.setContentPaddingTop(value)
+      }
+
       Prop("contentPaddingBottom") { view: ChatListView, value: Double ->
         view.setContentPaddingBottom(value)
       }
 
       Prop("voicePlayback") { view: ChatListView, payload: Map<String, Any?> ->
         view.setVoicePlayback(payload)
+      }
+
+      Prop("inputBarEnabled") { view: ChatListView, enabled: Boolean ->
+        view.setInputBarEnabled(enabled)
+      }
+
+      Prop("inputPlaceholder") { view: ChatListView, placeholder: String? ->
+        view.setInputPlaceholder(placeholder ?: "Message")
+      }
+
+      Prop("nativeSendEnabled") { view: ChatListView, enabled: Boolean ->
+        view.setNativeSendEnabled(enabled)
       }
     }
   }

@@ -19,11 +19,19 @@ const CHATSTORE_DEBUG = false;
 const chatStoreLog = (...args: any[]) => {
     if (CHATSTORE_DEBUG) console.log(...args);
 };
-const CHATSTORE_MESSAGE_FLOW_DEBUG = true;
+const CHATSTORE_MESSAGE_FLOW_DEBUG = false;
 const chatStoreMessageLog = (...args: any[]) => {
-    if (CHATSTORE_MESSAGE_FLOW_DEBUG || CHATSTORE_DEBUG) {
-        console.log('[ChatStore][MsgFlow]', ...args);
+    const runtimeEnabled = __DEV__ && (globalThis as any).__VIBE_CHATSTORE_MSGFLOW_DEBUG === true;
+    if (CHATSTORE_MESSAGE_FLOW_DEBUG || CHATSTORE_DEBUG || runtimeEnabled) {
+        if (CHATSTORE_DEBUG) {
+            console.log('[ChatStore][MsgFlow]', ...args);
+        }
     }
+};
+const CHATSTORE_HISTORY_PERF_LOG = __DEV__;
+const chatStoreHistoryPerfLog = (...args: any[]) => {
+    if (!CHATSTORE_HISTORY_PERF_LOG) return;
+    console.log('[ChatStore][HistoryPerf]', ...args);
 };
 const MEDIA_UPLOAD_DEFERRED = 'MEDIA_UPLOAD_DEFERRED';
 const MEDIA_LOCAL_FILE_MISSING = 'MEDIA_LOCAL_FILE_MISSING';
@@ -1030,7 +1038,7 @@ export const getUserChannel = (): Channel | null => userChannel;
 
 // Export a function to reset socket (for development/hot-reload issues)
 export const resetSocketConnection = () => {
-    // console.log('[ChatStore] Resetting socket connection...');
+
 
     // Leave all chat channels
     chatChannels.forEach((channel, chatId) => {
@@ -1078,7 +1086,7 @@ export const resetSocketConnection = () => {
     // Reset flag so socket can be re-initialized
     socketInitialized = false;
 
-    // console.log('[ChatStore] Socket reset complete');
+
 };
 
 export const useChatStore = create<ChatState>()(
@@ -1104,7 +1112,7 @@ export const useChatStore = create<ChatState>()(
             initSocket: () => {
                 // Module-level singleton check - prevents any re-initialization
                 if (socketInitialized) {
-                    // console.log('[ChatStore] Socket already initialized, skipping');
+
                     return;
                 }
                 socketInitialized = true;
@@ -1116,13 +1124,12 @@ export const useChatStore = create<ChatState>()(
 
                 const auth = AuthManager.getInstance().getSession();
                 if (!auth) {
-                    // console.log('[ChatStore] No auth session for socket init');
+
                     socketInitialized = false; // Reset so it can try again later
                     return;
                 }
 
-                // console.log('[ChatStore] Init Phoenix socket to:', socketUrl);
-                // console.log('[ChatStore] Auth token available:', !!auth.loginToken, 'userId:', auth.userId);
+
 
                 socket = new PhxSocket(socketUrl, {
                     params: { token: auth.loginToken || auth.userId },
@@ -1180,7 +1187,7 @@ export const useChatStore = create<ChatState>()(
                 };
 
                 socket.onOpen(() => {
-                    // console.log('[ChatStore] Phoenix Socket Connected');
+
                     set({ isConnected: true });
 
                     // Re-sync push token on every reconnect so server always has it
@@ -1244,7 +1251,7 @@ export const useChatStore = create<ChatState>()(
                         try { channel.leave(); } catch (e) { /* ignore */ }
                     });
                     chatChannels.clear();
-                    // console.log('[ChatStore] Cleared old channels, will re-join');
+
 
                     // Re-join chat channels on every reconnect.
                     // We clear channel refs above, so skipping this leaves retry queue without writable channels.
@@ -1265,18 +1272,16 @@ export const useChatStore = create<ChatState>()(
 
                         userChannel = socket!.channel(`user:${auth.userId}`, {});
                         userChannel.join()
-                            .receive("ok", resp => { /* console.log("Joined user channel", resp) */ })
-                            .receive("error", resp => { /* console.log("Unable to join user channel", resp) */ });
+                            .receive("ok", resp => { })
+                            .receive("error", resp => { });
 
                         userChannel.on('initial-presence', (resp: any) => {
-                            // console.log('[ChatStore] Initial presence:', resp);
                             const userIds = resp.onlineFriendIds || [];
                             set({ onlineUsers: new Set(userIds.map((id: string) => id.toUpperCase())) });
                         });
 
                         // Listen for presence changes (user came online/offline)
                         userChannel.on('presence-diff', (resp: any) => {
-                            // console.log('[ChatStore] Presence diff:', resp);
                             const { onlineUsers } = get();
                             const newSet = new Set(onlineUsers);
 
@@ -1295,7 +1300,6 @@ export const useChatStore = create<ChatState>()(
 
                         // Also listen for friend-online and friend-offline events
                         userChannel.on('friend-online', (resp: any) => {
-                            // console.log('[ChatStore] Friend online:', resp);
                             const { onlineUsers } = get();
                             // robust check for keys
                             const rawId = resp.userId || resp.user_id || resp.id;
@@ -1309,7 +1313,6 @@ export const useChatStore = create<ChatState>()(
                         });
 
                         userChannel.on('friend-offline', (resp: any) => {
-                            // console.log('[ChatStore] Friend offline:', resp);
                             const { onlineUsers } = get();
                             // robust check for keys
                             const rawId = resp.userId || resp.user_id || resp.id;
@@ -1324,14 +1327,12 @@ export const useChatStore = create<ChatState>()(
 
                         // Phoenix Presence state (initial list of online users)
                         userChannel.on('presence_state', (state: any) => {
-                            // console.log('[ChatStore] Presence state:', Object.keys(state));
                             const userIds = Object.keys(state).map(id => id.toUpperCase());
                             set({ onlineUsers: new Set(userIds) });
                         });
 
                         // Phoenix Presence diff (users joining/leaving)
                         userChannel.on('presence_diff', (diff: any) => {
-                            // console.log('[ChatStore] Presence diff:', diff);
                             const { onlineUsers } = get();
                             const newSet = new Set(onlineUsers);
 
@@ -1345,17 +1346,17 @@ export const useChatStore = create<ChatState>()(
 
                         // Listen for new chat creation (e.g., first message from a new contact)
                         userChannel.on('new_chat', (payload: any) => {
-                            // console.log('[ChatStore] New chat received:', payload);
+
                             // Reload chats to get the new chat
                             scheduleLoadChats(250);
                         });
 
                         // Listen for new message notification (for chats we might not have yet or deleted)
                         userChannel.on('new_message', (payload: any) => {
-                            console.log('[ChatStore] user:new_message received', payload);
+                            chatStoreLog('[ChatStore] user:new_message received', payload);
                             const msgId = payload.message_id || payload.messageId;
                             if (msgId && recentlyProcessedMsgIds.has(msgId)) return;
-                            // console.log('[ChatStore] New message notification:', payload);
+
                             const { chats } = get();
                             const chatId = payload.chatId || payload.chat_id;
 
@@ -1368,7 +1369,7 @@ export const useChatStore = create<ChatState>()(
                                 // This happens when:
                                 // 1. New chat we never had
                                 // 2. Chat we deleted (but someone messaged us)
-                                // console.log('[ChatStore] Reloading chats due to new_message notification');
+
                                 scheduleLoadChats(250);
                             }
                         });
@@ -1379,7 +1380,6 @@ export const useChatStore = create<ChatState>()(
 
                         // Handle incoming call request
                         userChannel.on('call-start', (payload: any) => {
-                            // console.log('[ChatStore] Incoming call:', payload);
                             try {
                                 // Dynamic import to avoid crashes if CallStore fails to load
                                 const { useCallStore } = require('./stores/CallStore');
@@ -1414,7 +1414,6 @@ export const useChatStore = create<ChatState>()(
 
                         // Handle call accepted by remote party
                         userChannel.on('call-accepted', (payload: any) => {
-                            // console.log('[ChatStore] Call accepted:', payload);
                             try {
                                 const { useCallStore } = require('./stores/CallStore');
                                 useCallStore.getState().handleCallAccepted(payload);
@@ -1425,7 +1424,6 @@ export const useChatStore = create<ChatState>()(
 
                         // Handle call ended by remote party
                         userChannel.on('call-end', (payload: any) => {
-                            // console.log('[ChatStore] Call ended:', payload);
                             try {
                                 const { useCallStore } = require('./stores/CallStore');
                                 useCallStore.getState().handleCallEnded(payload);
@@ -1436,7 +1434,6 @@ export const useChatStore = create<ChatState>()(
 
                         // Handle WebRTC signaling (SDP offer/answer, ICE candidates)
                         userChannel.on('webrtc-signal', (payload: any) => {
-                            // console.log('[ChatStore] WebRTC signal:', payload.type);
                             try {
                                 const { useCallStore } = require('./stores/CallStore');
                                 useCallStore.getState().handleWebRTCSignal(payload);
@@ -1458,7 +1455,6 @@ export const useChatStore = create<ChatState>()(
                 });
 
                 socket.onError((e) => {
-                    // console.log('[ChatStore] Phoenix Socket Error', e);
                     queueRecoverableMessages();
                     // Don't clear channels here - let onClose handle it
                     // Just update connection status
@@ -1467,13 +1463,10 @@ export const useChatStore = create<ChatState>()(
             },
 
             loadChats: async () => {
-                // console.log('[ChatStore] loadChats called');
                 let auth = AuthManager.getInstance().getSession();
                 if (!auth) {
-                    // console.log('[ChatStore] No auth session found');
                     auth = await AuthManager.getInstance().init();
                     if (!auth) {
-                        // console.log('[ChatStore] Auth init failed');
                         return;
                     }
                 }
@@ -1484,7 +1477,6 @@ export const useChatStore = create<ChatState>()(
                     // Fetch chats via API
                     const { apiClient } = require('./api-client');
                     const data = await apiClient.getChats(auth.userId);
-                    // console.log('[ChatStore] Fetched API. Chats count:', data ? data.length : 'null');
 
                     // Process chats
                     // Process chats with merge logic - PRESERVE local plaintext!
@@ -1521,10 +1513,10 @@ export const useChatStore = create<ChatState>()(
                             }
                         }
                         mergedMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-                        console.log(`[ChatStore-TargetLog] User ${auth?.userId} loaded chat ${c.chatId}. API returned ${serverMessages.length} msgs. Merged result is ${mergedMessages.length} msgs.`);
+                        chatStoreLog(`[ChatStore-TargetLog] User ${auth?.userId} loaded chat ${c.chatId}. API returned ${serverMessages.length} msgs. Merged result is ${mergedMessages.length} msgs.`);
                         const undecryptableCount = mergedMessages.filter(m => m.encryptedContent && !m.plaintext).length;
                         if (undecryptableCount > 0) {
-                            console.log(`[ChatStore-TargetLog] Out of ${mergedMessages.length} msgs, ${undecryptableCount} need decryption/rendering.`);
+                            chatStoreLog(`[ChatStore-TargetLog] Out of ${mergedMessages.length} msgs, ${undecryptableCount} need decryption/rendering.`);
                         }
 
                         chatStoreMessageLog('loadChats:merged', {
@@ -1578,7 +1570,6 @@ export const useChatStore = create<ChatState>()(
                     // Join chat channels for real-time updates
                     // Check socket exists and is connected
                     const isSocketReady = socket && socket.isConnected();
-                    // console.log('[ChatStore] Socket ready for channels:', isSocketReady, 'Chats to join:', processedChats.length);
 
                     if (isSocketReady) {
                         for (const chat of processedChats) {
@@ -1597,13 +1588,11 @@ export const useChatStore = create<ChatState>()(
                                         scheduleChatRetryFlush(chat.chatId, get, 260);
                                     })
                                     .receive("error", (err: any) => {
-                                        // console.log(`[ChatStore] Failed to join chat ${chat.chatId}:`, err);
-                                        // Remove from map so we can retry
                                         chatChannels.delete(chat.chatId);
                                     });
 
                                 channel.on("message", async (payload: any) => {
-                                    console.log(`[ChatStore-TargetLog] Realtime msg received on ${topic}: ${payload.id}, type: ${payload.type}. hasPlaintext: ${!!payload.plaintext}, encryptedContent: ${!!payload.encryptedContent}`);
+                                    chatStoreLog(`[ChatStore-TargetLog] Realtime msg received on ${topic}: ${payload.id}, type: ${payload.type}. hasPlaintext: ${!!payload.plaintext}, encryptedContent: ${!!payload.encryptedContent}`);
                                     const incomingId = payload?.id || payload?.message_id;
 
                                     // Ignore current user's own messages (we handle them optimistically)
@@ -1707,7 +1696,6 @@ export const useChatStore = create<ChatState>()(
 
                                 // Listen for typing events
                                 channel.on("typing", (payload: any) => {
-                                    // console.log('[ChatStore] Typing event:', payload);
                                     const { typingUsers } = get();
                                     const auth = AuthManager.getInstance().getSession();
                                     const myUserId = auth?.userId?.toUpperCase() || '';
@@ -1726,7 +1714,6 @@ export const useChatStore = create<ChatState>()(
                                 });
 
                                 channel.on("stop-typing", (payload: any) => {
-                                    // console.log('[ChatStore] Stop-typing event:', payload);
                                     const { typingUsers } = get();
                                     const auth = AuthManager.getInstance().getSession();
                                     const myUserId = auth?.userId?.toUpperCase() || '';
@@ -1745,7 +1732,6 @@ export const useChatStore = create<ChatState>()(
                                 });
 
                                 channel.on("recording", (payload: any) => {
-                                    // console.log('[ChatStore] Recording event:', payload);
                                     const { recordingUsers } = get();
                                     const auth = AuthManager.getInstance().getSession();
                                     const myUserId = auth?.userId?.toUpperCase() || '';
@@ -1759,7 +1745,6 @@ export const useChatStore = create<ChatState>()(
                                 });
 
                                 channel.on("stop-recording", (payload: any) => {
-                                    // console.log('[ChatStore] Stop-recording event:', payload);
                                     const { recordingUsers } = get();
                                     const auth = AuthManager.getInstance().getSession();
                                     const myUserId = auth?.userId?.toUpperCase() || '';
@@ -1774,7 +1759,6 @@ export const useChatStore = create<ChatState>()(
 
                                 // Listen for message delivered events (when recipient receives message)
                                 channel.on("message-delivered", (payload: any) => {
-                                    // console.log('[ChatStore] Message delivered event:', payload);
                                     const messageId = payload.messageId || payload.message_id;
                                     if (!messageId) return;
 
@@ -1803,7 +1787,6 @@ export const useChatStore = create<ChatState>()(
 
                                 // Listen for message read events (when recipient reads message)
                                 channel.on("message-read", (payload: any) => {
-                                    // console.log('[ChatStore] Message read event:', payload);
                                     const messageId = payload.messageId || payload.message_id;
                                     if (!messageId) return;
 
@@ -1933,7 +1916,7 @@ export const useChatStore = create<ChatState>()(
                         body: JSON.stringify({ myId: auth.userId, friendId })
                     });
 
-                    console.log('[ChatStore] startChat response status:', res.status);
+                    chatStoreLog('[ChatStore] startChat response status:', res.status);
 
                     if (!res.ok) {
                         const text = await res.text();
@@ -1992,7 +1975,7 @@ export const useChatStore = create<ChatState>()(
                                     setTimeout(() => recentlyProcessedMsgIds.delete(incomingId), 10000);
 
                                     (async () => {
-                                        console.log('[ChatStore] New Message in new chat:', serverMsg.id);
+                                        chatStoreLog('[ChatStore] New Message in new chat:', serverMsg.id);
                                         const { chats: currentChats, offlineQueue } = get();
                                         const idx = currentChats.findIndex(c => c.chatId === chatId);
                                         if (idx < 0) return;
@@ -2097,7 +2080,7 @@ export const useChatStore = create<ChatState>()(
 
                                 // Listen for message delivered events
                                 channel.on("message-delivered", (payload: any) => {
-                                    console.log('[ChatStore] Message delivered (startChat):', payload);
+                                    chatStoreLog('[ChatStore] Message delivered (startChat):', payload);
                                     const messageId = payload.messageId || payload.message_id;
                                     if (!messageId) return;
 
@@ -2124,7 +2107,7 @@ export const useChatStore = create<ChatState>()(
 
                                 // Listen for message read events
                                 channel.on("message-read", (payload: any) => {
-                                    console.log('[ChatStore] Message read (startChat):', payload);
+                                    chatStoreLog('[ChatStore] Message read (startChat):', payload);
                                     const messageId = payload.messageId || payload.message_id;
                                     if (!messageId) return;
 
@@ -2162,15 +2145,15 @@ export const useChatStore = create<ChatState>()(
                                 // Join channel in background (don't await — Phoenix queues pushes until joined)
                                 channel.join()
                                     .receive("ok", () => {
-                                        console.log(`[ChatStore] Joined new chat ${chatId}`);
+                                        chatStoreLog(`[ChatStore] Joined new chat ${chatId}`);
                                         scheduleChatRetryFlush(chatId, get, 260);
                                     })
                                     .receive("error", () => {
-                                        console.log(`[ChatStore] Failed to join new chat ${chatId}`);
+                                        chatStoreLog(`[ChatStore] Failed to join new chat ${chatId}`);
                                         chatChannels.delete(chatId);
                                     })
                                     .receive("timeout", () => {
-                                        console.log(`[ChatStore] Timeout joining new chat ${chatId}`);
+                                        chatStoreLog(`[ChatStore] Timeout joining new chat ${chatId}`);
                                     });
                             }
                         }
@@ -2370,7 +2353,7 @@ export const useChatStore = create<ChatState>()(
                 const nextText = text.trim();
                 if (!nextText) return false;
                 if (__DEV__) {
-                    console.log('[ChatStore] editMessage start', { chatId, messageId, textLength: nextText.length });
+                    chatStoreLog('[ChatStore] editMessage start', { chatId, messageId, textLength: nextText.length });
                 }
 
                 const { chats } = get();
@@ -2434,7 +2417,7 @@ export const useChatStore = create<ChatState>()(
                     if (optimisticChats !== get().chats) {
                         set({ chats: optimisticChats });
                         if (__DEV__) {
-                            console.log('[ChatStore] editMessage optimistic patch applied', { chatId, messageId, editedAt });
+                            chatStoreLog('[ChatStore] editMessage optimistic patch applied', { chatId, messageId, editedAt });
                         }
                     }
 
@@ -2448,7 +2431,7 @@ export const useChatStore = create<ChatState>()(
                         console.warn('[ChatStore] edit-message timeout:', messageId);
                     });
                     if (__DEV__) {
-                        console.log('[ChatStore] editMessage push sent', { chatId, messageId });
+                        chatStoreLog('[ChatStore] editMessage push sent', { chatId, messageId });
                     }
 
                     return true;
@@ -2647,7 +2630,7 @@ export const useChatStore = create<ChatState>()(
                     : undefined;
 
                 if (!isConnected) {
-                    console.log('[ChatStore] Offline, queuing message:', msgId);
+                    chatStoreLog('[ChatStore] Offline, queuing message:', msgId);
                     const { offlineQueue } = get();
                     const queuedMessage = get().chats
                         .find((c) => c.chatId === chatId)
@@ -2683,7 +2666,7 @@ export const useChatStore = create<ChatState>()(
                     const uploadSignal = abortController.signal;
 
                     try {
-                        console.log('[ChatStore] Encrypting & uploading media:', resolvedMediaUrl);
+                        chatStoreLog('[ChatStore] Encrypting & uploading media:', resolvedMediaUrl);
                         const mediaCategory = type === 'image' ? 'image' : type === 'video' ? 'video' : type === 'voice' || type === 'music' ? 'audio' : 'file';
 
                         // Step 0: Set initial progress to show activity
@@ -2707,7 +2690,7 @@ export const useChatStore = create<ChatState>()(
                         const useLargeFileMode = fileSizeMB > 15;
 
                         if (useLargeFileMode) {
-                            console.log(`[ChatStore] Large file (${Math.round(fileSizeMB)}MB), using chunked encryption`);
+                            chatStoreLog(`[ChatStore] Large file (${Math.round(fileSizeMB)}MB), using chunked encryption`);
                             get().setUploadProgress(msgId, 0.05);
 
                             const ext = guessMediaExtension(resolvedMediaUrl, type);
@@ -2724,7 +2707,7 @@ export const useChatStore = create<ChatState>()(
 
                             if (result) {
                                 mediaKey = result.keyBase64;
-                                console.log('[ChatStore] Large file chunked-encrypted, key length:', mediaKey.length);
+                                chatStoreLog('[ChatStore] Large file chunked-encrypted, key length:', mediaKey.length);
                                 get().setUploadProgress(msgId, 0.30);
 
                                 const uploadedUrl = await uploadMedia(
@@ -2748,13 +2731,13 @@ export const useChatStore = create<ChatState>()(
                                         const originalUri = originalLocalMediaUri.startsWith('file://') ? originalLocalMediaUri : `file://${originalLocalMediaUri}`;
                                         useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
                                     }
-                                    console.log('[ChatStore] Large media encrypted & uploaded, URL:', resolvedMediaUrl);
+                                    chatStoreLog('[ChatStore] Large media encrypted & uploaded, URL:', resolvedMediaUrl);
                                 } else {
                                     throw new Error(MEDIA_UPLOAD_DEFERRED);
                                 }
                             } else {
                                 // Chunked encryption not available (e.g. Expo Go), upload directly
-                                console.log('[ChatStore] Chunked encrypt unavailable, uploading directly');
+                                chatStoreLog('[ChatStore] Chunked encrypt unavailable, uploading directly');
                                 const uploadedUrl = await uploadMedia(
                                     fileUri,
                                     auth.userId,
@@ -2793,7 +2776,7 @@ export const useChatStore = create<ChatState>()(
                                     });
                                     metadata.thumbnailBase64 = thumbBase64;
                                     FileSystem.deleteAsync(thumb.uri, { idempotent: true }).catch(() => { });
-                                    console.log('[ChatStore] HD thumbnail generated:', Math.round(thumbBase64.length * 0.75 / 1024), 'KB');
+                                    chatStoreLog('[ChatStore] HD thumbnail generated:', Math.round(thumbBase64.length * 0.75 / 1024), 'KB');
                                 } catch (thumbErr) {
                                     console.warn('[ChatStore] Thumbnail generation failed:', thumbErr);
                                 }
@@ -2808,7 +2791,7 @@ export const useChatStore = create<ChatState>()(
                                             [{ resize: { width: maxDim } }],
                                             { compress: 0.85, format: SaveFormat.JPEG }
                                         );
-                                        console.log('[ChatStore] Image optimized:', Math.round(fileSizeKB), 'KB ->', compressed.uri);
+                                        chatStoreLog('[ChatStore] Image optimized:', Math.round(fileSizeKB), 'KB ->', compressed.uri);
                                         fileUri = compressed.uri;
                                     }
                                 } catch (compErr) {
@@ -2824,13 +2807,13 @@ export const useChatStore = create<ChatState>()(
                             const fileBase64 = await FileSystem.readAsStringAsync(readableUri, {
                                 encoding: FileSystem.EncodingType.Base64,
                             });
-                            console.log('[ChatStore] File read, size:', Math.round(fileBase64.length * 0.75 / 1024), 'KB');
+                            chatStoreLog('[ChatStore] File read, size:', Math.round(fileBase64.length * 0.75 / 1024), 'KB');
                             get().setUploadProgress(msgId, 0.15); // 15%
 
                             // Step 2: Encrypt the file data with AES-256-GCM (native QuickCrypto is fast)
                             const encResult = await encryptFileData(fileBase64);
                             mediaKey = encResult.keyBase64;
-                            console.log('[ChatStore] File encrypted, key length:', mediaKey.length);
+                            chatStoreLog('[ChatStore] File encrypted, key length:', mediaKey.length);
                             get().setUploadProgress(msgId, 0.25); // 25%
 
                             // Step 3: Write encrypted data to a temp file
@@ -2868,7 +2851,7 @@ export const useChatStore = create<ChatState>()(
                                     useEncryptedMediaStore.getState().manuallyCacheFile(uploadedUrl, originalUri);
                                 }
 
-                                console.log('[ChatStore] Encrypted media uploaded, URL:', resolvedMediaUrl);
+                                chatStoreLog('[ChatStore] Encrypted media uploaded, URL:', resolvedMediaUrl);
                             } else {
                                 throw new Error(MEDIA_UPLOAD_DEFERRED);
                             }
@@ -3114,7 +3097,7 @@ export const useChatStore = create<ChatState>()(
                         }).receive("timeout", () => {
                             releaseEphemeralChannel();
                             get().clearUploadProgress(msgId);
-                            console.error('[ChatStore] Message send timed out:', msgId);
+                            chatStoreLog('[ChatStore] Message send timed out:', msgId);
                             // Timeout is treated as transient network/channel failure.
                             const latestChats = get().chats;
                             const idx = latestChats.findIndex(c => c.chatId === chatId);
@@ -3177,7 +3160,7 @@ export const useChatStore = create<ChatState>()(
                     get().clearUploadProgress(msgId);
                     // If user cancelled, the message was already removed by cancelUpload — skip error marking
                     if (e?.message === 'Upload cancelled') {
-                        console.log('[ChatStore] Upload cancelled by user:', msgId);
+                        chatStoreLog('[ChatStore] Upload cancelled by user:', msgId);
                         return;
                     }
                     const errorMessage = String(e?.message || e || '');
@@ -3234,8 +3217,10 @@ export const useChatStore = create<ChatState>()(
             setActiveChat: (id) => set({ activeChatId: id }),
 
             loadMessages: async (chatId) => {
+                const loadStartTs = Date.now();
                 const inFlight = historyLoadInFlight.get(chatId);
                 if (inFlight) {
+                    chatStoreHistoryPerfLog('loadMessages:join-inflight', { chatId, dt: Date.now() - loadStartTs });
                     await inFlight;
                     return;
                 }
@@ -3244,7 +3229,7 @@ export const useChatStore = create<ChatState>()(
                 const cachedCount = Array.isArray(cachedChat?.messages) ? cachedChat!.messages.length : 0;
                 if (cachedCount > 0) {
                     if (__DEV__) {
-                        console.log('[ChatStore][HistoryDebug] loadMessages executing (previously skipped cache-first)', {
+                        chatStoreLog('[ChatStore][HistoryDebug] loadMessages executing (previously skipped cache-first)', {
                             chatId,
                             cachedCount,
                         });
@@ -3252,23 +3237,38 @@ export const useChatStore = create<ChatState>()(
                 }
 
                 const run = (async () => {
+                    const runStartTs = Date.now();
                     const proxy = ProxyManager.getInstance();
                     const baseUrl = proxy.getBestUrl();
                     const auth = AuthManager.getInstance().getSession();
 
                     try {
+                        const fetchStartTs = Date.now();
                         const res = await fetch(`${baseUrl}/api/chat/${chatId}/messages`, {
                             headers: {
                                 'ngrok-skip-browser-warning': 'true',
                                 ...buildAuthHeaders(auth),
                             }
                         });
+                        chatStoreHistoryPerfLog('loadMessages:fetch:done', {
+                            chatId,
+                            status: res.status,
+                            fetchDt: Date.now() - fetchStartTs,
+                            totalDt: Date.now() - runStartTs,
+                        });
 
                         if (!res.ok) {
                             const body = await res.text().catch(() => '');
                             throw new Error(`HTTP ${res.status}${body ? `: ${body.slice(0, 180)}` : ''}`);
                         }
+                        const jsonStartTs = Date.now();
                         const messages = await res.json();
+                        chatStoreHistoryPerfLog('loadMessages:json:done', {
+                            chatId,
+                            count: Array.isArray(messages) ? messages.length : -1,
+                            jsonDt: Date.now() - jsonStartTs,
+                            totalDt: Date.now() - runStartTs,
+                        });
                         if (!Array.isArray(messages)) {
                             console.warn('[ChatStore][HistoryDebug] loadMessages returned non-array payload', {
                                 chatId,
@@ -3285,7 +3285,7 @@ export const useChatStore = create<ChatState>()(
                                 return !(typeof text === 'string' && text.trim().length > 0);
                             }).length;
                             const encryptedCount = messages.filter((m: any) => !!(m?.encryptedContent || m?.encrypted_content)).length;
-                            console.log('[ChatStore][HistoryDebug] loadMessages fetched from API', {
+                            chatStoreLog('[ChatStore][HistoryDebug] loadMessages fetched from API', {
                                 chatId,
                                 fetchedCount: messages.length,
                                 encryptedCount,
@@ -3306,6 +3306,7 @@ export const useChatStore = create<ChatState>()(
                         const { chats } = get();
                         const chatIndex = chats.findIndex(c => c.chatId === chatId);
                         if (chatIndex > -1) {
+                            const mergeStartTs = Date.now();
                             const existingMessages = chats[chatIndex].messages;
                             const serverMsgMap = new Map<string, any>();
 
@@ -3353,6 +3354,7 @@ export const useChatStore = create<ChatState>()(
 
                             if (newServerMessages.length > 0 && auth?.keyPair?.privateKey) {
                                 try {
+                                    const decryptStartTs = Date.now();
                                     const itemsToDecrypt = newServerMessages
                                         .filter(m => m.encryptedContent)
                                         .map(m => ({
@@ -3373,6 +3375,13 @@ export const useChatStore = create<ChatState>()(
                                             }
                                         });
                                     }
+                                    chatStoreHistoryPerfLog('loadMessages:decrypt:newServerMessages', {
+                                        chatId,
+                                        newServerMessages: newServerMessages.length,
+                                        decryptCandidates: itemsToDecrypt.length,
+                                        decryptDt: Date.now() - decryptStartTs,
+                                        totalDt: Date.now() - runStartTs,
+                                    });
                                 } catch (e) {
                                     console.warn('[ChatStore] bulk decryption failed in loadMessages', e);
                                 }
@@ -3395,7 +3404,7 @@ export const useChatStore = create<ChatState>()(
                                     const text = m?.plaintext || m?.content || m?.text || '';
                                     return !(typeof text === 'string' && text.trim().length > 0);
                                 }).length;
-                                console.log('[ChatStore][HistoryDebug] loadMessages merged into store', {
+                                chatStoreLog('[ChatStore][HistoryDebug] loadMessages merged into store', {
                                     chatId,
                                     localCountBeforeMerge: existingMessages.length,
                                     serverCount: messages.length,
@@ -3410,9 +3419,26 @@ export const useChatStore = create<ChatState>()(
                                     })),
                                 });
                             }
+                            const setStartTs = Date.now();
                             set({ chats: updatedChats });
+                            chatStoreHistoryPerfLog('loadMessages:merge+set:done', {
+                                chatId,
+                                existingMessages: existingMessages.length,
+                                serverMessages: messages.length,
+                                newServerMessages: newServerMessages.length,
+                                mergedMessages: mergedMessages.length,
+                                mergeDt: Date.now() - mergeStartTs,
+                                setDt: Date.now() - setStartTs,
+                                totalDt: Date.now() - runStartTs,
+                            });
                         }
+                        chatStoreHistoryPerfLog('loadMessages:done', { chatId, totalDt: Date.now() - runStartTs });
                     } catch (e) {
+                        chatStoreHistoryPerfLog('loadMessages:error', {
+                            chatId,
+                            totalDt: Date.now() - runStartTs,
+                            error: String((e as any)?.message || e),
+                        });
                         console.error('[ChatStore] Load messages failed:', e);
                     }
                 })();
@@ -3575,7 +3601,7 @@ export const useChatStore = create<ChatState>()(
                                 'Content-Type': 'application/json',
                             }),
                         });
-                        console.log('[ChatStore] Chat deleted from server:', chatId);
+                        chatStoreLog('[ChatStore] Chat deleted from server:', chatId);
                     }
                 } catch (e) {
                     console.warn('[ChatStore] Failed to delete chat from server:', e);
@@ -3788,12 +3814,12 @@ export const useChatStore = create<ChatState>()(
             }),
             // Called when store is rehydrated from storage
             onRehydrateStorage: () => {
-                console.log('[ChatStore] Starting hydration from storage...');
+                chatStoreLog('[ChatStore] Starting hydration from storage...');
                 return (state, error) => {
                     if (error) {
                         console.error('[ChatStore] Hydration error:', error);
                     } else {
-                        console.log('[ChatStore] Hydration complete. Chats:', state?.chats?.length || 0);
+                        chatStoreLog('[ChatStore] Hydration complete. Chats:', state?.chats?.length || 0);
                         // Messages have encryptedContent but no plaintext after hydration
                         // The UI will handle decryption when messages are rendered
                     }
@@ -3810,7 +3836,7 @@ if (__DEV__ && CHATSTORE_DEBUG) {
             if (state.chats !== prevState.chats) {
                 const chatId = state.activeChatId;
                 const chat = chatId ? state.chats.find(c => c.chatId === chatId) : null;
-                console.log('[ChatStore] State changed! Active chat messages:', chat?.messages?.length || 0);
+                chatStoreLog('[ChatStore] State changed! Active chat messages:', chat?.messages?.length || 0);
             }
         }
     );

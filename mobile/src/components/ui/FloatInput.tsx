@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { View, TextInput, Text, StyleSheet, TextInputProps } from 'react-native';
+import { View, TextInput, Text, StyleSheet, TextInputProps, I18nManager } from 'react-native';
 import Animated, { useSharedValue, useAnimatedStyle, withTiming, interpolate, interpolateColor } from 'react-native-reanimated';
 import { useThemeStore } from '../../lib/stores/theme-store';
 
@@ -11,8 +11,9 @@ interface FloatInputProps extends TextInputProps {
 }
 
 const FloatInput = ({ label, value, error, containerStyle, labelColor, ...props }: FloatInputProps) => {
-    const { colors, effectiveTheme } = useThemeStore();
+    const { colors } = useThemeStore();
     const [isFocused, setIsFocused] = useState(false);
+    const isRTL = I18nManager.isRTL;
 
     // Check if value is truly present (handling undefined/null)
     const hasValue = value !== undefined && value !== null && value.length > 0;
@@ -29,13 +30,14 @@ const FloatInput = ({ label, value, error, containerStyle, labelColor, ...props 
     const labelStyle = useAnimatedStyle(() => {
         return {
             position: 'absolute',
-            left: 12,
-            top: interpolate(focusAnim.value, [0, 1], [16, -10]), // Centered label
+            [isRTL ? 'right' : 'left']: 12,
+            top: interpolate(focusAnim.value, [0, 1], [26, -4]),
             fontSize: interpolate(focusAnim.value, [0, 1], [15, 12]),
             color: interpolateColor(focusAnim.value, [0, 1], [inactiveLabelColor, activeLabelColor]),
             zIndex: 1,
             backgroundColor: colors.background,
-            paddingHorizontal: 4,
+            paddingHorizontal: 6,
+            borderRadius: 8,
         };
     });
 
@@ -52,13 +54,14 @@ const FloatInput = ({ label, value, error, containerStyle, labelColor, ...props 
                     {
                         color: colors.text,
                         borderColor: error ? colors.danger : (isFocused ? activeLabelColor : colors.border),
+                        textAlign: isRTL ? 'right' : 'left',
                     }
                 ]}
                 placeholderTextColor="transparent"
                 onFocus={() => setIsFocused(true)}
                 onBlur={() => setIsFocused(false)}
             />
-            {error ? <Text style={[styles.errorText, { color: colors.danger }]}>{error}</Text> : null}
+            {error ? <Text style={[styles.errorText, { color: colors.danger, textAlign: isRTL ? 'right' : 'left' }]}>{error}</Text> : null}
         </View>
     );
 };
@@ -67,26 +70,27 @@ const styles = StyleSheet.create({
     container: {
         marginBottom: 20,
         position: 'relative',
+        width: '100%',
+        paddingTop: 10,
     },
     label: {
         fontWeight: '500',
         letterSpacing: 0.2,
     },
     input: {
-        height: 52, // Reduced height
-        borderWidth: 0.5,
-        borderRadius: 22, // Reduced curve
+        height: 52,
+        borderWidth: 1,
+        borderRadius: 22,
         paddingHorizontal: 16,
         paddingTop: 0,
         paddingBottom: 0,
-        fontSize: 16, // Slightly smaller font
+        fontSize: 16,
         fontWeight: '500',
     },
     errorText: {
-        color: '#ef4444',
         fontSize: 13,
         marginTop: 10,
-        marginLeft: 8,
+        marginHorizontal: 8,
         fontWeight: '500',
     }
 });

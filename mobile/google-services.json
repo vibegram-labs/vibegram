@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "555349386069",
+    "project_id": "vibe-4d1ea",
+    "storage_bucket": "vibe-4d1ea.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:555349386069:android:11635922dc6f0bf91c85dc",
+        "android_client_info": {
+          "package_name": "com.mohammadshayani.vibegram"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDxh8spJgG9ROD4Hm5ePH5Cm8f9nD-HobE"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

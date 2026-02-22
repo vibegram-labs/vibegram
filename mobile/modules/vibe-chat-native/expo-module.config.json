@@ -17,7 +17,9 @@
     "modules": [
       "expo.modules.vibechatnative.ChatNativeCoreModule",
       "expo.modules.vibechatnative.ChatNativeListModule",
-      "expo.modules.vibechatnative.ChatNativeGifModule"
+      "expo.modules.vibechatnative.ChatNativeGifModule",
+      "expo.modules.vibechatnative.LiquidGlassModule",
+      "expo.modules.vibechatnative.ChatNativeTabBarModule"
     ]
   }
 }

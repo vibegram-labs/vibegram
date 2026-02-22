@@ -12,42 +12,197 @@ private struct HybridPayload: Decodable {
   let s: String?
 }
 
-private func decodePEM(_ pem: String) -> Data? {
-  let withoutHeaders = pem
-    .components(separatedBy: .newlines)
-    .filter { !$0.hasPrefix("-----") }
-    .joined()
-  if let data = Data(base64Encoded: withoutHeaders) {
-    return data
+private struct PEMDecodeResult {
+  let data: Data?
+  let label: String
+  let hadEscapedNewlines: Bool
+  let inputLength: Int
+  let normalizedLength: Int
+  let base64Length: Int
+}
+
+private func pemLabel(from value: String) -> String {
+  guard
+    let regex = try? NSRegularExpression(pattern: "-----BEGIN ([^-]+)-----"),
+    let match = regex.firstMatch(in: value, range: NSRange(value.startIndex..., in: value)),
+    let labelRange = Range(match.range(at: 1), in: value)
+  else {
+    return "unknown"
   }
-  let sanitized = pem.replacingOccurrences(
+  return String(value[labelRange])
+}
+
+private func readDERLength(bytes: [UInt8], offset: inout Int) -> Int? {
+  guard offset < bytes.count else { return nil }
+  let first = Int(bytes[offset])
+  offset += 1
+  if (first & 0x80) == 0 {
+    return first
+  }
+  let lengthByteCount = first & 0x7f
+  guard lengthByteCount > 0, lengthByteCount <= 4 else { return nil }
+  guard offset + lengthByteCount <= bytes.count else { return nil }
+  var value = 0
+  for _ in 0..<lengthByteCount {
+    value = (value << 8) | Int(bytes[offset])
+    offset += 1
+  }
+  return value
+}
+
+private func extractPKCS1FromPKCS8(_ data: Data) -> Data? {
+  let bytes = [UInt8](data)
+  var offset = 0
+
+  // PrivateKeyInfo ::= SEQUENCE
+  guard offset < bytes.count, bytes[offset] == 0x30 else { return nil }
+  offset += 1
+  guard let seqLength = readDERLength(bytes: bytes, offset: &offset) else { return nil }
+  let seqEnd = offset + seqLength
+  guard seqEnd <= bytes.count else { return nil }
+
+  // version INTEGER
+  guard offset < seqEnd, bytes[offset] == 0x02 else { return nil }
+  offset += 1
+  guard let versionLength = readDERLength(bytes: bytes, offset: &offset) else { return nil }
+  offset += versionLength
+  guard offset <= seqEnd else { return nil }
+
+  // algorithm identifier SEQUENCE
+  guard offset < seqEnd, bytes[offset] == 0x30 else { return nil }
+  offset += 1
+  guard let algorithmLength = readDERLength(bytes: bytes, offset: &offset) else { return nil }
+  offset += algorithmLength
+  guard offset <= seqEnd else { return nil }
+
+  // privateKey OCTET STRING (this is PKCS#1 bytes for RSA)
+  guard offset < seqEnd, bytes[offset] == 0x04 else { return nil }
+  offset += 1
+  guard let privateKeyLength = readDERLength(bytes: bytes, offset: &offset) else { return nil }
+  let keyStart = offset
+  let keyEnd = keyStart + privateKeyLength
+  guard keyEnd <= seqEnd else { return nil }
+  return data.subdata(in: keyStart..<keyEnd)
+}
+
+private func decodePEM(_ pem: String) -> PEMDecodeResult {
+  let hadEscapedNewlines = pem.contains("\\n") || pem.contains("\\r")
+  let normalized = pem
+    .replacingOccurrences(of: "\\r\\n", with: "\n")
+    .replacingOccurrences(of: "\\n", with: "\n")
+    .replacingOccurrences(of: "\\r", with: "\n")
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+  let label = pemLabel(from: normalized)
+
+  let withoutHeaders = normalized
+    .replacingOccurrences(of: "-----BEGIN [^-]+-----", with: "", options: .regularExpression)
+    .replacingOccurrences(of: "-----END [^-]+-----", with: "", options: .regularExpression)
+  let sanitized = withoutHeaders.replacingOccurrences(
     of: "\\s+",
     with: "",
     options: .regularExpression
   )
-  return Data(base64Encoded: sanitized)
+
+  return PEMDecodeResult(
+    data: Data(base64Encoded: sanitized),
+    label: label,
+    hadEscapedNewlines: hadEscapedNewlines,
+    inputLength: pem.count,
+    normalizedLength: normalized.count,
+    base64Length: sanitized.count
+  )
 }
 
-private func privateSecKey(from pem: String) -> SecKey? {
-  guard let keyData = decodePEM(pem) else {
-    return nil
-  }
+private func secKeyFromData(_ keyData: Data, keyClass: CFString) -> (SecKey?, String?) {
   let attrs: [String: Any] = [
     kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-    kSecAttrKeyClass as String: kSecAttrKeyClassPrivate
+    kSecAttrKeyClass as String: keyClass
   ]
-  return SecKeyCreateWithData(keyData as CFData, attrs as CFDictionary, nil)
+  var error: Unmanaged<CFError>?
+  let key = SecKeyCreateWithData(keyData as CFData, attrs as CFDictionary, &error)
+  let errorDescription = error?.takeRetainedValue().localizedDescription
+  return (key, errorDescription)
+}
+
+private func describeKeyFailure(
+  label: String,
+  hadEscapedNewlines: Bool,
+  inputLength: Int,
+  normalizedLength: Int,
+  base64Length: Int,
+  derLength: Int,
+  failureStep: String,
+  importError: String?
+) -> String {
+  let errorText = importError ?? "unknown"
+  return "label=\(label), escapedNewlines=\(hadEscapedNewlines), input=\(inputLength), normalized=\(normalizedLength), base64=\(base64Length), der=\(derLength), step=\(failureStep), error=\(errorText)"
+}
+
+private func privateSecKey(from pem: String) -> (key: SecKey?, failureDetails: String?) {
+  let decoded = decodePEM(pem)
+  guard let keyData = decoded.data else {
+    return (
+      nil,
+      describeKeyFailure(
+        label: decoded.label,
+        hadEscapedNewlines: decoded.hadEscapedNewlines,
+        inputLength: decoded.inputLength,
+        normalizedLength: decoded.normalizedLength,
+        base64Length: decoded.base64Length,
+        derLength: 0,
+        failureStep: "decodePEM",
+        importError: "base64 decode failed"
+      )
+    )
+  }
+
+  let directResult = secKeyFromData(keyData, keyClass: kSecAttrKeyClassPrivate)
+  if let key = directResult.0 {
+    return (key, nil)
+  }
+
+  if decoded.label == "PRIVATE KEY", let pkcs1Data = extractPKCS1FromPKCS8(keyData) {
+    let pkcs1Result = secKeyFromData(pkcs1Data, keyClass: kSecAttrKeyClassPrivate)
+    if let key = pkcs1Result.0 {
+      return (key, nil)
+    }
+
+    return (
+      nil,
+      describeKeyFailure(
+        label: decoded.label,
+        hadEscapedNewlines: decoded.hadEscapedNewlines,
+        inputLength: decoded.inputLength,
+        normalizedLength: decoded.normalizedLength,
+        base64Length: decoded.base64Length,
+        derLength: keyData.count,
+        failureStep: "SecKeyCreateWithData(pkcs8->pkcs1)",
+        importError: pkcs1Result.1 ?? directResult.1
+      )
+    )
+  }
+
+  return (
+    nil,
+    describeKeyFailure(
+      label: decoded.label,
+      hadEscapedNewlines: decoded.hadEscapedNewlines,
+      inputLength: decoded.inputLength,
+      normalizedLength: decoded.normalizedLength,
+      base64Length: decoded.base64Length,
+      derLength: keyData.count,
+      failureStep: decoded.label == "PRIVATE KEY" ? "extractPKCS1FromPKCS8" : "SecKeyCreateWithData",
+      importError: directResult.1
+    )
+  )
 }
 
 private func publicSecKey(from pem: String) -> SecKey? {
-  guard let keyData = decodePEM(pem) else {
+  let decoded = decodePEM(pem)
+  guard let keyData = decoded.data else {
     return nil
   }
-  let attrs: [String: Any] = [
-    kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
-    kSecAttrKeyClass as String: kSecAttrKeyClassPublic
-  ]
-  return SecKeyCreateWithData(keyData as CFData, attrs as CFDictionary, nil)
+  return secKeyFromData(keyData, keyClass: kSecAttrKeyClassPublic).0
 }
 
 private func rsaDecryptOAEP(privateKey: SecKey, encrypted: Data) -> Data? {
@@ -249,11 +404,13 @@ public class ChatNativeCoreModule: Module {
       guard let privateKeyPem = input["privateKey"] as? String else {
         return ["messages": [String: String]()]
       }
-      guard let privateKey = privateSecKey(from: privateKeyPem) else {
+      let privateKeyResult = privateSecKey(from: privateKeyPem)
+      guard let privateKey = privateKeyResult.key else {
+        let details = privateKeyResult.failureDetails ?? "no details"
         throw NSError(
           domain: "ChatNativeCore",
           code: 21,
-          userInfo: [NSLocalizedDescriptionKey: "Invalid private key"]
+          userInfo: [NSLocalizedDescriptionKey: "Invalid private key (\(details))"]
         )
       }
       let items = input["items"] as? [[String: Any]] ?? []

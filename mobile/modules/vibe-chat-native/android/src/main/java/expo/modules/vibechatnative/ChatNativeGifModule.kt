@@ -39,11 +39,11 @@ class ChatNativeGifModule : Module() {
     Function("closePanel") {
       gifPanel?.dismiss()
     }
-  }
 
-  override fun onDestroy() {
-    gifPanel?.dismiss()
-    gifPanel = null
+    OnDestroy {
+      gifPanel?.dismiss()
+      gifPanel = null
+    }
   }
 
   private fun panel(): ChatGifPanel {

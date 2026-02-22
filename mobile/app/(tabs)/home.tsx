@@ -6,7 +6,7 @@ import { useThemeStore } from '../../src/lib/stores/theme-store'
 import { useChatStore } from '../../src/lib/ChatStore'
 import { useCallStore } from '../../src/lib/stores/CallStore'
 import { useUIStore } from '../../src/lib/stores/ui-store'
-import { Copy, Check, Pin, VolumeX, Trash2, Pencil, Settings, User, Search, Circle, CheckCircle, Smartphone, Plus, X, Shield, Bookmark, Sparkles } from 'lucide-react-native'
+import { Copy, Check, Pin, VolumeX, Trash2, Pencil, Settings, User, Search, Circle, CheckCircle, Smartphone, Plus, X, Shield, Bookmark } from 'lucide-react-native'
 import { PlusCircleVibeIcon, AnimatedShieldIcon, EditChatVibeIcon } from '../../src/components/Icons'
 import * as Clipboard from 'expo-clipboard'
 import * as Haptics from 'expo-haptics'
@@ -104,11 +104,11 @@ const getMessageText = (msg: any): string => {
     }
 
     // Check if it's a media message
-    if (msg.type === 'image') return '📷 Photo'
-    if (msg.type === 'voice') return '🎤 Voice message'
-    if (msg.type === 'gif') return '🎬 GIF'
-    if (msg.type === 'sticker') return '🧩 Sticker'
-    if (msg.type === 'video') return '🎥 Video'
+    if (msg.type === 'image') return 'Photo'
+    if (msg.type === 'voice') return 'Voice message'
+    if (msg.type === 'gif') return 'GIF'
+    if (msg.type === 'sticker') return 'Sticker'
+    if (msg.type === 'video') return 'Video'
 
     // If encrypted and not yet decrypted, show placeholder
     if (msg.encryptedContent && (!text || text === '')) {
@@ -324,7 +324,11 @@ const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onD
                         ]}
                     >
                         <View style={styles.avatarContainer}>
-                            <SafeLiquidGlass style={styles.avatarGlass} blurIntensity={10} effect="clear" tint={theme === 'dark' ? 'dark' : 'light'}>
+                            <SafeLiquidGlass
+                                style={[styles.avatarGlass, { backgroundColor: withAlpha(colors.text, 0.12) }]}
+                                blurIntensity={10}
+                                tint={theme === 'dark' ? 'dark' : 'light'}
+                            >
                                 {chat.chatId === 'saved_messages' ? (
                                     <View style={[styles.avatarPlaceholder, { backgroundColor: colors.primary + '20' }]}>
                                         <Bookmark size={24} color={colors.primary} fill={colors.primary} />
@@ -604,18 +608,6 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         });
     }, [isSearchActive, handleSearchClose, onOpenStoryCamera, router, safePress]);
 
-    const handleOpenGlassDebug = useCallback(() => {
-        safePress('openGlassDebug', () => {
-            router.push('/test-telegram-morph-native');
-        });
-    }, [router, safePress]);
-
-    const handleOpenNativeInsertTest = useCallback(() => {
-        safePress('openNativeInsertTest', () => {
-            router.push('/test-native-insert');
-        });
-    }, [router, safePress]);
-
     const handleOpenStoryViewer = useCallback((userId: string, index: number = 0) => {
         setStoryViewerUserId(userId);
         setStoryViewerIndex(index);
@@ -632,6 +624,21 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         // Spacer opacity
         opacity: 0,
     }));
+
+    const androidHeaderAnimatedStyle = useAnimatedStyle(() => {
+        const opacity = interpolate(scrollY.value, [0, 40], [0, 1], Extrapolate.CLAMP);
+        const elevation = interpolate(scrollY.value, [0, 40], [0, 8], Extrapolate.CLAMP);
+        return {
+            opacity,
+            elevation,
+            shadowColor: '#000',
+            shadowOffset: { width: 0, height: 2 },
+            shadowOpacity: interpolate(scrollY.value, [0, 40], [0, 0.15], Extrapolate.CLAMP),
+            shadowRadius: 4,
+            borderBottomWidth: StyleSheet.hairlineWidth,
+            borderBottomColor: withAlpha(colors.text, interpolate(scrollY.value, [0, 40], [0, 0.08], Extrapolate.CLAMP)),
+        };
+    });
 
 
 
@@ -837,24 +844,34 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             {/* Main Content Layer (Scales/Translates) */}
             <Animated.View style={[{ flex: 1, backgroundColor: colors.background }, containerAnimatedStyle]}>
                 <View style={styles.container}>
-                    {/* Header Overlay (Blurred) */}
-                    <View style={[styles.headerMaskContainer, { height: Math.max(80, insets.top + 20) }]}>
-                        <MaskedView
-                            style={StyleSheet.absoluteFill}
-                            maskElement={
-                                <LinearGradient
-                                    colors={['rgba(0,0,0,1)', 'rgba(0,0,0,0)']}
-                                    locations={[0.6, 1]}
-                                    style={StyleSheet.absoluteFill}
-                                />
-                            }
-                        >
-                            <BlurView
-                                intensity={30}
-                                tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(colors.background, 0.85) }]}
+                    {/* Header Overlay (Blurred for iOS, Elevated for Android) */}
+                    <View style={[styles.headerMaskContainer, { height: Math.max(80, insets.top + (Platform.OS === 'android' ? 50 : 20)) }]}>
+                        {Platform.OS === 'android' ? (
+                            <Animated.View
+                                style={[
+                                    StyleSheet.absoluteFill,
+                                    { backgroundColor: effectiveTheme === 'dark' ? '#121212' : '#ffffff' },
+                                    androidHeaderAnimatedStyle
+                                ]}
                             />
-                        </MaskedView>
+                        ) : (
+                            <MaskedView
+                                style={StyleSheet.absoluteFill}
+                                maskElement={
+                                    <LinearGradient
+                                        colors={['rgba(0,0,0,1)', 'rgba(0,0,0,0)']}
+                                        locations={[0.6, 1]}
+                                        style={StyleSheet.absoluteFill}
+                                    />
+                                }
+                            >
+                                <BlurView
+                                    intensity={30}
+                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                    style={[StyleSheet.absoluteFill, { backgroundColor: effectiveTheme === 'dark' ? 'rgba(0,0,0,0.4)' : 'rgba(255,255,255,0.4)' }]}
+                                />
+                            </MaskedView>
+                        )}
                     </View>
 
                     {/* Header Buttons/Title */}
@@ -875,24 +892,37 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
                         {/* Search & Add Story Container - Right Aligned */}
                         {showEditButton && (
-                            <View
-                                style={{ zIndex: 200 }}
-                            >
-                                <SafeLiquidGlass style={styles.glassBtnEdit} blurIntensity={15} effect="clear">
-                                    <TouchableOpacity
-                                        onPress={() => {
-                                            safePress('toggleEdit', () => {
-                                                Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                                                setIsEditing(!isEditing);
-                                            });
-                                        }}
-                                        style={styles.textBtnTouch}
-                                    >
-                                        <Text style={[styles.headerTextBtn, { color: colors.text }]}>
-                                            {isEditing ? 'Done' : 'Edit'}
-                                        </Text>
-                                    </TouchableOpacity>
-                                </SafeLiquidGlass>
+                            <View style={{ zIndex: 200 }}>
+                                <TouchableOpacity
+                                    onPress={() => {
+                                        safePress('toggleEdit', () => {
+                                            Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+                                            setIsEditing(!isEditing);
+                                        });
+                                    }}
+                                    activeOpacity={0.7}
+                                >
+                                    {Platform.OS === 'android' ? (
+                                        <View style={[styles.glassBtnEdit, {
+                                            backgroundColor: isEditing ? colors.primary : withAlpha(colors.text, 0.08),
+                                            borderRadius: 20,
+                                        }]}>
+                                            <View style={styles.textBtnTouch}>
+                                                <Text style={[styles.headerTextBtn, { color: isEditing ? '#fff' : colors.text }]}>
+                                                    {isEditing ? 'Done' : 'Edit'}
+                                                </Text>
+                                            </View>
+                                        </View>
+                                    ) : (
+                                        <SafeLiquidGlass style={styles.glassBtnEdit} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                                            <View style={styles.textBtnTouch}>
+                                                <Text style={[styles.headerTextBtn, { color: colors.text }]}>
+                                                    {isEditing ? 'Done' : 'Edit'}
+                                                </Text>
+                                            </View>
+                                        </SafeLiquidGlass>
+                                    )}
+                                </TouchableOpacity>
                             </View>
                         )}
 
@@ -900,30 +930,39 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
 
                         <View style={{ zIndex: 200 }}>
-                            <SafeLiquidGlass style={styles.glassBtnRow} blurIntensity={15} effect="clear">
-                                <TouchableOpacity onPress={() => safePress('openConnectionModal', () => connectionModalRef.current?.present())} style={styles.iconBtnCircle}>
-                                    <AnimatedShieldIcon size={22} />
-                                </TouchableOpacity>
-                                <TouchableOpacity
-                                    onPress={handleOpenStoryCamera}
-                                    onLongPress={handleOpenNativeInsertTest}
-                                    delayLongPress={400}
-                                    style={styles.iconBtnCircle}
-                                >
-                                    <PlusCircleVibeIcon size={24} color={colors.text} />
-                                </TouchableOpacity>
+                            {Platform.OS === 'android' ? (
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                                    <TouchableOpacity onPress={() => safePress('openConnectionModal', () => connectionModalRef.current?.present())} style={[styles.iconBtnCircle, { backgroundColor: withAlpha(colors.text, 0.08), borderRadius: 20, width: 40, height: 40 }]}>
+                                        <AnimatedShieldIcon size={22} />
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                        onPress={handleOpenStoryCamera}
+                                        style={[styles.iconBtnCircle, { backgroundColor: withAlpha(colors.text, 0.08), borderRadius: 20, width: 40, height: 40 }]}
+                                    >
+                                        <PlusCircleVibeIcon size={24} color={colors.text} />
+                                    </TouchableOpacity>
 
-                                <TouchableOpacity
-                                    onPress={handleOpenGlassDebug}
-                                    style={styles.iconBtnCircle}
-                                >
-                                    <Sparkles size={20} color={colors.text} strokeWidth={2} />
-                                </TouchableOpacity>
+                                    <TouchableOpacity onPress={() => safePress('openMainMenuHeader', () => setShowMainMenu(true))} style={[styles.iconBtnCircle, { backgroundColor: withAlpha(colors.text, 0.08), borderRadius: 20, width: 40, height: 40 }]}>
+                                        <EditChatVibeIcon size={24} color={colors.text} strokeWidth={1.5} />
+                                    </TouchableOpacity>
+                                </View>
+                            ) : (
+                                <SafeLiquidGlass style={styles.glassBtnRow} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                                    <TouchableOpacity onPress={() => safePress('openConnectionModal', () => connectionModalRef.current?.present())} style={styles.iconBtnCircle}>
+                                        <AnimatedShieldIcon size={22} />
+                                    </TouchableOpacity>
+                                    <TouchableOpacity
+                                        onPress={handleOpenStoryCamera}
+                                        style={styles.iconBtnCircle}
+                                    >
+                                        <PlusCircleVibeIcon size={24} color={colors.text} />
+                                    </TouchableOpacity>
 
-                                <TouchableOpacity onPress={() => safePress('openMainMenuHeader', () => setShowMainMenu(true))} style={styles.iconBtnCircle}>
-                                    <EditChatVibeIcon size={24} color={colors.text} strokeWidth={1.5} />
-                                </TouchableOpacity>
-                            </SafeLiquidGlass>
+                                    <TouchableOpacity onPress={() => safePress('openMainMenuHeader', () => setShowMainMenu(true))} style={styles.iconBtnCircle}>
+                                        <EditChatVibeIcon size={24} color={colors.text} strokeWidth={1.5} />
+                                    </TouchableOpacity>
+                                </SafeLiquidGlass>
+                            )}
                         </View>
                     </View>
 
@@ -1018,22 +1057,25 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                             style={[styles.bottomBarEdit, { bottom: insets.bottom + 0 }]}
                         >
                             <View style={styles.editActionsContainer}>
-                                <SafeLiquidGlass style={styles.glassActionBtn} blurIntensity={20} effect="clear" tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
-                                    <TouchableOpacity onPress={() => setSelectedConversations(new Set())} style={styles.actionBtnTouch}>
-                                        <X size={24} color={colors.primary} />
-                                    </TouchableOpacity>
-                                </SafeLiquidGlass>
+                                <TouchableOpacity onPress={() => setSelectedConversations(new Set())} activeOpacity={0.7}>
+                                    <SafeLiquidGlass style={styles.glassActionBtn} blurIntensity={20} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                                        <View style={styles.actionBtnTouch}>
+                                            <X size={24} color={colors.primary} />
+                                        </View>
+                                    </SafeLiquidGlass>
+                                </TouchableOpacity>
 
-                                <SafeLiquidGlass
-                                    style={[styles.glassActionBtn, { backgroundColor: withAlpha('#ef4444', 0.15) }]}
-                                    blurIntensity={20}
-                                    effect="clear"
-                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                >
-                                    <TouchableOpacity onPress={() => {/* Delete logic */ }} style={styles.actionBtnTouch}>
-                                        <Trash2 size={24} color="#ef4444" />
-                                    </TouchableOpacity>
-                                </SafeLiquidGlass>
+                                <TouchableOpacity onPress={() => {/* Delete logic */ }} activeOpacity={0.7}>
+                                    <SafeLiquidGlass
+                                        style={[styles.glassActionBtn, { backgroundColor: withAlpha('#ef4444', 0.15) }]}
+                                        blurIntensity={20}
+                                        tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                    >
+                                        <View style={styles.actionBtnTouch}>
+                                            <Trash2 size={24} color="#ef4444" />
+                                        </View>
+                                    </SafeLiquidGlass>
+                                </TouchableOpacity>
                             </View>
                         </Animated.View>
                     )}
@@ -1204,7 +1246,8 @@ const styles = StyleSheet.create({
         overflow: 'hidden',
         height: 40,
         justifyContent: 'center',
-        paddingHorizontal: 16
+        paddingHorizontal: 16,
+        backgroundColor: 'rgba(255, 255, 255, 0.08)',
     },
     glassBtnCircle: {
         width: 40,
@@ -1221,6 +1264,7 @@ const styles = StyleSheet.create({
         borderRadius: 20,
         overflow: 'hidden',
         paddingHorizontal: 4,
+        backgroundColor: 'rgba(255, 255, 255, 0.06)',
     },
     rowDivider: {
         width: 1,
@@ -1379,7 +1423,8 @@ const styles = StyleSheet.create({
         borderRadius: 27,
         overflow: 'hidden',
         alignItems: 'center',
-        justifyContent: 'center'
+        justifyContent: 'center',
+        backgroundColor: 'rgba(255, 255, 255, 0.08)',
     },
     actionBtnTouch: {
         width: 54,

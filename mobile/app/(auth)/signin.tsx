@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react'
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView } from 'react-native'
+import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, I18nManager } from 'react-native'
 import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
 
@@ -153,11 +153,12 @@ export default function SignInScreen() {
                 cyanColor="#D8875A" // Persimmon (Theme Palette)
             />
 
-            <View style={[styles.navbar, { paddingTop: insets.top + 10 }]}>
+            <View style={[styles.navbar, { paddingTop: insets.top + 10, direction: 'ltr', flexDirection: 'row' }]}>
                 <TouchableOpacity onPress={() => router.back()} style={styles.navAction}>
-                    <SafeLiquidGlass style={styles.glassCircle} blurIntensity={15} tint={isDark ? 'dark' : 'light'}>
-                        <ChevronLeft size={22} color={colors.text} />
-                    </SafeLiquidGlass>
+                    <SafeLiquidGlass style={styles.glassCircle} blurIntensity={15} tint={isDark ? 'dark' : 'light'} pointerEvents="none" />
+                    <View pointerEvents="none" style={styles.navIconOverlay}>
+                        <ChevronLeft size={20} color={colors.text} />
+                    </View>
                 </TouchableOpacity>
                 <Logo size={22} />
                 <View style={{ width: 44 }} />
@@ -172,11 +173,11 @@ export default function SignInScreen() {
                     showsVerticalScrollIndicator={false}
                     bounces={false}
                 >
-                    <View style={styles.heroSection}>
-                        <Text style={[styles.heroTitle, { color: colors.text }]}>
+                    <View style={[styles.heroSection, { alignItems: I18nManager.isRTL ? 'flex-end' : 'flex-start' }]}>
+                        <Text style={[styles.heroTitle, { color: colors.text, textAlign: I18nManager.isRTL ? 'right' : 'left' }]}>
                             {t('auth.welcomeBack')}
                         </Text>
-                        <Text style={[styles.heroSubtitle, { color: colors.textSecondary }]}>
+                        <Text style={[styles.heroSubtitle, { color: colors.textSecondary, textAlign: I18nManager.isRTL ? 'right' : 'left' }]}>
                             {t('auth.enterSecretKey')}
                         </Text>
                     </View>
@@ -193,26 +194,35 @@ export default function SignInScreen() {
 
                         <View style={{ marginTop: 8, height: 52, borderRadius: 22, overflow: 'hidden' }}>
                             <SafeLiquidGlass
-                                style={StyleSheet.absoluteFill}
+                                style={[StyleSheet.absoluteFill, { borderRadius: 22 }]}
                                 blurIntensity={20}
                                 tint={isDark ? 'dark' : 'light'}
+                                pointerEvents="none"
+                            />
+                            <View
+                                pointerEvents="none"
+                                style={[
+                                    StyleSheet.absoluteFill,
+                                    {
+                                        backgroundColor: isFormValid ? withAlpha(colors.primary, 0.8) : withAlpha(colors.card, 0.5),
+                                        borderRadius: 22,
+                                    },
+                                ]}
+                            />
+                            <TouchableOpacity
+                                onPress={handleLogin}
+                                disabled={loading || !isFormValid}
+                                activeOpacity={0.8}
+                                style={[styles.buttonTouchArea, { borderRadius: 22 }]}
                             >
-                                <View style={[StyleSheet.absoluteFill, { backgroundColor: isFormValid ? withAlpha(colors.primary, 0.8) : withAlpha(colors.card, 0.5) }]} />
-                                <TouchableOpacity
-                                    onPress={handleLogin}
-                                    disabled={loading || !isFormValid}
-                                    activeOpacity={0.8}
-                                    style={styles.buttonTouchArea}
-                                >
-                                    {loading ? (
-                                        <ModernLoader size={48} color="#fff" type="dots" />
-                                    ) : (
-                                        <Text style={[styles.buttonLabel, { color: isFormValid ? '#fff' : colors.textSecondary }]}>
-                                            {t('auth.signIn')}
-                                        </Text>
-                                    )}
-                                </TouchableOpacity>
-                            </SafeLiquidGlass>
+                                {loading ? (
+                                    <ModernLoader size={48} color="#fff" type="dots" />
+                                ) : (
+                                    <Text style={[styles.buttonLabel, { color: isFormValid ? '#fff' : colors.textSecondary }]}>
+                                        {t('auth.signIn')}
+                                    </Text>
+                                )}
+                            </TouchableOpacity>
                         </View>
 
                         <View style={styles.switchLink}>
@@ -249,11 +259,15 @@ const styles = StyleSheet.create({
     navAction: {
         width: 44,
         height: 44,
+        position: 'relative',
     },
     glassCircle: {
         width: 44,
         height: 44,
         borderRadius: 22,
+    },
+    navIconOverlay: {
+        ...StyleSheet.absoluteFillObject,
         alignItems: 'center',
         justifyContent: 'center',
     },

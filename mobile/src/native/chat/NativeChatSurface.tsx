@@ -34,6 +34,7 @@ interface NativeChatSurfaceProps {
   surfaceId: string;
   rows: NativeChatRow[];
   appearance?: NativeChatAppearance;
+  contentPaddingTop?: number;
   contentPaddingBottom?: number;
   voicePlayback?: {
     messageId: string | null;
@@ -54,8 +55,9 @@ interface NativeChatSurfaceProps {
 }
 
 export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurfaceProps>(
-  ({ surfaceId, rows, appearance, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
+  ({ surfaceId, rows, appearance, contentPaddingTop, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
     const nativeListModule = useMemo(() => getNativeChatListModule(), []);
+    const debugNativeEvents = __DEV__ && (globalThis as any).__VIBE_NATIVE_CHAT_DEBUG === true;
     const reportNativeError = (error: unknown, context: string) => {
       console.error(`[NativeChatSurface] ${context} failed`, error);
       onNativeError?.(error, context);
@@ -114,6 +116,7 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
         surfaceId={surfaceId}
         rows={rows}
         appearance={appearance}
+        contentPaddingTop={contentPaddingTop}
         contentPaddingBottom={contentPaddingBottom}
         voicePlayback={voicePlayback}
         inputBarEnabled={inputBarEnabled}
@@ -122,7 +125,7 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
         debugAnimationPanel={debugAnimationPanel}
         onViewportChanged={(event: any) => {
           // Log once to verify event bridge works
-          if (onViewportChanged && !(onViewportChanged as any)._logged) {
+          if (debugNativeEvents && onViewportChanged && !(onViewportChanged as any)._logged) {
             console.log('[NativeChatSurface] onViewportChanged first event received');
             (onViewportChanged as any)._logged = true;
           }
@@ -133,7 +136,9 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
           }
         }}
         onNativeEvent={(event: any) => {
-          console.log('[NativeChatSurface] onNativeEvent raw:', JSON.stringify(event?.nativeEvent ?? event));
+          if (debugNativeEvents) {
+            console.log('[NativeChatSurface] onNativeEvent raw:', JSON.stringify(event?.nativeEvent ?? event));
+          }
           try {
             onNativeEvent?.(event);
           } catch (error) {

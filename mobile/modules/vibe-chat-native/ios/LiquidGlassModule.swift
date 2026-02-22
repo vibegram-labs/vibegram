@@ -65,11 +65,11 @@ class LiquidGlassView: ExpoView {
 
   private func applyCurrentEffect() {
     if #available(iOS 26.0, *) {
-      let style: UIGlassEffect.Style = glassStyle == "clear" ? .clear : .regular
-      let effect = UIGlassEffect(style: style)
+      let effect = UIGlassEffect()
       effect.isInteractive = glassInteractive
-      effect.tintColor = resolvedGlassTintColor()
       visualEffectView.effect = effect
+      visualEffectView.backgroundColor = .clear
+      visualEffectView.contentView.backgroundColor = resolvedGlassTintColor()
       return
     }
 
@@ -78,6 +78,7 @@ class LiquidGlassView: ExpoView {
     } else {
       visualEffectView.effect = nil
     }
+    visualEffectView.backgroundColor = .clear
   }
 
   private func applyCornerStyling() {
@@ -108,7 +109,7 @@ class LiquidGlassView: ExpoView {
     guard isPressFeedbackActive != isPressed else { return }
     isPressFeedbackActive = isPressed
 
-    let scale: CGFloat = isPressed ? 0.94 : 1.0
+    let scale: CGFloat = isPressed ? 0.96 : 1.0
     let duration: TimeInterval = isPressed ? 0.1 : 0.22
     let damping: CGFloat = isPressed ? 1.0 : 0.72
 
@@ -120,17 +121,30 @@ class LiquidGlassView: ExpoView {
       options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
       self.transform = CGAffineTransform(scaleX: scale, y: scale)
+
+      let defaultColor: UIColor = {
+        if #available(iOS 26.0, *) {
+          return self.resolvedGlassTintColor() ?? .clear
+        } else {
+          return .clear
+        }
+      }()
+
       self.visualEffectView.contentView.backgroundColor =
         isPressed
         ? self.glassPressedOverlayColor
-        : .clear
+        : defaultColor
     }
   }
 
   private func resetPressFeedbackAppearance() {
     isPressFeedbackActive = false
     transform = .identity
-    visualEffectView.contentView.backgroundColor = .clear
+    if #available(iOS 26.0, *) {
+      visualEffectView.contentView.backgroundColor = resolvedGlassTintColor()
+    } else {
+      visualEffectView.contentView.backgroundColor = .clear
+    }
   }
 
   override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {

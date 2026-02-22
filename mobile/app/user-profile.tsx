@@ -50,8 +50,6 @@ const waitForUserChannel = async (timeoutMs = 12000): Promise<any | null> => {
     return null;
 };
 
-const URL_RE = /(https?:\/\/[^\s]+)/gi;
-
 const toTimestamp = (value: unknown): number => {
     if (typeof value === 'number' && Number.isFinite(value)) return value;
     if (typeof value === 'string') {
@@ -67,12 +65,94 @@ const toText = (m: Message): string => {
     return (m.plaintext || m.caption || '').toString();
 };
 
+const USER_PROFILE_PERF_LOG = __DEV__;
+const userProfilePerfLog = (...args: any[]) => {
+    if (!USER_PROFILE_PERF_LOG) return;
+    console.log('[UserProfilePerf]', ...args);
+};
+
+type DerivedProfileContent = {
+    mediaItems: UserProfileMediaItem[];
+    videoItems: UserProfileMediaItem[];
+    imageItems: UserProfileMediaItem[];
+    fileItems: UserProfileFileItem[];
+    linkItems: UserProfileLinkItem[];
+};
+
+const profileContentCache = new Map<string, { signature: string; data: DerivedProfileContent }>();
+const pinnedItemsCache = new Map<string, { items: UserProfilePinnedItem[]; cachedAt: number }>();
+const PINNED_CACHE_TTL_MS = 30_000;
+
+const messageListSignature = (messages: Message[]): string => {
+    const count = messages.length;
+    if (count === 0) return '0';
+    const first = messages[0];
+    const last = messages[count - 1];
+    return [
+        count,
+        first?.id || '',
+        toTimestamp(first?.timestamp),
+        last?.id || '',
+        toTimestamp(last?.timestamp),
+    ].join(':');
+};
+
+const deriveProfileContentFromMessages = (messages: Message[]): DerivedProfileContent => {
+    const mediaItems: UserProfileMediaItem[] = [];
+    const videoItems: UserProfileMediaItem[] = [];
+    const imageItems: UserProfileMediaItem[] = [];
+    const fileItems: UserProfileFileItem[] = [];
+
+    // Messages in store are already timestamp-sorted in practice; iterate newest -> oldest
+    // to avoid cloning/sorting full history on profile open.
+    for (let i = messages.length - 1; i >= 0; i -= 1) {
+        const m = messages[i];
+        const type = (m.type || '').toLowerCase();
+        const mediaUrl = typeof m.mediaUrl === 'string' ? m.mediaUrl : '';
+        const timestamp = toTimestamp(m.timestamp);
+
+        // Direct media only (no plaintext URL parsing)
+        if (mediaUrl && (type === 'image' || type === 'video' || type === 'gif' || type === 'sticker')) {
+            const item: UserProfileMediaItem = {
+                id: m.id,
+                type: m.type,
+                mediaUrl,
+                caption: toText(m),
+                timestamp,
+            };
+            mediaItems.push(item);
+            if (type === 'video') videoItems.push(item);
+            else imageItems.push(item);
+            continue;
+        }
+
+        // Music is included (playable via direct mediaUrl). Voice is excluded.
+        if (type === 'file' || type === 'music') {
+            fileItems.push({
+                id: m.id,
+                type: m.type,
+                fileName: m.fileName || `${(m.type || 'FILE').toUpperCase()}-${m.id.slice(0, 6)}`,
+                fileSize: m.fileSize,
+                mediaUrl: mediaUrl || undefined,
+                timestamp,
+            });
+        }
+    }
+
+    return {
+        mediaItems,
+        videoItems,
+        imageItems,
+        fileItems,
+        linkItems: [],  // intentionally disabled: use direct media/file tabs only
+    };
+};
+
 export default function UserProfileRoute() {
     const router = useRouter();
     const params = useLocalSearchParams();
     const { colors } = useThemeStore();
     const { user } = useAuthStore();
-    const chats = useChatStore((s) => s.chats);
     const loadMessages = useChatStore((s) => s.loadMessages);
     const isConnected = useChatStore((s) => s.isConnected);
     const initSocket = useChatStore((s) => s.initSocket);
@@ -88,15 +168,15 @@ export default function UserProfileRoute() {
     const profileImageParam = typeof params.profileImage === 'string' ? params.profileImage : '';
     const isOnlineParam = toBool(params.isOnline);
 
-    const chat = useMemo(() => {
+    const chat = useChatStore((s) => {
         if (chatIdParam) {
-            const byChatId = chats.find((entry) => entry.chatId === chatIdParam);
+            const byChatId = s.chats.find((entry) => entry.chatId === chatIdParam);
             if (byChatId) return byChatId;
         }
         if (!userId) return undefined;
         const targetId = userId.toUpperCase();
-        return chats.find((entry) => (entry.friendId || '').toUpperCase() === targetId);
-    }, [chatIdParam, chats, userId]);
+        return s.chats.find((entry) => (entry.friendId || '').toUpperCase() === targetId);
+    });
 
     const [remoteProfile, setRemoteProfile] = useState<{
         username?: string;
@@ -144,11 +224,13 @@ export default function UserProfileRoute() {
     const displayOnline = remoteProfile.online ?? isOnlineParam ?? false;
     const resolvedChatId = chat?.chatId || chatIdParam;
     const isMuted = !!chat?.muted;
+    const localMessageCount = Array.isArray(chat?.messages) ? chat!.messages.length : 0;
 
     useEffect(() => {
         let cancelled = false;
 
         const run = async () => {
+            const startedAt = Date.now();
             if (!resolvedChatId) {
                 setMediaItems([]);
                 setVideoItems([]);
@@ -156,86 +238,112 @@ export default function UserProfileRoute() {
                 setFileItems([]);
                 setLinkItems([]);
                 setPinnedItems([]);
+                userProfilePerfLog('content:skip:no-chat', { dt: Date.now() - startedAt });
                 return;
             }
 
             setContentLoading(true);
             try {
-                await loadMessages(resolvedChatId);
-            } catch {
-                // Continue with whatever local messages are currently available.
-            }
-
-            try {
-                const latestChat = useChatStore.getState().chats.find((c) => c.chatId === resolvedChatId);
-                const messages = [...(latestChat?.messages || [])].sort((a, b) => toTimestamp(b.timestamp) - toTimestamp(a.timestamp));
-
-                const allMedia = messages
-                    .filter((m) => !!m.mediaUrl || ['image', 'video', 'gif', 'sticker'].includes(m.type))
-                    .map((m) => ({
-                        id: m.id,
-                        type: m.type,
-                        mediaUrl: m.mediaUrl || '',
-                        caption: toText(m),
-                        timestamp: toTimestamp(m.timestamp),
-                    }));
-
-                const videos = allMedia.filter((m) => m.type === 'video');
-                const images = allMedia.filter((m) => m.type === 'image' || m.type === 'gif' || m.type === 'sticker');
-
-                const files = messages
-                    .filter((m) => m.type === 'file' || m.type === 'music' || m.type === 'voice')
-                    .map((m) => ({
-                        id: m.id,
-                        type: m.type,
-                        fileName: m.fileName || `${m.type.toUpperCase()}-${m.id.slice(0, 6)}`,
-                        fileSize: m.fileSize,
-                        mediaUrl: m.mediaUrl,
-                        timestamp: toTimestamp(m.timestamp),
-                    }));
-
-                const links: UserProfileLinkItem[] = [];
-                messages.forEach((m) => {
-                    const text = toText(m);
-                    const found = text.match(URL_RE) || [];
-                    found.forEach((url, index) => {
-                        links.push({
-                            id: `${m.id}_${index}`,
-                            url,
-                            previewText: text.length > 220 ? `${text.slice(0, 220)}...` : text,
-                            timestamp: toTimestamp(m.timestamp),
-                        });
+                // Use existing local messages immediately so profile screen mounts fast.
+                // Only refetch if we have no local history yet.
+                if (localMessageCount === 0) {
+                    userProfilePerfLog('content:loadMessages:start', { chatId: resolvedChatId });
+                    try {
+                        await loadMessages(resolvedChatId);
+                    } catch {
+                        // Continue with whatever local messages are currently available.
+                    }
+                    userProfilePerfLog('content:loadMessages:done', {
+                        chatId: resolvedChatId,
+                        dt: Date.now() - startedAt,
                     });
+                } else {
+                    userProfilePerfLog('content:use-local-cache-first', {
+                        chatId: resolvedChatId,
+                        localMessageCount,
+                    });
+                }
+
+                const latestChat = useChatStore.getState().chats.find((c) => c.chatId === resolvedChatId);
+                const sourceMessages = latestChat?.messages || [];
+                const deriveStart = Date.now();
+                const signature = messageListSignature(sourceMessages);
+                const cachedDerived = profileContentCache.get(resolvedChatId);
+                const derived = cachedDerived?.signature === signature
+                    ? cachedDerived.data
+                    : deriveProfileContentFromMessages(sourceMessages);
+                if (cachedDerived?.signature !== signature) {
+                    profileContentCache.set(resolvedChatId, {
+                        signature,
+                        data: derived,
+                    });
+                }
+                userProfilePerfLog('content:messages:derived', {
+                    chatId: resolvedChatId,
+                    sourceCount: sourceMessages.length,
+                    cacheHit: cachedDerived?.signature === signature,
+                    dt: Date.now() - deriveStart,
+                    totalDt: Date.now() - startedAt,
                 });
+                if (cancelled) return;
+                setMediaItems(derived.mediaItems);
+                setVideoItems(derived.videoItems);
+                setImageItems(derived.imageItems);
+                setFileItems(derived.fileItems);
+                setLinkItems(derived.linkItems);
 
                 let pinned: UserProfilePinnedItem[] = [];
                 try {
-                    const pinnedResp = await apiClient.getPinnedMessages(resolvedChatId);
-                    const rawList = Array.isArray(pinnedResp)
-                        ? pinnedResp
-                        : Array.isArray((pinnedResp as any)?.data)
-                            ? (pinnedResp as any).data
-                            : Array.isArray((pinnedResp as any)?.messages)
-                                ? (pinnedResp as any).messages
-                                : [];
+                    const pinnedCached = pinnedItemsCache.get(resolvedChatId);
+                    const now = Date.now();
+                    if (pinnedCached && (now - pinnedCached.cachedAt) < PINNED_CACHE_TTL_MS) {
+                        pinned = pinnedCached.items;
+                        userProfilePerfLog('content:pinned:cache-hit', {
+                            chatId: resolvedChatId,
+                            count: pinned.length,
+                            totalDt: Date.now() - startedAt,
+                        });
+                    } else {
+                        const pinnedStart = Date.now();
+                        const pinnedResp = await apiClient.getPinnedMessages(resolvedChatId);
+                        const rawList = Array.isArray(pinnedResp)
+                            ? pinnedResp
+                            : Array.isArray((pinnedResp as any)?.data)
+                                ? (pinnedResp as any).data
+                                : Array.isArray((pinnedResp as any)?.messages)
+                                    ? (pinnedResp as any).messages
+                                    : [];
 
-                    pinned = rawList.map((item: any) => ({
-                        id: item?.id || item?.messageId || item?.message_id || `${Math.random()}`,
-                        type: item?.type || 'text',
-                        text: item?.plaintext || item?.content || item?.text || item?.fileName || item?.file_name || '',
-                        timestamp: toTimestamp(item?.timestamp || item?.createdAt || item?.created_at),
-                    }));
+                        pinned = rawList.map((item: any) => ({
+                            id: item?.id || item?.messageId || item?.message_id || `${Math.random()}`,
+                            type: item?.type || 'text',
+                            text: item?.plaintext || item?.content || item?.text || item?.fileName || item?.file_name || '',
+                            timestamp: toTimestamp(item?.timestamp || item?.createdAt || item?.created_at),
+                        }));
+                        pinnedItemsCache.set(resolvedChatId, { items: pinned, cachedAt: now });
+                        userProfilePerfLog('content:pinned:loaded', {
+                            chatId: resolvedChatId,
+                            count: pinned.length,
+                            dt: Date.now() - pinnedStart,
+                            totalDt: Date.now() - startedAt,
+                        });
+                    }
                 } catch {
                     pinned = [];
                 }
 
                 if (cancelled) return;
-                setMediaItems(allMedia);
-                setVideoItems(videos);
-                setImageItems(images);
-                setFileItems(files);
-                setLinkItems(links);
                 setPinnedItems(pinned);
+                userProfilePerfLog('content:apply:done', {
+                    chatId: resolvedChatId,
+                    media: derived.mediaItems.length,
+                    videos: derived.videoItems.length,
+                    images: derived.imageItems.length,
+                    files: derived.fileItems.length,
+                    links: derived.linkItems.length,
+                    pinned: pinned.length,
+                    totalDt: Date.now() - startedAt,
+                });
             } finally {
                 if (!cancelled) setContentLoading(false);
             }
@@ -245,7 +353,7 @@ export default function UserProfileRoute() {
         return () => {
             cancelled = true;
         };
-    }, [resolvedChatId, loadMessages]);
+    }, [resolvedChatId, loadMessages, localMessageCount]);
 
     const handleToggleMute = useCallback(() => {
         if (!resolvedChatId) return;

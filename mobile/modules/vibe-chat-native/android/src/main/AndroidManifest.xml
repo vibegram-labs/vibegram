@@ -1,1 +1,19 @@
-<manifest package="expo.modules.vibechatnative" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools"
+  package="expo.modules.vibechatnative">
+
+  <application>
+    <!-- Remove Expo's default Firebase service and replace it with Vibe's custom one. -->
+    <service
+      android:name="expo.modules.notifications.service.ExpoFirebaseMessagingService"
+      tools:node="remove" />
+
+    <service
+      android:name="expo.modules.vibechatnative.notifications.VibeFirebaseMessagingService"
+      android:exported="false">
+      <intent-filter>
+        <action android:name="com.google.firebase.MESSAGING_EVENT" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

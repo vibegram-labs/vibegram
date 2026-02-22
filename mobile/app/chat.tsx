@@ -29,6 +29,9 @@ import ChatScreenHeader from '../src/components/chat/ChatScreenHeader';
 import WallpaperBackground from '../src/components/chat/WallpaperBackground';
 import { useThemeStore } from '../src/lib/stores/theme-store';
 import { useWallpaperStore, resolveThemeVariant } from '../src/lib/stores/wallpaper-store';
+import { getUserChannel } from '../src/lib/ChatStore';
+import { useCallStore } from '../src/lib/stores/CallStore';
+import { useAuthStore } from '../src/lib/stores/auth-store';
 import ChatListScreen from './chatlist';
 import { VideoNoteOverlay } from '../src/components/chat/VideoNoteOverlay';
 import { haptics } from '../src/lib/haptics';
@@ -45,10 +48,30 @@ const withAlpha = (color: string, alpha: number) => {
     return color;
 };
 
+const waitForUserChannel = async (timeoutMs = 12000): Promise<any | null> => {
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+        const channel = getUserChannel();
+        const state = (channel as any)?.state;
+        const ready =
+            channel &&
+            typeof channel.push === 'function' &&
+            (state === 'joined' || state === 'joining' || !state);
+        if (ready) return channel;
+        await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    return null;
+};
+
 const TYPING_MASK_WIDTH = 84;
 const TYPING_SHIMMER_BAND_WIDTH = 120;
 const TYPING_SHIMMER_START = -TYPING_SHIMMER_BAND_WIDTH;
 const TYPING_SHIMMER_END = TYPING_MASK_WIDTH + TYPING_SHIMMER_BAND_WIDTH;
+const CHAT_PROFILE_PERF_LOG = __DEV__;
+const chatProfilePerfLog = (...args: any[]) => {
+    if (!CHAT_PROFILE_PERF_LOG) return;
+    console.log('[ChatProfilePerf]', ...args);
+};
 
 const parseTimestampMs = (value: unknown): number | undefined => {
     if (typeof value === 'number' && Number.isFinite(value)) {
@@ -176,6 +199,14 @@ export default function ChatScreen() {
     const typingUsers = useChatStore(s => s.typingUsers);
     const sendTyping = useChatStore(s => s.sendTyping);
     const sendStopTyping = useChatStore(s => s.sendStopTyping);
+    const isConnected = useChatStore(s => s.isConnected);
+    const initSocket = useChatStore(s => s.initSocket);
+
+    const callStatus = useCallStore(s => s.callStatus);
+    const checkWebRTCAvailability = useCallStore(s => s.checkWebRTCAvailability);
+    const startCall = useCallStore(s => s.startCall);
+
+    const { user } = useAuthStore();
 
     const chatIdFromParams = getParamString(params?.id) || getParamString((params as any)?.chatId);
     const friendIdFromParams = getParamString((params as any)?.friendId);
@@ -201,6 +232,7 @@ export default function ChatScreen() {
     const [incomingVideoNote, setIncomingVideoNote] = useState<{ uri: string; duration?: number; token: number } | null>(null);
     const [friendApiPresence, setFriendApiPresence] = useState<{ lastSeenMs?: number; online?: boolean } | null>(null);
     const videoNoteCanceledRef = useRef(false);
+    const profileNavInFlightRef = useRef(false);
 
     useEffect(() => {
         const shouldOpenSearch = openSearchParam === '1' || openSearchParam === 'true';
@@ -301,15 +333,25 @@ export default function ChatScreen() {
     }, [isFriendTyping, typingShimmerX]);
     const fallbackLastSeenMs = useMemo(() => {
         if (!activeChat) return undefined;
+        if (!friendIdUpper) {
+            return pickLatestTimestamp(
+                parseTimestampMs((activeChat as any).updatedAt),
+                parseTimestampMs((activeChat as any).updated_at)
+            );
+        }
         let latestFriendMessageMs: number | undefined;
-        (activeChat.messages || []).forEach((m) => {
-            if ((m.fromId || '').toUpperCase() !== friendIdUpper) return;
-            const ts = parseTimestampMs(m.timestamp);
-            if (!ts) return;
-            if (!latestFriendMessageMs || ts > latestFriendMessageMs) {
-                latestFriendMessageMs = ts;
-            }
-        });
+        const messages = Array.isArray(activeChat.messages) ? activeChat.messages : [];
+        // Avoid scanning entire chat history on header renders; a small tail window
+        // is enough for last-seen fallback and prevents JS-thread stalls on large chats.
+        let inspected = 0;
+        for (let i = messages.length - 1; i >= 0 && inspected < 120; i -= 1, inspected += 1) {
+            const m = messages[i] as any;
+            if ((m?.fromId || '').toUpperCase() !== friendIdUpper) continue;
+            const ts = parseTimestampMs(m?.timestamp);
+            if (!ts) continue;
+            latestFriendMessageMs = ts;
+            break;
+        }
 
         const lastMessageFromFriendMs =
             (activeChat.lastMessage?.fromId || '').toUpperCase() === friendIdUpper
@@ -322,7 +364,83 @@ export default function ChatScreen() {
             parseTimestampMs((activeChat as any).updatedAt),
             parseTimestampMs((activeChat as any).updated_at)
         );
-    }, [activeChat, friendIdUpper]);
+    }, [
+        activeChat?.messages?.length,
+        activeChat?.lastMessage?.fromId,
+        activeChat?.lastMessage?.timestamp,
+        (activeChat as any)?.updatedAt,
+        (activeChat as any)?.updated_at,
+        friendIdUpper,
+    ]);
+
+    const headerIsOnline =
+        isDirectChat && (((!!friendIdUpper && onlineUsers.has(friendIdUpper)) || friendApiPresence?.online === true));
+
+    const handlePressAvatar = useCallback(() => {
+        if (profileNavInFlightRef.current) return;
+        const tapTs = Date.now();
+        const activeMessageCount = Array.isArray(activeChat?.messages) ? activeChat.messages.length : 0;
+        chatProfilePerfLog('avatarTap:start', {
+            chatId: activeChat?.chatId,
+            type: effectiveChatType,
+            activeMessageCount,
+            ts: tapTs,
+        });
+
+        if (activeChat?.chatId && effectiveChatType === 'channel') {
+            profileNavInFlightRef.current = true;
+            chatProfilePerfLog('avatarTap:push:channel-info', { chatId: activeChat.chatId, dt: Date.now() - tapTs });
+            router.push({
+                pathname: '/channel-info',
+                params: { channelId: activeChat.chatId }
+            });
+            requestAnimationFrame(() => {
+                chatProfilePerfLog('avatarTap:postPush:rAF', { dt: Date.now() - tapTs });
+            });
+            setTimeout(() => { profileNavInFlightRef.current = false; }, 400);
+            return;
+        }
+
+        if (activeChat?.chatId && effectiveChatType === 'group') {
+            profileNavInFlightRef.current = true;
+            chatProfilePerfLog('avatarTap:push:group-info', { chatId: activeChat.chatId, dt: Date.now() - tapTs });
+            router.push({
+                pathname: '/group-info',
+                params: { groupId: activeChat.chatId }
+            });
+            requestAnimationFrame(() => {
+                chatProfilePerfLog('avatarTap:postPush:rAF', { dt: Date.now() - tapTs });
+            });
+            setTimeout(() => { profileNavInFlightRef.current = false; }, 400);
+            return;
+        }
+
+        if (!activeChat?.friendId) return;
+
+        profileNavInFlightRef.current = true;
+        chatProfilePerfLog('avatarTap:push:user-profile', {
+            chatId: activeChat.chatId,
+            friendId: activeChat.friendId,
+            dt: Date.now() - tapTs,
+        });
+        router.push({
+            pathname: '/user-profile',
+            params: {
+                userId: activeChat.friendId,
+                chatId: activeChat.chatId,
+                username: activeChat.friendName || displayName,
+                profileImage: activeChat.friendImage || '',
+                isOnline: headerIsOnline ? '1' : '0',
+            }
+        });
+        requestAnimationFrame(() => {
+            chatProfilePerfLog('avatarTap:postPush:rAF', { dt: Date.now() - tapTs });
+        });
+        setTimeout(() => {
+            chatProfilePerfLog('avatarTap:postPush:timeout16', { dt: Date.now() - tapTs });
+        }, 16);
+        setTimeout(() => { profileNavInFlightRef.current = false; }, 400);
+    }, [activeChat, effectiveChatType, router, displayName, headerIsOnline]);
 
     useEffect(() => {
         let cancelled = false;
@@ -447,8 +565,60 @@ export default function ChatScreen() {
         });
     }, []);
 
-    const headerIsOnline =
-        isDirectChat && (((!!friendIdUpper && onlineUsers.has(friendIdUpper)) || friendApiPresence?.online === true));
+    const handleStartCall = useCallback(async (type: 'voice' | 'video') => {
+        if (!activeChat || !activeChat.friendId) return;
+        const userId = activeChat.friendId;
+        if ((user?.userId || '').toUpperCase() === userId.toUpperCase()) {
+            // Can't call yourself
+            return;
+        }
+        if (callStatus !== 'idle') {
+            // Call in progress
+            return;
+        }
+
+        const available = await checkWebRTCAvailability();
+        if (!available) {
+            return;
+        }
+
+        if (!isConnected) {
+            initSocket();
+        }
+
+        const channel = await waitForUserChannel();
+        if (!channel) {
+            return;
+        }
+
+        startCall(
+            {
+                userId,
+                userName: activeChat.friendName || displayName,
+                userImage: activeChat.friendImage,
+            },
+            type,
+            channel,
+        );
+    }, [
+        activeChat,
+        user?.userId,
+        callStatus,
+        checkWebRTCAvailability,
+        isConnected,
+        initSocket,
+        startCall,
+        displayName
+    ]);
+
+    const handleAudioCall = useCallback(() => {
+        void handleStartCall('voice');
+    }, [handleStartCall]);
+
+    const handleVideoCall = useCallback(() => {
+        void handleStartCall('video');
+    }, [handleStartCall]);
+
     const headerShiftStyle = useAnimatedStyle(() => ({
         transform: [{ translateY: withTiming(chatSearchOpen ? -(insets.top + 86) : 0, { duration: 230 }) }],
     }), [chatSearchOpen, insets.top]);
@@ -476,40 +646,9 @@ export default function ChatScreen() {
                     effectiveTheme={effectiveTheme as 'light' | 'dark'}
                     wallpaperGradient={resolvedTheme.backgroundGradient || [colors.background, colors.background]}
                     bubbleTheme={bubbleTheme}
-                    onPressAvatar={() => {
-                        if (activeChat?.chatId && effectiveChatType === 'channel') {
-                            router.push({
-                                pathname: '/channel-info',
-                                params: {
-                                    channelId: activeChat.chatId,
-                                }
-                            });
-                            return;
-                        }
-
-                        if (activeChat?.chatId && effectiveChatType === 'group') {
-                            router.push({
-                                pathname: '/group-info',
-                                params: {
-                                    groupId: activeChat.chatId,
-                                }
-                            });
-                            return;
-                        }
-
-                        if (activeChat?.friendId) {
-                            router.push({
-                                pathname: '/user-profile',
-                                params: {
-                                    userId: activeChat.friendId,
-                                    chatId: activeChat.chatId,
-                                    username: activeChat.friendName || displayName,
-                                    profileImage: activeChat.friendImage || '',
-                                    isOnline: headerIsOnline ? '1' : '0',
-                                }
-                            });
-                        }
-                    }}
+                    onPressAvatar={handlePressAvatar}
+                    onAudioCall={handleAudioCall}
+                    onVideoCall={handleVideoCall}
                 />
             </Animated.View>
 

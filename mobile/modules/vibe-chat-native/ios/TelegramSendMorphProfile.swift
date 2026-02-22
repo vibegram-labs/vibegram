@@ -19,11 +19,11 @@ public enum TelegramSendMorphProfile {
   // Fade it in later while the source bubble is still visible to avoid a
   // transparent gap and reduce the "solid color" flash.
   static let bubbleFadeFrom: Float = 0.10
-  static let bubbleFadeDelay: CFTimeInterval = 0.05
-  static let bubbleFadeDuration: CFTimeInterval = 0.17
+  static let bubbleFadeDelay: CFTimeInterval = 0.04
+  static let bubbleFadeDuration: CFTimeInterval = 0.15
 
   static let bubbleContentFadeDelay: CFTimeInterval = 0.0
-  static let bubbleContentFadeDuration: CFTimeInterval = 0.10
+  static let bubbleContentFadeDuration: CFTimeInterval = 0.09
 
   static let sourceBackgroundFadeDelay: CFTimeInterval = 0.0
   static let sourceBackgroundFadeDuration: CFTimeInterval = 0.22

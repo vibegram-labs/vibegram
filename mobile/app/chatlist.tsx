@@ -148,6 +148,13 @@ const LIST_INITIAL_RENDER = 14;
 const LIST_BATCH_RENDER = 10;
 const LIST_WINDOW_SIZE = 7;
 const BINARY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const EMPTY_LIST_ROWS: ListRow[] = [];
+const EMPTY_SEQUENCE_META = new Map<string, { isSequenceStart: boolean; isSequenceEnd: boolean }>();
+const CHATLIST_PERF_LOG = __DEV__;
+const chatListPerfLog = (...args: any[]) => {
+    if (!CHATLIST_PERF_LOG) return;
+    console.log('[ChatListPerf]', ...args);
+};
 
 const isValidBinaryMessageId = (value?: string | null) => {
     if (!value || typeof value !== 'string') return false;
@@ -1233,8 +1240,7 @@ export default function ChatListScreen({
     );
     const activeChatMessages = activeChat?.messages;
     const nativeChatRuntime = useMemo(() => getNativeChatRuntimeInfo(), []);
-    // Keep Android on RN list rendering path instead of Kotlin native list.
-    const nativeChatEnabled = Platform.OS === 'ios' && nativeChatRuntime.enabled;
+    const nativeChatEnabled = nativeChatRuntime.enabled;
     const shouldUseNativeList = nativeChatEnabled;
     const normalizedSearchQuery = useMemo(() => searchQuery.trim().toLowerCase(), [searchQuery]);
     const searchActive = !shouldUseNativeList && normalizedSearchQuery.length > 0;
@@ -1326,6 +1332,9 @@ export default function ChatListScreen({
 
     const sendDebug = useCallback((...args: unknown[]) => {
         if (!__DEV__) return;
+        // Opt-in verbose chatlist logs only.
+        // Enable dynamically in dev with: global.__VIBE_CHATLIST_DEBUG = true
+        if ((globalThis as any).__VIBE_CHATLIST_DEBUG !== true) return;
         console.log('[ChatList][SendDebug]', ...args);
     }, []);
 
@@ -1441,13 +1450,19 @@ export default function ChatListScreen({
     useEffect(() => {
         if (!effectiveChatId) return;
         const chat = useChatStore.getState().chats.find(c => c.chatId === effectiveChatId);
+        chatListPerfLog('loadMessages:effect', {
+            effectiveChatId,
+            chatFound: !!chat,
+            localMessages: chat?.messages?.length ?? 0,
+            native: shouldUseNativeList,
+        });
         sendDebug('loadMessages:trigger', {
             effectiveChatId,
             chatFound: !!chat,
             localMessages: chat?.messages?.length ?? 0,
         });
         loadMessages(effectiveChatId);
-    }, [effectiveChatId, loadMessages]);
+    }, [effectiveChatId, loadMessages, shouldUseNativeList]);
 
     useEffect(() => {
         if (!effectiveChatId) return;
@@ -1474,15 +1489,24 @@ export default function ChatListScreen({
     }, [effectiveChatId]);
 
     useEffect(() => {
+        const hydrateStart = Date.now();
         if (!effectiveChatId) {
+            chatListPerfLog('hydrate:skip:no-chat', { dt: Date.now() - hydrateStart });
             sendDebug('hydrate:skip:no-effective-chat-id');
             return;
         }
         if (!Array.isArray(activeChatMessages)) {
+            chatListPerfLog('hydrate:skip:no-array', { effectiveChatId, dt: Date.now() - hydrateStart });
             sendDebug('hydrate:skip:no-active-chat-messages-array', { effectiveChatId });
             return;
         }
         if (pendingGhost || ghostData) {
+            chatListPerfLog('hydrate:skip:ghost', {
+                effectiveChatId,
+                pendingGhost: !!pendingGhost,
+                ghostData: !!ghostData,
+                dt: Date.now() - hydrateStart,
+            });
             sendDebug('hydrate:skip:ghost-active', {
                 pendingGhost: !!pendingGhost,
                 ghostData: !!ghostData,
@@ -1593,8 +1617,17 @@ export default function ChatListScreen({
             storeRows: storeRows.length,
             visibleStoreRows: visibleStoreRows.length,
         });
+        chatListPerfLog('hydrate:normalized', {
+            effectiveChatId,
+            sourceCount: source.length,
+            windowedSource: windowedSource.length,
+            storeRows: storeRows.length,
+            visibleStoreRows: visibleStoreRows.length,
+            dt: Date.now() - hydrateStart,
+        });
 
         setMessages(prev => {
+            const mergeStart = Date.now();
             const localCarryRows = prev.filter((m) => (
                 deletingIds.has(m.id) || (
                     m.isOptimistic &&
@@ -1619,6 +1652,14 @@ export default function ChatListScreen({
                 prevCount: prev.length,
                 mergedCount: merged.length,
                 localCarryRows: localCarryRows.length,
+            });
+            chatListPerfLog('hydrate:setMessages', {
+                effectiveChatId,
+                prevCount: prev.length,
+                mergedCount: merged.length,
+                localCarryRows: localCarryRows.length,
+                totalDt: Date.now() - hydrateStart,
+                mergeDt: Date.now() - mergeStart,
             });
             return merged;
         });
@@ -1677,7 +1718,7 @@ export default function ChatListScreen({
                 recoveryAttemptedRef.current.delete(queued.messageId);
                 setMessages(prev => prev.map(m => (
                     m.id === queued.messageId
-                        ? { ...m, isOptimistic: false, status: isConnected ? 'sent' : 'pending' }
+                        ? { ...m, isOptimistic: false }
                         : m
                 )));
             })
@@ -1685,7 +1726,7 @@ export default function ChatListScreen({
                 setMessages(prev => prev.map(m => (m.id === queued.messageId ? { ...m, isOptimistic: false, status: 'error' } : m)));
                 scheduleBackgroundRecovery(queued.chatId, queued.messageId);
             });
-    }, [sendMessage, clearRecoveryTimer, scheduleBackgroundRecovery, isConnected]);
+    }, [sendMessage, clearRecoveryTimer, scheduleBackgroundRecovery]);
 
     useEffect(() => {
         if (!effectiveChatId || !isConnected) return;
@@ -2041,6 +2082,11 @@ export default function ChatListScreen({
         if (type === 'textChanged') {
             const textRaw = typeof nativeEvent.text === 'string' ? nativeEvent.text : '';
             onTypingStatusChange?.(textRaw.trim().length > 0);
+            return;
+        }
+
+        if (type === 'attachmentPressed') {
+            showToast('Native attachment menu is not wired yet', 'info');
             return;
         }
 
@@ -2576,6 +2622,7 @@ export default function ChatListScreen({
     }, [messages, normalizedSearchQuery, searchActive]);
 
     const sequenceMetaById = useMemo(() => {
+        if (shouldUseNativeList) return EMPTY_SEQUENCE_META;
         const meta = new Map<string, { isSequenceStart: boolean; isSequenceEnd: boolean }>();
 
         for (let i = 0; i < visibleMessages.length; i++) {
@@ -2589,9 +2636,10 @@ export default function ChatListScreen({
         }
 
         return meta;
-    }, [visibleMessages]);
+    }, [visibleMessages, shouldUseNativeList]);
 
     const listRows = useMemo<ListRow[]>(() => {
+        if (shouldUseNativeList) return EMPTY_LIST_ROWS;
         if (visibleMessages.length === 0) return [];
 
         const rows: ListRow[] = [];
@@ -2609,10 +2657,11 @@ export default function ChatListScreen({
         }
 
         return rows;
-    }, [visibleMessages]);
+    }, [visibleMessages, shouldUseNativeList]);
 
-    const nativeRows = useMemo(() => (
-        mapMessagesToNativeRows(visibleMessages.map((message) => ({
+    const nativeRows = useMemo(() => {
+        const t0 = Date.now();
+        const rows = mapMessagesToNativeRows(visibleMessages.map((message) => ({
             id: message.id,
             chatId: message.chatId,
             fromId: message.fromId,
@@ -2635,8 +2684,14 @@ export default function ChatListScreen({
             replyToId: message.replyToId,
             reactionEmoji: message.reactionEmoji,
             encryptedContent: message.encryptedContent,
-        })))
-    ), [visibleMessages, uploadProgressById]);
+        })));
+        chatListPerfLog('nativeRows:map', {
+            visibleMessages: visibleMessages.length,
+            rows: rows.length,
+            dt: Date.now() - t0,
+        });
+        return rows;
+    }, [visibleMessages, uploadProgressById]);
 
     const currentPinnedMessageId = pinnedMessageIds.length > 0
         ? pinnedMessageIds[Math.min(activePinnedIndex, pinnedMessageIds.length - 1)]
@@ -2769,6 +2824,7 @@ export default function ChatListScreen({
                         surfaceId={nativeSurfaceId}
                         rows={nativeRows}
                         appearance={nativeAppearance}
+                        contentPaddingTop={listTopPadding}
                         contentPaddingBottom={14}
                         inputBarEnabled
                         inputPlaceholder="Message"

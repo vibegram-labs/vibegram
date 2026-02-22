@@ -3,9 +3,8 @@ import { initReactI18next } from 'react-i18next';
 import * as Localization from 'expo-localization';
 import { I18nManager } from 'react-native';
 
-// Force LTR layout even if the language is RTL (per user request)
-I18nManager.allowRTL(false);
-I18nManager.forceRTL(false);
+// Enable RTL layout support for languages like Persian
+I18nManager.allowRTL(true);
 
 const resources = {
     en: {
@@ -33,6 +32,7 @@ const resources = {
             },
             "auth": {
                 "welcomeBack": "Welcome\nBack",
+                "connectFreely": "Connect freely. Chat securely.",
                 "enterSecretKey": "Enter your unique Secret Key to restore your session.",
                 "secretKeyLabel": "Secret Key",
                 "signIn": "Sign In",
@@ -71,6 +71,7 @@ const resources = {
             },
             "auth": {
                 "welcomeBack": "خوش\nآمدید",
+                "connectFreely": "آزادانه متصل شوید. امن گفتگو کنید.",
                 "enterSecretKey": "برای بازیابی نشست خود، کلید امنیتی منحصر به فرد خود را وارد کنید.",
                 "secretKeyLabel": "کلید امنیتی",
                 "signIn": "ورود",

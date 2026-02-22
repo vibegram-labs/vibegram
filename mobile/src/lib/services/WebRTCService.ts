@@ -238,6 +238,71 @@ class WebRTCService {
         }
     }
 
+    hasLocalVideoTrack(): boolean {
+        try {
+            return !!this.localStream && (this.localStream.getVideoTracks?.().length ?? 0) > 0;
+        } catch {
+            return false;
+        }
+    }
+
+    /**
+     * Lazily add a local camera track to an active audio call so the call can be upgraded.
+     * Returns true when a video track exists and is enabled locally.
+     */
+    async ensureLocalVideoTrack(): Promise<boolean> {
+        const available = await this.loadWebRTC();
+        if (!available || !mediaDevices) return false;
+
+        try {
+            if (!this.localStream) {
+                return this.initializeMedia(true);
+            }
+
+            const existingTracks = this.localStream.getVideoTracks?.() ?? [];
+            if (existingTracks.length > 0) {
+                existingTracks.forEach((track: any) => {
+                    track.enabled = true;
+                });
+                return true;
+            }
+
+            const videoOnlyStream = await mediaDevices.getUserMedia({
+                audio: false,
+                video: {
+                    facingMode: 'user',
+                    width: { ideal: 1920, min: 640 },
+                    height: { ideal: 1080, min: 480 },
+                    frameRate: { ideal: 30, min: 15 },
+                },
+            });
+
+            const newVideoTracks = videoOnlyStream?.getVideoTracks?.() ?? [];
+            if (newVideoTracks.length === 0) return false;
+
+            for (const track of newVideoTracks) {
+                track.enabled = true;
+                this.localStream.addTrack?.(track);
+                if (this.peerConnection) {
+                    this.peerConnection.addTrack(track, this.localStream);
+                }
+            }
+
+            if (InCallManager) {
+                try {
+                    InCallManager.start({ media: 'video' });
+                } catch {
+                    // Ignore InCallManager upgrade issues.
+                }
+            }
+
+            return true;
+        } catch (e) {
+            console.error('[WebRTC] Failed to add local video track:', e);
+            return false;
+        }
+    }
+
     /**
      * Create peer connection and add local tracks.
      * @param forceRelay - Force all media through TURN relay (for filtered networks)
@@ -420,11 +485,34 @@ class WebRTCService {
     }
 
     /**
+     * Create a renegotiation offer on an existing peer connection (e.g., voice -> video upgrade).
+     */
+    async createRenegotiationOffer(): Promise<any | null> {
+        if (!this.peerConnection) return null;
+
+        try {
+            const offer = await this.peerConnection.createOffer({
+                offerToReceiveAudio: true,
+                offerToReceiveVideo: true,
+            });
+            await this.peerConnection.setLocalDescription(offer);
+            this.onOffer?.(this.peerConnection.localDescription);
+            return this.peerConnection.localDescription;
+        } catch (e) {
+            console.error('[WebRTC] Failed to create renegotiation offer:', e);
+            return null;
+        }
+    }
+
+    /**
      * Handle incoming offer and create answer (callee side)
      */
     async handleOffer(offer: any, forceRelay: boolean = false): Promise<any | null> {
-        const created = await this.createPeerConnection(forceRelay);
-        if (!created || !this.peerConnection || !RTCSessionDescription) return null;
+        if (!this.peerConnection) {
+            const created = await this.createPeerConnection(forceRelay);
+            if (!created) return null;
+        }
+        if (!this.peerConnection || !RTCSessionDescription) return null;
 
         try {
             await this.peerConnection.setRemoteDescription(

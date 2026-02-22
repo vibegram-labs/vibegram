@@ -21,7 +21,7 @@ const shouldForceRelay = (): boolean => {
 // Types
 export type CallType = 'voice' | 'video';
 export type CallDirection = 'incoming' | 'outgoing';
-export type CallStatus = 'idle' | 'ringing' | 'connecting' | 'active' | 'ended' | 'failed';
+export type CallStatus = 'idle' | 'ringing' | 'connecting' | 'active' | 'ended' | 'failed' | 'reconnecting';
 
 export interface CallHistoryRecord {
     id: string;
@@ -45,6 +45,35 @@ const asNonEmptyString = (value: unknown): string | null => {
     return trimmed.length > 0 ? trimmed : null;
 };
 
+const asRecord = (value: unknown): Record<string, unknown> | null => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    return value as Record<string, unknown>;
+};
+
+const parseJsonRecord = (value: unknown): Record<string, unknown> | null => {
+    const raw = asNonEmptyString(value);
+    if (!raw) return null;
+    if (!(raw.startsWith('{') && raw.endsWith('}'))) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return asRecord(parsed);
+    } catch {
+        return null;
+    }
+};
+
+const isIncomingCallTypeValue = (value: unknown): boolean => {
+    const raw = asNonEmptyString(value)?.toLowerCase();
+    if (!raw) return false;
+    return (
+        raw === 'call-start' ||
+        raw === 'call_start' ||
+        raw === 'incoming-call' ||
+        raw === 'incoming_call' ||
+        raw === 'call'
+    );
+};
+
 const normalizeCallType = (value: unknown): CallType => {
     const raw = asNonEmptyString(value)?.toLowerCase();
     return raw === 'video' ? 'video' : 'voice';
@@ -54,30 +83,75 @@ const normalizeIncomingCallPayload = (
     payload: Record<string, unknown> | null | undefined
 ): CallState['incomingCallData'] | null => {
     if (!payload) return null;
+
+    const candidates: Record<string, unknown>[] = [payload];
+    const nestedKeys = [
+        'payload',
+        'call',
+        'callData',
+        'call_data',
+        'data',
+        'meta',
+    ] as const;
+    for (const key of nestedKeys) {
+        const nested = asRecord(payload[key]) || parseJsonRecord(payload[key]);
+        if (nested) candidates.push(nested);
+    }
+
+    const pickString = (...keys: string[]): string | null => {
+        for (const candidate of candidates) {
+            for (const key of keys) {
+                const value = asNonEmptyString(candidate[key]);
+                if (value) return value;
+            }
+        }
+        return null;
+    };
+
+    const hasExplicitCallEvent = (() => {
+        for (const candidate of candidates) {
+            if (isIncomingCallTypeValue(candidate.event) || isIncomingCallTypeValue(candidate.type)) {
+                return true;
+            }
+        }
+        return false;
+    })();
+
+    const callTypeValue = (() => {
+        for (const candidate of candidates) {
+            const direct = candidate.callType ?? candidate.call_type;
+            if (direct != null) return direct;
+            // Some backends send { type: 'video', event: 'call-start' }
+            if (!isIncomingCallTypeValue(candidate.type)) {
+                const t = asNonEmptyString(candidate.type)?.toLowerCase();
+                if (t === 'video' || t === 'voice') return t;
+            }
+        }
+        return undefined;
+    })();
+
     const fromUserId =
-        asNonEmptyString(payload.fromUserId) ||
-        asNonEmptyString(payload.from_user_id) ||
-        asNonEmptyString(payload.callerId) ||
-        asNonEmptyString(payload.caller_id);
+        pickString('fromUserId', 'from_user_id', 'callerId', 'caller_id', 'userId', 'user_id');
     const callId =
-        asNonEmptyString(payload.callId) ||
-        asNonEmptyString(payload.call_id);
+        pickString('callId', 'call_id', 'callUUID', 'call_uuid', 'callToken', 'call_token');
     if (!fromUserId || !callId) return null;
+
+    // Prevent normal message/notification payloads from being mistaken as incoming calls.
+    // We require either an explicit call event marker or a call-specific type hint.
+    const hasCallSpecificType =
+        callTypeValue != null ||
+        candidates.some((candidate) => candidate.callType != null || candidate.call_type != null);
+    if (!hasExplicitCallEvent && !hasCallSpecificType) return null;
+
     return {
         fromUserId,
         fromUserName:
-            asNonEmptyString(payload.fromUserName) ||
-            asNonEmptyString(payload.from_user_name) ||
-            asNonEmptyString(payload.callerName) ||
-            asNonEmptyString(payload.caller_name) ||
+            pickString('fromUserName', 'from_user_name', 'callerName', 'caller_name', 'userName', 'user_name') ||
             fromUserId.slice(0, 8),
         fromUserImage:
-            asNonEmptyString(payload.fromUserImage) ||
-            asNonEmptyString(payload.from_user_image) ||
-            asNonEmptyString(payload.callerImage) ||
-            asNonEmptyString(payload.caller_image) ||
+            pickString('fromUserImage', 'from_user_image', 'callerImage', 'caller_image', 'userImage', 'user_image') ||
             undefined,
-        callType: normalizeCallType(payload.callType || payload.call_type),
+        callType: normalizeCallType(callTypeValue),
         callId,
     };
 };
@@ -124,6 +198,9 @@ interface CallState {
 
     // Signaling channel (Phoenix user channel)
     signalingChannel: any | null;
+
+    // Internal timing refs (not part of state, but kept tracking)
+    _callWatchdogTimeout?: any;
 }
 
 interface CallActions {
@@ -189,7 +266,28 @@ const initialState: CallState = {
 export const useCallStore = create<CallState & CallActions>()(
     persist(
         (set, get) => {
+            const clearWatchdog = () => {
+                const state = get() as any;
+                if (state._callWatchdogTimeout) {
+                    clearTimeout(state._callWatchdogTimeout);
+                    set({ _callWatchdogTimeout: undefined });
+                }
+            };
+
+            const startWatchdog = (timeoutMs: number = 30000, context: string = 'timeout') => {
+                clearWatchdog();
+                const timeoutId = setTimeout(() => {
+                    const current = get();
+                    if (current.callStatus === 'connecting' || current.callStatus === 'reconnecting') {
+                        console.log(`[CallStore] Watchdog triggered for ${context}, ending call`);
+                        markCallFailed();
+                    }
+                }, timeoutMs);
+                set({ _callWatchdogTimeout: timeoutId });
+            };
+
             const markCallFailed = () => {
+                clearWatchdog();
                 set({ callStatus: 'failed' });
                 setTimeout(() => {
                     if (get().callStatus === 'failed') {
@@ -243,6 +341,7 @@ export const useCallStore = create<CallState & CallActions>()(
 
                 WebRTCService.onConnectionStateChange = (state: string) => {
                     if (state === 'connected') {
+                        clearWatchdog();
                         const current = get();
                         if (current.callStatus !== 'active') {
                             set({
@@ -254,10 +353,24 @@ export const useCallStore = create<CallState & CallActions>()(
                         return;
                     }
 
-                    if (state === 'failed' || state === 'disconnected' || state === 'closed') {
+                    if (state === 'disconnected') {
+                        const current = get();
+                        if (current.callStatus === 'active' || current.callStatus === 'connecting') {
+                            set({ callStatus: 'reconnecting' });
+                            startWatchdog(25000, 'reconnecting');
+                        }
+                        return;
+                    }
+
+                    if (state === 'failed' || state === 'closed') {
+                        clearWatchdog();
                         const current = get();
                         if (current.callStatus !== 'idle' && current.callStatus !== 'ended') {
-                            get().endCall(channel || current.signalingChannel || undefined);
+                            if (current.callStatus === 'connecting' || current.callStatus === 'reconnecting') {
+                                markCallFailed();
+                            } else {
+                                get().endCall(channel || current.signalingChannel || undefined);
+                            }
                         }
                     }
                 };
@@ -286,367 +399,423 @@ export const useCallStore = create<CallState & CallActions>()(
             return {
                 ...initialState,
 
-            checkWebRTCAvailability: async () => {
-                try {
-                    const available = await WebRTCService.isAvailable();
-                    set({ isWebRTCAvailable: available });
-                    return available;
-                } catch (e) {
-                    set({ isWebRTCAvailable: false });
-                    return false;
-                }
-            },
-
-            clearHistory: () => set({ callHistory: [] }),
-
-            deleteCallRecord: (id) => {
-                set({
-                    callHistory: get().callHistory.filter(c => c.id !== id)
-                });
-            },
-
-            startCall: async (remoteUser, type, socket) => {
-                const { isWebRTCAvailable, callStatus } = get();
-                const channel = resolveSignalingChannel(socket);
-
-                if (!isWebRTCAvailable) {
-                    console.warn('[CallStore] WebRTC not available, cannot start call');
-                    return false;
-                }
-                if (callStatus !== 'idle') {
-                    console.warn('[CallStore] Already in a call, status:', callStatus);
-                    return false;
-                }
-                if (!channel) {
-                    console.warn('[CallStore] User channel unavailable, cannot trigger call-start');
-                    return false;
-                }
-
-                const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-                set({
-                    callId,
-                    callType: type,
-                    callDirection: 'outgoing',
-                    callStatus: 'ringing',
-                    remoteUser,
-                    isVideoEnabled: type === 'video',
-                    signalingChannel: channel,
-                });
-
-                try {
-                    // Pre-fetch TURN credentials (runs in parallel with media init)
-                    const [mediaReady] = await Promise.all([
-                        WebRTCService.initializeMedia(type === 'video'),
-                        WebRTCService.fetchIceServers(),
-                    ]);
-                    if (!mediaReady) {
-                        console.warn('[CallStore] Media init returned false');
-                        markCallFailed();
+                checkWebRTCAvailability: async () => {
+                    try {
+                        const available = await WebRTCService.isAvailable();
+                        set({ isWebRTCAvailable: available });
+                        return available;
+                    } catch (e) {
+                        set({ isWebRTCAvailable: false });
                         return false;
                     }
-                    bindSignalingCallbacks(channel);
-                    set({ hasLocalStream: true });
+                },
 
-                    channel.push('call-start', {
-                        toUserId: remoteUser.userId,
+                clearHistory: () => set({ callHistory: [] }),
+
+                deleteCallRecord: (id) => {
+                    set({
+                        callHistory: get().callHistory.filter(c => c.id !== id)
+                    });
+                },
+
+                startCall: async (remoteUser, type, socket) => {
+                    const { isWebRTCAvailable, callStatus } = get();
+                    const channel = resolveSignalingChannel(socket);
+
+                    if (!isWebRTCAvailable) {
+                        console.warn('[CallStore] WebRTC not available, cannot start call');
+                        return false;
+                    }
+                    if (callStatus !== 'idle') {
+                        console.warn('[CallStore] Already in a call, status:', callStatus);
+                        return false;
+                    }
+                    if (!channel) {
+                        console.warn('[CallStore] User channel unavailable, cannot trigger call-start');
+                        return false;
+                    }
+
+                    const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+                    set({
                         callId,
                         callType: type,
+                        callDirection: 'outgoing',
+                        callStatus: 'ringing',
+                        remoteUser,
+                        isVideoEnabled: type === 'video',
+                        signalingChannel: channel,
                     });
 
-                    // Auto-timeout ringing after 30 seconds if no response
-                    setTimeout(() => {
-                        const current = get();
-                        if (current.callId === callId && current.callStatus === 'ringing') {
-                            console.log('[CallStore] Ringing timeout, ending call');
-                            get().endCall(channel);
+                    try {
+                        // Pre-fetch TURN credentials (runs in parallel with media init)
+                        const [mediaReady] = await Promise.all([
+                            WebRTCService.initializeMedia(type === 'video'),
+                            WebRTCService.fetchIceServers(),
+                        ]);
+                        if (!mediaReady) {
+                            console.warn('[CallStore] Media init returned false');
+                            markCallFailed();
+                            return false;
                         }
-                    }, 30000);
+                        bindSignalingCallbacks(channel);
+                        set({ hasLocalStream: true });
 
-                    return true;
-                } catch (e) {
-                    console.error('[CallStore] startCall error:', e);
-                    markCallFailed();
-                    return false;
-                }
-            },
+                        channel.push('call-start', {
+                            toUserId: remoteUser.userId,
+                            callId,
+                            callType: type,
+                        });
 
-            handleIncomingCallPayload: (payload) => {
-                const normalized = normalizeIncomingCallPayload(payload);
-                if (!normalized) return false;
-                get().handleIncomingCall(normalized);
-                return true;
-            },
+                        // Wait longer (30s) generally, or `startWatchdog` if needed.
+                        startWatchdog(40000, 'call-start-ringing');
 
-            handleIncomingCall: (data) => {
-                const normalized = normalizeIncomingCallPayload(data as Record<string, unknown>);
-                if (!normalized) return;
-                const current = get();
-                const isSameIncomingCall =
-                    current.callDirection === 'incoming' &&
-                    current.callStatus === 'ringing' &&
-                    current.callId === normalized.callId;
-
-                if (current.callStatus !== 'idle' && !isSameIncomingCall) return;
-
-                if (isSameIncomingCall) {
-                    const mergedIncoming = {
-                        ...(current.incomingCallData || normalized),
-                        ...normalized,
-                    };
-                    set({
-                        incomingCallData: mergedIncoming,
-                        remoteUser: {
-                            userId: mergedIncoming.fromUserId,
-                            userName: mergedIncoming.fromUserName,
-                            userImage: mergedIncoming.fromUserImage,
-                        },
-                        callType: mergedIncoming.callType,
-                    });
-                    return;
-                }
-
-                set({
-                    incomingCallData: normalized,
-                    callStatus: 'ringing',
-                    callDirection: 'incoming',
-                    callId: normalized.callId,
-                    callType: normalized.callType,
-                    remoteUser: {
-                        userId: normalized.fromUserId,
-                        userName: normalized.fromUserName,
-                        userImage: normalized.fromUserImage,
-                    },
-                });
-            },
-
-            acceptCall: async (socket) => {
-                const { incomingCallData, isWebRTCAvailable, callType } = get();
-                const channel = resolveSignalingChannel(socket);
-                if (!incomingCallData || !isWebRTCAvailable) return false;
-                if (!channel) {
-                    console.warn('[CallStore] User channel unavailable, cannot accept call');
-                    return false;
-                }
-
-                set({ callStatus: 'connecting', signalingChannel: channel });
-
-                try {
-                    // Pre-fetch TURN credentials in parallel with media init
-                    const [mediaReady] = await Promise.all([
-                        WebRTCService.initializeMedia(callType === 'video'),
-                        WebRTCService.fetchIceServers(),
-                    ]);
-                    if (!mediaReady) {
+                        return true;
+                    } catch (e) {
+                        console.error('[CallStore] startCall error:', e);
                         markCallFailed();
                         return false;
                     }
-                    bindSignalingCallbacks(channel);
-                    set({ hasLocalStream: true });
+                },
 
-                    channel.push('call-accepted', {
-                        toUserId: incomingCallData.fromUserId,
-                        callId: incomingCallData.callId,
-                    });
-
+                handleIncomingCallPayload: (payload) => {
+                    const normalized = normalizeIncomingCallPayload(payload);
+                    if (!normalized) return false;
+                    try {
+                        console.log('[CallStore] Incoming call payload accepted', {
+                            fromUserId: normalized.fromUserId,
+                            callId: normalized.callId,
+                            callType: normalized.callType,
+                            keys: payload ? Object.keys(payload) : [],
+                        });
+                    } catch { }
+                    get().handleIncomingCall(normalized);
                     return true;
-                } catch (e) {
-                    get().resetCall();
-                    return false;
-                }
-            },
+                },
 
-            declineCall: (socket) => {
-                const { incomingCallData, callId, remoteUser, callType, callDirection, signalingChannel } = get();
-                const channel = resolveSignalingChannel(socket || signalingChannel);
+                handleIncomingCall: (data) => {
+                    const normalized = normalizeIncomingCallPayload(data as Record<string, unknown>);
+                    if (!normalized) return;
+                    const current = get();
+                    const isSameIncomingCall =
+                        current.callDirection === 'incoming' &&
+                        current.callStatus === 'ringing' &&
+                        current.callId === normalized.callId;
 
-                if (incomingCallData && channel && typeof channel.push === 'function') {
-                    channel.push('call-end', {
-                        toUserId: incomingCallData.fromUserId,
-                        reason: 'declined',
-                    });
-                }
+                    if (current.callStatus !== 'idle' && !isSameIncomingCall) return;
 
-                // Add to history as declined
-                if (callId && remoteUser) {
-                    const record: CallHistoryRecord = {
-                        id: callId,
-                        remoteUser,
-                        type: callType!,
-                        direction: callDirection!,
-                        status: 'declined',
-                        timestamp: Date.now(),
-                        duration: 0
-                    };
-                    set({ callHistory: [record, ...get().callHistory] });
-                }
-
-                get().resetCall();
-            },
-
-            handleCallAccepted: async (payload) => {
-                const current = get();
-                const { callDirection, remoteUser, callId } = current;
-                const acceptedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
-                if (acceptedCallId && callId && acceptedCallId !== callId) return;
-                if (callDirection !== 'outgoing' || !remoteUser) return;
-                const channel = resolveSignalingChannel(current.signalingChannel);
-                if (!channel) {
-                    console.warn('[CallStore] Missing signaling channel after call acceptance');
-                    markCallFailed();
-                    return;
-                }
-
-                set({ callStatus: 'connecting', signalingChannel: channel });
-
-                try {
-                    bindSignalingCallbacks(channel);
-                    const forceRelay = shouldForceRelay();
-                    const offer = await WebRTCService.createOffer(forceRelay);
-                    if (!offer) throw new Error('Failed to create offer');
-                } catch (e) {
-                    console.error('[CallStore] Failed to create offer:', e);
-                    get().endCall(channel);
-                }
-            },
-
-            handleWebRTCSignal: async (data) => {
-                const { callId, callStatus } = get();
-                const signalCallId = asNonEmptyString(data?.callId) || asNonEmptyString(data?.call_id);
-                if (signalCallId && callId && signalCallId !== callId) {
-                    return;
-                }
-                if (callStatus === 'idle' || callStatus === 'ended') {
-                    return;
-                }
-
-                const type = asNonEmptyString(data?.type);
-                const sdp = data?.sdp;
-                const candidate = data?.candidate;
-                try {
-                    bindSignalingCallbacks();
-                    const forceRelay = shouldForceRelay();
-                    if (type === 'offer') {
-                        if (!sdp) return;
-                        await WebRTCService.handleOffer(sdp, forceRelay);
-                    } else if (type === 'answer') {
-                        if (!sdp) return;
-                        await WebRTCService.handleAnswer(sdp);
-                        set({ callStatus: 'active', callStartTime: Date.now() });
-                        WebRTCService.startBandwidthMonitor();
-                    } else if (type === 'ice-candidate' && candidate) {
-                        await WebRTCService.handleIceCandidate(candidate);
+                    if (isSameIncomingCall) {
+                        const mergedIncoming = {
+                            ...(current.incomingCallData || normalized),
+                            ...normalized,
+                        };
+                        set({
+                            incomingCallData: mergedIncoming,
+                            remoteUser: {
+                                userId: mergedIncoming.fromUserId,
+                                userName: mergedIncoming.fromUserName,
+                                userImage: mergedIncoming.fromUserImage,
+                            },
+                            callType: mergedIncoming.callType,
+                        });
+                        return;
                     }
-                } catch (e) {
-                    console.error('[CallStore] WebRTC signal error:', e);
-                }
-            },
 
-            handleCallEnded: (payload) => {
-                const { callId, remoteUser, callType, callDirection, callStatus, callDuration } = get();
-                const endedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
-                if (endedCallId && callId && endedCallId !== callId) {
-                    return;
-                }
-
-                // Save to history before resetting
-                if (callId && remoteUser) {
-                    let status: CallHistoryRecord['status'] = 'completed';
-                    if (callStatus === 'ringing') status = callDirection === 'incoming' ? 'missed' : 'declined';
-                    if (callStatus === 'failed') status = 'failed';
-
-                    const record: CallHistoryRecord = {
-                        id: callId,
-                        remoteUser,
-                        type: callType!,
-                        direction: callDirection!,
-                        status,
-                        timestamp: Date.now(),
-                        duration: callDuration
-                    };
-                    set({ callHistory: [record, ...get().callHistory] });
-                }
-
-                get().resetCall();
-            },
-
-            endCall: (socket) => {
-                const { remoteUser, callId, callType, callDirection, callStatus, callDuration, signalingChannel } = get();
-                const channel = resolveSignalingChannel(socket || signalingChannel);
-
-                if (remoteUser && channel && typeof channel.push === 'function') {
-                    channel.push('call-end', {
-                        toUserId: remoteUser.userId,
-                        callId,
-                        reason: 'ended',
+                    set({
+                        incomingCallData: normalized,
+                        callStatus: 'ringing',
+                        callDirection: 'incoming',
+                        callId: normalized.callId,
+                        callType: normalized.callType,
+                        remoteUser: {
+                            userId: normalized.fromUserId,
+                            userName: normalized.fromUserName,
+                            userImage: normalized.fromUserImage,
+                        },
                     });
-                }
+                },
 
-                // Save to history before resetting
-                if (callId && remoteUser) {
-                    let status: CallHistoryRecord['status'] = 'completed';
-                    if (callStatus === 'ringing') status = 'declined';
-                    if (callStatus === 'failed') status = 'failed';
+                acceptCall: async (socket) => {
+                    const { incomingCallData, isWebRTCAvailable, callType } = get();
+                    const channel = resolveSignalingChannel(socket);
+                    if (!incomingCallData || !isWebRTCAvailable) return false;
+                    if (!channel) {
+                        console.warn('[CallStore] User channel unavailable, cannot accept call');
+                        return false;
+                    }
 
-                    const record: CallHistoryRecord = {
-                        id: callId,
-                        remoteUser,
-                        type: callType!,
-                        direction: callDirection!,
-                        status,
-                        timestamp: Date.now(),
-                        duration: callDuration
-                    };
-                    set({ callHistory: [record, ...get().callHistory] });
-                }
+                    set({ callStatus: 'connecting', signalingChannel: channel });
 
-                get().resetCall();
-            },
+                    try {
+                        // Pre-fetch TURN credentials in parallel with media init
+                        const [mediaReady] = await Promise.all([
+                            WebRTCService.initializeMedia(callType === 'video'),
+                            WebRTCService.fetchIceServers(),
+                        ]);
+                        if (!mediaReady) {
+                            markCallFailed();
+                            return false;
+                        }
+                        bindSignalingCallbacks(channel);
+                        set({ hasLocalStream: true });
 
-            toggleMute: () => {
-                const { isMuted } = get();
-                WebRTCService.setAudioEnabled(isMuted);
-                set({ isMuted: !isMuted });
-            },
+                        channel.push('call-accepted', {
+                            toUserId: incomingCallData.fromUserId,
+                            callId: incomingCallData.callId,
+                        });
 
-            toggleSpeaker: () => {
-                const { isSpeakerOn } = get();
-                WebRTCService.setSpeakerEnabled(!isSpeakerOn);
-                set({ isSpeakerOn: !isSpeakerOn });
-            },
+                        startWatchdog(20000, 'accept-connecting');
 
-            toggleVideo: () => {
-                const { isVideoEnabled } = get();
-                WebRTCService.setVideoEnabled(!isVideoEnabled);
-                set({ isVideoEnabled: !isVideoEnabled });
-            },
+                        return true;
+                    } catch (e) {
+                        get().resetCall();
+                        return false;
+                    }
+                },
 
-            flipCamera: () => {
-                const { isFrontCamera } = get();
-                WebRTCService.flipCamera();
-                set({ isFrontCamera: !isFrontCamera });
-            },
+                declineCall: (socket) => {
+                    const { incomingCallData, callId, remoteUser, callType, callDirection, signalingChannel } = get();
+                    const channel = resolveSignalingChannel(socket || signalingChannel);
 
-            updateDuration: () => {
-                const { callStartTime, callStatus } = get();
-                if (callStatus === 'active' && callStartTime) {
-                    set({ callDuration: Math.floor((Date.now() - callStartTime) / 1000) });
-                }
-            },
+                    if (incomingCallData && channel && typeof channel.push === 'function') {
+                        channel.push('call-end', {
+                            toUserId: incomingCallData.fromUserId,
+                            reason: 'declined',
+                        });
+                    }
 
-            resetCall: () => {
-                WebRTCService.cleanup();
-                WebRTCService.onIceCandidate = null;
-                WebRTCService.onOffer = null;
-                WebRTCService.onAnswer = null;
-                WebRTCService.onRemoteStream = null;
-                WebRTCService.onConnectionStateChange = null;
-                set({
-                    ...initialState,
-                    callHistory: get().callHistory, // Keep history
-                    isWebRTCAvailable: get().isWebRTCAvailable,
-                });
-            },
+                    // Add to history as declined
+                    if (callId && remoteUser) {
+                        const record: CallHistoryRecord = {
+                            id: callId,
+                            remoteUser,
+                            type: callType!,
+                            direction: callDirection!,
+                            status: 'declined',
+                            timestamp: Date.now(),
+                            duration: 0
+                        };
+                        set({ callHistory: [record, ...get().callHistory] });
+                    }
+
+                    get().resetCall();
+                },
+
+                handleCallAccepted: async (payload) => {
+                    const current = get();
+                    const { callDirection, remoteUser, callId } = current;
+                    const acceptedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
+                    if (acceptedCallId && callId && acceptedCallId !== callId) return;
+                    if (callDirection !== 'outgoing' || !remoteUser) return;
+                    const channel = resolveSignalingChannel(current.signalingChannel);
+                    if (!channel) {
+                        console.warn('[CallStore] Missing signaling channel after call acceptance');
+                        markCallFailed();
+                        return;
+                    }
+
+                    set({ callStatus: 'connecting', signalingChannel: channel });
+                    startWatchdog(20000, 'handle-call-accepted-connecting');
+
+                    try {
+                        bindSignalingCallbacks(channel);
+                        const forceRelay = shouldForceRelay();
+                        const offer = await WebRTCService.createOffer(forceRelay);
+                        if (!offer) throw new Error('Failed to create offer');
+                    } catch (e) {
+                        console.error('[CallStore] Failed to create offer:', e);
+                        get().endCall(channel);
+                    }
+                },
+
+                handleWebRTCSignal: async (data) => {
+                    const { callId, callStatus } = get();
+                    const signalCallId = asNonEmptyString(data?.callId) || asNonEmptyString(data?.call_id);
+                    if (signalCallId && callId && signalCallId !== callId) {
+                        return;
+                    }
+                    if (callStatus === 'idle' || callStatus === 'ended') {
+                        return;
+                    }
+
+                    const type = asNonEmptyString(data?.type);
+                    const sdp = data?.sdp;
+                    const candidate = data?.candidate;
+                    const sdpText =
+                        typeof sdp === 'string'
+                            ? sdp
+                            : (typeof sdp?.sdp === 'string' ? sdp.sdp : null);
+                    if (sdpText && sdpText.includes('m=video')) {
+                        set({ callType: 'video' });
+                    }
+                    try {
+                        bindSignalingCallbacks();
+                        const forceRelay = shouldForceRelay();
+                        if (type === 'offer') {
+                            if (!sdp) return;
+                            await WebRTCService.handleOffer(sdp, forceRelay);
+                        } else if (type === 'answer') {
+                            if (!sdp) return;
+                            await WebRTCService.handleAnswer(sdp);
+                            set({ callStatus: 'active', callStartTime: Date.now() });
+                            WebRTCService.startBandwidthMonitor();
+                        } else if (type === 'ice-candidate' && candidate) {
+                            await WebRTCService.handleIceCandidate(candidate);
+                        }
+                    } catch (e) {
+                        console.error('[CallStore] WebRTC signal error:', e);
+                    }
+                },
+
+                handleCallEnded: (payload) => {
+                    const { callId, remoteUser, callType, callDirection, callStatus, callDuration } = get();
+                    const endedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
+                    if (endedCallId && callId && endedCallId !== callId) {
+                        return;
+                    }
+
+                    // Save to history before resetting
+                    if (callId && remoteUser) {
+                        let status: CallHistoryRecord['status'] = 'completed';
+                        if (callStatus === 'ringing') status = callDirection === 'incoming' ? 'missed' : 'declined';
+                        if (callStatus === 'failed') status = 'failed';
+
+                        const record: CallHistoryRecord = {
+                            id: callId,
+                            remoteUser,
+                            type: callType!,
+                            direction: callDirection!,
+                            status,
+                            timestamp: Date.now(),
+                            duration: callDuration
+                        };
+                        set({ callHistory: [record, ...get().callHistory] });
+                    }
+
+                    get().resetCall();
+                },
+
+                endCall: (socket) => {
+                    const { remoteUser, callId, callType, callDirection, callStatus, callDuration, signalingChannel } = get();
+                    const channel = resolveSignalingChannel(socket || signalingChannel);
+
+                    if (remoteUser && channel && typeof channel.push === 'function') {
+                        channel.push('call-end', {
+                            toUserId: remoteUser.userId,
+                            callId,
+                            reason: 'ended',
+                        });
+                    }
+
+                    // Save to history before resetting
+                    if (callId && remoteUser) {
+                        let status: CallHistoryRecord['status'] = 'completed';
+                        if (callStatus === 'ringing') status = 'declined';
+                        if (callStatus === 'failed') status = 'failed';
+
+                        const record: CallHistoryRecord = {
+                            id: callId,
+                            remoteUser,
+                            type: callType!,
+                            direction: callDirection!,
+                            status,
+                            timestamp: Date.now(),
+                            duration: callDuration
+                        };
+                        set({ callHistory: [record, ...get().callHistory] });
+                    }
+
+                    get().resetCall();
+                },
+
+                toggleMute: () => {
+                    const { isMuted } = get();
+                    WebRTCService.setAudioEnabled(isMuted);
+                    set({ isMuted: !isMuted });
+                },
+
+                toggleSpeaker: () => {
+                    const { isSpeakerOn } = get();
+                    WebRTCService.setSpeakerEnabled(!isSpeakerOn);
+                    set({ isSpeakerOn: !isSpeakerOn });
+                },
+
+                toggleVideo: () => {
+                    void (async () => {
+                        const current = get();
+                        const nextEnabled = !current.isVideoEnabled;
+
+                        if (!nextEnabled) {
+                            WebRTCService.setVideoEnabled(false);
+                            set({ isVideoEnabled: false });
+                            return;
+                        }
+
+                        const needsTrackUpgrade = !WebRTCService.hasLocalVideoTrack();
+                        if (needsTrackUpgrade) {
+                            const ready = await WebRTCService.ensureLocalVideoTrack();
+                            if (!ready) {
+                                console.warn('[CallStore] Failed to enable local video track');
+                                return;
+                            }
+
+                            // Mark UI as video-capable immediately so the local preview / controls can render.
+                            set({
+                                isVideoEnabled: true,
+                                callType: 'video',
+                                hasLocalStream: true,
+                            });
+
+                            const { callStatus } = get();
+                            if (callStatus === 'active' || callStatus === 'connecting') {
+                                try {
+                                    bindSignalingCallbacks();
+                                    const offer = await WebRTCService.createRenegotiationOffer();
+                                    if (!offer) {
+                                        console.warn('[CallStore] Renegotiation offer was not created');
+                                    }
+                                } catch (e) {
+                                    console.warn('[CallStore] Failed to renegotiate video upgrade', e);
+                                }
+                            }
+                            return;
+                        }
+
+                        WebRTCService.setVideoEnabled(true);
+                        set({
+                            isVideoEnabled: true,
+                            callType: current.callType ?? 'video',
+                        });
+                    })();
+                },
+
+                flipCamera: () => {
+                    const { isFrontCamera } = get();
+                    WebRTCService.flipCamera();
+                    set({ isFrontCamera: !isFrontCamera });
+                },
+
+                updateDuration: () => {
+                    const { callStartTime, callStatus } = get();
+                    if (callStatus === 'active' && callStartTime) {
+                        set({ callDuration: Math.floor((Date.now() - callStartTime) / 1000) });
+                    }
+                },
+
+                resetCall: () => {
+                    clearWatchdog();
+                    WebRTCService.cleanup();
+                    WebRTCService.onIceCandidate = null;
+                    WebRTCService.onOffer = null;
+                    WebRTCService.onAnswer = null;
+                    WebRTCService.onRemoteStream = null;
+                    WebRTCService.onConnectionStateChange = null;
+                    set({
+                        ...initialState,
+                        callHistory: get().callHistory, // Keep history
+                        isWebRTCAvailable: get().isWebRTCAvailable,
+                    });
+                },
             };
         },
         {

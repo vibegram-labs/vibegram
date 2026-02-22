@@ -299,35 +299,42 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
 
             {/* Header */}
             <View style={styles.header}>
-                <AnimatedGlassButton
-                    onPress={view === 'card' ? goBackToSearch : handleCloseInternal}
-                    progress={headerProgress}
-                    showPanelIcon={view === 'card'}
-                    effectiveTheme={effectiveTheme}
-                    size={40}
-                    homeIcon={<X size={20} color={colors.text} strokeWidth={2} />}
-                    panelIcon={<ChevronLeft size={22} color={colors.text} strokeWidth={2} />}
-                    homeBackgroundColor="transparent"
-                    panelBackgroundColor="transparent"
-                />
+                <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                    <TouchableOpacity
+                        onPress={view === 'card' ? goBackToSearch : handleCloseInternal}
+                        style={styles.iconBtnCircle}
+                        activeOpacity={0.85}
+                    >
+                        {view === 'card' ? (
+                            <ArrowLeft size={20} color={colors.text} strokeWidth={2} />
+                        ) : (
+                            <X size={20} color={colors.text} strokeWidth={2} />
+                        )}
+                    </TouchableOpacity>
+                </SafeLiquidGlass>
 
                 <Text style={[styles.title, { color: colors.text }]} numberOfLines={1}>
                     {view === 'card' ? 'User Profile' : 'Find Person'}
                 </Text>
 
-                <AnimatedGlassButton
-                    onPress={view === 'search' ? goToCard : handleMessage}
-                    disabled={view === 'search' && (!foundUser || loading)}
-                    progress={headerProgress}
-                    showPanelIcon={view === 'card'}
-                    effectiveTheme={effectiveTheme}
-                    size={40}
-                    homeIcon={<ArrowRight size={20} color={colors.primary} strokeWidth={2.5} />}
-                    panelIcon={<Check size={20} color={colors.primary} strokeWidth={2.5} />}
-                    homeBackgroundColor="transparent"
-                    panelBackgroundColor="transparent"
-                    style={{ opacity: (view === 'search' && (!foundUser || loading)) ? 0.3 : 1 }}
-                />
+                <SafeLiquidGlass
+                    style={[styles.glassBtnCircle, { opacity: (view === 'search' && (!foundUser || loading)) ? 0.3 : 1 }]}
+                    blurIntensity={15}
+                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                >
+                    <TouchableOpacity
+                        onPress={view === 'search' ? goToCard : handleMessage}
+                        disabled={view === 'search' && (!foundUser || loading)}
+                        style={styles.iconBtnCircle}
+                        activeOpacity={0.85}
+                    >
+                        {view === 'card' ? (
+                            <Check size={20} color={colors.primary} strokeWidth={2.5} />
+                        ) : (
+                            <ArrowRight size={20} color={colors.primary} strokeWidth={2.5} />
+                        )}
+                    </TouchableOpacity>
+                </SafeLiquidGlass>
             </View>
 
             <View style={styles.contentContainer}>
@@ -581,6 +588,8 @@ const styles = StyleSheet.create({
     sectionWrapper: { marginTop: 14 },
     sectionHeader: { fontSize: 13, fontWeight: '600', marginBottom: 8, marginLeft: 12, opacity: 0.6, letterSpacing: 0.5, textTransform: 'uppercase' },
     sectionContainer: { borderRadius: 26, overflow: 'hidden' },
+    glassBtnCircle: { width: 44, height: 44, borderRadius: 22, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+    iconBtnCircle: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
     glassCard: { width: '100%', borderRadius: 26, overflow: 'hidden' },
 
     row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 20, minHeight: 58 },

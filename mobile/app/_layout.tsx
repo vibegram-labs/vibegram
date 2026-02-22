@@ -27,6 +27,25 @@ import SessionExpiredBanner from '../src/components/shared/SessionExpiredBanner'
 
 SplashScreen.preventAutoHideAsync()
 
+// Persist across RootLayout remounts within the same JS runtime (dev reloads / error recovery)
+const handledNotificationResponseKeys = new Set<string>()
+
+const getNotificationResponseKey = (
+  response: Notifications.NotificationResponse
+): string => {
+  const notification = response.notification
+  const identifier = notification.request.identifier
+  const data = notification.request.content.data as Record<string, unknown> | undefined
+  const messageId = typeof data?.messageId === 'string' ? data.messageId : null
+  const chatId = typeof data?.chatId === 'string' ? data.chatId : null
+  const type = typeof data?.type === 'string' ? data.type : null
+
+  if (messageId) return `msg:${messageId}`
+  if (chatId && type) return `chat:${chatId}:${type}`
+  if (chatId) return `chat:${chatId}`
+  return `id:${identifier}`
+}
+
 export default function RootLayout() {
   const { colors, effectiveTheme, initTheme } = useThemeStore()
   const { isAuthenticated, user, hasHydrated } = useAuthStore()
@@ -54,7 +73,18 @@ export default function RootLayout() {
   const handledNotificationIdsRef = useRef<Set<string>>(new Set());
 
   const handleNotificationData = (data: Record<string, unknown> | undefined): boolean => {
-    return useCallStore.getState().handleIncomingCallPayload(data);
+    const handled = useCallStore.getState().handleIncomingCallPayload(data);
+    if (data) {
+      console.log('[Notifications] call-payload-check', {
+        handled,
+        keys: Object.keys(data),
+        event: typeof data.event === 'string' ? data.event : undefined,
+        type: typeof data.type === 'string' ? data.type : undefined,
+        callId: typeof data.callId === 'string' ? data.callId : (typeof (data as any).call_id === 'string' ? (data as any).call_id : undefined),
+        messageId: typeof data.messageId === 'string' ? data.messageId : (typeof (data as any).message_id === 'string' ? (data as any).message_id : undefined),
+      });
+    }
+    return handled;
   };
 
   useEffect(() => {
@@ -75,10 +105,21 @@ export default function RootLayout() {
     // Foreground notification received
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
       const data = notification.request.content.data as Record<string, unknown> | undefined;
+      const triggerAny = notification.request.trigger as any;
+      const aps = triggerAny?.payload?.aps ?? triggerAny?.aps ?? null;
+      const mutableContent = (
+        aps?.['mutable-content'] ??
+        aps?.mutableContent ??
+        null
+      );
+      const hasAlert = !!aps?.alert;
       console.log('[Notifications] Received in foreground:', {
         id: notification.request.identifier,
         title: notification.request.content.title,
         body: notification.request.content.body,
+        appState: 'foreground',
+        apsMutableContent: mutableContent,
+        apsHasAlert: hasAlert,
         data,
       });
       if (handleNotificationData(data)) {
@@ -95,9 +136,12 @@ export default function RootLayout() {
 
     // User tapped on notification — navigate to chat
     responseListener.current = Notifications.addNotificationResponseReceivedListener(response => {
-      const id = response.notification.request.identifier;
-      if (handledNotificationIdsRef.current.has(id)) return;
-      handledNotificationIdsRef.current.add(id);
+      const key = getNotificationResponseKey(response);
+      if (handledNotificationIdsRef.current.has(key) || handledNotificationResponseKeys.has(key)) {
+        return;
+      }
+      handledNotificationIdsRef.current.add(key);
+      handledNotificationResponseKeys.add(key);
       const data = response.notification.request.content.data as Record<string, unknown> | undefined;
       console.log('[Notifications] Tapped:', data);
       if (handleNotificationData(data)) {
@@ -110,20 +154,33 @@ export default function RootLayout() {
     });
 
     Notifications.getLastNotificationResponseAsync()
-      .then((response) => {
+      .then(async (response) => {
         if (!response) return;
-        const id = response.notification.request.identifier;
-        if (handledNotificationIdsRef.current.has(id)) return;
-        handledNotificationIdsRef.current.add(id);
+        const key = getNotificationResponseKey(response);
+        if (handledNotificationIdsRef.current.has(key) || handledNotificationResponseKeys.has(key)) {
+          // Best effort clear to prevent replay loops after remounts.
+          try {
+            await (Notifications as any).clearLastNotificationResponseAsync?.();
+          } catch { }
+          return;
+        }
+        handledNotificationIdsRef.current.add(key);
+        handledNotificationResponseKeys.add(key);
         const data = response.notification.request.content.data as Record<string, unknown> | undefined;
         console.log('[Notifications] Last response:', data);
         if (handleNotificationData(data)) {
+          try {
+            await (Notifications as any).clearLastNotificationResponseAsync?.();
+          } catch { }
           return;
         }
         const chatId = typeof data?.chatId === 'string' ? data.chatId : null;
         if (chatId) {
           router.push({ pathname: '/chat' as any, params: { id: chatId } });
         }
+        try {
+          await (Notifications as any).clearLastNotificationResponseAsync?.();
+        } catch { }
       })
       .catch((error) => {
         console.warn('[Notifications] Failed to read last response', error);

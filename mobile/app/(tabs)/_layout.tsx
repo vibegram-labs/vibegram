@@ -15,13 +15,15 @@ import Animated, {
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
 import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
+import { LinearGradient } from 'expo-linear-gradient'
 import { useThemeStore } from '../../src/lib/stores/theme-store'
 import { useUIStore } from '../../src/lib/stores/ui-store'
 import SafeLiquidGlass from '../../src/components/native/SafeLiquidGlass'
 import NativeTabBar, { isNativeTabBarAvailable } from '../../src/components/native/NativeTabBar'
+import AndroidBottomTabBar from '../../src/components/native/AndroidBottomTabBar'
 import { useChatStore } from '../../src/lib/ChatStore'
 import { useAuthStore } from '../../src/lib/stores/auth-store'
-import { ContactsIcon, CallsIcon, SettingsIcon } from '../../src/components/Icons'
+import { ContactsIcon, CallsIcon, SettingsIcon, VibeLogoIcon } from '../../src/components/Icons'
 import DoubleChatIcon from '../../src/components/icons/DoubleChatIcon'
 import HomeScreen from './home'
 import SettingsScreen from './settings'
@@ -453,8 +455,123 @@ export default function TabLayout() {
 
                 {/* Bottom Navigation (Fallback Pill) */}
                 {showBottomBar && (
-                    <AnimatedView style={[styles.bottomBarWrapper, bottomBarFadeStyle]}>
+                    <AnimatedView
+                        style={[
+                            styles.bottomBarWrapper,
+                            Platform.OS === 'android' && styles.bottomBarWrapperAndroidAttached,
+                            bottomBarFadeStyle,
+                        ]}
+                    >
+                        {Platform.OS === 'android' && (
+                            <View pointerEvents="none" style={styles.bottomBarBackdropMask}>
+                                <MaskedView
+                                    style={StyleSheet.absoluteFill}
+                                    maskElement={
+                                        <LinearGradient
+                                            colors={['rgba(0,0,0,0)', 'rgba(0,0,0,0.75)', 'rgba(0,0,0,1)']}
+                                            locations={[0, 0.48, 1]}
+                                            start={{ x: 0.5, y: 0 }}
+                                            end={{ x: 0.5, y: 1 }}
+                                            style={StyleSheet.absoluteFill}
+                                        />
+                                    }
+                                >
+                                    <LinearGradient
+                                        colors={
+                                            isDark
+                                                ? ['rgba(0,0,0,0)', 'rgba(0,0,0,0.18)', 'rgba(0,0,0,0.28)']
+                                                : ['rgba(255,255,255,0)', 'rgba(255,255,255,0.14)', 'rgba(255,255,255,0.22)']
+                                        }
+                                        locations={[0, 0.6, 1]}
+                                        start={{ x: 0.5, y: 0 }}
+                                        end={{ x: 0.5, y: 1 }}
+                                        style={StyleSheet.absoluteFill}
+                                    />
+                                </MaskedView>
+                            </View>
+                        )}
                         {/* Main Tab Bar - Fallback mode */}
+                        {Platform.OS === 'android' ? (
+                            <AndroidBottomTabBar
+                                currentIndex={PAGES[currentTab]}
+                                onIndexChange={(index) => {
+                                    try {
+                                        const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
+                                        console.log('[TabsLayout] android tab index change', index, pageNames[index]);
+                                        handleTabPress(pageNames[index]);
+                                    } catch (error) {
+                                        console.error('[TabsLayout] android tab index change failed', error);
+                                    }
+                                }}
+                                tabs={[
+                                    {
+                                        key: 'contacts',
+                                        title: t('tabs.contacts'),
+                                        sfSymbol: 'person.2.fill',
+                                        unfocusedSfSymbol: 'person.2',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <ContactsIcon size={size} color={color} focused={focused} />
+                                        ),
+                                    },
+                                    {
+                                        key: 'calls',
+                                        title: t('tabs.calls'),
+                                        sfSymbol: 'phone.fill',
+                                        unfocusedSfSymbol: 'phone',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <CallsIcon size={size} color={color} focused={focused} />
+                                        ),
+                                    },
+                                    {
+                                        key: 'home',
+                                        title: t('tabs.chats'),
+                                        sfSymbol: 'bubble.left.and.bubble.right.fill',
+                                        unfocusedSfSymbol: 'bubble.left.and.bubble.right',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <View>
+                                                <DoubleChatIcon size={size} color={color} focused={focused} />
+                                                {totalUnread > 0 && (
+                                                    <View style={styles.badge}>
+                                                        <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
+                                                    </View>
+                                                )}
+                                            </View>
+                                        ),
+                                    },
+                                    {
+                                        key: 'settings',
+                                        title: t('tabs.settings'),
+                                        sfSymbol: 'gearshape.fill',
+                                        unfocusedSfSymbol: 'gearshape',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <SettingsIcon
+                                                size={size}
+                                                color={color}
+                                                focused={focused}
+                                                imageUri={user?.profileImage}
+                                                name={user?.name || user?.username}
+                                            />
+                                        ),
+                                    },
+                                    {
+                                        key: 'vibe',
+                                        title: 'Vibe',
+                                        preventsDefault: true,
+                                        renderIcon: ({ color, size, focused }) => (
+                                            <VibeLogoIcon
+                                                size={size + 1}
+                                                color={focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)')}
+                                                strokeWidth={2.6}
+                                            />
+                                        ),
+                                    },
+                                ]}
+                                activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
+                                inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
+                                isDark={isDark}
+                                onVibePress={() => safeRouterPush('/agent', 'android-bottom-vibe-tab')}
+                            />
+                        ) : (
                         <NativeTabBar
                             currentIndex={PAGES[currentTab]}
                             onIndexChange={(index) => {
@@ -517,6 +634,20 @@ export default function TabLayout() {
                                         />
                                     ),
                                 },
+                                ...(Platform.OS === 'android'
+                                    ? [{
+                                        key: 'vibe',
+                                        title: 'Vibe',
+                                        preventsDefault: true,
+                                        renderIcon: ({ color, size, focused }) => (
+                                            <VibeLogoIcon
+                                                size={size + 1}
+                                                color={focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)')}
+                                                strokeWidth={2.6}
+                                            />
+                                        ),
+                                    }]
+                                    : []),
                             ]}
                             activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
                             inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
@@ -524,11 +655,15 @@ export default function TabLayout() {
                             translateX={translateX}
                             screenWidth={SCREEN_WIDTH}
                             fallbackTabWidth={fallbackTabWidth}
+                            onVibePress={() => safeRouterPush('/agent', 'fallback-vibe-tab')}
                         />
-                        <VibeButton
-                            onPress={() => safeRouterPush('/agent', 'fallback-vibe-button')}
-                            isDark={isDark}
-                        />
+                        )}
+                        {Platform.OS !== 'android' && (
+                            <VibeButton
+                                onPress={() => safeRouterPush('/agent', 'fallback-vibe-button')}
+                                isDark={isDark}
+                            />
+                        )}
                     </AnimatedView>
                 )}
             </AnimatedView>
@@ -570,6 +705,25 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         gap: BOTTOM_BAR_GAP,
         paddingHorizontal: BOTTOM_BAR_HORIZONTAL_PADDING
+    },
+    bottomBarWrapperAndroidAttached: {
+        bottom: 10,
+        left: 0,
+        right: 0,
+        width: '100%',
+        justifyContent: 'flex-end',
+        alignItems: 'stretch',
+        gap: 0,
+        paddingHorizontal: 10,
+    },
+    bottomBarBackdropMask: {
+        position: 'absolute',
+        left: 10,
+        right: 10,
+        top: -14,
+        bottom: -2,
+        borderRadius: 26,
+        overflow: 'hidden',
     },
     badge: {
         position: 'absolute',

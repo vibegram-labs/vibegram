@@ -30,6 +30,7 @@
         "foregroundImage": "./assets/logos/logo1.png",
         "backgroundColor": "#191919"
       },
+      "googleServicesFile": "./google-services.json",
       "edgeToEdgeEnabled": true,
       "predictiveBackGestureEnabled": false,
       "package": "com.mohammadshayani.vibegram",

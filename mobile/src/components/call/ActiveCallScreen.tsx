@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
     View,
     Text,
@@ -13,6 +13,8 @@ import Animated, {
     useSharedValue,
     useAnimatedStyle,
     FadeIn,
+    FadeOut,
+    LinearTransition,
 } from 'react-native-reanimated';
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,13 +23,7 @@ import {
     Mic,
     MicOff,
     Volume2,
-    VolumeX,
     VideoOff,
-    ChevronDown,
-    Maximize2,
-    RotateCcw,
-    Camera,
-    CameraOff,
     ArrowLeftRight,
 } from 'lucide-react-native';
 import * as Haptics from 'expo-haptics';
@@ -37,9 +33,15 @@ import { useThemeStore } from '../../lib/stores/theme-store';
 import { getUserChannel } from '../../lib/ChatStore';
 import WebRTCService from '../../lib/services/WebRTCService';
 import SafeLiquidGlass from '../native/SafeLiquidGlass';
-import { RefreshIcon, MinimizeIcon, ExpandIcon, ChevronDownIcon } from '../Icons';
+import {
+    RefreshIcon,
+    MinimizeIcon,
+    CallVideoIcon,
+    CallVideoOffIcon,
+} from '../Icons';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
+const VIDEO_CHROME_HIDE_DELAY_MS = 10_000;
 
 // --- Components ---
 
@@ -123,6 +125,10 @@ export default function ActiveCallScreen() {
     // UI States
     const [isMinimized, setIsMinimized] = useState(false);
     const [localIsFull, setLocalIsFull] = useState(false);
+    const [showVideoChrome, setShowVideoChrome] = useState(true);
+    const videoChromeHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const wasVideoFullscreenVisibleRef = useRef(false);
+    const hasVideoChromeInteractionRef = useRef(false);
 
 
     const [localStreamUrl, setLocalStreamUrl] = useState<string | null>(null);
@@ -209,11 +215,9 @@ export default function ActiveCallScreen() {
         setIsMinimized(!isMinimized);
     };
 
-
-    if (!isInCall || callStatus === 'idle' || callStatus === 'ended') return null;
-    if (callStatus === 'ringing' && useCallStore.getState().callDirection === 'incoming') return null;
-
-    const isVideoCall = callType === 'video';
+    // If local video is disabled, check if this was inherently a video call to avoid getting stuck in a video container
+    // without video feeds when turned off manually.
+    const isVideoCall = isVideoEnabled;
     const isDark = effectiveTheme === 'dark';
     const glassTint = isDark ? 'dark' : 'light';
     const palette = {
@@ -235,56 +239,142 @@ export default function ActiveCallScreen() {
     const baseControlColor = palette.text;
     const activeControlIconColor = colors.background;
 
+    const clearVideoChromeTimer = () => {
+        if (videoChromeHideTimerRef.current) {
+            clearTimeout(videoChromeHideTimerRef.current);
+            videoChromeHideTimerRef.current = null;
+        }
+    };
+
+    const scheduleVideoChromeHide = () => {
+        clearVideoChromeTimer();
+        if (!isVideoCall || isMinimized || callStatus !== 'active') return;
+        if (!hasVideoChromeInteractionRef.current) return;
+        videoChromeHideTimerRef.current = setTimeout(() => {
+            setShowVideoChrome(false);
+        }, VIDEO_CHROME_HIDE_DELAY_MS);
+    };
+
+    const showVideoChromeNow = (reschedule: boolean = true) => {
+        hasVideoChromeInteractionRef.current = true;
+        if (!showVideoChrome) {
+            setShowVideoChrome(true);
+        }
+        if (reschedule) {
+            scheduleVideoChromeHide();
+        }
+    };
+
+    // Ensure controls are visible when entering fullscreen video call UI
+    // (also fixes Fast Refresh preserving a previously hidden state).
+    useEffect(() => {
+        const isVideoFullscreenVisible = !!isInCall && isVideoCall && !isMinimized;
+        if (isVideoFullscreenVisible && !wasVideoFullscreenVisibleRef.current) {
+            clearVideoChromeTimer();
+            hasVideoChromeInteractionRef.current = false;
+            setShowVideoChrome(true);
+        }
+        wasVideoFullscreenVisibleRef.current = isVideoFullscreenVisible;
+        if (!isVideoFullscreenVisible) {
+            clearVideoChromeTimer();
+            hasVideoChromeInteractionRef.current = false;
+        }
+    }, [isInCall, isVideoCall, isMinimized]);
+
+    useEffect(() => {
+        if (!isVideoCall || isMinimized) {
+            clearVideoChromeTimer();
+            setShowVideoChrome(true);
+            return;
+        }
+        if (callStatus !== 'active') {
+            clearVideoChromeTimer();
+            setShowVideoChrome(true);
+            return;
+        }
+        setShowVideoChrome(true);
+        scheduleVideoChromeHide();
+        return () => clearVideoChromeTimer();
+    }, [isVideoCall, isMinimized, callStatus]);
+
+    if (!isInCall || callStatus === 'idle' || callStatus === 'ended') return null;
+    if (callStatus === 'ringing' && useCallStore.getState().callDirection === 'incoming') return null;
+
     // Shared Bottom Bar - Matches Native Tab Bar Style
     const renderBottomBar = () => (
-        <View style={{ position: 'absolute', bottom: insets.bottom + 20, width: '100%', alignItems: 'center' }}>
+        <View style={{ position: 'absolute', bottom: insets.bottom + 40, width: '100%', alignItems: 'center', zIndex: 60, elevation: 60 }} pointerEvents="box-none">
             <SafeLiquidGlass
                 blurIntensity={20}
                 tint={glassTint}
                 style={[styles.bottomBar, { backgroundColor: palette.controlBarBg }]}
             >
-                <View style={styles.controlsRow}>
-                    <ControlButton
-                        icon={isMuted ? <MicOff /> : <Mic />}
-                        onPress={toggleMute}
-                        isActive={isMuted}
-                        backgroundColor={isMuted ? palette.controlActiveBg : palette.controlBg}
-                        iconColor={isMuted ? activeControlIconColor : baseControlColor}
-                    />
-
-                    <ControlButton
-                        icon={isVideoEnabled ? <Camera /> : <CameraOff />}
-                        onPress={toggleVideo}
-                        isActive={isVideoEnabled}
-                        backgroundColor={isVideoEnabled ? palette.controlActiveBg : palette.controlBg}
-                        iconColor={isVideoEnabled ? activeControlIconColor : baseControlColor}
-                    />
-
-                    {isVideoCall && (
+                <Animated.View style={styles.controlsRow}>
+                    <Animated.View layout={LinearTransition.duration(250)}>
                         <ControlButton
-                            icon={<RefreshIcon />}
-                            onPress={flipCamera}
-                            backgroundColor={palette.controlBg}
-                            iconColor={baseControlColor}
+                            icon={isMuted ? <MicOff /> : <Mic />}
+                            onPress={() => {
+                                showVideoChromeNow();
+                                toggleMute();
+                            }}
+                            isActive={isMuted}
+                            backgroundColor={isMuted ? palette.controlActiveBg : palette.controlBg}
+                            iconColor={isMuted ? activeControlIconColor : baseControlColor}
                         />
+                    </Animated.View>
+
+                    <Animated.View layout={LinearTransition.duration(250)}>
+                        <ControlButton
+                            icon={isVideoEnabled ? <CallVideoIcon /> : <CallVideoOffIcon />}
+                            onPress={() => {
+                                showVideoChromeNow();
+                                toggleVideo();
+                            }}
+                            isActive={isVideoEnabled}
+                            backgroundColor={isVideoEnabled ? palette.controlActiveBg : palette.controlBg}
+                            iconColor={isVideoEnabled ? activeControlIconColor : baseControlColor}
+                        />
+                    </Animated.View>
+
+                    {isVideoCall && isVideoEnabled && (
+                        <Animated.View layout={LinearTransition.duration(250)}>
+                            <ControlButton
+                                icon={<RefreshIcon />}
+                                onPress={() => {
+                                    showVideoChromeNow();
+                                    flipCamera();
+                                }}
+                                backgroundColor={palette.controlBg}
+                                iconColor={baseControlColor}
+                            />
+                        </Animated.View>
                     )}
 
-                    <ControlButton
-                        icon={isSpeakerOn ? <Volume2 /> : <VolumeX />}
-                        onPress={toggleSpeaker}
-                        isActive={isSpeakerOn}
-                        backgroundColor={isSpeakerOn ? palette.controlActiveBg : palette.controlBg}
-                        iconColor={isSpeakerOn ? activeControlIconColor : baseControlColor}
-                    />
+                    <Animated.View layout={LinearTransition.duration(250)}>
+                        <ControlButton
+                            icon={<Volume2 />}
+                            onPress={() => {
+                                showVideoChromeNow();
+                                toggleSpeaker();
+                            }}
+                            isActive={isSpeakerOn}
+                            backgroundColor={isSpeakerOn ? palette.controlActiveBg : palette.controlBg}
+                            iconColor={isSpeakerOn ? activeControlIconColor : baseControlColor}
+                        />
+                    </Animated.View>
 
-                    <ControlButton
-                        icon={<PhoneOff />}
-                        onPress={handleEndCall}
-                        isDestructive
-                        backgroundColor={palette.danger}
-                        iconColor={palette.text}
-                    />
-                </View>
+                    <Animated.View layout={LinearTransition.duration(250)}>
+                        <ControlButton
+                            icon={<PhoneOff />}
+                            onPress={() => {
+                                clearVideoChromeTimer();
+                                handleEndCall();
+                            }}
+                            isDestructive
+                            backgroundColor={palette.danger}
+                            iconColor={palette.text}
+                        />
+                    </Animated.View>
+                </Animated.View>
             </SafeLiquidGlass>
         </View>
     );
@@ -296,6 +386,8 @@ export default function ActiveCallScreen() {
         const miniIsLocal = !fullShowsLocal;
         const FullView = fullShowsLocal ? localStreamUrl : remoteStreamUrl;
         const MiniView = fullShowsLocal ? remoteStreamUrl : localStreamUrl;
+        const fullRtcExtraProps = Platform.OS === 'android' ? ({ zOrder: 0 } as any) : ({} as any);
+        const miniRtcExtraProps = Platform.OS === 'android' ? ({ zOrder: 1 } as any) : ({} as any);
         // iOS remote front-camera frames can arrive mirrored depending on capturer path.
         // Use RTCView's native mirror prop (not style transforms) to compensate.
         const shouldCompensateRemoteMirror = Platform.OS === 'ios';
@@ -311,6 +403,7 @@ export default function ActiveCallScreen() {
                         style={StyleSheet.absoluteFill}
                         objectFit="cover"
                         mirror={isFullMirror}
+                        {...fullRtcExtraProps}
                     />
                 ) : (
                     <View style={[StyleSheet.absoluteFill, { backgroundColor: palette.pipBg, justifyContent: 'center', alignItems: 'center' }]}>
@@ -319,11 +412,20 @@ export default function ActiveCallScreen() {
                 )}
 
                 {/* Header Overlay */}
-                {!isMinimizedMode && (
-                    <View style={{ position: 'absolute', top: insets.top + 10, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
+                {!isMinimizedMode && showVideoChrome && (
+                    <Animated.View
+                        entering={FadeIn.duration(140)}
+                        exiting={FadeOut.duration(180)}
+                        style={[{ position: 'absolute', top: insets.top + 10, left: 16, right: 16, flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', zIndex: 50, elevation: 50 }]}
+                        pointerEvents="box-none"
+                    >
                         <TouchableOpacity
-                            onPress={toggleMinimize}
+                            onPress={() => {
+                                showVideoChromeNow();
+                                toggleMinimize();
+                            }}
                             activeOpacity={0.7}
+                            style={styles.headerBtnWrapper}
                         >
                             <SafeLiquidGlass
                                 style={styles.headerBtn}
@@ -334,23 +436,24 @@ export default function ActiveCallScreen() {
                             </SafeLiquidGlass>
                         </TouchableOpacity>
 
-                        <SafeLiquidGlass
-                            borderRadius={20}
-                            blurIntensity={15}
-                            tint={glassTint}
-                            style={{ paddingHorizontal: 16, paddingVertical: 8, flexDirection: 'row', alignItems: 'center', gap: 8 }}
-                        >
-                            <Text style={{ color: palette.text, fontSize: 16, fontWeight: '700' }}>
-                                {remoteUser?.userName || 'Unknown'}
-                            </Text>
-                            <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: palette.textSubtle }} />
-                            <Text style={{ color: palette.textDim, fontSize: 14 }}>
-                                {formatDuration(callDuration)}
-                            </Text>
-                        </SafeLiquidGlass>
+                        <View style={styles.topInfoGlassWrapper}>
+                            <SafeLiquidGlass
+                                blurIntensity={20}
+                                tint={glassTint}
+                                style={[styles.topInfoGlass, { borderRadius: 22 }]}
+                            >
+                                <Text style={{ color: palette.text, fontSize: 16, fontWeight: '700' }}>
+                                    {remoteUser?.userName || 'Unknown'}
+                                </Text>
+                                <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: palette.textSubtle }} />
+                                <Text style={{ color: palette.textDim, fontSize: 14 }}>
+                                    {callStatus === 'connecting' ? 'Connecting...' : callStatus === 'reconnecting' ? 'Reconnecting...' : formatDuration(callDuration)}
+                                </Text>
+                            </SafeLiquidGlass>
+                        </View>
 
-                        <View style={{ width: 44 }} />
-                    </View>
+                        <View style={{ width: 44, height: 44 }} />
+                    </Animated.View>
                 )}
 
                 {/* PiP feed within screen */}
@@ -364,6 +467,7 @@ export default function ActiveCallScreen() {
                                     style={{ width: '100%', height: '100%' }}
                                     objectFit="cover"
                                     mirror={isMiniMirror}
+                                    {...miniRtcExtraProps}
                                 />
                                 {(!localIsFull && !isVideoEnabled) && (
                                     <View style={[StyleSheet.absoluteFill, { backgroundColor: palette.pipBg, alignItems: 'center', justifyContent: 'center' }]}>
@@ -378,7 +482,16 @@ export default function ActiveCallScreen() {
                     </GestureDetector>
                 )}
 
-                {!isMinimizedMode && renderBottomBar()}
+                {!isMinimizedMode && showVideoChrome && (
+                    <Animated.View
+                        entering={FadeIn.duration(140)}
+                        exiting={FadeOut.duration(180)}
+                        style={[StyleSheet.absoluteFill, { zIndex: 60, elevation: 60 }]}
+                        pointerEvents="box-none"
+                    >
+                        {renderBottomBar()}
+                    </Animated.View>
+                )}
 
                 {isMinimizedMode && (
                     <TouchableOpacity onPress={toggleMinimize} style={StyleSheet.absoluteFill}>
@@ -404,7 +517,15 @@ export default function ActiveCallScreen() {
             <View style={StyleSheet.absoluteFill}>
                 <StatusBar barStyle={isDark ? 'light-content' : 'dark-content'} />
                 <GestureHandlerRootView style={StyleSheet.absoluteFill}>
-                    <View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background }]}>
+                    <View
+                        style={[StyleSheet.absoluteFill, { backgroundColor: colors.background }]}
+                        onTouchStart={() => {
+                            if (isVideoCall && !isMinimized) {
+                                showVideoChromeNow();
+                            }
+                        }}
+                        pointerEvents="box-none"
+                    >
                         {renderVideoContent(false)}
                     </View>
                 </GestureHandlerRootView>
@@ -448,7 +569,7 @@ export default function ActiveCallScreen() {
             {/* Header - Static */}
             <View style={{ paddingTop: insets.top + 32, alignItems: 'center' }}>
                 <Text style={{ color: palette.textSubtle, fontSize: 16, fontWeight: '500', marginBottom: 8 }}>
-                    {callStatus === 'connecting' ? 'Connecting...' : callStatus === 'ringing' ? 'Ringing...' : 'Vibe Audio'}
+                    {callStatus === 'connecting' ? 'Connecting...' : callStatus === 'reconnecting' ? 'Connectivity Issue...' : callStatus === 'ringing' ? 'Ringing...' : 'Vibe Audio'}
                 </Text>
             </View>
 
@@ -490,7 +611,7 @@ export default function ActiveCallScreen() {
             <TouchableOpacity
                 onPress={toggleMinimize}
                 activeOpacity={0.7}
-                style={{ position: 'absolute', top: insets.top + 10, left: 16 }}
+                style={[styles.headerBtnWrapper, { position: 'absolute', top: insets.top + 10, left: 16, zIndex: 60, elevation: 60 }]}
             >
                 <SafeLiquidGlass
                     style={styles.headerBtn}
@@ -509,10 +630,9 @@ const styles = StyleSheet.create({
     pipContainer: {
         position: 'absolute',
         width: 120,
-        height: 160,
+        height: 172,
         borderRadius: 16,
         overflow: 'hidden',
-        borderWidth: 1,
     },
     bottomBar: {
         borderRadius: 32,
@@ -534,13 +654,30 @@ const styles = StyleSheet.create({
         justifyContent: 'center',
         alignItems: 'center',
     },
-    headerBtn: {
+    headerBtnWrapper: {
         width: 44,
         height: 44,
         borderRadius: 22,
+        overflow: 'hidden',
+    },
+    headerBtn: {
+        width: 44,
+        height: 44,
         backgroundColor: 'rgba(255,255,255,0.15)',
         justifyContent: 'center',
         alignItems: 'center',
+    },
+    topInfoGlassWrapper: {
+        borderRadius: 22,
+        overflow: 'hidden',
+    },
+    topInfoGlass: {
+        minHeight: 44,
+        paddingHorizontal: 16,
+        paddingVertical: 10,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
     },
     minimizedContainer: {
         position: 'absolute',

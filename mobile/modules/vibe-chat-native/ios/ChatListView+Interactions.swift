@@ -44,8 +44,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     let velocity = pan.velocity(in: collectionView)
     let horizontal = abs(velocity.x)
     let vertical = abs(velocity.y)
-    // Make swipe-to-reply easier to start while preserving regular vertical scroll.
-    return horizontal > vertical * 0.85
+    // Prioritize clear horizontal intent to avoid competing with vertical list pan.
+    return horizontal > max(35.0, vertical * 1.05)
   }
 
   public func gestureRecognizer(
@@ -54,9 +54,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
   ) -> Bool {
     guard gestureRecognizer === swipeReplyPanGesture || otherGestureRecognizer === swipeReplyPanGesture
     else { return false }
-    // Let collection scrolling continue while we still read horizontal drag progress.
-    return gestureRecognizer === collectionView.panGestureRecognizer
-      || otherGestureRecognizer === collectionView.panGestureRecognizer
+    // Avoid pan competition; once swipe-reply begins we want real-time horizontal feedback.
+    return false
   }
 
   @objc private func handleSwipeReplyPan(_ gesture: UIPanGestureRecognizer) {
@@ -100,23 +99,16 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     guard let indexPath = swipeReplyIndexPath else {
       return
     }
-    // If vertical motion dominates, keep the cell steady so swipe feels responsive
-    // without fighting normal list scrolling.
+    // Ignore vertical-heavy drift without snapping the bubble back on every frame.
     let absX = abs(translation.x)
     let absY = abs(translation.y)
-    if absY > absX * 1.15 {
-      if let cell = collectionView.cellForItem(at: indexPath) {
-        cell.contentView.transform = .identity
-      }
+    if absY > absX * 1.45 {
       return
     }
 
     let directional = swipeReplyIsMe ? -translation.x : translation.x
     let clamped = max(0.0, min(swipeReplyMaxOffset, directional))
-    // Slight non-linear easing gives stronger immediate feedback at short drags.
-    let progress = clamped / swipeReplyMaxOffset
-    let eased = swipeReplyMaxOffset * pow(progress, 0.82)
-    let signedOffset = eased * (swipeReplyIsMe ? -1.0 : 1.0)
+    let signedOffset = clamped * (swipeReplyIsMe ? -1.0 : 1.0)
 
     if let cell = collectionView.cellForItem(at: indexPath) {
       cell.contentView.transform = CGAffineTransform(translationX: signedOffset, y: 0.0)

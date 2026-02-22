@@ -20,7 +20,7 @@ import { useChatStore } from '../../lib/ChatStore'
 import { useAuthStore } from '../../lib/stores/auth-store'
 import { useToastStore } from '../../lib/stores/toast-store'
 import { apiClient } from '../../lib/api-client'
-import { X, Users, Megaphone, Search, Check, Sparkles, ArrowLeft, MessageCircle, Image as ImageIcon } from 'lucide-react-native'
+import { X, Users, Megaphone, Search, Check, ChevronRight, ArrowLeft, MessageCircle, Image as ImageIcon } from 'lucide-react-native'
 import AnimatedGlassButton from '../native/AnimatedGlassButton'
 import SafeLiquidGlass from '../native/SafeLiquidGlass'
 import { EditChatVibeIcon } from '../Icons'
@@ -111,7 +111,7 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
     const { showToast } = useToastStore()
     const isLight = effectiveTheme === 'light'
     const isDark = effectiveTheme === 'dark'
-    const bgColor = isLight ? '#f5f5f5' : colors.background
+    const bgColor = colors.background
 
     // Main panel animation
     const translateY = useSharedValue(CLOSED_Y)
@@ -399,16 +399,11 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
             return (
                 <>
                     <View style={styles.childHeader}>
-                        <AnimatedGlassButton
-                            onPress={closeChildView}
-                            progress={childProgress}
-                            showPanelIcon={false}
-                            effectiveTheme={effectiveTheme}
-                            size={36}
-                            homeIcon={<ArrowLeft size={20} color={colors.text} strokeWidth={1.5} />}
-                            panelIcon={<View />}
-                            homeBackgroundColor={isLight ? '#FFFFFF' : withAlpha(colors.text, 0.1)}
-                        />
+                        <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                            <TouchableOpacity onPress={closeChildView} style={styles.iconBtnCircle} activeOpacity={0.85}>
+                                <ArrowLeft size={20} color={colors.text} strokeWidth={1.5} />
+                            </TouchableOpacity>
+                        </SafeLiquidGlass>
                         <Text style={[styles.childTitle, { color: colors.text }]}>New Group</Text>
                         <TouchableOpacity
                             onPress={handleCreateGroup}
@@ -516,16 +511,11 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
             return (
                 <>
                     <View style={styles.childHeader}>
-                        <AnimatedGlassButton
-                            onPress={closeChildView}
-                            progress={childProgress}
-                            showPanelIcon={false}
-                            effectiveTheme={effectiveTheme}
-                            size={36}
-                            homeIcon={<ArrowLeft size={20} color={colors.text} strokeWidth={1.5} />}
-                            panelIcon={<View />}
-                            homeBackgroundColor={isLight ? '#FFFFFF' : withAlpha(colors.text, 0.1)}
-                        />
+                        <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                            <TouchableOpacity onPress={closeChildView} style={styles.iconBtnCircle} activeOpacity={0.85}>
+                                <ArrowLeft size={20} color={colors.text} strokeWidth={1.5} />
+                            </TouchableOpacity>
+                        </SafeLiquidGlass>
                         <Text style={[styles.childTitle, { color: colors.text }]}>New Channel</Text>
                         <TouchableOpacity
                             onPress={handleCreateChannel}
@@ -633,16 +623,11 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
                             {/* Header & Close - Fixed */}
                             <View style={styles.headerContainer} pointerEvents="box-none">
                                 <Text style={[styles.headerTitle, { color: colors.text }]}>Start Vibe</Text>
-                                <AnimatedGlassButton
-                                    onPress={handleCloseInternal}
-                                    progress={closeButtonProgress}
-                                    showPanelIcon={false}
-                                    effectiveTheme={effectiveTheme}
-                                    size={36}
-                                    homeIcon={<X size={20} color={colors.text} strokeWidth={1.5} />}
-                                    panelIcon={<View />}
-                                    homeBackgroundColor={isLight ? '#FFFFFF' : withAlpha(colors.text, 0.1)}
-                                />
+                                <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                                    <TouchableOpacity onPress={handleCloseInternal} style={styles.iconBtnCircle} activeOpacity={0.85}>
+                                        <X color={colors.text} size={22} />
+                                    </TouchableOpacity>
+                                </SafeLiquidGlass>
                             </View>
 
                             <Animated.ScrollView
@@ -651,42 +636,23 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
                                 contentContainerStyle={styles.scrollContent}
                                 showsVerticalScrollIndicator={false}
                             >
-                                {/* Actions Row - Modern Glass */}
-                                <View style={styles.actionsRow}>
-                                    <TouchableOpacity onPress={() => openChildView('newChat')} style={styles.bubbleBtn}>
-                                        <SafeLiquidGlass style={styles.bubbleGlass} blurIntensity={12}>
-                                            <View style={[styles.bubbleIcon, { backgroundColor: withAlpha(colors.primary, 0.1) }]}>
-                                                <EditChatVibeIcon size={24} color={colors.primary} strokeWidth={1.5} />
-                                            </View>
-                                        </SafeLiquidGlass>
-                                        <Text style={[styles.bubbleLabel, { color: colors.text }]}>New Chat</Text>
+                                {/* Actions - Simple Unified Buttons */}
+                                <View style={styles.simpleActionList}>
+                                    <TouchableOpacity onPress={() => openChildView('newChat')} style={styles.simpleActionBtn} activeOpacity={0.7}>
+                                        <EditChatVibeIcon size={22} color={colors.primary} strokeWidth={1.5} />
+                                        <Text style={[styles.simpleActionText, { color: colors.primary }]}>New Chat</Text>
                                     </TouchableOpacity>
+                                    <View style={[styles.simpleActionDivider, { backgroundColor: withAlpha(colors.text, 0.05) }]} />
 
-                                    <TouchableOpacity onPress={() => openChildView('newGroup')} style={styles.bubbleBtn}>
-                                        <SafeLiquidGlass style={styles.bubbleGlass} blurIntensity={12}>
-                                            <View style={[styles.bubbleIcon, { backgroundColor: withAlpha('#8b5cf6', 0.1) }]}>
-                                                <Users size={22} color="#8b5cf6" strokeWidth={1.5} />
-                                            </View>
-                                        </SafeLiquidGlass>
-                                        <Text style={[styles.bubbleLabel, { color: colors.text }]}>New Group</Text>
+                                    <TouchableOpacity onPress={() => openChildView('newGroup')} style={styles.simpleActionBtn} activeOpacity={0.7}>
+                                        <Users size={22} color={colors.primary} strokeWidth={1.5} />
+                                        <Text style={[styles.simpleActionText, { color: colors.primary }]}>New Group</Text>
                                     </TouchableOpacity>
+                                    <View style={[styles.simpleActionDivider, { backgroundColor: withAlpha(colors.text, 0.05) }]} />
 
-                                    <TouchableOpacity onPress={() => openChildView('newChannel')} style={styles.bubbleBtn}>
-                                        <SafeLiquidGlass style={styles.bubbleGlass} blurIntensity={12}>
-                                            <View style={[styles.bubbleIcon, { backgroundColor: withAlpha('#f59e0b', 0.1) }]}>
-                                                <Megaphone size={22} color="#f59e0b" strokeWidth={1.5} />
-                                            </View>
-                                        </SafeLiquidGlass>
-                                        <Text style={[styles.bubbleLabel, { color: colors.text }]}>New Channel</Text>
-                                    </TouchableOpacity>
-
-                                    <TouchableOpacity onPress={() => { handleCloseInternal(); setTimeout(() => router.push('/test-animation-basic'), 300); }} style={styles.bubbleBtn}>
-                                        <SafeLiquidGlass style={styles.bubbleGlass} blurIntensity={12}>
-                                            <View style={[styles.bubbleIcon, { backgroundColor: withAlpha('#10b981', 0.1) }]}>
-                                                <Sparkles size={22} color="#10b981" strokeWidth={1.5} />
-                                            </View>
-                                        </SafeLiquidGlass>
-                                        <Text style={[styles.bubbleLabel, { color: colors.text }]}>Test</Text>
+                                    <TouchableOpacity onPress={() => openChildView('newChannel')} style={styles.simpleActionBtn} activeOpacity={0.7}>
+                                        <Megaphone size={22} color={colors.primary} strokeWidth={1.5} />
+                                        <Text style={[styles.simpleActionText, { color: colors.primary }]}>New Channel</Text>
                                     </TouchableOpacity>
                                 </View>
 
@@ -794,35 +760,24 @@ const styles = StyleSheet.create({
         paddingHorizontal: 20,
         paddingBottom: 60
     },
-    actionsRow: {
+    simpleActionList: {
+        marginBottom: 24,
+        marginTop: 4,
+        paddingLeft: 4,
+    },
+    simpleActionBtn: {
         flexDirection: 'row',
-        justifyContent: 'space-around',
-        marginBottom: 32,
-        marginTop: 10,
-        paddingHorizontal: 10
-    },
-    bubbleBtn: {
         alignItems: 'center',
-        gap: 10
+        gap: 12,
+        paddingVertical: 10,
     },
-    bubbleGlass: {
-        width: 64,
-        height: 64,
-        borderRadius: 32,
-        overflow: 'hidden',
-        alignItems: 'center',
-        justifyContent: 'center'
+    simpleActionDivider: {
+        height: 1,
+        marginLeft: 30,
     },
-    bubbleIcon: {
-        width: 64,
-        height: 64,
-        borderRadius: 32,
-        alignItems: 'center',
-        justifyContent: 'center'
-    },
-    bubbleLabel: {
-        fontSize: 13,
-        fontWeight: '600',
+    simpleActionText: {
+        fontSize: 17,
+        fontWeight: '500',
     },
     sectionTitle: {
         fontSize: 13,
@@ -1286,6 +1241,20 @@ const styles = StyleSheet.create({
         alignItems: 'center',
         justifyContent: 'center',
         overflow: 'hidden'
+    },
+    glassBtnCircle: {
+        width: 44,
+        height: 44,
+        borderRadius: 22,
+        overflow: 'hidden',
+        alignItems: 'center',
+        justifyContent: 'center'
+    },
+    iconBtnCircle: {
+        width: 44,
+        height: 44,
+        alignItems: 'center',
+        justifyContent: 'center'
     },
     msgBtnGlass: {
         width: 40,

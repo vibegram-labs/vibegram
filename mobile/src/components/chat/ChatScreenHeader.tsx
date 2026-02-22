@@ -1,7 +1,8 @@
 import React from 'react';
 import { StyleSheet, Text, View, TouchableOpacity, Image, Platform } from 'react-native';
 import { BlurView } from 'expo-blur';
-import { ChevronLeft, Search } from 'lucide-react-native';
+import { ChevronLeft, Search, Phone, Video } from 'lucide-react-native';
+import { HeaderBackIcon, HeaderPhoneIcon, HeaderVideoIcon, HeaderSearchIcon } from '../Icons';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -23,6 +24,8 @@ interface ChatScreenHeaderProps {
     };
     onPressSearch?: () => void;
     onPressAvatar?: () => void;
+    onAudioCall?: () => void;
+    onVideoCall?: () => void;
 }
 
 const withAlpha = (color: string, alpha: number) => {
@@ -46,10 +49,69 @@ export default function ChatScreenHeader({
     wallpaperGradient,
     bubbleTheme,
     onPressSearch,
-    onPressAvatar
+    onPressAvatar,
+    onAudioCall,
+    onVideoCall
 }: ChatScreenHeaderProps) {
     const insets = useSafeAreaInsets();
     const router = useRouter();
+
+    if (Platform.OS === 'android') {
+        return (
+            <View style={[styles.androidHeader, { height: insets.top + 60, paddingTop: insets.top }]}>
+                <View style={StyleSheet.absoluteFill}>
+                    <BlurView
+                        intensity={30}
+                        tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                        style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(colors.background, 0.95) }]}
+                    />
+                </View>
+
+                <View style={styles.androidLeft}>
+                    <TouchableOpacity onPress={() => router.back()} style={styles.androidBack}>
+                        <HeaderBackIcon color={colors.text} size={22} strokeWidth={1.2} />
+                    </TouchableOpacity>
+
+                    <TouchableOpacity onPress={onPressAvatar} style={styles.androidProfileGroup} activeOpacity={0.8}>
+                        <View style={styles.androidAvatar}>
+                            {avatarUri ? (
+                                <Image source={{ uri: avatarUri }} style={styles.avatarImage} />
+                            ) : (
+                                <LinearGradient
+                                    colors={bubbleTheme.meGradient}
+                                    start={{ x: 0, y: 0 }}
+                                    end={{ x: 1, y: 1 }}
+                                    style={styles.avatarFallback}
+                                >
+                                    <Text style={styles.avatarLetter}>{title[0]?.toUpperCase() || 'U'}</Text>
+                                </LinearGradient>
+                            )}
+                        </View>
+                        <View style={styles.androidTextGroup}>
+                            <Text style={[styles.androidTitle, { color: colors.text }]} numberOfLines={1}>{title}</Text>
+                            <Text style={[styles.androidSubtitle, { color: isOnline ? '#53E08A' : withAlpha(colors.text, 0.68) }]} numberOfLines={1}>
+                                {subtitle}
+                            </Text>
+                        </View>
+                    </TouchableOpacity>
+                </View>
+
+                <View style={styles.androidRight}>
+                    <TouchableOpacity style={styles.androidIconAction} onPress={onVideoCall} disabled={!onVideoCall}>
+                        <HeaderVideoIcon color={colors.text} size={22} strokeWidth={1.3} />
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.androidIconAction} onPress={onAudioCall} disabled={!onAudioCall}>
+                        <HeaderPhoneIcon color={colors.text} size={22} strokeWidth={1.3} />
+                    </TouchableOpacity>
+                    {onPressSearch && (
+                        <TouchableOpacity style={styles.androidIconAction} onPress={onPressSearch}>
+                            <HeaderSearchIcon color={colors.text} size={22} strokeWidth={1.3} />
+                        </TouchableOpacity>
+                    )}
+                </View>
+            </View>
+        );
+    }
 
     return (
         <>
@@ -171,5 +233,68 @@ const styles = StyleSheet.create({
         color: '#fff',
         fontSize: 18,
         fontWeight: '600',
+    },
+    // Android specific styles
+    androidHeader: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        paddingHorizontal: 8,
+        zIndex: 130,
+        position: 'absolute',
+        top: 0,
+        left: 0,
+        right: 0,
+    },
+    androidLeft: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+    },
+    androidBack: {
+        width: 44,
+        height: 44,
+        alignItems: 'center',
+        justifyContent: 'center',
+        marginRight: 4,
+    },
+    androidProfileGroup: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        flex: 1,
+    },
+    androidAvatar: {
+        width: 38,
+        height: 38,
+        borderRadius: 19,
+        overflow: 'hidden',
+        marginRight: 12,
+    },
+    androidTextGroup: {
+        flex: 1,
+        justifyContent: 'center',
+        paddingRight: 8,
+    },
+    androidTitle: {
+        fontSize: 18,
+        fontWeight: '700',
+        marginBottom: 2,
+    },
+    androidSubtitle: {
+        fontSize: 13,
+        fontWeight: '500',
+    },
+    androidRight: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 0,
+        paddingRight: 4,
+    },
+    androidIconAction: {
+        width: 40,
+        height: 40,
+        alignItems: 'center',
+        justifyContent: 'center',
+        borderRadius: 20,
     },
 });

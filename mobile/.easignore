@@ -4,6 +4,12 @@
 # dependencies
 node_modules/
 
+# git and server backend
+.git/
+server_nodejs_old/
+server/
+client/
+
 # Expo
 .expo/
 dist/
@@ -37,9 +43,13 @@ yarn-error.*
 # typescript
 *.tsbuildinfo
 
-# generated native folders (managed workflow only)
-/ios
-/android
+# Native folders MUST be included for this project (custom native modules / bare changes)
+# Do not ignore ios/ or android/ here.
+ios/Pods/
+ios/build/
+android/.gradle/
+android/app/build/
+android/build/
 
 # Local logs and debug artifacts
 *.log
@@ -51,11 +61,35 @@ tsc_output.txt
 old_bubble.tsx
 temp_tool_selector.tsx
 app/chat copy.txt
+rg
+.tools/
+*.bak
+.easignore.bak
+
+# Editor / local caches / tmp
+.idea/
+.vscode/
+.cache/
+tmp/
+.tmp/
+*.tmp
+*.swp
+*.swo
+
+# Generated artifacts
+*.apk
+*.aab
+*.ipa
+*.dSYM/
+android/.cxx/
+android/app/.cxx/
+android/local.properties
 
 # Wallpaper source files not used by runtime (transparent variants are used)
 assets/Wallpapers/animals.PNG
 assets/Wallpapers/doodle.PNG
 assets/Wallpapers/food.PNG
 assets/Wallpapers/music.png
+assets/Wallpapers/music 2.png
 assets/Wallpapers/music2.PNG
 assets/Wallpapers/process_all_wallpapers.py

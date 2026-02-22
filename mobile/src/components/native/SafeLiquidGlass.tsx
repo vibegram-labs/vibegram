@@ -1,6 +1,7 @@
 import React from 'react'
 import {
   Platform,
+  processColor,
   StyleSheet,
   View,
   useColorScheme,
@@ -9,10 +10,12 @@ import {
 } from 'react-native'
 import Constants from 'expo-constants'
 import { BlurView } from 'expo-blur'
+import { GlassView as ExpoGlassView, isGlassEffectAPIAvailable } from 'expo-glass-effect'
 import { requireNativeViewManager } from 'expo-modules-core'
 
 interface NativeLiquidGlassProps extends ViewProps {
   blurIntensity?: number
+  blurReductionFactor?: number
   tint?: 'default' | 'light' | 'dark' | 'extraLight' | 'regular' | 'prominent'
   interactive?: boolean
   effect?: 'clear' | 'regular'
@@ -67,20 +70,24 @@ export default function SafeLiquidGlass({
     colorScheme === 'system' || !colorScheme ? systemColorScheme : colorScheme
   const isDark = effectiveColorScheme === 'dark'
   const blurTint = tint || (isDark ? 'dark' : 'light')
+  const isExpoGo = Constants.appOwnership === 'expo'
 
   if (Platform.OS === 'ios' && nativeLiquidGlassAvailable && NativeLiquidGlassView) {
     const flattenedStyle = StyleSheet.flatten(style) || {}
     const cornerRadius =
       typeof flattenedStyle.borderRadius === 'number' ? flattenedStyle.borderRadius : undefined
+    const nativeTintColor =
+      Platform.OS === 'android' && tintColor != null ? processColor(tintColor) : tintColor
 
     return (
       <NativeLiquidGlassView
         style={style}
         blurIntensity={blurIntensity}
+        blurReductionFactor={blurReductionFactor}
         tint={tint}
         interactive={interactive}
         effect={effect}
-        tintColor={tintColor}
+        tintColor={nativeTintColor}
         cornerRadius={cornerRadius}
         pressFeedbackEnabled={pressFeedbackEnabled}
         {...props}
@@ -91,6 +98,26 @@ export default function SafeLiquidGlass({
   }
 
   if (Platform.OS === 'ios') {
+    const canUseExpoGlass = isExpoGo && isGlassEffectAPIAvailable()
+    const expoGlassTintColor = typeof tintColor === 'string' ? tintColor : undefined
+    const expoGlassColorScheme =
+      effectiveColorScheme === 'dark' ? 'dark' : effectiveColorScheme === 'light' ? 'light' : 'auto'
+
+    if (canUseExpoGlass) {
+      return (
+        <ExpoGlassView
+          style={[style, { overflow: 'hidden' }]}
+          glassEffectStyle={effect}
+          tintColor={expoGlassTintColor}
+          isInteractive={interactive}
+          colorScheme={expoGlassColorScheme}
+          {...props}
+        >
+          {children}
+        </ExpoGlassView>
+      )
+    }
+
     return (
       <BlurView
         intensity={blurIntensity * 2}
@@ -162,4 +189,3 @@ export const LiquidGlassPresets = {
     blurReductionFactor: 4,
   },
 } as const
-

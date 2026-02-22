@@ -8,10 +8,11 @@ import Animated, {
     withTiming,
 } from 'react-native-reanimated';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Check, AlertCircle, Info, X } from 'lucide-react-native';
+import { X } from 'lucide-react-native';
 import { BlurView } from 'expo-blur';
 import { useThemeStore } from '../../lib/stores/theme-store';
 import { useToastStore } from '../../lib/stores/toast-store';
+import { AnimatedCopyIcon, AnimatedTrashIcon, AnimatedPinIcon, AnimatedSuccessIcon, AnimatedInfoIcon } from '../Icons';
 
 export default function GlassToast() {
     const { visible, message, type, hideToast } = useToastStore();
@@ -66,10 +67,17 @@ export default function GlassToast() {
 
     // Icon logic
     const getIcon = () => {
-        switch (type) {
-            case 'success': return <Check size={20} color={'#4ade80'} />;
-            case 'error': return <AlertCircle size={20} color="#ef4444" />;
-            default: return <Info size={20} color={colors.primary} />;
+        const typeStr = (type || '').toLowerCase();
+
+        switch (typeStr) {
+            case 'success': return <AnimatedSuccessIcon size={20} color={'#4ade80'} strokeWidth={2.5} />;
+            case 'error': return <AnimatedTrashIcon size={20} color="#ef4444" strokeWidth={2.5} />;
+            case 'copy':
+            case 'copied': return <AnimatedCopyIcon size={20} color={colors.text} strokeWidth={2.5} />;
+            case 'delete':
+            case 'trash': return <AnimatedTrashIcon size={20} color="#ef4444" strokeWidth={2.5} />;
+            case 'pin': return <AnimatedPinIcon size={20} color={colors.text} strokeWidth={2.5} />;
+            default: return <AnimatedInfoIcon size={20} color={colors.primary} strokeWidth={2.5} />;
         }
     };
 
