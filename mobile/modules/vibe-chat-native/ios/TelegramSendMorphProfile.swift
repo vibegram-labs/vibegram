@@ -15,15 +15,18 @@ public enum TelegramSendMorphProfile {
     Float(0.27920937042459737), Float(0.91025390625)
   )
 
-  static let bubbleFadeFrom: Float = 1.0
-  static let bubbleFadeDelay: CFTimeInterval = 0.0
-  static let bubbleFadeDuration: CFTimeInterval = 0.15
+  // Destination bubble background often snapshots flatter than the live blur.
+  // Fade it in later while the source bubble is still visible to avoid a
+  // transparent gap and reduce the "solid color" flash.
+  static let bubbleFadeFrom: Float = 0.10
+  static let bubbleFadeDelay: CFTimeInterval = 0.05
+  static let bubbleFadeDuration: CFTimeInterval = 0.17
 
   static let bubbleContentFadeDelay: CFTimeInterval = 0.0
-  static let bubbleContentFadeDuration: CFTimeInterval = 0.12
+  static let bubbleContentFadeDuration: CFTimeInterval = 0.10
 
   static let sourceBackgroundFadeDelay: CFTimeInterval = 0.0
-  static let sourceBackgroundFadeDuration: CFTimeInterval = 0.15
+  static let sourceBackgroundFadeDuration: CFTimeInterval = 0.22
 
   static let sourceTextFadeDelay: CFTimeInterval = 0.0
   static let sourceTextFadeDuration: CFTimeInterval = 0.10
@@ -136,6 +139,31 @@ final class SendTransitionState: NSObject {
       key: "\(keyPrefix).bgH")
   }
 
+  private func addOpacityAnimation(
+    layer: CALayer,
+    from: Float,
+    to: Float,
+    delay: CFTimeInterval,
+    duration: CFTimeInterval,
+    timing: CAMediaTimingFunction,
+    key: String
+  ) {
+    let anim = CABasicAnimation(keyPath: "opacity")
+    anim.fromValue = from
+    anim.toValue = to
+    anim.beginTime = layer.convertTime(CACurrentMediaTime(), from: nil) + delay
+    anim.duration = duration
+    anim.timingFunction = timing
+    anim.fillMode = .both
+    anim.isRemovedOnCompletion = true
+    layer.add(anim, forKey: key)
+
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    layer.opacity = to
+    CATransaction.commit()
+  }
+
   func start(sourceRect: CGRect, targetRect: CGRect) {
     overlayContainer.frame = targetRect
 
@@ -188,46 +216,39 @@ final class SendTransitionState: NSObject {
       startPos: startPos, endPos: endPos, keyPrefix: "bubbleBgMorph")
 
     // Destination bubble background crossfade
-    bubbleBackgroundSnapshot.layer.opacity = TelegramSendMorphProfile.bubbleFadeFrom
-    let backgroundFade = CABasicAnimation(keyPath: "opacity")
-    backgroundFade.fromValue = TelegramSendMorphProfile.bubbleFadeFrom
-    backgroundFade.toValue = 1.0
-    backgroundFade.beginTime = CACurrentMediaTime() + TelegramSendMorphProfile.bubbleFadeDelay
-    backgroundFade.duration = TelegramSendMorphProfile.bubbleFadeDuration
-    backgroundFade.timingFunction = CAMediaTimingFunction(name: .easeIn)
-    backgroundFade.fillMode = .backwards
-    backgroundFade.isRemovedOnCompletion = false
-    bubbleBackgroundSnapshot.layer.add(backgroundFade, forKey: "bubbleBackgroundFadeIn")
-    bubbleBackgroundSnapshot.layer.opacity = 1.0
+    addOpacityAnimation(
+      layer: bubbleBackgroundSnapshot.layer,
+      from: TelegramSendMorphProfile.bubbleFadeFrom,
+      to: 1.0,
+      delay: TelegramSendMorphProfile.bubbleFadeDelay,
+      duration: TelegramSendMorphProfile.bubbleFadeDuration,
+      timing: CAMediaTimingFunction(name: .easeIn),
+      key: "bubbleBackgroundFadeIn"
+    )
 
     // Source background crossfade out
-    sourceBackgroundSnapshot.layer.opacity = 1.0
-    let sourceBgFade = CABasicAnimation(keyPath: "opacity")
-    sourceBgFade.fromValue = 1.0
-    sourceBgFade.toValue = 0.0
-    sourceBgFade.beginTime =
-      CACurrentMediaTime() + TelegramSendMorphProfile.sourceBackgroundFadeDelay
-    sourceBgFade.duration = TelegramSendMorphProfile.sourceBackgroundFadeDuration
-    sourceBgFade.timingFunction = CAMediaTimingFunction(name: .easeOut)
-    sourceBgFade.fillMode = .backwards
-    sourceBgFade.isRemovedOnCompletion = false
-    sourceBackgroundSnapshot.layer.add(sourceBgFade, forKey: "sourceBgFade")
-    sourceBackgroundSnapshot.layer.opacity = 0.0
+    addOpacityAnimation(
+      layer: sourceBackgroundSnapshot.layer,
+      from: 1.0,
+      to: 0.0,
+      delay: TelegramSendMorphProfile.sourceBackgroundFadeDelay,
+      duration: TelegramSendMorphProfile.sourceBackgroundFadeDuration,
+      timing: CAMediaTimingFunction(name: .easeOut),
+      key: "sourceBgFade"
+    )
 
     // Source text fade out
     if let sourceTextSnapshot {
       sourceTextSnapshot.frame = sourceContentStartFrame
-      sourceTextSnapshot.layer.opacity = 1.0
-      let textFadeOut = CABasicAnimation(keyPath: "opacity")
-      textFadeOut.fromValue = 1.0
-      textFadeOut.toValue = 0.0
-      textFadeOut.beginTime = CACurrentMediaTime() + TelegramSendMorphProfile.sourceTextFadeDelay
-      textFadeOut.duration = TelegramSendMorphProfile.sourceTextFadeDuration
-      textFadeOut.timingFunction = CAMediaTimingFunction(name: .easeIn)
-      textFadeOut.fillMode = .backwards
-      textFadeOut.isRemovedOnCompletion = false
-      sourceTextSnapshot.layer.add(textFadeOut, forKey: "sourceTextFadeOut")
-      sourceTextSnapshot.layer.opacity = 0.0
+      addOpacityAnimation(
+        layer: sourceTextSnapshot.layer,
+        from: 1.0,
+        to: 0.0,
+        delay: TelegramSendMorphProfile.sourceTextFadeDelay,
+        duration: TelegramSendMorphProfile.sourceTextFadeDuration,
+        timing: CAMediaTimingFunction(name: .easeIn),
+        key: "sourceTextFadeOut"
+      )
     }
 
     destinationContentSnapshot.frame = destinationContentFrame
@@ -248,16 +269,15 @@ final class SendTransitionState: NSObject {
       duration: TelegramSendMorphProfile.duration, timing: TelegramSendMorphProfile.verticalTiming,
       key: "destContent.positionY", additive: true)
 
-    let contentFadeIn = CABasicAnimation(keyPath: "opacity")
-    contentFadeIn.fromValue = 0.0
-    contentFadeIn.toValue = 1.0
-    contentFadeIn.beginTime = CACurrentMediaTime() + TelegramSendMorphProfile.bubbleContentFadeDelay
-    contentFadeIn.duration = TelegramSendMorphProfile.bubbleContentFadeDuration
-    contentFadeIn.timingFunction = CAMediaTimingFunction(name: .easeIn)
-    contentFadeIn.fillMode = .backwards
-    contentFadeIn.isRemovedOnCompletion = false
-    destinationContentSnapshot.layer.add(contentFadeIn, forKey: "destContentFadeIn")
-    destinationContentSnapshot.layer.opacity = 1.0
+    addOpacityAnimation(
+      layer: destinationContentSnapshot.layer,
+      from: 0.0,
+      to: 1.0,
+      delay: TelegramSendMorphProfile.bubbleContentFadeDelay,
+      duration: TelegramSendMorphProfile.bubbleContentFadeDuration,
+      timing: CAMediaTimingFunction(name: .easeIn),
+      key: "destContentFadeIn"
+    )
   }
 
   func compensateScroll(targetRect: CGRect) {
@@ -505,13 +525,24 @@ enum SendTransitionOverlayFactory {
         snapshot.frame = sourceContentStartFrame
         return snapshot
       }
+      if let contentFallback = makeContentSnapshot(
+        snapshotCell: snapshotCell,
+        captureRect: contentCaptureRect,
+        targetFrame: sourceContentStartFrame
+      ) {
+        return contentFallback
+      }
+      let trimmedText = payload.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmedText.isEmpty else {
+        return nil
+      }
       let label = UILabel(frame: sourceContentStartFrame)
       label.font = UIFont.systemFont(ofSize: 16)
       label.textColor = appearance.textColorThem.withAlphaComponent(0.95)
       label.textAlignment = .left
       label.numberOfLines = 1
       label.lineBreakMode = .byTruncatingTail
-      label.text = payload.text
+      label.text = trimmedText
       return label
     }()
 

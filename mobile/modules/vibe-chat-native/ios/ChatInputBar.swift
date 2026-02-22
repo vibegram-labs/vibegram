@@ -56,18 +56,10 @@ final class FluidVADVisualizer: UIView {
   override func layoutSubviews() {
     super.layoutSubviews()
     let center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
-    let baseRadius = bounds.width / 2
     for l in layers {
       l.bounds = bounds
       l.position = center
-      l.path =
-        UIBezierPath(
-          arcCenter: CGPoint(x: bounds.width / 2, y: bounds.height / 2),
-          radius: baseRadius,
-          startAngle: 0,
-          endAngle: .pi * 2,
-          clockwise: true
-        ).cgPath
+      l.path = UIBezierPath(ovalIn: bounds).cgPath
     }
   }
 
@@ -91,32 +83,15 @@ final class FluidVADVisualizer: UIView {
     time += 0.05
     for (i, l) in layers.enumerated() {
       let idx = CGFloat(i + 1)
-      let layerScale = 1.0 + (level * 0.4 * idx)
 
-      let segments = 60
-      let path = UIBezierPath()
-      let baseRadius: CGFloat = (bounds.width / 2) * layerScale
-      let center = CGPoint(x: bounds.width / 2, y: bounds.height / 2)
+      let idlePulse = sin(time * 2.0 + CGFloat(i * 2)) * 0.04
+      let activePush = level * 0.4 * idx
+      let finalScale = 1.0 + idlePulse + activePush
 
-      for j in 0...segments {
-        let angle = CGFloat(j) * (2 * .pi) / CGFloat(segments)
-        let noiseConfig = 1.0 + CGFloat(i) * 0.2
-        let angleOffset = angle * CGFloat(3 + i)
-        let noise = sin(time * noiseConfig + angleOffset) * (level * 4.0 * idx)
-        let r = baseRadius + noise
+      l.transform = CATransform3DMakeScale(finalScale, finalScale, 1.0)
 
-        let point = CGPoint(x: center.x + r * cos(angle), y: center.y + r * sin(angle))
-        if j == 0 {
-          path.move(to: point)
-        } else {
-          path.addLine(to: point)
-        }
-      }
-      path.close()
-
-      l.path = path.cgPath
-      l.transform = CATransform3DIdentity  // Explicitly reset transform since we drew a scaled path
-      l.opacity = Float(max(0.2, 1.0 - (level * 0.3 * idx)))
+      let baseOpacity = max(0.0, 1.0 - (finalScale - 1.0) * 1.5)
+      l.opacity = Float(baseOpacity * 0.6)
     }
   }
 }
@@ -130,7 +105,11 @@ private final class VideoNoteRecorderViewController: UIViewController,
   private let movieOutput = AVCaptureMovieFileOutput()
   private let sessionQueue = DispatchQueue(label: "chat.video.note.session", qos: .userInitiated)
   private var previewLayer: AVCaptureVideoPreviewLayer?
+  private let backdropBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
   private let circleContainer = UIView()
+  private let circleLoadingBlur = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterialDark))
+  private let circleLoadingShade = UIView()
+  private let circleSpinner = UIActivityIndicatorView(style: .large)
   private let hintLabel = UILabel()
 
   private var startedAt: Date?
@@ -139,6 +118,8 @@ private final class VideoNoteRecorderViewController: UIViewController,
   private var hasAppeared = false
   private var didFinish = false
   private var isSessionConfigured = false
+  private var hasStartedFileRecording = false
+  private var recordingStartTimeoutWorkItem: DispatchWorkItem?
 
   private let progressLayer = CAShapeLayer()
   private var displayLink: CADisplayLink?
@@ -152,12 +133,30 @@ private final class VideoNoteRecorderViewController: UIViewController,
     super.viewDidLoad()
     view.backgroundColor = .clear
     view.isUserInteractionEnabled = true
+    backdropBlur.frame = view.bounds
+    backdropBlur.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    backdropBlur.alpha = 0.88
+    view.addSubview(backdropBlur)
 
     circleContainer.backgroundColor = .black
     circleContainer.clipsToBounds = true
     circleContainer.alpha = 0
-    circleContainer.transform = CGAffineTransform(scaleX: 0.92, y: 0.92)
+    circleContainer.transform = CGAffineTransform(translationX: 0, y: 28).scaledBy(x: 0.92, y: 0.92)
     view.addSubview(circleContainer)
+
+    circleLoadingBlur.isUserInteractionEnabled = false
+    circleLoadingBlur.alpha = 1.0
+    circleContainer.addSubview(circleLoadingBlur)
+
+    circleLoadingShade.backgroundColor = UIColor.black.withAlphaComponent(0.12)
+    circleLoadingShade.isUserInteractionEnabled = false
+    circleLoadingShade.alpha = 1.0
+    circleContainer.addSubview(circleLoadingShade)
+
+    circleSpinner.hidesWhenStopped = true
+    circleSpinner.color = UIColor.white.withAlphaComponent(0.9)
+    circleSpinner.startAnimating()
+    circleContainer.addSubview(circleSpinner)
 
     progressLayer.strokeColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0).cgColor
     progressLayer.lineWidth = 4
@@ -185,6 +184,11 @@ private final class VideoNoteRecorderViewController: UIViewController,
     view.addSubview(hintLabel)
   }
 
+  deinit {
+    recordingStartTimeoutWorkItem?.cancel()
+    displayLink?.invalidate()
+  }
+
   @objc private func closeTapped() {
     stopRecording(send: false)
   }
@@ -210,6 +214,9 @@ private final class VideoNoteRecorderViewController: UIViewController,
     )
     circleContainer.frame = circleFrame
     circleContainer.layer.cornerRadius = side * 0.5
+    circleLoadingBlur.frame = circleContainer.bounds
+    circleLoadingShade.frame = circleContainer.bounds
+    circleSpinner.center = CGPoint(x: circleContainer.bounds.midX, y: circleContainer.bounds.midY)
 
     let path = UIBezierPath(
       arcCenter: CGPoint(x: circleFrame.midX, y: circleFrame.midY),
@@ -264,7 +271,15 @@ private final class VideoNoteRecorderViewController: UIViewController,
     }
   }
 
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    if (isBeingDismissed || isMovingFromParent), !didFinish {
+      finish(url: nil, duration: 0.0, shouldSend: false)
+    }
+  }
+
   func stopRecording(send: Bool) {
+    guard !didFinish else { return }
     pendingSend = send
     sessionQueue.async { [weak self] in
       guard let self else { return }
@@ -272,6 +287,12 @@ private final class VideoNoteRecorderViewController: UIViewController,
         self.movieOutput.stopRecording()
       } else {
         self.stopRequested = true
+        // If recording has not started yet, allow immediate cancel so the overlay
+        // never gets stuck waiting for AVCapture callbacks that may not arrive.
+        guard !send else { return }
+        DispatchQueue.main.async {
+          self.finish(url: nil, duration: 0.0, shouldSend: false)
+        }
       }
     }
   }
@@ -367,6 +388,7 @@ private final class VideoNoteRecorderViewController: UIViewController,
       if session.canAddOutput(movieOutput) {
         session.addOutput(movieOutput)
       }
+      movieOutput.maxRecordedDuration = CMTime(seconds: maxDuration, preferredTimescale: 600)
 
       if let connection = movieOutput.connection(with: .video) {
         if connection.isVideoMirroringSupported {
@@ -394,9 +416,15 @@ private final class VideoNoteRecorderViewController: UIViewController,
   private func startSessionAndRecording() {
     sessionQueue.async { [weak self] in
       guard let self else { return }
-      guard self.isSessionConfigured else { return }
+      guard self.isSessionConfigured, !self.didFinish else { return }
       if !self.session.isRunning {
         self.session.startRunning()
+      }
+      if self.stopRequested && !self.pendingSend {
+        DispatchQueue.main.async {
+          self.finish(url: nil, duration: 0.0, shouldSend: false)
+        }
+        return
       }
       let fm = FileManager.default
       let base =
@@ -414,6 +442,7 @@ private final class VideoNoteRecorderViewController: UIViewController,
         self.displayLink?.invalidate()
         self.displayLink = CADisplayLink(target: self, selector: #selector(self.updateProgress))
         self.displayLink?.add(to: .main, forMode: .common)
+        self.armRecordingStartTimeout()
       }
 
       self.movieOutput.startRecording(to: outputURL, recordingDelegate: self)
@@ -439,9 +468,13 @@ private final class VideoNoteRecorderViewController: UIViewController,
   private func finish(url: URL?, duration: Double, shouldSend: Bool) {
     guard !didFinish else { return }
     didFinish = true
+    recordingStartTimeoutWorkItem?.cancel()
+    recordingStartTimeoutWorkItem = nil
 
     let callback = {
-      self.onFinished?(url, duration, shouldSend)
+      let cb = self.onFinished
+      self.onFinished = nil
+      cb?(url, duration, shouldSend)
     }
 
     if presentingViewController != nil {
@@ -458,6 +491,12 @@ private final class VideoNoteRecorderViewController: UIViewController,
     didStartRecordingTo fileURL: URL,
     from connections: [AVCaptureConnection]
   ) {
+    hasStartedFileRecording = true
+    DispatchQueue.main.async {
+      self.recordingStartTimeoutWorkItem?.cancel()
+      self.recordingStartTimeoutWorkItem = nil
+      self.revealCameraPreviewIfReady(animated: true)
+    }
     sessionQueue.async { [weak self] in
       guard let self else { return }
       guard self.stopRequested else { return }
@@ -471,6 +510,10 @@ private final class VideoNoteRecorderViewController: UIViewController,
     from connections: [AVCaptureConnection],
     error: Error?
   ) {
+    DispatchQueue.main.async {
+      self.recordingStartTimeoutWorkItem?.cancel()
+      self.recordingStartTimeoutWorkItem = nil
+    }
     let elapsed = max(0.0, Date().timeIntervalSince(startedAt ?? Date()))
     let shouldSend = pendingSend && error == nil
     stopSession()
@@ -480,6 +523,40 @@ private final class VideoNoteRecorderViewController: UIViewController,
         duration: elapsed,
         shouldSend: shouldSend
       )
+    }
+  }
+
+  private func armRecordingStartTimeout() {
+    recordingStartTimeoutWorkItem?.cancel()
+    let item = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      guard !self.didFinish, !self.hasStartedFileRecording else { return }
+      self.pendingSend = false
+      self.stopRequested = true
+      self.finish(url: nil, duration: 0.0, shouldSend: false)
+    }
+    recordingStartTimeoutWorkItem = item
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: item)
+  }
+
+  private func revealCameraPreviewIfReady(animated: Bool) {
+    let animations = {
+      self.circleLoadingBlur.alpha = 0.0
+      self.circleLoadingShade.alpha = 0.0
+    }
+    if animated {
+      UIView.animate(
+        withDuration: 0.26,
+        delay: 0.06,
+        options: [.curveEaseOut, .beginFromCurrentState]
+      ) {
+        animations()
+      } completion: { _ in
+        self.circleSpinner.stopAnimating()
+      }
+    } else {
+      animations()
+      circleSpinner.stopAnimating()
     }
   }
 }
@@ -617,12 +694,15 @@ final class ChatInputBar: UIView {
 
   // Appearance
   private var appearance = ChatListAppearance.fallback
-  private var pillTint: UIColor? = ChatListAppearance.fallback.bubbleThemColor.withAlphaComponent(0.14)
+  private var pillTint: UIColor? = ChatListAppearance.fallback.bubbleThemColor.withAlphaComponent(
+    0.14)
 
   // MARK: Layout constants
   private let sideSize: CGFloat = 36
   private let sideGap: CGFloat = 6
-  private let vPad: CGFloat = 6
+  private let topVPad: CGFloat = 6
+  private let bottomVPad: CGFloat = 5
+  private let panelGapV: CGFloat = 6
   private let minPillH: CGFloat = 40
   private let maxPillH: CGFloat = 120
   private let textInsetH: CGFloat = 12
@@ -930,8 +1010,8 @@ final class ChatInputBar: UIView {
     micButton.clipsToBounds = false
     micButton.addSubview(micGlass)
     micButton.sendSubviewToBack(micGlass)
-    let micCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-    micButton.setImage(UIImage(systemName: "mic.fill", withConfiguration: micCfg), for: .normal)
+    let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+    micButton.setImage(UIImage(systemName: "mic", withConfiguration: micCfg), for: .normal)
     micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
     contentRow.addSubview(micButton)
 
@@ -1215,7 +1295,9 @@ final class ChatInputBar: UIView {
     let pillH = clampedTextH + textInsetV * 2 + bannerExtra
     let gifPanelH = gifPanelVisible ? preferredGifPanelHeight() : 0
 
-    let totalH = vPad + pillH + (gifPanelVisible ? (vPad + gifPanelH) : vPad) + safeBottom
+    let totalH =
+      topVPad + pillH + (gifPanelVisible ? (panelGapV + gifPanelH) : 0) + bottomVPad
+      + safeBottom
     let prevH = barHeight
     barHeight = totalH
 
@@ -1223,7 +1305,7 @@ final class ChatInputBar: UIView {
     textView.isScrollEnabled = textH > maxPillH - textInsetV * 2
 
     // ── View frames (CAN animate when triggered from UIView.animate) ──
-    let rowY = vPad
+    let rowY = topVPad
     let rowH = pillH
     contentRow.frame = CGRect(x: 0, y: rowY, width: w, height: rowH)
 
@@ -1337,7 +1419,7 @@ final class ChatInputBar: UIView {
     if gifPanelVisible {
       gifPanel.frame = CGRect(
         x: gifPanelX,
-        y: contentRow.frame.maxY + vPad,
+        y: contentRow.frame.maxY + panelGapV,
         width: gifPanelW,
         height: gifPanelH + safeBottom
       )
@@ -1505,7 +1587,8 @@ final class ChatInputBar: UIView {
       options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
       if button === self.attachButton || button === self.micButton {
-        button.imageView?.transform = CGAffineTransform(scaleX: standardTabScale, y: standardTabScale)
+        button.imageView?.transform = CGAffineTransform(
+          scaleX: standardTabScale, y: standardTabScale)
       } else {
         button.imageView?.transform = isPressed ? iconTransform : .identity
       }
@@ -1685,9 +1768,9 @@ final class ChatInputBar: UIView {
     }
 
     isVideoMode.toggle()
-    let iconName = isVideoMode ? "video.fill" : "mic.fill"
+    let iconName = isVideoMode ? "video" : "mic"
     UIView.transition(with: micButton, duration: 0.2, options: .transitionCrossDissolve) {
-      let cfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+      let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
       self.micButton.setImage(UIImage(systemName: iconName, withConfiguration: cfg), for: .normal)
     }
   }
@@ -1835,6 +1918,11 @@ final class ChatInputBar: UIView {
   private func startVideoNoteRecording() -> Bool {
     guard !isVideoRecordingActive else { return false }
     guard let hostVC = findViewController() else { return false }
+    var presenter = hostVC
+    while let next = presenter.presentedViewController, !next.isBeingDismissed {
+      presenter = next
+    }
+    guard presenter.presentedViewController == nil else { return false }
 
     isVideoRecordingActive = true
 
@@ -1853,7 +1941,7 @@ final class ChatInputBar: UIView {
       self.pendingVideoStopShouldSend = true
     }
     videoNoteRecorderController = recorder
-    hostVC.present(recorder, animated: true)
+    presenter.present(recorder, animated: true)
     return true
   }
 
@@ -2128,7 +2216,7 @@ final class ChatInputBar: UIView {
 
     let trashIcon = UIImageView(
       image: UIImage(
-        systemName: "trash.fill",
+        systemName: "trash",
         withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
       )
     )
@@ -2146,8 +2234,11 @@ final class ChatInputBar: UIView {
       // Step 1: Open door & jump
       let path = UIBezierPath()
       path.move(to: dotStart)
+
+      let jumpHeight: CGFloat = 80
+      let controlY = min(dotStart.y, dotEnd.y) - jumpHeight
       path.addQuadCurve(
-        to: dotEnd, controlPoint: CGPoint(x: (dotStart.x + dotEnd.x) / 2, y: dotStart.y - 40))
+        to: dotEnd, controlPoint: CGPoint(x: (dotStart.x + dotEnd.x) / 2, y: controlY))
 
       let jumpAnim = CAKeyframeAnimation(keyPath: "position")
       jumpAnim.path = path.cgPath
@@ -2162,11 +2253,11 @@ final class ChatInputBar: UIView {
       CATransaction.begin()
       CATransaction.setCompletionBlock {
         // Step 2: Dot falls in, make it shrink
-        UIView.animate(withDuration: 0.1, delay: 0, options: [.curveEaseIn]) {
+        UIView.animate(withDuration: 0.15, delay: 0, options: [.curveEaseIn]) {
           animatedDot.transform = CGAffineTransform(scaleX: 0.1, y: 0.1)
           animatedDot.alpha = 0
           // Trash "closes door" with a squish
-          trashIcon.transform = CGAffineTransform(scaleX: 0.8, y: 0.8).translatedBy(x: 0, y: 3)
+          trashIcon.transform = CGAffineTransform(scaleX: 0.9, y: 0.9).translatedBy(x: 0, y: 2)
         } completion: { _ in
           animatedDot.removeFromSuperview()
           // Step 3: Bounce back to identity smoothly
@@ -2174,7 +2265,7 @@ final class ChatInputBar: UIView {
             trashIcon.transform = .identity
           } completion: { _ in
             // Step 4: Reset back to plus icon
-            UIView.animate(withDuration: 0.2, delay: 0.2, options: .curveEaseInOut) {
+            UIView.animate(withDuration: 0.2, delay: 0.1, options: .curveEaseInOut) {
               trashContainer.alpha = 0
               trashContainer.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
               self.attachButton.alpha = 1
@@ -2281,8 +2372,8 @@ final class ChatInputBar: UIView {
       self.micButton.alpha = 1
       self.micGlass.backgroundColor = .clear
 
-      let micCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-      let iconName = self.isVideoMode ? "video.fill" : "mic.fill"
+      let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+      let iconName = self.isVideoMode ? "video" : "mic"
       self.micButton.setImage(
         UIImage(systemName: iconName, withConfiguration: micCfg), for: .normal)
       self.micButton.tintColor = self.appearance.textColorThem.withAlphaComponent(0.9)
@@ -2494,6 +2585,22 @@ final class ChatAttachmentSheet: UIViewController {
     tabBar.insertSegment(withTitle: "📍 Location", at: 2, animated: false)
     tabBar.insertSegment(withTitle: "👤 Contact", at: 3, animated: false)
     tabBar.selectedSegmentIndex = 0
+    tabBar.backgroundColor = .clear
+    tabBar.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.16)
+    tabBar.setTitleTextAttributes(
+      [
+        .foregroundColor: UIColor(white: 0.95, alpha: 0.84),
+        .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
+      ],
+      for: .normal
+    )
+    tabBar.setTitleTextAttributes(
+      [
+        .foregroundColor: UIColor.white,
+        .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
+      ],
+      for: .selected
+    )
     tabBar.addTarget(self, action: #selector(tabChanged), for: .valueChanged)
     view.addSubview(tabBar)
 

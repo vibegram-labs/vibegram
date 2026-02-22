@@ -190,18 +190,13 @@ private let bubbleStatusSlotWidth: CGFloat = 16.0
 private let bubbleStatusSlotHeight: CGFloat = 14.0
 private let bubbleStatusCheckStrokeWidth: CGFloat = 1.55
 
-private func pixelRound(_ value: CGFloat) -> CGFloat {
-  let scale = max(UIScreen.main.scale, 1.0)
-  return (value * scale).rounded() / scale
-}
-
 private func pixelAlignedRect(_ rect: CGRect) -> CGRect {
-  CGRect(
-    x: pixelRound(rect.origin.x),
-    y: pixelRound(rect.origin.y),
-    width: pixelRound(rect.size.width),
-    height: pixelRound(rect.size.height)
-  )
+  let scale = max(UIScreen.main.scale, 1.0)
+  let minX = floor(rect.minX * scale) / scale
+  let minY = floor(rect.minY * scale) / scale
+  let maxX = ceil(rect.maxX * scale) / scale
+  let maxY = ceil(rect.maxY * scale) / scale
+  return CGRect(x: minX, y: minY, width: max(0.0, maxX - minX), height: max(0.0, maxY - minY))
 }
 
 private func bubbleStatusCheckImage(double: Bool, color: UIColor) -> UIImage? {
@@ -302,7 +297,7 @@ private func bubbleMetaWidths(for row: ChatListRow) -> ChatBubbleMetaWidths {
 func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   -> ChatMessageBubbleLayoutMetrics
 {
-  let maxBubbleWidth = rowWidth * bubbleMaxWidthFactor
+  let maxBubbleWidth = floor(rowWidth * bubbleMaxWidthFactor)
   let maxContentWidth = max(1.0, maxBubbleWidth - (bubbleHorizontalPadding * 2.0))
   let meta = bubbleMetaWidths(for: row)
 
@@ -1199,12 +1194,13 @@ final class ChatListCell: UICollectionViewCell {
     let bubbleHeight = metrics.bubbleHeight
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
-    let bubbleFrame = pixelAlignedRect(CGRect(
-      x: floor(bubbleX),
-      y: floor(bubbleY),
-      width: ceil(bubbleWidth),
-      height: ceil(bubbleHeight)
-    ))
+    let bubbleFrame = pixelAlignedRect(
+      CGRect(
+        x: floor(bubbleX),
+        y: floor(bubbleY),
+        width: ceil(bubbleWidth),
+        height: ceil(bubbleHeight)
+      ))
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
@@ -1224,36 +1220,41 @@ final class ChatListCell: UICollectionViewCell {
     }
 
     if metrics.isMediaLayout {
-      let mediaFrame = pixelAlignedRect(CGRect(
-        x: bubbleFrame.minX + bubbleHorizontalPadding,
-        y: bubbleFrame.minY + bubbleTopPadding,
-        width: metrics.contentWidth,
-        height: metrics.mediaHeight
-      ))
+      let mediaFrame = pixelAlignedRect(
+        CGRect(
+          x: bubbleFrame.minX + bubbleHorizontalPadding,
+          y: bubbleFrame.minY + bubbleTopPadding,
+          width: metrics.contentWidth,
+          height: metrics.mediaHeight
+        ))
       mediaContainerView.frame = mediaFrame
       messageLabel.frame = .zero
-      metaContainerView.frame = pixelAlignedRect(CGRect(
-        x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
-        y: mediaFrame.maxY + bubbleMetaTopSpacing,
-        width: metrics.metaWidth,
-        height: bubbleMetaHeight
-      ))
+      metaContainerView.frame = pixelAlignedRect(
+        CGRect(
+          x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
+          y: mediaFrame.maxY + bubbleMetaTopSpacing,
+          width: metrics.metaWidth,
+          height: bubbleMetaHeight
+        ))
       mediaProgressOverlayView.frame = mediaContainerView.bounds
       layoutMediaSubviews(for: row, in: mediaContainerView.bounds)
     } else {
       mediaContainerView.frame = .zero
-      messageLabel.frame = pixelAlignedRect(CGRect(
-        x: bubbleFrame.minX + bubbleHorizontalPadding,
-        y: bubbleFrame.minY + bubbleTopPadding + max(0.0, metrics.bodyHeight - metrics.textHeight),
-        width: metrics.messageWidth,
-        height: metrics.textHeight
-      ))
-      metaContainerView.frame = pixelAlignedRect(CGRect(
-        x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
-        y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
-        width: metrics.metaWidth,
-        height: bubbleMetaHeight
-      ))
+      messageLabel.frame = pixelAlignedRect(
+        CGRect(
+          x: bubbleFrame.minX + bubbleHorizontalPadding,
+          y: bubbleFrame.minY + bubbleTopPadding
+            + max(0.0, metrics.bodyHeight - metrics.textHeight),
+          width: metrics.messageWidth,
+          height: metrics.textHeight
+        ))
+      metaContainerView.frame = pixelAlignedRect(
+        CGRect(
+          x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
+          y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
+          width: metrics.metaWidth,
+          height: bubbleMetaHeight
+        ))
     }
     layoutMetaLabels(for: row)
 
@@ -1570,12 +1571,13 @@ final class ChatListCell: UICollectionViewCell {
 
     place(timestampLabel, width: widths.timestamp)
     let statusY = floor((bubbleMetaHeight - bubbleStatusSlotHeight) * 0.5)
-    let statusFrame = pixelAlignedRect(CGRect(
-      x: cursorX,
-      y: statusY,
-      width: bubbleStatusSlotWidth,
-      height: bubbleStatusSlotHeight
-    ))
+    let statusFrame = pixelAlignedRect(
+      CGRect(
+        x: cursorX,
+        y: statusY,
+        width: bubbleStatusSlotWidth,
+        height: bubbleStatusSlotHeight
+      ))
     statusLabel.frame = statusFrame
     statusImageView.frame = statusFrame
   }
@@ -1761,6 +1763,18 @@ final class ChatListCell: UICollectionViewCell {
       mediaContainerView.isHidden = mediaWasHidden
       contentView.layoutIfNeeded()
       CATransaction.commit()
+    }
+
+    // Prefer UIKit snapshot APIs first. They tend to preserve UIVisualEffectView
+    // appearance better than offscreen rasterization during transitions.
+    if let snapshot = contentView.resizableSnapshotView(
+      from: captureRect,
+      afterScreenUpdates: true,
+      withCapInsets: .zero
+    ) {
+      snapshot.frame = contentView.convert(captureRect, to: view)
+      snapshot.clipsToBounds = false
+      return snapshot
     }
 
     let format = UIGraphicsImageRendererFormat()

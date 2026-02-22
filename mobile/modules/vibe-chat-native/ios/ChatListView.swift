@@ -143,6 +143,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     NSLog("[ChatListView] init COMPLETE")
   }
 
+  private func pixelAlignedValue(_ value: CGFloat) -> CGFloat {
+    let scale = max(window?.screen.scale ?? UIScreen.main.scale, 1.0)
+    return (value * scale).rounded() / scale
+  }
+
   deinit {
     NotificationCenter.default.removeObserver(self)
   }
@@ -250,7 +255,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           let desiredOffset = attrs.frame.minY - anchor.screenY
           let maxOffset = max(
             0.0, self.collectionView.contentSize.height - self.collectionView.bounds.height)
-          let clampedOffset = max(0.0, min(maxOffset, desiredOffset))
+          let clampedOffset = pixelAlignedValue(max(0.0, min(maxOffset, desiredOffset)))
           self.performInternalScrollAdjustment {
             self.collectionView.setContentOffset(CGPoint(x: 0.0, y: clampedOffset), animated: false)
           }
@@ -550,7 +555,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
             continue
           }
           let slideUp = CABasicAnimation(keyPath: "position.y")
-          slideUp.fromValue = debugAnimSlideOffset as NSNumber
+          slideUp.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
           slideUp.toValue = 0.0 as NSNumber
           slideUp.isAdditive = true
           slideUp.duration = animDuration
@@ -579,7 +584,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
           if let oldScreenY = preUpdateScreenY[key] {
             let currentScreenY = cell.center.y - postOffset
-            let delta = oldScreenY - currentScreenY
+            let delta = pixelAlignedValue(oldScreenY - currentScreenY)
             if abs(delta) > 0.5 {
               let anim = CABasicAnimation(keyPath: "position.y")
               anim.fromValue = delta as NSNumber
@@ -602,7 +607,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
             }()
             if !isHiddenForSend {
               let slideAnim = CABasicAnimation(keyPath: "position.y")
-              slideAnim.fromValue = debugAnimSlideOffset as NSNumber
+              slideAnim.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
               slideAnim.toValue = 0.0 as NSNumber
               slideAnim.isAdditive = true
               slideAnim.duration = animDuration
@@ -700,7 +705,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   func scrollToBottom(animated: Bool) {
-    let maxOffsetY = max(0.0, collectionView.contentSize.height - collectionView.bounds.height)
+    let maxOffsetY = pixelAlignedValue(
+      max(0.0, collectionView.contentSize.height - collectionView.bounds.height))
     if animated {
       // For animated scroll, use UIView spring animation to match the insertion feel.
       shouldAutoScroll = true
@@ -742,7 +748,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let targetY =
       attrs.frame.minY - ((collectionView.bounds.height - attrs.frame.height) * CGFloat(clamped))
     let maxOffset = max(0.0, collectionView.contentSize.height - collectionView.bounds.height)
-    let clampedOffset = max(0.0, min(maxOffset, targetY))
+    let clampedOffset = pixelAlignedValue(max(0.0, min(maxOffset, targetY)))
     collectionView.setContentOffset(CGPoint(x: 0.0, y: clampedOffset), animated: animated)
     previousOffsetY = clampedOffset
     shouldAutoScroll = false
