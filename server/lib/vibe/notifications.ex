@@ -8,12 +8,12 @@ defmodule Vibe.Notifications do
   @expo_push_url "https://exp.host/--/api/v2/push/send"
   @expo_receipts_url "https://exp.host/--/api/v2/push/getReceipts"
   @default_message_title "New message"
+  @apns_voip_prod_base "https://api.push.apple.com"
+  @apns_voip_sandbox_base "https://api.sandbox.push.apple.com"
 
   def send_incoming_call_push(to_user_id, payload) when is_binary(to_user_id) and is_map(payload) do
     with to_user when not is_nil(to_user) <- Accounts.get_user(to_user_id),
-         push_targets when is_map(push_targets) <- normalized_push_targets(to_user.push_token),
-         push_token when is_binary(push_token) <- push_targets.expo,
-         true <- push_token != "" do
+         push_targets when is_map(push_targets) <- normalized_push_targets(to_user.push_token) do
       call_type = normalize_call_type(payload["callType"] || payload["call_type"])
       from_user_id = payload["fromUserId"] || payload["from_user_id"]
       caller_name = payload["fromUserName"] || payload["from_user_name"] || from_user_id || "Unknown"
@@ -39,53 +39,23 @@ defmodule Vibe.Notifications do
           _ -> base_data
         end
 
-      base_message = %{
-        to: push_token,
-        sound: "default",
-        priority: "high",
-        title: caller_name,
-        body: "Incoming #{call_type} call",
-        data: data
-      }
+      expo_result = send_expo_incoming_call_push(push_targets[:expo], to_user_id, caller_name, call_type, caller_image, data)
+      voip_result = send_apns_voip_incoming_call_push(push_targets[:apns_voip], to_user_id, caller_name, call_type, data)
 
-      message =
-        case caller_image do
-          value when is_binary(value) and value != "" ->
-            base_message
-            |> Map.put(:mutableContent, true)
-            |> Map.put(:richContent, %{image: value})
+      case {expo_result, voip_result} do
+        {{:ok, :expo}, _} -> :ok
+        {_, {:ok, :apns_voip}} -> :ok
+        {:noop, :noop} ->
+          Logger.info("[Notifications] Incoming call push skipped: no usable Expo/VoIP token to_user=#{to_user_id}")
+          :noop
 
-          _ ->
-            base_message
-        end
-
-      request =
-        Finch.build(
-          :post,
-          @expo_push_url,
-          [{"content-type", "application/json"}],
-          Jason.encode!(message)
-        )
-
-      case Finch.request(request, Vibe.Finch, receive_timeout: 7_000) do
-        {:ok, %Finch.Response{status: status, body: body}} when status in 200..299 ->
-          log_expo_push_result("call", to_user_id, body)
-          :ok
-
-        {:ok, %Finch.Response{status: status, body: body}} ->
-          Logger.warning(
-            "[Notifications] Expo push failed status=#{status} to_user=#{to_user_id} body=#{String.slice(body || "", 0, 240)}"
-          )
-
-          :error
-
-        {:error, reason} ->
-          Logger.warning("[Notifications] Expo push request failed to_user=#{to_user_id} reason=#{inspect(reason)}")
+        {left, right} ->
+          Logger.warning("[Notifications] Incoming call push delivery failed to_user=#{to_user_id} expo=#{inspect(left)} voip=#{inspect(right)}")
           :error
       end
     else
       _ ->
-        Logger.info("[Notifications] Incoming call push skipped: missing target user/Expo push token to_user=#{to_user_id}")
+        Logger.info("[Notifications] Incoming call push skipped: missing target user/push token to_user=#{to_user_id}")
         :noop
     end
   end
@@ -202,6 +172,118 @@ defmodule Vibe.Notifications do
 
   def send_message_push(_to_user_id, _payload), do: :noop
 
+  defp send_expo_incoming_call_push(push_token, _to_user_id, _caller_name, _call_type, _caller_image, _data)
+       when not is_binary(push_token) do
+    :noop
+  end
+
+  defp send_expo_incoming_call_push(push_token, _to_user_id, _caller_name, _call_type, _caller_image, _data)
+       when is_binary(push_token) and push_token == "" do
+    :noop
+  end
+
+  defp send_expo_incoming_call_push(push_token, to_user_id, caller_name, call_type, caller_image, data) do
+    base_message = %{
+      to: push_token,
+      sound: "default",
+      priority: "high",
+      title: caller_name,
+      body: "Incoming #{call_type} call",
+      data: data
+    }
+
+    message =
+      case caller_image do
+        value when is_binary(value) and value != "" ->
+          base_message
+          |> Map.put(:mutableContent, true)
+          |> Map.put(:richContent, %{image: value})
+
+        _ ->
+          base_message
+      end
+
+    request =
+      Finch.build(
+        :post,
+        @expo_push_url,
+        [{"content-type", "application/json"}],
+        Jason.encode!(message)
+      )
+
+    case Finch.request(request, Vibe.Finch, receive_timeout: 7_000) do
+      {:ok, %Finch.Response{status: status, body: body}} when status in 200..299 ->
+        log_expo_push_result("call", to_user_id, body)
+        {:ok, :expo}
+
+      {:ok, %Finch.Response{status: status, body: body}} ->
+        Logger.warning(
+          "[Notifications] Expo push failed status=#{status} to_user=#{to_user_id} body=#{String.slice(body || "", 0, 240)}"
+        )
+
+        :error
+
+      {:error, reason} ->
+        Logger.warning("[Notifications] Expo push request failed to_user=#{to_user_id} reason=#{inspect(reason)}")
+        :error
+    end
+  end
+
+  defp send_apns_voip_incoming_call_push(voip_token, _to_user_id, _caller_name, _call_type, _data)
+       when not is_binary(voip_token) do
+    :noop
+  end
+
+  defp send_apns_voip_incoming_call_push(voip_token, _to_user_id, _caller_name, _call_type, _data)
+       when is_binary(voip_token) and voip_token == "" do
+    :noop
+  end
+
+  defp send_apns_voip_incoming_call_push(voip_token, to_user_id, caller_name, call_type, data) do
+    with {:ok, config} <- apns_voip_config(),
+         {:ok, jwt} <- apns_voip_jwt(config),
+         {:ok, body} <- apns_voip_payload(data, caller_name, call_type) do
+      url = "#{config.base_url}/3/device/#{URI.encode(voip_token)}"
+
+      headers = [
+        {"content-type", "application/json"},
+        {"authorization", "bearer " <> jwt},
+        {"apns-push-type", "voip"},
+        {"apns-priority", "10"},
+        {"apns-topic", config.topic},
+        {"apns-expiration", "0"},
+        {"apns-collapse-id", Map.get(data, :callId, "") |> to_string()}
+      ]
+      |> Enum.reject(fn {_k, v} -> v in [nil, ""] end)
+
+      request = Finch.build(:post, url, headers, body)
+
+      case Finch.request(request, Vibe.Finch, receive_timeout: 7_000) do
+        {:ok, %Finch.Response{status: 200}} ->
+          Logger.info("[Notifications] APNs VoIP push accepted to_user=#{to_user_id} call_type=#{call_type}")
+          {:ok, :apns_voip}
+
+        {:ok, %Finch.Response{status: status, body: response_body}} ->
+          Logger.warning(
+            "[Notifications] APNs VoIP push failed status=#{status} to_user=#{to_user_id} body=#{String.slice(response_body || "", 0, 240)}"
+          )
+          :error
+
+        {:error, reason} ->
+          Logger.warning("[Notifications] APNs VoIP request failed to_user=#{to_user_id} reason=#{inspect(reason)}")
+          :error
+      end
+    else
+      {:error, :missing_config} ->
+        Logger.info("[Notifications] APNs VoIP push skipped: missing APNs VoIP config")
+        :noop
+
+      {:error, reason} ->
+        Logger.warning("[Notifications] APNs VoIP push setup failed to_user=#{to_user_id} reason=#{inspect(reason)}")
+        :error
+    end
+  end
+
   defp normalized_push_targets(token) when is_binary(token) do
     trimmed = String.trim(token)
 
@@ -238,6 +320,123 @@ defmodule Vibe.Notifications do
   end
 
   defp normalize_token_value(_), do: nil
+
+  defp apns_voip_config do
+    team_id = System.get_env("APPLE_VOIP_TEAM_ID") |> normalize_token_value()
+    key_id = System.get_env("APPLE_VOIP_KEY_ID") |> normalize_token_value()
+    private_key =
+      System.get_env("APPLE_VOIP_PRIVATE_KEY")
+      |> normalize_apns_private_key()
+
+    topic =
+      (System.get_env("APPLE_VOIP_TOPIC") |> normalize_token_value()) ||
+        case System.get_env("APPLE_BUNDLE_ID") |> normalize_token_value() do
+          nil -> nil
+          bundle_id -> bundle_id <> ".voip"
+        end
+
+    base_url =
+      case String.downcase(System.get_env("APPLE_VOIP_APNS_ENV") || "") do
+        "sandbox" -> @apns_voip_sandbox_base
+        "development" -> @apns_voip_sandbox_base
+        "dev" -> @apns_voip_sandbox_base
+        _ -> @apns_voip_prod_base
+      end
+
+    if is_binary(team_id) and is_binary(key_id) and is_binary(private_key) and is_binary(topic) do
+      {:ok, %{team_id: team_id, key_id: key_id, private_key: private_key, topic: topic, base_url: base_url}}
+    else
+      {:error, :missing_config}
+    end
+  end
+
+  defp normalize_apns_private_key(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    normalized =
+      trimmed
+      |> String.replace("\\r\\n", "\n")
+      |> String.replace("\\n", "\n")
+      |> String.replace("\\r", "\n")
+
+    if normalized == "", do: nil, else: normalized
+  end
+
+  defp normalize_apns_private_key(_), do: nil
+
+  defp apns_voip_jwt(config) do
+    now = System.system_time(:second)
+
+    header = %{"alg" => "ES256", "kid" => config.key_id}
+    claims = %{"iss" => config.team_id, "iat" => now}
+
+    signing_input =
+      base64url_encode(Jason.encode!(header)) <>
+        "." <> base64url_encode(Jason.encode!(claims))
+
+    with {:ok, private_key} <- decode_apns_private_key(config.private_key),
+         {:ok, signature} <- sign_es256_jwt(signing_input, private_key) do
+      {:ok, signing_input <> "." <> base64url_encode(signature)}
+    end
+  end
+
+  defp decode_apns_private_key(pem) when is_binary(pem) do
+    try do
+      case :public_key.pem_decode(String.to_charlist(pem)) do
+        [entry | _] ->
+          {:ok, :public_key.pem_entry_decode(entry)}
+
+        _ ->
+          {:error, :invalid_apns_private_key_pem}
+      end
+    rescue
+      error -> {:error, {:invalid_apns_private_key_pem, error}}
+    end
+  end
+
+  defp sign_es256_jwt(signing_input, private_key) do
+    try do
+      der_sig = :public_key.sign(signing_input, :sha256, private_key)
+      case :public_key.der_decode(:"ECDSA-Sig-Value", der_sig) do
+        {r, s} when is_integer(r) and is_integer(s) ->
+          {:ok, <<int_to_fixed_32(r)::binary, int_to_fixed_32(s)::binary>>}
+
+        _ ->
+          {:error, :invalid_apns_signature}
+      end
+    rescue
+      error -> {:error, {:apns_sign_failed, error}}
+    end
+  end
+
+  defp int_to_fixed_32(int) when is_integer(int) and int >= 0 do
+    bin = :binary.encode_unsigned(int)
+    case byte_size(bin) do
+      32 -> bin
+      size when size < 32 -> :binary.copy(<<0>>, 32 - size) <> bin
+      size when size > 32 -> binary_part(bin, size - 32, 32)
+    end
+  end
+
+  defp apns_voip_payload(data, caller_name, call_type) when is_map(data) do
+    aps = %{"content-available" => 1}
+    payload =
+      data
+      |> Map.put_new(:event, "call-start")
+      |> Map.put_new(:type, "call-start")
+      |> Map.put_new(:nativeCall, true)
+      |> Map.put(:callerLabel, caller_name)
+      |> Map.put(:callType, if(call_type == "video", do: "video", else: "voice"))
+      |> Map.put(:aps, aps)
+
+    {:ok, Jason.encode!(payload)}
+  rescue
+    error -> {:error, {:apns_payload_encode_failed, error}}
+  end
+
+  defp base64url_encode(binary) when is_binary(binary) do
+    Base.url_encode64(binary, padding: false)
+  end
 
   defp normalize_call_type(value) when is_binary(value) do
     if String.downcase(value) == "video", do: "video", else: "voice"
