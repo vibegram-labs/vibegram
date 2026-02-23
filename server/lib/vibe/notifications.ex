@@ -44,8 +44,36 @@ defmodule Vibe.Notifications do
           _ -> base_data
         end
 
-      expo_result = send_expo_incoming_call_push(push_targets[:expo], to_user_id, caller_name, call_type, caller_image, data)
-      voip_result = send_apns_voip_incoming_call_push(push_targets[:apns_voip], to_user_id, caller_name, call_type, data)
+      has_voip_target = is_binary(push_targets[:apns_voip]) and push_targets[:apns_voip] != ""
+
+      voip_result =
+        send_apns_voip_incoming_call_push(
+          push_targets[:apns_voip],
+          to_user_id,
+          caller_name,
+          call_type,
+          data
+        )
+
+      expo_result =
+        cond do
+          has_voip_target and voip_result == {:ok, :apns_voip} ->
+            Logger.info(
+              "[Notifications] Expo call push skipped to_user=#{to_user_id} reason=voip_accepted"
+            )
+
+            :noop
+
+          true ->
+            send_expo_incoming_call_push(
+              push_targets[:expo],
+              to_user_id,
+              caller_name,
+              call_type,
+              caller_image,
+              data
+            )
+        end
 
       case {expo_result, voip_result} do
         {{:ok, :expo}, _} -> :ok
@@ -187,8 +215,8 @@ defmodule Vibe.Notifications do
     :noop
   end
 
-  defp send_expo_incoming_call_push(push_token, to_user_id, caller_name, call_type, caller_image, data) do
-    base_message = %{
+  defp send_expo_incoming_call_push(push_token, to_user_id, caller_name, call_type, _caller_image, data) do
+    message = %{
       to: push_token,
       sound: "default",
       priority: "high",
@@ -196,17 +224,6 @@ defmodule Vibe.Notifications do
       body: "Incoming #{call_type} call",
       data: data
     }
-
-    message =
-      case caller_image do
-        value when is_binary(value) and value != "" ->
-          base_message
-          |> Map.put(:mutableContent, true)
-          |> Map.put(:richContent, %{image: value})
-
-        _ ->
-          base_message
-      end
 
     request =
       Finch.build(

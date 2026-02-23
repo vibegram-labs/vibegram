@@ -1,5 +1,6 @@
 defmodule VibeWeb.UserChannel do
   use VibeWeb, :channel
+  require Logger
   alias VibeWeb.Presence
   alias Vibe.Accounts
   alias Vibe.Notifications
