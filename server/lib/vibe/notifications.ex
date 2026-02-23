@@ -463,6 +463,9 @@ defmodule Vibe.Notifications do
     try do
       der_sig = :public_key.sign(signing_input, :sha256, private_key)
       case :public_key.der_decode(:"ECDSA-Sig-Value", der_sig) do
+        {:"ECDSA-Sig-Value", r, s} when is_integer(r) and is_integer(s) ->
+          {:ok, <<int_to_fixed_32(r)::binary, int_to_fixed_32(s)::binary>>}
+
         {r, s} when is_integer(r) and is_integer(s) ->
           {:ok, <<int_to_fixed_32(r)::binary, int_to_fixed_32(s)::binary>>}
 
