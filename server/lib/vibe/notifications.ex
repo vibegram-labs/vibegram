@@ -447,7 +447,7 @@ defmodule Vibe.Notifications do
 
   defp decode_apns_private_key(pem) when is_binary(pem) do
     try do
-      case :public_key.pem_decode(String.to_charlist(pem)) do
+      case :public_key.pem_decode(pem) do
         [entry | _] ->
           {:ok, :public_key.pem_entry_decode(entry)}
 
