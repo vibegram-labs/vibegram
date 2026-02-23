@@ -12,6 +12,7 @@ import { useEffect, useRef } from 'react'
 import * as Notifications from 'expo-notifications'
 import { useShallow } from 'zustand/react/shallow'
 import { useThemeStore } from '../src/lib/stores/theme-store'
+import { resolveThemeVariant, useWallpaperStore } from '../src/lib/stores/wallpaper-store'
 import { useAuthStore } from '../src/lib/stores/auth-store'
 import ThemeBackground from '../src/components/ThemeBackground'
 import GlassToast from '../src/components/ui/GlassToast';
@@ -20,9 +21,7 @@ import { GlobalMusicPlayer } from '../src/components/music/GlobalMusicPlayer';
 import VibeResponseToast from '../src/components/shared/VibeResponseToast';
 import { useTransientAgentStore } from '../src/lib/stores/transient-agent-store';
 
-// Call components (dynamically imported to handle environments without WebRTC)
-import IncomingCallModal from '../src/components/call/IncomingCallModal';
-import ActiveCallScreen from '../src/components/call/ActiveCallScreen';
+// Call state is still managed in JS, but iOS/Android native call UI is used.
 import { useCallStore } from '../src/lib/stores/CallStore';
 import { getUserChannel } from '../src/lib/ChatStore';
 import SessionExpiredBanner from '../src/components/shared/SessionExpiredBanner';
@@ -58,8 +57,8 @@ export default function RootLayout() {
   const nativeCallUiRuntimeInfo = getNativeCallModule()
   const supportsNativeInAppCallUi = !!nativeCallUiRuntimeInfo?.supportsInAppUi?.()
   const enableNativeInAppCallUi = supportsNativeInAppCallUi
-  const showIncomingCallOverlay = !enableNativeInAppCallUi
-  const showActiveCallOverlay = !enableNativeInAppCallUi
+  const activeWallpaperTheme = useWallpaperStore((s) => s.activeTheme)
+  const activeWallpaperThemeId = useWallpaperStore((s) => s.activeThemeId)
 
   const callUiSnapshot = useCallStore(
     useShallow((s) => ({
@@ -98,6 +97,7 @@ export default function RootLayout() {
   const nativeCallDrainInFlightRef = useRef(false);
   const deferredNativeCallEventsRef = useRef<any[]>([]);
   const nativeCallUiDebugKeyRef = useRef<string>('');
+  const resolvedCallWallpaperTheme = resolveThemeVariant(activeWallpaperTheme, effectiveTheme === 'dark')
 
   const drainNativeCallEvents = async () => {
     if (nativeCallDrainInFlightRef.current) return;
@@ -195,6 +195,11 @@ export default function RootLayout() {
   }, [enableNativeInAppCallUi]);
 
   useEffect(() => {
+    if (Platform.OS !== 'ios' || enableNativeInAppCallUi) return;
+    getNativeCallModule()?.hideCallUi?.();
+  }, [enableNativeInAppCallUi]);
+
+  useEffect(() => {
     if (!enableNativeInAppCallUi) return;
     const nativeCall = getNativeCallModule();
     if (!nativeCall?.setCallUiState) return;
@@ -265,8 +270,39 @@ export default function RootLayout() {
       canFlipCamera: callType === 'video',
       callDuration: callUiSnapshot.callDuration,
       isDark: effectiveTheme === 'dark',
+      nativeThemeId: activeWallpaperThemeId,
+      nativeThemeIsDark: effectiveTheme === 'dark',
+      wallpaperGradient: resolvedCallWallpaperTheme.backgroundGradient,
+      wallpaperOpacity: 1,
+      wallpaperPatternGradient: resolvedCallWallpaperTheme.patternGradientColors || [],
+      wallpaperPatternLocations: resolvedCallWallpaperTheme.patternGradientLocations || [],
+      wallpaperPatternOpacity: resolvedCallWallpaperTheme.patternOpacity ?? 0,
+      wallpaperMaskKey:
+        resolvedCallWallpaperTheme.maskedImage ||
+        activeWallpaperTheme.maskedImage ||
+        undefined,
     });
-  }, [enableNativeInAppCallUi, callUiSnapshot, effectiveTheme]);
+  }, [
+    enableNativeInAppCallUi,
+    callUiSnapshot,
+    effectiveTheme,
+    activeWallpaperTheme,
+    activeWallpaperThemeId,
+    resolvedCallWallpaperTheme,
+  ]);
+
+  // Keep call duration ticking even when local RN call screens are disabled.
+  useEffect(() => {
+    let timer: ReturnType<typeof setInterval> | null = null;
+    if (callUiSnapshot.callStatus === 'active') {
+      timer = setInterval(() => {
+        useCallStore.getState().updateDuration();
+      }, 1000);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [callUiSnapshot.callStatus]);
 
   useEffect(() => {
     void drainNativeCallEvents();
@@ -536,9 +572,7 @@ export default function RootLayout() {
             onViewFull={handleViewFullResponse}
           />
 
-          {/* Global Call Overlays */}
-          {showIncomingCallOverlay && <IncomingCallModal />}
-          {showActiveCallOverlay && <ActiveCallScreen />}
+          {/* Native call UI is the single call surface; local RN call overlays disabled. */}
         </View>
       </KeyboardProvider>
     </GestureHandlerRootViewAny>

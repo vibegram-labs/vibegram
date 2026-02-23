@@ -11,7 +11,7 @@
  * - Adaptive video quality with bandwidth monitoring
  */
 
-import { NativeModules, Platform } from 'react-native';
+import { DeviceEventEmitter, NativeModules, Platform } from 'react-native';
 
 // Dynamic module references - populated on first use
 let RTCPeerConnection: any = null;
@@ -20,6 +20,7 @@ let RTCIceCandidate: any = null;
 let mediaDevices: any = null;
 let MediaStream: any = null;
 let InCallManager: any = null;
+let inCallProximitySub: { remove: () => void } | null = null;
 
 // WebRTC module loading state
 let webrtcLoaded = false;
@@ -85,6 +86,27 @@ class WebRTCService {
     private lastBytesTimestamp: number = 0;
 
     private constructor() { }
+
+    private ensureInCallProximityListener(): void {
+        if (inCallProximitySub || Platform.OS === 'web') return;
+        try {
+            // InCallManager emits "Proximity" even if the app does not actively consume it.
+            // Register a no-op listener to avoid React Native warning spam.
+            inCallProximitySub = DeviceEventEmitter.addListener('Proximity', () => { });
+        } catch {
+            inCallProximitySub = null;
+        }
+    }
+
+    private removeInCallProximityListener(): void {
+        try {
+            inCallProximitySub?.remove();
+        } catch {
+            // Ignore
+        } finally {
+            inCallProximitySub = null;
+        }
+    }
 
     static getInstance(): WebRTCService {
         if (!WebRTCService.instance) {
@@ -227,6 +249,7 @@ class WebRTCService {
 
             // Start InCallManager for proper audio routing
             if (InCallManager) {
+                this.ensureInCallProximityListener();
                 InCallManager.start({ media: withVideo ? 'video' : 'audio' });
                 InCallManager.setForceSpeakerphoneOn(false);
             }
@@ -655,6 +678,7 @@ class WebRTCService {
                 // Ignore
             }
         }
+        this.removeInCallProximityListener();
     }
 }
 

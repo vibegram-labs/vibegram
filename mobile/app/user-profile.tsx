@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { Alert, View, ActivityIndicator, StyleSheet } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Alert, View, ActivityIndicator, StyleSheet, InteractionManager } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 
 import UserProfile from '../src/components/chat/UserProfile';
@@ -168,14 +168,27 @@ export default function UserProfileRoute() {
     const profileImageParam = typeof params.profileImage === 'string' ? params.profileImage : '';
     const isOnlineParam = toBool(params.isOnline);
 
+    // Stabilize the store selector: resolve chatId once and subscribe by ID
+    // so the selector doesn't re-run .find() on unrelated store changes.
+    const resolvedChatIdRef = useRef<string | undefined>(undefined);
     const chat = useChatStore((s) => {
         if (chatIdParam) {
             const byChatId = s.chats.find((entry) => entry.chatId === chatIdParam);
-            if (byChatId) return byChatId;
+            if (byChatId) {
+                resolvedChatIdRef.current = byChatId.chatId;
+                return byChatId;
+            }
         }
         if (!userId) return undefined;
+        // Use cached ID for subsequent renders to avoid full scan
+        if (resolvedChatIdRef.current) {
+            const cached = s.chats.find((entry) => entry.chatId === resolvedChatIdRef.current);
+            if (cached) return cached;
+        }
         const targetId = userId.toUpperCase();
-        return s.chats.find((entry) => (entry.friendId || '').toUpperCase() === targetId);
+        const found = s.chats.find((entry) => (entry.friendId || '').toUpperCase() === targetId);
+        if (found) resolvedChatIdRef.current = found.chatId;
+        return found;
     });
 
     const [remoteProfile, setRemoteProfile] = useState<{
@@ -186,12 +199,22 @@ export default function UserProfileRoute() {
         online?: boolean;
     }>({});
     const [contentLoading, setContentLoading] = useState(false);
-    const [mediaItems, setMediaItems] = useState<UserProfileMediaItem[]>([]);
-    const [videoItems, setVideoItems] = useState<UserProfileMediaItem[]>([]);
-    const [imageItems, setImageItems] = useState<UserProfileMediaItem[]>([]);
-    const [fileItems, setFileItems] = useState<UserProfileFileItem[]>([]);
-    const [linkItems, setLinkItems] = useState<UserProfileLinkItem[]>([]);
-    const [pinnedItems, setPinnedItems] = useState<UserProfilePinnedItem[]>([]);
+    // Batched content state to avoid multiple re-renders
+    const [contentData, setContentData] = useState<{
+        mediaItems: UserProfileMediaItem[];
+        videoItems: UserProfileMediaItem[];
+        imageItems: UserProfileMediaItem[];
+        fileItems: UserProfileFileItem[];
+        linkItems: UserProfileLinkItem[];
+        pinnedItems: UserProfilePinnedItem[];
+    }>({
+        mediaItems: [],
+        videoItems: [],
+        imageItems: [],
+        fileItems: [],
+        linkItems: [],
+        pinnedItems: [],
+    });
 
     useEffect(() => {
         let cancelled = false;
@@ -232,17 +255,26 @@ export default function UserProfileRoute() {
         const run = async () => {
             const startedAt = Date.now();
             if (!resolvedChatId) {
-                setMediaItems([]);
-                setVideoItems([]);
-                setImageItems([]);
-                setFileItems([]);
-                setLinkItems([]);
-                setPinnedItems([]);
+                setContentData({
+                    mediaItems: [],
+                    videoItems: [],
+                    imageItems: [],
+                    fileItems: [],
+                    linkItems: [],
+                    pinnedItems: [],
+                });
                 userProfilePerfLog('content:skip:no-chat', { dt: Date.now() - startedAt });
                 return;
             }
 
             setContentLoading(true);
+
+            // Wait for navigation transition to finish before doing heavy work
+            await new Promise<void>((resolve) => {
+                InteractionManager.runAfterInteractions(() => resolve());
+            });
+            if (cancelled) return;
+
             try {
                 // Use existing local messages immediately so profile screen mounts fast.
                 // Only refetch if we have no local history yet.
@@ -263,6 +295,8 @@ export default function UserProfileRoute() {
                         localMessageCount,
                     });
                 }
+
+                if (cancelled) return;
 
                 const latestChat = useChatStore.getState().chats.find((c) => c.chatId === resolvedChatId);
                 const sourceMessages = latestChat?.messages || [];
@@ -286,26 +320,38 @@ export default function UserProfileRoute() {
                     totalDt: Date.now() - startedAt,
                 });
                 if (cancelled) return;
-                setMediaItems(derived.mediaItems);
-                setVideoItems(derived.videoItems);
-                setImageItems(derived.imageItems);
-                setFileItems(derived.fileItems);
-                setLinkItems(derived.linkItems);
 
-                let pinned: UserProfilePinnedItem[] = [];
-                try {
-                    const pinnedCached = pinnedItemsCache.get(resolvedChatId);
-                    const now = Date.now();
-                    if (pinnedCached && (now - pinnedCached.cachedAt) < PINNED_CACHE_TTL_MS) {
-                        pinned = pinnedCached.items;
-                        userProfilePerfLog('content:pinned:cache-hit', {
-                            chatId: resolvedChatId,
-                            count: pinned.length,
-                            totalDt: Date.now() - startedAt,
-                        });
-                    } else {
+                // PHASE 1: Apply derived content IMMEDIATELY so the screen appears fast.
+                // Don't wait for the pinned messages API call (which can take 3+ seconds).
+                const pinnedCached = pinnedItemsCache.get(resolvedChatId);
+                const now = Date.now();
+                const hasFreshPinnedCache = pinnedCached && (now - pinnedCached.cachedAt) < PINNED_CACHE_TTL_MS;
+                setContentData({
+                    mediaItems: derived.mediaItems,
+                    videoItems: derived.videoItems,
+                    imageItems: derived.imageItems,
+                    fileItems: derived.fileItems,
+                    linkItems: derived.linkItems,
+                    pinnedItems: hasFreshPinnedCache ? pinnedCached.items : [],
+                });
+                userProfilePerfLog('content:apply:phase1', {
+                    chatId: resolvedChatId,
+                    media: derived.mediaItems.length,
+                    videos: derived.videoItems.length,
+                    images: derived.imageItems.length,
+                    files: derived.fileItems.length,
+                    links: derived.linkItems.length,
+                    pinnedFromCache: hasFreshPinnedCache ? pinnedCached.items.length : 0,
+                    totalDt: Date.now() - startedAt,
+                });
+
+                // PHASE 2: Fetch pinned messages in the background (non-blocking).
+                // The screen is already visible and interactive at this point.
+                if (!hasFreshPinnedCache) {
+                    try {
                         const pinnedStart = Date.now();
                         const pinnedResp = await apiClient.getPinnedMessages(resolvedChatId);
+                        if (cancelled) return;
                         const rawList = Array.isArray(pinnedResp)
                             ? pinnedResp
                             : Array.isArray((pinnedResp as any)?.data)
@@ -314,36 +360,25 @@ export default function UserProfileRoute() {
                                     ? (pinnedResp as any).messages
                                     : [];
 
-                        pinned = rawList.map((item: any) => ({
+                        const pinned: UserProfilePinnedItem[] = rawList.map((item: any) => ({
                             id: item?.id || item?.messageId || item?.message_id || `${Math.random()}`,
                             type: item?.type || 'text',
                             text: item?.plaintext || item?.content || item?.text || item?.fileName || item?.file_name || '',
                             timestamp: toTimestamp(item?.timestamp || item?.createdAt || item?.created_at),
                         }));
-                        pinnedItemsCache.set(resolvedChatId, { items: pinned, cachedAt: now });
+                        pinnedItemsCache.set(resolvedChatId, { items: pinned, cachedAt: Date.now() });
+                        // Incrementally update just the pinned items
+                        setContentData((prev) => ({ ...prev, pinnedItems: pinned }));
                         userProfilePerfLog('content:pinned:loaded', {
                             chatId: resolvedChatId,
                             count: pinned.length,
                             dt: Date.now() - pinnedStart,
                             totalDt: Date.now() - startedAt,
                         });
+                    } catch {
+                        // Pinned messages failed — screen already shows content, no action needed
                     }
-                } catch {
-                    pinned = [];
                 }
-
-                if (cancelled) return;
-                setPinnedItems(pinned);
-                userProfilePerfLog('content:apply:done', {
-                    chatId: resolvedChatId,
-                    media: derived.mediaItems.length,
-                    videos: derived.videoItems.length,
-                    images: derived.imageItems.length,
-                    files: derived.fileItems.length,
-                    links: derived.linkItems.length,
-                    pinned: pinned.length,
-                    totalDt: Date.now() - startedAt,
-                });
             } finally {
                 if (!cancelled) setContentLoading(false);
             }
@@ -469,12 +504,12 @@ export default function UserProfileRoute() {
             onDeleteContact={resolvedChatId ? handleClearChat : undefined}
             onBlock={handleBlock}
             isContentLoading={contentLoading}
-            mediaItems={mediaItems}
-            videoItems={videoItems}
-            imageItems={imageItems}
-            fileItems={fileItems}
-            linkItems={linkItems}
-            pinnedItems={pinnedItems}
+            mediaItems={contentData.mediaItems}
+            videoItems={contentData.videoItems}
+            imageItems={contentData.imageItems}
+            fileItems={contentData.fileItems}
+            linkItems={contentData.linkItems}
+            pinnedItems={contentData.pinnedItems}
         />
     );
 }

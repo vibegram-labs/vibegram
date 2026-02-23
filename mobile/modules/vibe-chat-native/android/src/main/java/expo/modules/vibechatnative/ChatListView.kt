@@ -46,6 +46,7 @@ import android.view.MotionEvent
 import android.view.ViewConfiguration
 import java.io.File
 import java.util.UUID
+import java.util.concurrent.Executors
 import androidx.recyclerview.widget.DiffUtil
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
@@ -619,9 +620,20 @@ private class NativeRowsAdapter(
     }
   }
 
+  private var diffGeneration = 0
+
   fun setRows(next: List<NativeRowItem>) {
     dismissContextMenu()
     val previous = rows.toList()
+
+    // Fast path: skip if list hasn't changed (same keys in same order with same contents)
+    if (previous.size == next.size && previous.size > 0) {
+      var same = true
+      for (i in previous.indices) {
+        if (previous[i] != next[i]) { same = false; break }
+      }
+      if (same) return
+    }
 
     val isAppendOnly =
       previous.isNotEmpty() &&
@@ -646,20 +658,28 @@ private class NativeRowsAdapter(
         return
       }
     }
-    val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
-      override fun getOldListSize(): Int = previous.size
 
-      override fun getNewListSize(): Int = rows.size
-
-      override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
-        return previous[oldItemPosition].key == rows[newItemPosition].key
+    // Run DiffUtil on a background thread to avoid blocking the main/UI thread.
+    val generation = ++diffGeneration
+    val snapshot = rows.toList() // snapshot for the background thread
+    diffExecutor.execute {
+      val diffResult = DiffUtil.calculateDiff(object : DiffUtil.Callback() {
+        override fun getOldListSize(): Int = previous.size
+        override fun getNewListSize(): Int = snapshot.size
+        override fun areItemsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+          return previous[oldItemPosition].key == snapshot[newItemPosition].key
+        }
+        override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
+          return previous[oldItemPosition] == snapshot[newItemPosition]
+        }
+      })
+      mainHandler.post {
+        // Only apply if no newer setRows call has been made while we were diffing
+        if (generation == diffGeneration) {
+          diffResult.dispatchUpdatesTo(this)
+        }
       }
-
-      override fun areContentsTheSame(oldItemPosition: Int, newItemPosition: Int): Boolean {
-        return previous[oldItemPosition] == rows[newItemPosition]
-      }
-    })
-    diffResult.dispatchUpdatesTo(this)
+    }
   }
 
   fun setHiddenMessageId(nextId: String?) {
@@ -2151,6 +2171,11 @@ private class WallpaperPatternMaskView(context: Context) : View(context) {
   }
 }
 
+private val diffExecutor = Executors.newSingleThreadExecutor { r ->
+  Thread(r, "ChatListDiffThread").apply { isDaemon = true }
+}
+private val mainHandler = android.os.Handler(android.os.Looper.getMainLooper())
+
 class ChatListView(
   context: Context,
   appContext: AppContext,
@@ -2371,24 +2396,33 @@ class ChatListView(
     ChatListRegistry.register(surfaceId, this)
   }
 
+  private var parseGeneration = 0
+
   fun setRows(input: List<Map<String, Any?>>) {
     val previousDistanceFromBottom = currentDistanceFromBottom()
     val wasNearBottom = previousDistanceFromBottom <= LIST_BOTTOM_THRESHOLD || shouldAutoScroll
 
-    val next = parseRows(input)
-    rows.clear()
-    rows.addAll(next)
-    adapter.setRows(next)
-    recyclerView.post {
-      applyBottomAnchorPadding()
-      if (wasNearBottom) {
-        scrollToBottom(false)
-      } else {
-        restoreStationaryDistance(previousDistanceFromBottom)
+    // Parse rows on background thread to avoid blocking the UI during navigation
+    val generation = ++parseGeneration
+    diffExecutor.execute {
+      val next = parseRows(input)
+      mainHandler.post {
+        if (generation != parseGeneration) return@post // stale, skip
+        rows.clear()
+        rows.addAll(next)
+        adapter.setRows(next)
+        recyclerView.post {
+          applyBottomAnchorPadding()
+          if (wasNearBottom) {
+            scrollToBottom(false)
+          } else {
+            restoreStationaryDistance(previousDistanceFromBottom)
+          }
+          prevScrollOffset = recyclerView.computeVerticalScrollOffset()
+          emitViewport()
+          maybeStartPendingTransition()
+        }
       }
-      prevScrollOffset = recyclerView.computeVerticalScrollOffset()
-      emitViewport()
-      maybeStartPendingTransition()
     }
   }
 

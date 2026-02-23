@@ -688,8 +688,6 @@ export const useCallStore = create<CallState & CallActions>()(
                         } else if (type === 'answer') {
                             if (!sdp) return;
                             await WebRTCService.handleAnswer(sdp);
-                            set({ callStatus: 'active', callStartTime: Date.now() });
-                            WebRTCService.startBandwidthMonitor();
                         } else if (type === 'ice-candidate' && candidate) {
                             await WebRTCService.handleIceCandidate(candidate);
                         }

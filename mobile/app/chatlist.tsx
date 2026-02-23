@@ -136,6 +136,7 @@ const BUBBLE_TIME_SIZE = 10;
 const BUBBLE_TIME_OPACITY = 0.7;
 const BUBBLE_INNER_RADIUS = 5;
 const MAX_RENDER_MESSAGES = 80;
+const HYDRATE_DEBOUNCE_MS = 60;
 const MENU_BASE_LIFT = 0;
 const MENU_TOP_SAFE = 78;
 const MENU_BOTTOM_SAFE = Platform.OS === 'ios' ? 176 : 160;
@@ -1407,8 +1408,7 @@ export default function ChatListScreen({
         activeChatId,
         effectiveChatId,
         chats.length,
-        activeChat,
-        activeChatMessages,
+        !!activeChat,
         nativeChatEnabled,
         shouldUseNativeList,
     ]);
@@ -1487,208 +1487,214 @@ export default function ChatListScreen({
             chatFound: !!chat,
             localMessages: chat?.messages?.length ?? 0,
         });
-        loadMessages(effectiveChatId);
+        // Defer loadMessages until the navigation transition finishes so the
+        // screen mounts instantly with cached messages. The fetch/decrypt/merge
+        // work runs after the transition animation completes, avoiding the
+        // ~1-2 second UI delay on Android when opening a chat.
+        const handle = InteractionManager.runAfterInteractions(() => {
+            loadMessages(effectiveChatId);
+        });
+        return () => handle.cancel();
     }, [effectiveChatId, loadMessages, shouldUseNativeList]);
 
     useEffect(() => {
         if (!effectiveChatId) return;
         let cancelled = false;
-        (async () => {
-            try {
-                const { apiClient } = await import('../src/lib/api-client');
-                const json = await apiClient.getPinnedMessages(effectiveChatId);
-                if (cancelled) return;
-                const ids = Array.isArray(json?.data)
-                    ? json.data
-                        .map((entry: any) => entry?.messageId || entry?.message_id)
-                        .filter((id: any) => typeof id === 'string')
-                    : [];
-                setPinnedMessageIds(ids);
-                setActivePinnedIndex(0);
-            } catch {
-                if (!cancelled) setPinnedMessageIds([]);
-            }
-        })();
+        const handle = InteractionManager.runAfterInteractions(() => {
+            (async () => {
+                try {
+                    const { apiClient } = await import('../src/lib/api-client');
+                    const json = await apiClient.getPinnedMessages(effectiveChatId);
+                    if (cancelled) return;
+                    const ids = Array.isArray(json?.data)
+                        ? json.data
+                            .map((entry: any) => entry?.messageId || entry?.message_id)
+                            .filter((id: any) => typeof id === 'string')
+                        : [];
+                    setPinnedMessageIds(ids);
+                    setActivePinnedIndex(0);
+                } catch {
+                    if (!cancelled) setPinnedMessageIds([]);
+                }
+            })();
+        });
         return () => {
             cancelled = true;
+            handle.cancel();
         };
     }, [effectiveChatId]);
 
+    // --- Debounced hydration: avoid blocking the JS thread on every store change ---
+    const hydrateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+    const lastHydrateSourceRef = useRef<any>(null);
+
     useEffect(() => {
-        const hydrateStart = Date.now();
-        if (!effectiveChatId) {
-            chatListPerfLog('hydrate:skip:no-chat', { dt: Date.now() - hydrateStart });
-            sendDebug('hydrate:skip:no-effective-chat-id');
-            return;
+        // Clear any pending debounce when deps change
+        if (hydrateTimerRef.current) {
+            clearTimeout(hydrateTimerRef.current);
+            hydrateTimerRef.current = null;
         }
-        if (!Array.isArray(activeChatMessages)) {
-            chatListPerfLog('hydrate:skip:no-array', { effectiveChatId, dt: Date.now() - hydrateStart });
-            sendDebug('hydrate:skip:no-active-chat-messages-array', { effectiveChatId });
-            return;
-        }
-        if (pendingGhost || ghostData) {
-            chatListPerfLog('hydrate:skip:ghost', {
+
+        if (!effectiveChatId) return;
+        if (!Array.isArray(activeChatMessages)) return;
+        if (pendingGhost || ghostData) return;
+
+        // Fast reference-equality check: skip if the source array hasn't changed
+        if (lastHydrateSourceRef.current === activeChatMessages) return;
+
+        const runHydrate = () => {
+            const hydrateStart = Date.now();
+            lastHydrateSourceRef.current = activeChatMessages;
+            const source = activeChatMessages;
+            const windowStart = Math.max(0, source.length - MAX_RENDER_MESSAGES);
+            const windowedSource = source.slice(windowStart);
+            let requiresSort = false;
+            for (let i = 1; i < windowedSource.length; i++) {
+                if ((windowedSource[i - 1]?.timestamp || 0) < (windowedSource[i]?.timestamp || 0)) {
+                    requiresSort = true;
+                    break;
+                }
+            }
+
+            const normalizedRows = requiresSort
+                ? [...windowedSource].sort((a: any, b: any) => (a?.timestamp || 0) - (b?.timestamp || 0))
+                : windowedSource;
+
+            const storeRows: Message[] = [];
+            const indexById = new Map<string, number>();
+            for (let i = 0; i < normalizedRows.length; i++) {
+                const m: any = normalizedRows[i];
+                const rawId = m?.id ?? m?.message_id ?? m?.messageId;
+                const normalizedId = normalizeMessageIdValue(rawId);
+                if (!normalizedId) continue;
+                const type = normalizeMessageType(m?.type);
+                const timestampMs = typeof m?.timestamp === 'number'
+                    ? m.timestamp
+                    : new Date(m?.timestamp || Date.now()).getTime();
+                const mapped: Message = {
+                    id: normalizedId,
+                    chatId: normalizeOptionalStringId(m.chatId || m.chat_id),
+                    fromId: normalizeOptionalStringId(m.fromId || m.from_id) || '',
+                    encryptedContent: m.encryptedContent || m.encrypted_content,
+                    type,
+                    text: getStoreMessageText(m, type),
+                    isMe: normalizeOptionalStringId(m.fromId || m.from_id) === user?.userId,
+                    timestamp: formatUiTime(timestampMs),
+                    timestampMs,
+                    status: m.status as BubbleStatus,
+                    errorMessage: typeof m.errorMessage === 'string' ? m.errorMessage : undefined,
+                    isOptimistic: false,
+                    mediaUrl: m.mediaUrl || m.media_url,
+                    fileName: m.fileName || m.file_name,
+                    fileSize: m.fileSize || m.file_size,
+                    duration: m.duration,
+                    latitude: m.latitude,
+                    longitude: m.longitude,
+                    caption: m.caption,
+                    viewOnce: !!m.viewOnce,
+                    viewedBy: Array.isArray(m.viewedBy)
+                        ? m.viewedBy
+                        : (Array.isArray(m.viewed_by) ? m.viewed_by : []),
+                    isVideoNote: !!m.isVideoNote,
+                    contact: m.contact,
+                    replyToId: normalizeOptionalStringId(m.replyToId || m.reply_to_id),
+                    isEdited: !!(m.isEdited || m.edited || m.extra?.isEdited),
+                    editedAt: m.editedAt || m.edited_at || m.extra?.editedAt,
+                    reactionEmoji: (
+                        typeof m?.reactionEmoji === 'string'
+                            ? m.reactionEmoji
+                            : (typeof m?.extra?.reactionEmoji === 'string' ? m.extra.reactionEmoji : undefined)
+                    ),
+                    extra: {
+                        width: m.extra?.width,
+                        height: m.extra?.height,
+                        thumbnailBase64: m.extra?.thumbnailBase64,
+                        waveform: Array.isArray(m.extra?.waveform)
+                            ? m.extra.waveform.filter((v: any) => typeof v === 'number')
+                            : undefined,
+                    },
+                };
+
+                const existingIndex = indexById.get(normalizedId);
+                if (existingIndex === undefined) {
+                    indexById.set(normalizedId, storeRows.length);
+                    storeRows.push(mapped);
+                } else {
+                    storeRows[existingIndex] = {
+                        ...storeRows[existingIndex],
+                        ...mapped,
+                        id: normalizedId,
+                    };
+                }
+            }
+            const deletingIds = deletingMessageIdsRef.current;
+            const deletedIds = deletedMessageIdsRef.current;
+            const visibleStoreRows = storeRows.filter((row) => (
+                !deletingIds.has(row.id) && !deletedIds.has(row.id)
+            ));
+
+            sendDebug('hydrate:source', {
                 effectiveChatId,
-                pendingGhost: !!pendingGhost,
-                ghostData: !!ghostData,
+                sourceCount: source.length,
+                storeRows: storeRows.length,
+                visibleStoreRows: visibleStoreRows.length,
+            });
+            chatListPerfLog('hydrate:normalized', {
+                effectiveChatId,
+                sourceCount: source.length,
+                windowedSource: windowedSource.length,
+                storeRows: storeRows.length,
+                visibleStoreRows: visibleStoreRows.length,
                 dt: Date.now() - hydrateStart,
             });
-            sendDebug('hydrate:skip:ghost-active', {
-                pendingGhost: !!pendingGhost,
-                ghostData: !!ghostData,
-                effectiveChatId,
-            });
-            return;
-        }
 
-        const source = activeChatMessages;
-        const windowStart = Math.max(0, source.length - MAX_RENDER_MESSAGES);
-        const windowedSource = source.slice(windowStart);
-        let requiresSort = false;
-        for (let i = 1; i < windowedSource.length; i++) {
-            if ((windowedSource[i - 1]?.timestamp || 0) < (windowedSource[i]?.timestamp || 0)) {
-                requiresSort = true;
-                break;
-            }
-        }
-
-        const normalizedRows = requiresSort
-            ? [...windowedSource].sort((a: any, b: any) => (a?.timestamp || 0) - (b?.timestamp || 0))
-            : windowedSource;
-
-        const storeRows: Message[] = [];
-        const indexById = new Map<string, number>();
-        for (let i = 0; i < normalizedRows.length; i++) {
-            const m: any = normalizedRows[i];
-            const rawId = m?.id ?? m?.message_id ?? m?.messageId;
-            const normalizedId = normalizeMessageIdValue(rawId);
-            if (!normalizedId) {
-                sendDebug('hydrate:drop:invalid-id', {
-                    effectiveChatId,
-                    rawId,
-                    index: i,
-                });
-                continue;
-            }
-            const type = normalizeMessageType(m?.type);
-            const timestampMs = typeof m?.timestamp === 'number'
-                ? m.timestamp
-                : new Date(m?.timestamp || Date.now()).getTime();
-            const mapped: Message = {
-                id: normalizedId,
-                chatId: normalizeOptionalStringId(m.chatId || m.chat_id),
-                fromId: normalizeOptionalStringId(m.fromId || m.from_id) || '',
-                encryptedContent: m.encryptedContent || m.encrypted_content,
-                type,
-                text: getStoreMessageText(m, type),
-                isMe: normalizeOptionalStringId(m.fromId || m.from_id) === user?.userId,
-                timestamp: formatUiTime(timestampMs),
-                timestampMs,
-                status: m.status as BubbleStatus,
-                errorMessage: typeof m.errorMessage === 'string' ? m.errorMessage : undefined,
-                isOptimistic: false,
-                mediaUrl: m.mediaUrl || m.media_url,
-                fileName: m.fileName || m.file_name,
-                fileSize: m.fileSize || m.file_size,
-                duration: m.duration,
-                latitude: m.latitude,
-                longitude: m.longitude,
-                caption: m.caption,
-                viewOnce: !!m.viewOnce,
-                viewedBy: Array.isArray(m.viewedBy)
-                    ? m.viewedBy
-                    : (Array.isArray(m.viewed_by) ? m.viewed_by : []),
-                isVideoNote: !!m.isVideoNote,
-                contact: m.contact,
-                replyToId: normalizeOptionalStringId(m.replyToId || m.reply_to_id),
-                isEdited: !!(m.isEdited || m.edited || m.extra?.isEdited),
-                editedAt: m.editedAt || m.edited_at || m.extra?.editedAt,
-                reactionEmoji: (
-                    typeof m?.reactionEmoji === 'string'
-                        ? m.reactionEmoji
-                        : (typeof m?.extra?.reactionEmoji === 'string' ? m.extra.reactionEmoji : undefined)
-                ),
-                extra: {
-                    width: m.extra?.width,
-                    height: m.extra?.height,
-                    thumbnailBase64: m.extra?.thumbnailBase64,
-                    waveform: Array.isArray(m.extra?.waveform)
-                        ? m.extra.waveform.filter((v: any) => typeof v === 'number')
-                        : undefined,
-                },
-            };
-
-            const existingIndex = indexById.get(normalizedId);
-            if (existingIndex === undefined) {
-                indexById.set(normalizedId, storeRows.length);
-                storeRows.push(mapped);
-            } else {
-                // Keep row position stable while refreshing the latest payload for this ID.
-                storeRows[existingIndex] = {
-                    ...storeRows[existingIndex],
-                    ...mapped,
-                    id: normalizedId,
-                };
-            }
-        }
-        const deletingIds = deletingMessageIdsRef.current;
-        const deletedIds = deletedMessageIdsRef.current;
-        const visibleStoreRows = storeRows.filter((row) => (
-            !deletingIds.has(row.id) && !deletedIds.has(row.id)
-        ));
-
-        sendDebug('hydrate:source', {
-            effectiveChatId,
-            sourceCount: source.length,
-            storeRows: storeRows.length,
-            visibleStoreRows: visibleStoreRows.length,
-        });
-        chatListPerfLog('hydrate:normalized', {
-            effectiveChatId,
-            sourceCount: source.length,
-            windowedSource: windowedSource.length,
-            storeRows: storeRows.length,
-            visibleStoreRows: visibleStoreRows.length,
-            dt: Date.now() - hydrateStart,
-        });
-
-        setMessages(prev => {
-            const mergeStart = Date.now();
-            const localCarryRows = prev.filter((m) => (
-                deletingIds.has(m.id) || (
-                    m.isOptimistic &&
-                    !deletingIds.has(m.id) &&
-                    !deletedIds.has(m.id) &&
-                    !visibleStoreRows.some((s) => s.id === m.id)
-                )
-            ));
-            const merged = [...visibleStoreRows, ...localCarryRows].sort((a, b) => a.timestampMs - b.timestampMs);
-            if (merged.length === prev.length) {
-                let same = true;
-                for (let i = 0; i < merged.length; i++) {
-                    if (!sameRenderableMessage(merged[i], prev[i])) {
-                        same = false;
-                        break;
+            setMessages(prev => {
+                const mergeStart = Date.now();
+                const localCarryRows = prev.filter((m) => (
+                    deletingIds.has(m.id) || (
+                        m.isOptimistic &&
+                        !deletingIds.has(m.id) &&
+                        !deletedIds.has(m.id) &&
+                        !visibleStoreRows.some((s) => s.id === m.id)
+                    )
+                ));
+                const merged = [...visibleStoreRows, ...localCarryRows].sort((a, b) => a.timestampMs - b.timestampMs);
+                if (merged.length === prev.length) {
+                    let same = true;
+                    for (let i = 0; i < merged.length; i++) {
+                        if (!sameRenderableMessage(merged[i], prev[i])) {
+                            same = false;
+                            break;
+                        }
                     }
+                    if (same) return prev;
                 }
-                if (same) return prev;
+                sendDebug('hydrate:apply', {
+                    effectiveChatId,
+                    prevCount: prev.length,
+                    mergedCount: merged.length,
+                    localCarryRows: localCarryRows.length,
+                });
+                chatListPerfLog('hydrate:setMessages', {
+                    effectiveChatId,
+                    prevCount: prev.length,
+                    mergedCount: merged.length,
+                    localCarryRows: localCarryRows.length,
+                    totalDt: Date.now() - hydrateStart,
+                    mergeDt: Date.now() - mergeStart,
+                });
+                return merged;
+            });
+        };
+
+        // Debounce hydration so rapid store updates don't fire multiple heavy passes
+        hydrateTimerRef.current = setTimeout(runHydrate, HYDRATE_DEBOUNCE_MS);
+        return () => {
+            if (hydrateTimerRef.current) {
+                clearTimeout(hydrateTimerRef.current);
+                hydrateTimerRef.current = null;
             }
-            sendDebug('hydrate:apply', {
-                effectiveChatId,
-                prevCount: prev.length,
-                mergedCount: merged.length,
-                localCarryRows: localCarryRows.length,
-            });
-            chatListPerfLog('hydrate:setMessages', {
-                effectiveChatId,
-                prevCount: prev.length,
-                mergedCount: merged.length,
-                localCarryRows: localCarryRows.length,
-                totalDt: Date.now() - hydrateStart,
-                mergeDt: Date.now() - mergeStart,
-            });
-            return merged;
-        });
+        };
     }, [effectiveChatId, activeChatMessages, user?.userId, pendingGhost, ghostData]);
 
     useEffect(() => {

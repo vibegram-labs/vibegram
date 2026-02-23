@@ -2523,19 +2523,32 @@ export const useChatStore = create<ChatState>()(
                     };
 
                     const updatedChats = [...chats];
-                    // Handle potential duplicate/retry by filtering
-                    const msgs = updatedChats[chatIndex].messages.filter(m => m.id !== msgId && m.id !== staleExistingId);
+                    // Handle potential duplicate/retry by filtering — combine filter + append in one pass
+                    const existingMsgs = updatedChats[chatIndex].messages;
+                    const newMsgs = staleExistingId || existingMsgs.some(m => m.id === msgId)
+                        ? existingMsgs.filter(m => m.id !== msgId && m.id !== staleExistingId)
+                        : existingMsgs;
+                    // Append optimistic message (reuse array ref if no filter was needed)
+                    const finalMsgs = newMsgs === existingMsgs
+                        ? [...existingMsgs, optimisticMsg]
+                        : [...newMsgs, optimisticMsg];
 
                     updatedChats[chatIndex] = {
                         ...updatedChats[chatIndex],
-                        messages: [...msgs, optimisticMsg],
+                        messages: finalMsgs,
                         lastMessage: optimisticMsg
                     };
-                    // Sort chats to bring this one to top
-                    updatedChats.sort((a, b) => {
-                        if (a.pinned !== b.pinned) return a.pinned ? -1 : 1;
-                        return (b.lastMessage?.timestamp || 0) - (a.lastMessage?.timestamp || 0);
-                    });
+                    // Move this chat to its correct position instead of a full sort.
+                    // In most cases it just moves to the top (or just below pinned chats).
+                    if (chatIndex > 0) {
+                        const [movedChat] = updatedChats.splice(chatIndex, 1);
+                        let insertAt = 0;
+                        // Skip past pinned chats that should stay above
+                        while (insertAt < updatedChats.length && updatedChats[insertAt].pinned && !movedChat.pinned) {
+                            insertAt++;
+                        }
+                        updatedChats.splice(insertAt, 0, movedChat);
+                    }
                     set({ chats: updatedChats });
                 } else {
                     throw new Error('Chat not found');
