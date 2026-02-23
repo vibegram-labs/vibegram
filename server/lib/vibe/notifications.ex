@@ -15,6 +15,7 @@ defmodule Vibe.Notifications do
     with to_user when not is_nil(to_user) <- Accounts.get_user(to_user_id),
          push_targets when is_map(push_targets) <- normalized_push_targets(to_user.push_token) do
       call_type = normalize_call_type(payload["callType"] || payload["call_type"])
+      call_id = payload["callId"] || payload["call_id"]
       from_user_id = payload["fromUserId"] || payload["from_user_id"]
       caller_name = payload["fromUserName"] || payload["from_user_name"] || from_user_id || "Unknown"
       caller_image =
@@ -23,10 +24,14 @@ defmodule Vibe.Notifications do
           from_user_id
         )
 
+      Logger.info(
+        "[Notifications] Incoming call push routing to_user=#{to_user_id} call_id=#{inspect(call_id)} call_type=#{call_type} targets=#{inspect(describe_push_targets(push_targets))}"
+      )
+
       base_data = %{
         event: "call-start",
         type: "call-start",
-        callId: payload["callId"] || payload["call_id"],
+        callId: call_id,
         callType: call_type,
         fromUserId: from_user_id,
         fromUserName: caller_name,
@@ -240,6 +245,13 @@ defmodule Vibe.Notifications do
   end
 
   defp send_apns_voip_incoming_call_push(voip_token, to_user_id, caller_name, call_type, data) do
+    call_id = Map.get(data, :callId, nil) |> to_string()
+    token_hint = token_hint(voip_token)
+
+    Logger.info(
+      "[Notifications] APNs VoIP attempt to_user=#{to_user_id} call_id=#{inspect(call_id)} call_type=#{call_type} token=#{token_hint}"
+    )
+
     with {:ok, config} <- apns_voip_config(),
          {:ok, jwt} <- apns_voip_jwt(config),
          {:ok, body} <- apns_voip_payload(data, caller_name, call_type) do
@@ -260,22 +272,28 @@ defmodule Vibe.Notifications do
 
       case Finch.request(request, Vibe.Finch, receive_timeout: 7_000) do
         {:ok, %Finch.Response{status: 200}} ->
-          Logger.info("[Notifications] APNs VoIP push accepted to_user=#{to_user_id} call_type=#{call_type}")
+          Logger.info(
+            "[Notifications] APNs VoIP push accepted to_user=#{to_user_id} call_type=#{call_type} topic=#{config.topic} base_url=#{config.base_url}"
+          )
           {:ok, :apns_voip}
 
         {:ok, %Finch.Response{status: status, body: response_body}} ->
           Logger.warning(
-            "[Notifications] APNs VoIP push failed status=#{status} to_user=#{to_user_id} body=#{String.slice(response_body || "", 0, 240)}"
+            "[Notifications] APNs VoIP push failed status=#{status} to_user=#{to_user_id} topic=#{config.topic} base_url=#{config.base_url} body=#{String.slice(response_body || "", 0, 240)}"
           )
           :error
 
         {:error, reason} ->
-          Logger.warning("[Notifications] APNs VoIP request failed to_user=#{to_user_id} reason=#{inspect(reason)}")
+          Logger.warning(
+            "[Notifications] APNs VoIP request failed to_user=#{to_user_id} topic=#{config.topic} base_url=#{config.base_url} reason=#{inspect(reason)}"
+          )
           :error
       end
     else
       {:error, :missing_config} ->
-        Logger.info("[Notifications] APNs VoIP push skipped: missing APNs VoIP config")
+        Logger.info(
+          "[Notifications] APNs VoIP push skipped: missing APNs VoIP config #{inspect(apns_voip_config_presence())}"
+        )
         :noop
 
       {:error, reason} ->
@@ -320,6 +338,53 @@ defmodule Vibe.Notifications do
   end
 
   defp normalize_token_value(_), do: nil
+
+  defp describe_push_targets(push_targets) when is_map(push_targets) do
+    %{
+      expo: token_hint(push_targets[:expo]),
+      fcm: token_hint(push_targets[:fcm]),
+      apns: token_hint(push_targets[:apns]),
+      apns_voip: token_hint(push_targets[:apns_voip])
+    }
+  end
+
+  defp token_hint(token) when is_binary(token) do
+    trimmed = String.trim(token)
+
+    cond do
+      trimmed == "" ->
+        "empty"
+
+      String.length(trimmed) <= 12 ->
+        "len=#{String.length(trimmed)}"
+
+      true ->
+        prefix = String.slice(trimmed, 0, 6)
+        suffix = String.slice(trimmed, -4, 4)
+        "len=#{String.length(trimmed)} #{prefix}...#{suffix}"
+    end
+  end
+
+  defp token_hint(_), do: "missing"
+
+  defp apns_voip_config_presence do
+    env_value = String.downcase(System.get_env("APPLE_VOIP_APNS_ENV") || "")
+
+    %{
+      team_id: is_binary(normalize_token_value(System.get_env("APPLE_VOIP_TEAM_ID"))),
+      key_id: is_binary(normalize_token_value(System.get_env("APPLE_VOIP_KEY_ID"))),
+      private_key: is_binary(normalize_apns_private_key(System.get_env("APPLE_VOIP_PRIVATE_KEY"))),
+      topic:
+        is_binary(
+          (System.get_env("APPLE_VOIP_TOPIC") |> normalize_token_value()) ||
+            case System.get_env("APPLE_BUNDLE_ID") |> normalize_token_value() do
+              nil -> nil
+              bundle_id -> bundle_id <> ".voip"
+            end
+        ),
+      env: if(env_value in ["sandbox", "development", "dev"], do: "sandbox", else: "production")
+    }
+  end
 
   defp apns_voip_config do
     team_id = System.get_env("APPLE_VOIP_TEAM_ID") |> normalize_token_value()

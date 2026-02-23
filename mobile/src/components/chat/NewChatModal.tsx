@@ -125,6 +125,8 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
         if (!inputValue.trim()) return;
         setLoading(true);
         setError('');
+        setFirstName('');
+        setLastName('');
         if (dismissKeyboard) Keyboard.dismiss();
 
         try {
@@ -215,7 +217,7 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
     const contactDisplayName = useMemo(() => {
         if (!foundUser) return '';
         const name = `${firstName} ${lastName}`.trim();
-        return name || foundUser.username || foundUser.userId || 'User';
+        return name || foundUser.username || (foundUser as any).name || foundUser.userId || 'User';
     }, [foundUser, firstName, lastName]);
 
     const isAdded = !!(foundUser && foundUser.userId && isContact(foundUser.userId));
@@ -252,6 +254,8 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
     const goBackToSearch = () => {
         setView('search');
         setIsAddingContact(false); // Reset add contact state
+        setFirstName('');
+        setLastName('');
         contentTranslateX.value = withTiming(0, SMOOTH_TIMING);
         headerProgress.value = withTiming(0, SMOOTH_TIMING);
     };

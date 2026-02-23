@@ -1,12 +1,13 @@
 import React, { useMemo, useEffect, useCallback, useRef, useState } from 'react';
 import {
+    Platform,
     View,
     StyleSheet,
     Text,
     TextInput,
     TouchableOpacity,
 } from 'react-native';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
 import Animated, {
     cancelAnimation,
     useSharedValue,
@@ -36,6 +37,7 @@ import ChatListScreen from './chatlist';
 import { VideoNoteOverlay } from '../src/components/chat/VideoNoteOverlay';
 import { haptics } from '../src/lib/haptics';
 import SafeLiquidGlass from '../src/components/native/SafeLiquidGlass';
+import { getNativeChatRuntimeInfo } from '../src/native/chat';
 
 const withAlpha = (color: string, alpha: number) => {
     if (!color) return `rgba(255, 255, 255, ${alpha})`;
@@ -231,8 +233,19 @@ export default function ChatScreen() {
     const [videoNoteVisible, setVideoNoteVisible] = useState(false);
     const [incomingVideoNote, setIncomingVideoNote] = useState<{ uri: string; duration?: number; token: number } | null>(null);
     const [friendApiPresence, setFriendApiPresence] = useState<{ lastSeenMs?: number; online?: boolean } | null>(null);
+    const [androidWallpaperRefreshKey, setAndroidWallpaperRefreshKey] = useState(0);
+    const nativeChatRuntime = useMemo(() => getNativeChatRuntimeInfo(), []);
     const videoNoteCanceledRef = useRef(false);
     const profileNavInFlightRef = useRef(false);
+
+    useFocusEffect(
+        useCallback(() => {
+            if (Platform.OS !== 'android') return;
+            // Android MaskedView can lose its mask after navigating back from stacked screens.
+            // Force a lightweight remount so the wallpaper pattern restores reliably.
+            setAndroidWallpaperRefreshKey((current) => current + 1);
+        }, [])
+    );
 
     useEffect(() => {
         const shouldOpenSearch = openSearchParam === '1' || openSearchParam === 'true';
@@ -625,10 +638,16 @@ export default function ChatScreen() {
     const searchShiftStyle = useAnimatedStyle(() => ({
         transform: [{ translateY: withTiming(chatSearchOpen ? 0 : -(insets.top + 72), { duration: 230 }) }],
     }), [chatSearchOpen, insets.top]);
+    const nativeOwnsWallpaper = nativeChatRuntime.enabled && chatSearchQuery.trim().length === 0;
 
     return (
         <View style={styles.screen}>
-            <WallpaperBackground theme={resolvedTheme} />
+            {!nativeOwnsWallpaper && (
+                <WallpaperBackground
+                    key={Platform.OS === 'android' ? `wallpaper-${androidWallpaperRefreshKey}` : undefined}
+                    theme={resolvedTheme}
+                />
+            )}
 
             <Animated.View
                 pointerEvents={chatSearchOpen ? 'none' : 'auto'}

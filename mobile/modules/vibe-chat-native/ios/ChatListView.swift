@@ -25,8 +25,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private let flowLayout: ChatCollectionFlowLayout
   let collectionView: UICollectionView
   private let wallpaperLayer = CAGradientLayer()
+  private let wallpaperPatternLayer = CAGradientLayer()
+  private let wallpaperPatternMaskLayer = CALayer()
   var rows: [ChatListRow] = []
   private var appearance = ChatListAppearance.fallback
+  private var queuedAppearanceAfterSendTransition: ChatListAppearance?
   private var shouldAutoScroll = true
   private var previousOffsetY: CGFloat = 0.0
   private var skipNextTransitionScrollCorrection = false
@@ -86,6 +89,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var debugDurationLabel: UILabel?
   private var debugOffsetLabel: UILabel?
   private var debugStatsLabel: UILabel?
+  private static var wallpaperMaskImageCache: [String: CGImage] = [:]
+  private static let cachedThemeIdDefaultsKey = "vibe.chat.native.themeId.v1"
+  private static let cachedThemeIsDarkDefaultsKey = "vibe.chat.native.themeIsDark.v1"
 
   required init(appContext: AppContext? = nil) {
     NSLog("[ChatListView] init START")
@@ -103,7 +109,15 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     NSLog("[ChatListView] init super.init done")
     clipsToBounds = false
 
+    if let cachedAppearance = Self.bootstrapCachedAppearance() {
+      appearance = cachedAppearance
+    }
+
+    wallpaperPatternLayer.mask = wallpaperPatternMaskLayer
+    wallpaperPatternMaskLayer.contentsGravity = .resizeAspectFill
+    wallpaperPatternMaskLayer.contentsScale = UIScreen.main.scale
     layer.insertSublayer(wallpaperLayer, at: 0)
+    layer.insertSublayer(wallpaperPatternLayer, above: wallpaperLayer)
 
     addSubview(collectionView)
     collectionView.translatesAutoresizingMaskIntoConstraints = false
@@ -156,6 +170,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let previousHeight = lastKnownViewportHeight
     super.layoutSubviews()
     wallpaperLayer.frame = bounds
+    wallpaperPatternLayer.frame = bounds
+    wallpaperPatternMaskLayer.frame = wallpaperPatternLayer.bounds
     transitionOverlayHost.frame = bounds
     layoutDebugPanel()
 
@@ -642,7 +658,23 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   func setAppearance(_ rawAppearance: [String: Any]) {
+    Self.cacheNativeThemeSeed(from: rawAppearance)
     let next = ChatListAppearance.from(raw: rawAppearance)
+    let visualChanged = appearance.visualKey != next.visualKey
+    let hasPendingOrActiveSendTransition = pendingSendTransition != nil || activeSendTransition != nil
+    if visualChanged && hasPendingOrActiveSendTransition {
+      queuedAppearanceAfterSendTransition = next
+      return
+    }
+    queuedAppearanceAfterSendTransition = nil
+    applyResolvedAppearance(next)
+  }
+
+  func resolvedAppearance() -> ChatListAppearance {
+    appearance
+  }
+
+  private func applyResolvedAppearance(_ next: ChatListAppearance) {
     let visualChanged = appearance.visualKey != next.visualKey
     appearance = next
     inputBar?.applyAppearance(next)
@@ -652,8 +684,53 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
   }
 
-  func resolvedAppearance() -> ChatListAppearance {
-    appearance
+  private func flushQueuedAppearanceAfterTransitionIfNeeded() {
+    guard activeSendTransition == nil, pendingSendTransition == nil, let queued = queuedAppearanceAfterSendTransition
+    else {
+      return
+    }
+    queuedAppearanceAfterSendTransition = nil
+    applyResolvedAppearance(queued)
+  }
+
+  private static func cacheNativeThemeSeed(from rawAppearance: [String: Any]) {
+    guard let themeIdRaw = rawAppearance["nativeThemeId"] else { return }
+    let themeId: String
+    if let value = themeIdRaw as? String {
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty else { return }
+      themeId = trimmed
+    } else {
+      return
+    }
+
+    let isDark: Bool = {
+      if let value = rawAppearance["nativeThemeIsDark"] as? Bool { return value }
+      if let value = rawAppearance["nativeThemeIsDark"] as? NSNumber { return value.boolValue }
+      if let value = rawAppearance["nativeThemeIsDark"] as? String {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return ["1", "true", "yes"].contains(normalized)
+      }
+      return true
+    }()
+
+    let defaults = UserDefaults.standard
+    defaults.set(themeId, forKey: cachedThemeIdDefaultsKey)
+    defaults.set(isDark, forKey: cachedThemeIsDarkDefaultsKey)
+  }
+
+  private static func bootstrapCachedAppearance() -> ChatListAppearance? {
+    let defaults = UserDefaults.standard
+    guard let themeId = defaults.string(forKey: cachedThemeIdDefaultsKey), !themeId.isEmpty else {
+      return nil
+    }
+    let isDark = defaults.bool(forKey: cachedThemeIsDarkDefaultsKey)
+    return ChatListAppearance.from(
+      raw: [
+        "backgroundMode": "transparent",
+        "nativeThemeId": themeId,
+        "nativeThemeIsDark": isDark,
+      ])
   }
 
   func setContentPaddingBottom(_ value: Double) {
@@ -1400,6 +1477,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       // list to apply latest payload once so the message becomes visible.
       setRows(sourceRowsPayload)
     }
+    flushQueuedAppearanceAfterTransitionIfNeeded()
     onNativeEvent(["type": "sendTransitionCompleted", "messageId": revealedMessageId ?? ""])
   }
 
@@ -1453,9 +1531,83 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private func applyWallpaperAppearance() {
     wallpaperLayer.colors = appearance.wallpaperGradient.map(\.cgColor)
     wallpaperLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
-    wallpaperLayer.endPoint = CGPoint(x: 0.0, y: 1.0)
+    wallpaperLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
     wallpaperLayer.opacity = Float(max(0.0, min(1.0, appearance.wallpaperOpacity)))
     wallpaperLayer.isHidden = appearance.backgroundMode == "transparent"
+
+    let canShowPattern =
+      appearance.backgroundMode != "transparent"
+      && appearance.wallpaperPatternGradient.count >= 2
+      && appearance.wallpaperPatternOpacity > 0.001
+      && (appearance.wallpaperMaskKey?.isEmpty == false)
+
+    guard
+      canShowPattern,
+      let maskKey = appearance.wallpaperMaskKey,
+      let maskImage = resolvedWallpaperMaskImage(for: maskKey)
+    else {
+      wallpaperPatternLayer.isHidden = true
+      wallpaperPatternLayer.colors = nil
+      wallpaperPatternLayer.locations = nil
+      wallpaperPatternLayer.opacity = 0.0
+      wallpaperPatternMaskLayer.contents = nil
+      return
+    }
+
+    wallpaperPatternLayer.colors = appearance.wallpaperPatternGradient.map(\.cgColor)
+    wallpaperPatternLayer.locations = appearance.wallpaperPatternLocations
+    wallpaperPatternLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
+    wallpaperPatternLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
+    wallpaperPatternLayer.opacity = Float(max(0.0, min(1.0, appearance.wallpaperPatternOpacity)))
+    wallpaperPatternMaskLayer.contents = maskImage
+    wallpaperPatternMaskLayer.frame = wallpaperPatternLayer.bounds
+    wallpaperPatternLayer.isHidden = false
+  }
+
+  private func resolvedWallpaperMaskImage(for key: String) -> CGImage? {
+    let normalizedKey = key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !normalizedKey.isEmpty else { return nil }
+    if let cached = Self.wallpaperMaskImageCache[normalizedKey] {
+      return cached
+    }
+    guard let baseName = Self.wallpaperMaskBaseName(for: normalizedKey) else {
+      return nil
+    }
+
+    let bundles = [Bundle.main, Bundle(for: ChatListView.self)]
+    for bundle in bundles {
+      if let image = UIImage(named: baseName, in: bundle, compatibleWith: nil)?.cgImage {
+        Self.wallpaperMaskImageCache[normalizedKey] = image
+        return image
+      }
+      if let image = UIImage(named: "\(baseName).png", in: bundle, compatibleWith: nil)?.cgImage {
+        Self.wallpaperMaskImageCache[normalizedKey] = image
+        return image
+      }
+      if let path = bundle.path(forResource: baseName, ofType: "png"),
+         let image = UIImage(contentsOfFile: path)?.cgImage {
+        Self.wallpaperMaskImageCache[normalizedKey] = image
+        return image
+      }
+    }
+    return nil
+  }
+
+  private static func wallpaperMaskBaseName(for key: String) -> String? {
+    switch key {
+    case "doodles", "hearts":
+      return "doodle_transparent"
+    case "music":
+      return "music_transparent"
+    case "music2":
+      return "music2_transparent"
+    case "food":
+      return "food_transparent"
+    case "animals":
+      return "animals_transparent"
+    default:
+      return nil
+    }
   }
 
   // MARK: - Debug Animation Panel

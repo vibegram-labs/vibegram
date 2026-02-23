@@ -94,11 +94,11 @@ final class BubbleBackgroundView: UIView {
     blurView.alpha = isMe ? 0.4 : 0.5
     gradientLayer.isHidden = !isMe
     gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-    gradientLayer.opacity = isMe ? 0.85 : 0.0
+    gradientLayer.opacity = isMe ? 1.0 : 0.0
     fillLayer.fillColor =
       isMe
       ? UIColor.clear.cgColor
-      : appearance.bubbleThemColor.withAlphaComponent(0.82).cgColor
+      : appearance.bubbleThemColor.cgColor
     CATransaction.commit()
 
     if shapeOnlyChange {
@@ -1834,11 +1834,11 @@ final class BubbleTailView: UIView {
     blurView.alpha = isMe ? 0.4 : 0.5
     gradientLayer.isHidden = !isMe
     gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-    gradientLayer.opacity = isMe ? 0.85 : 0.0
+    gradientLayer.opacity = isMe ? 1.0 : 0.0
     fillLayer.fillColor =
       isMe
       ? UIColor.clear.cgColor
-      : appearance.bubbleThemColor.withAlphaComponent(0.82).cgColor
+      : appearance.bubbleThemColor.cgColor
 
     // For 'me': rotate CW 25° (tail curves right at bottom-right of bubble)
     // For 'them': flip horizontally + rotate CCW 25° (tail curves left at bottom-left)

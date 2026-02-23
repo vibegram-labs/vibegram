@@ -1229,10 +1229,16 @@ export default function ChatListScreen({
         ),
     }), [resolvedTheme]);
     const nativeAppearance = useMemo<NativeChatAppearance>(() => ({
-        // Header/input/footer stay in RN; chat.tsx owns wallpaper rendering.
-        backgroundMode: 'transparent',
+        // Native list now resolves and renders its own wallpaper/mask.
+        backgroundMode: 'gradient',
+        nativeThemeId: activeTheme?.id,
+        nativeThemeIsDark: effectiveTheme === 'dark',
         wallpaperGradient: (resolvedTheme.backgroundGradient || [colors.background, colors.background]).slice(0, 3),
         wallpaperOpacity: 1,
+        wallpaperPatternGradient: resolvedTheme.patternGradientColors?.slice(0, 6),
+        wallpaperPatternLocations: resolvedTheme.patternGradientLocations?.slice(0, 6),
+        wallpaperPatternOpacity: resolvedTheme.patternOpacity,
+        wallpaperMaskKey: resolvedTheme.maskedImage || activeTheme?.maskedImage,
         bubbleMeGradient: [...bubbleTheme.meGradient],
         bubbleThemColor: bubbleTheme.themSolid,
         textColorMe: resolvedTheme.textColorMe || '#FFFFFF',
@@ -1242,7 +1248,7 @@ export default function ChatListScreen({
         dayTextColor: withAlpha(resolvedTheme.textColorThem || '#ECEFFF', 0.82),
         dayBackgroundColor: withAlpha(resolvedTheme.backgroundGradient?.[0] || colors.background, 0.42),
         dayBorderColor: withAlpha('#FFFFFF', 0.16),
-    }), [resolvedTheme, colors.background, bubbleTheme]);
+    }), [resolvedTheme, colors.background, bubbleTheme, activeTheme?.id, activeTheme?.maskedImage, effectiveTheme]);
     const reactionAvatarUri = useMemo(
         () => normalizeImageUri(user?.profileImage || null),
         [user?.profileImage]
@@ -1261,7 +1267,7 @@ export default function ChatListScreen({
     const activeChatMessages = activeChat?.messages;
     const nativeChatRuntime = useMemo(() => getNativeChatRuntimeInfo(), []);
     const nativeChatEnabled = nativeChatRuntime.enabled;
-    const shouldUseNativeList = nativeChatEnabled && Platform.OS !== 'android';
+    const shouldUseNativeList = nativeChatEnabled;
     const normalizedSearchQuery = useMemo(() => searchQuery.trim().toLowerCase(), [searchQuery]);
     const searchActive = !shouldUseNativeList && normalizedSearchQuery.length > 0;
     const nativeSurfaceId = useMemo(

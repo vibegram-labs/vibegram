@@ -18,35 +18,43 @@ public final class VibeNativeCallStore {
 
   public func setVoipToken(_ token: String?) {
     queue.sync {
-      defaults.set(token?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.voipToken)
+      let normalized = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+      defaults.set(normalized, forKey: Keys.voipToken)
+      NSLog("[VibeNativeCall][Store] setVoipToken len=%d", normalized?.count ?? 0)
     }
   }
 
   public func setApnsToken(_ token: String?) {
     queue.sync {
-      defaults.set(token?.trimmingCharacters(in: .whitespacesAndNewlines), forKey: Keys.apnsToken)
+      let normalized = token?.trimmingCharacters(in: .whitespacesAndNewlines)
+      defaults.set(normalized, forKey: Keys.apnsToken)
+      NSLog("[VibeNativeCall][Store] setApnsToken len=%d", normalized?.count ?? 0)
     }
   }
 
   public func getPushTokens() -> [String: Any] {
     queue.sync {
-      [
-        "platform": "ios",
-        "voip": defaults.string(forKey: Keys.voipToken),
-        "apns": defaults.string(forKey: Keys.apnsToken),
+      var result: [String: Any] = [
+        "platform": "ios"
       ]
+      result["voip"] = defaults.string(forKey: Keys.voipToken) as Any
+      result["apns"] = defaults.string(forKey: Keys.apnsToken) as Any
+      return result
     }
   }
 
   public func enqueueEvent(type: String, payload: [String: String]) {
     queue.sync {
       var events = readPendingEventsLocked()
+      let callId = payload["callId"] ?? payload["call_id"] ?? "-"
+      NSLog("[VibeNativeCall][Store] enqueueEvent type=%@ callId=%@ before=%d", type, callId, events.count)
       events.append([
         "type": type,
         "timestamp": Int(Date().timeIntervalSince1970 * 1000),
         "payload": payload,
       ])
       writePendingEventsLocked(events)
+      NSLog("[VibeNativeCall][Store] enqueueEvent type=%@ after=%d", type, events.count)
     }
   }
 
@@ -54,6 +62,7 @@ public final class VibeNativeCallStore {
     queue.sync {
       let events = readPendingEventsLocked()
       defaults.removeObject(forKey: Keys.pendingEvents)
+      NSLog("[VibeNativeCall][Store] drainEvents count=%d", events.count)
       return events
     }
   }
@@ -67,6 +76,7 @@ public final class VibeNativeCallStore {
       byUuid[uuid.uuidString] = payload
       defaults.set(byCallId, forKey: Keys.activeCallsByCallId)
       defaults.set(byUuid, forKey: Keys.payloadByUuid)
+      NSLog("[VibeNativeCall][Store] setActiveCall callId=%@ uuid=%@", callId, uuid.uuidString)
     }
   }
 
@@ -92,6 +102,9 @@ public final class VibeNativeCallStore {
 
       if let callId, let uuidString = byCallId.removeValue(forKey: callId) {
         byUuid.removeValue(forKey: uuidString)
+        NSLog("[VibeNativeCall][Store] clearActiveCall callId=%@ uuid=%@", callId, uuidString)
+      } else if let callId {
+        NSLog("[VibeNativeCall][Store] clearActiveCall callId=%@ noMapping", callId)
       }
 
       defaults.set(byCallId, forKey: Keys.activeCallsByCallId)
@@ -107,6 +120,7 @@ public final class VibeNativeCallStore {
       byUuid.removeValue(forKey: uuidString)
       for (callId, mapped) in byCallId where mapped == uuidString {
         byCallId.removeValue(forKey: callId)
+        NSLog("[VibeNativeCall][Store] clearActiveCall uuid=%@ callId=%@", uuidString, callId)
       }
       defaults.set(byCallId, forKey: Keys.activeCallsByCallId)
       defaults.set(byUuid, forKey: Keys.payloadByUuid)

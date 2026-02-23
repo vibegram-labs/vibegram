@@ -13,6 +13,7 @@ import Animated, {
     Easing,
 } from 'react-native-reanimated'
 import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
+import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
 import { LinearGradient } from 'expo-linear-gradient'
@@ -138,6 +139,9 @@ export default function TabLayout() {
         () => (settingsProfileUri ? { uri: settingsProfileUri } : undefined),
         [settingsProfileUri]
     )
+
+    const insets = useSafeAreaInsets()
+    const bottomInsetPadding = Math.max(0, Math.min(insets.bottom, 18))
 
     // Local State for Active Tab (Defaults to 'home')
     const [currentTab, setCurrentTab] = useState<PageName>('home')
@@ -458,7 +462,10 @@ export default function TabLayout() {
                     <AnimatedView
                         style={[
                             styles.bottomBarWrapper,
-                            Platform.OS === 'android' && styles.bottomBarWrapperAndroidAttached,
+                            Platform.OS === 'android' && [
+                                styles.bottomBarWrapperAndroidAttached,
+                                { bottom: 10 + Math.max(0, insets.bottom - 10) }
+                            ],
                             bottomBarFadeStyle,
                         ]}
                     >
@@ -558,10 +565,14 @@ export default function TabLayout() {
                                         title: 'Vibe',
                                         preventsDefault: true,
                                         renderIcon: ({ color, size, focused }) => (
-                                            <VibeLogoIcon
-                                                size={size + 1}
-                                                color={focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)')}
-                                                strokeWidth={2.6}
+                                            <Image
+                                                source={require('../../assets/logos/logotransparent.png')}
+                                                style={{
+                                                    width: size + 2,
+                                                    height: size + 2,
+                                                    tintColor: focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)'),
+                                                    resizeMode: 'contain'
+                                                }}
                                             />
                                         ),
                                     },
@@ -572,91 +583,95 @@ export default function TabLayout() {
                                 onVibePress={() => safeRouterPush('/agent', 'android-bottom-vibe-tab')}
                             />
                         ) : (
-                        <NativeTabBar
-                            currentIndex={PAGES[currentTab]}
-                            onIndexChange={(index) => {
-                                try {
-                                    const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
-                                    console.log('[TabsLayout] fallback tab index change', index, pageNames[index]);
-                                    handleTabPress(pageNames[index]);
-                                } catch (error) {
-                                    console.error('[TabsLayout] fallback tab index change failed', error);
-                                }
-                            }}
-                            tabs={[
-                                {
-                                    key: 'contacts',
-                                    title: t('tabs.contacts'),
-                                    sfSymbol: 'person.2.fill',
-                                    unfocusedSfSymbol: 'person.2',
-                                    renderIcon: ({ focused, color, size }) => (
-                                        <ContactsIcon size={size} color={color} focused={focused} />
-                                    ),
-                                },
-                                {
-                                    key: 'calls',
-                                    title: t('tabs.calls'),
-                                    sfSymbol: 'phone.fill',
-                                    unfocusedSfSymbol: 'phone',
-                                    renderIcon: ({ focused, color, size }) => (
-                                        <CallsIcon size={size} color={color} focused={focused} />
-                                    ),
-                                },
-                                {
-                                    key: 'home',
-                                    title: t('tabs.chats'),
-                                    sfSymbol: 'bubble.left.and.bubble.right.fill',
-                                    unfocusedSfSymbol: 'bubble.left.and.bubble.right',
-                                    badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
-                                    renderIcon: ({ focused, color, size }) => (
-                                        <View>
-                                            <DoubleChatIcon size={size} color={color} focused={focused} />
-                                            {totalUnread > 0 && (
-                                                <View style={styles.badge}>
-                                                    <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
-                                                </View>
-                                            )}
-                                        </View>
-                                    ),
-                                },
-                                {
-                                    key: 'settings',
-                                    title: t('tabs.settings'),
-                                    sfSymbol: 'gearshape.fill',
-                                    unfocusedSfSymbol: 'gearshape',
-                                    renderIcon: ({ focused, color, size }) => (
-                                        <SettingsIcon
-                                            size={size}
-                                            color={color}
-                                            focused={focused}
-                                            imageUri={user?.profileImage}
-                                            name={user?.name || user?.username}
-                                        />
-                                    ),
-                                },
-                                ...(Platform.OS === 'android'
-                                    ? [{
-                                        key: 'vibe',
-                                        title: 'Vibe',
-                                        preventsDefault: true,
-                                        renderIcon: ({ color, size, focused }) => (
-                                            <VibeLogoIcon
-                                                size={size + 1}
-                                                color={focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)')}
-                                                strokeWidth={2.6}
+                            <NativeTabBar
+                                currentIndex={PAGES[currentTab]}
+                                onIndexChange={(index) => {
+                                    try {
+                                        const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
+                                        console.log('[TabsLayout] fallback tab index change', index, pageNames[index]);
+                                        handleTabPress(pageNames[index]);
+                                    } catch (error) {
+                                        console.error('[TabsLayout] fallback tab index change failed', error);
+                                    }
+                                }}
+                                tabs={[
+                                    {
+                                        key: 'contacts',
+                                        title: t('tabs.contacts'),
+                                        sfSymbol: 'person.2.fill',
+                                        unfocusedSfSymbol: 'person.2',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <ContactsIcon size={size} color={color} focused={focused} />
+                                        ),
+                                    },
+                                    {
+                                        key: 'calls',
+                                        title: t('tabs.calls'),
+                                        sfSymbol: 'phone.fill',
+                                        unfocusedSfSymbol: 'phone',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <CallsIcon size={size} color={color} focused={focused} />
+                                        ),
+                                    },
+                                    {
+                                        key: 'home',
+                                        title: t('tabs.chats'),
+                                        sfSymbol: 'bubble.left.and.bubble.right.fill',
+                                        unfocusedSfSymbol: 'bubble.left.and.bubble.right',
+                                        badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <View>
+                                                <DoubleChatIcon size={size} color={color} focused={focused} />
+                                                {totalUnread > 0 && (
+                                                    <View style={styles.badge}>
+                                                        <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
+                                                    </View>
+                                                )}
+                                            </View>
+                                        ),
+                                    },
+                                    {
+                                        key: 'settings',
+                                        title: t('tabs.settings'),
+                                        sfSymbol: 'gearshape.fill',
+                                        unfocusedSfSymbol: 'gearshape',
+                                        renderIcon: ({ focused, color, size }) => (
+                                            <SettingsIcon
+                                                size={size}
+                                                color={color}
+                                                focused={focused}
+                                                imageUri={user?.profileImage}
+                                                name={user?.name || user?.username}
                                             />
                                         ),
-                                    }]
-                                    : []),
-                            ]}
-                            activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
-                            inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
-                            isDark={isDark}
-                            translateX={translateX}
-                            screenWidth={SCREEN_WIDTH}
-                            fallbackTabWidth={fallbackTabWidth}
-                            onVibePress={() => safeRouterPush('/agent', 'fallback-vibe-tab')}
-                        />
+                                    },
+                                    ...(Platform.OS === 'android'
+                                        ? [{
+                                            key: 'vibe',
+                                            title: 'Vibe',
+                                            preventsDefault: true,
+                                            renderIcon: ({ color, size, focused }: { color: string, size: number, focused: boolean }) => (
+                                                <Image
+                                                    source={require('../../assets/logos/logotransparent.png')}
+                                                    style={{
+                                                        width: size + 2,
+                                                        height: size + 2,
+                                                        tintColor: focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)'),
+                                                        resizeMode: 'contain'
+                                                    }}
+                                                />
+                                            ),
+                                        }]
+                                        : []),
+                                ]}
+                                activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
+                                inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
+                                isDark={isDark}
+                                translateX={translateX}
+                                screenWidth={SCREEN_WIDTH}
+                                fallbackTabWidth={fallbackTabWidth}
+                                onVibePress={() => safeRouterPush('/agent', 'fallback-vibe-tab')}
+                            />
                         )}
                         {Platform.OS !== 'android' && (
                             <VibeButton

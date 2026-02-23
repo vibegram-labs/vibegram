@@ -5,6 +5,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.ShapeDrawable
 import android.os.Bundle
+import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.widget.FrameLayout
@@ -27,24 +28,32 @@ class VibeNativeCallUiActivity : ComponentActivity() {
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
+    Log.d("VibeNativeCall", "UiActivity.onCreate savedState=${savedInstanceState != null}")
     buildUi()
     VibeNativeCallUiBridge.attachActivity(this)
   }
 
   override fun onDestroy() {
+    Log.d("VibeNativeCall", "UiActivity.onDestroy finishing=$isFinishing")
     super.onDestroy()
     VibeNativeCallUiBridge.detachActivity(this)
   }
 
   @Deprecated("Native call screen is controlled by call state")
   override fun onBackPressed() {
+    Log.d("VibeNativeCall", "UiActivity.onBackPressed ignored=true")
     // Keep the call UI visible until JS/native call state explicitly hides it.
   }
 
   fun applyUiState(state: Map<String, Any?>) {
     runOnUiThread {
       val mode = state.stringValue("mode") ?: "hidden"
+      Log.d(
+        "VibeNativeCall",
+        "UiActivity.applyUiState mode=$mode visible=${state.boolValue("visible")} callId=${state["callId"] ?: state["call_id"]} status=${state.stringValue("callStatus")}"
+      )
       if (mode == "hidden") {
+        Log.d("VibeNativeCall", "UiActivity.applyUiState finish reason=hidden")
         finish()
         return@runOnUiThread
       }
@@ -196,7 +205,7 @@ class VibeNativeCallUiActivity : ComponentActivity() {
       background = rounded(darkPalette.surface, dp(sizeDp / 2))
       setImageDrawable(null)
       setOnClickListener {
-        VibeNativeCallUiBridge.emitUiEvent(
+        val eventType =
           when (key) {
             "incomingAccept" -> "accept"
             "incomingDecline" -> "decline"
@@ -209,7 +218,8 @@ class VibeNativeCallUiActivity : ComponentActivity() {
             "end" -> "end"
             else -> "noop"
           }
-        )
+        Log.d("VibeNativeCall", "UiActivity.buttonTap key=$key event=$eventType")
+        VibeNativeCallUiBridge.emitUiEvent(eventType)
       }
     }
     val overlay = TextView(this).apply {

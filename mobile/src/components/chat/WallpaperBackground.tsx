@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { View, StyleSheet, Image } from 'react-native';
+import { View, StyleSheet, Image, Platform } from 'react-native';
 import { useWallpaperStore, resolveThemeVariant } from '../../lib/stores/wallpaper-store';
 import { useThemeStore } from '../../lib/stores/theme-store';
 import TelegramDoodleWallpaper from './wallpapers/TelegramDoodleWallpaper';
@@ -13,6 +13,7 @@ import PatternWallpaper from './wallpapers/PatternWallpaper';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Asset } from 'expo-asset';
+const MaskedViewAny = MaskedView as any;
 
 // Pre-resolve image assets at module load (not per render)
 const WALLPAPER_ASSETS = {
@@ -121,18 +122,27 @@ function WallpaperBackground({
                     end={{ x: 1, y: 1 }}
                 />
 
-                {/* 2. Masked Gradient Layer - This fills the SHAPES with the pattern gradient */}
-                <MaskedView
+                {/* 2. Masked Gradient Layer (Android uses software mask mode for back-navigation stability) */}
+                <MaskedViewAny
+                    key={`mask-${themeToRender.id}-${imageKey}-${isDark ? 'dark' : 'light'}`}
                     style={StyleSheet.absoluteFill}
+                    androidRenderingMode={Platform.OS === 'android' ? 'software' : undefined}
                     maskElement={
-                        <View style={{
-                            flex: 1,
-                            backgroundColor: 'transparent',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                        }}>
+                        <View
+                            collapsable={false}
+                            renderToHardwareTextureAndroid={true}
+                            style={{
+                                flex: 1,
+                                width: '100%',
+                                height: '100%',
+                                backgroundColor: 'transparent',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                            }}
+                        >
                             <Image
                                 source={WallpaperAsset}
+                                collapsable={false}
                                 style={{
                                     width: propWidth || '100%',
                                     height: propHeight || '100%',
@@ -143,14 +153,20 @@ function WallpaperBackground({
                         </View>
                     }
                 >
-                    <LinearGradient
-                        colors={GRADIENT_COLORS}
-                        locations={GRADIENT_LOCATIONS}
-                        start={{ x: 0, y: 0 }}
-                        end={{ x: 1, y: 1 }}
-                        style={[StyleSheet.absoluteFill, { opacity: themeToRender.patternOpacity || 0.08 }]}
-                    />
-                </MaskedView>
+                    <View
+                        collapsable={false}
+                        renderToHardwareTextureAndroid={true}
+                        style={StyleSheet.absoluteFill}
+                    >
+                        <LinearGradient
+                            colors={GRADIENT_COLORS}
+                            locations={GRADIENT_LOCATIONS}
+                            start={{ x: 0, y: 0 }}
+                            end={{ x: 1, y: 1 }}
+                            style={[StyleSheet.absoluteFill, { opacity: themeToRender.patternOpacity || 0.08 }]}
+                        />
+                    </View>
+                </MaskedViewAny>
             </View>
         );
     }

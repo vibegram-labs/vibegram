@@ -63,7 +63,7 @@ export default function ChatScreenHeader({
                     <BlurView
                         intensity={30}
                         tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                        style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(colors.background, 0.95) }]}
+                        style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(wallpaperGradient[0] || colors.background, 0.95) }]}
                     />
                 </View>
 

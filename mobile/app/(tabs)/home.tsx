@@ -17,6 +17,7 @@ import LottieView from 'lottie-react-native'
 import Swipeable from 'react-native-gesture-handler/Swipeable'
 import SafeLiquidGlass from '../../src/components/native/SafeLiquidGlass'
 import { StoryBar, StoryViewer, StoryAvatar } from '../../src/components/story'
+import { useStoryStore } from '../../src/lib/stores/story-store'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { BlurView } from 'expo-blur'
 import { Animated as RNAnimated } from 'react-native'
@@ -30,6 +31,7 @@ import { useSavedMessagesStore } from '../../src/lib/stores/saved-messages-store
 
 // Helper to add alpha to hex color
 const withAlpha = (color: string, alpha: number): string => {
+    'worklet';
     if (!color) return `rgba(127, 127, 127, ${alpha})`
     if (color.startsWith('#')) {
         const hex = color.replace('#', '')
@@ -150,6 +152,10 @@ interface HomeScreenProps {
     onChatSelect?: (chatId: string) => void;
     onOpenStoryCamera?: () => void;
 }
+
+const SEARCH_BAR_HEIGHT = 44;
+const SEARCH_BAR_VERTICAL_PADDING = 14;
+const SEARCH_BAR_BLOCK_HEIGHT = SEARCH_BAR_HEIGHT + (SEARCH_BAR_VERTICAL_PADDING * 2);
 
 // Swipeable Chat Row Component 
 const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onDelete, onPin, onMute, isEditing, isSelected, isTyping, isOnline }: any) => {
@@ -477,6 +483,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const { setActiveChat, chats, isLoading, loadChats, deleteChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected } = useChatStore()
     const { savedMessages } = useSavedMessagesStore()
     const { callStatus, remoteUser, callDuration, callType } = useCallStore()
+    const { feed, myStories } = useStoryStore()
     const onlineUsersList = onlineUsers ? Array.from(onlineUsers) : [];
 
 
@@ -549,7 +556,15 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
 
     const allChats = useMemo(() => {
-        let list = [...chats];
+        let list = chats.filter((chat: any) => {
+            if (chat.chatId === 'saved_messages') return true;
+            if (chat.type !== 'dm' && chat.type !== 'direct') return true;
+            if (chat.lastMessage) return true;
+            if (chat.messages && chat.messages.length > 0) return true;
+            if (chat.unreadCount > 0 || chat.markedUnread) return true;
+            if (chat.friendId && typingUsers.has(chat.friendId.toUpperCase())) return true;
+            return false;
+        });
         if (savedMessages.length > 0) {
             const lastMsg = savedMessages[0] as any;
             const savedChat = {
@@ -563,12 +578,12 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 friendName: 'Saved Messages',
                 messages: []
             } as any;
-            if (!list.find(c => c.chatId === 'saved_messages')) {
+            if (!list.find((c: any) => c.chatId === 'saved_messages')) {
                 list.push(savedChat);
             }
         }
         return list.sort((a: any, b: any) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-    }, [chats, savedMessages, user?.userId]);
+    }, [chats, savedMessages, user?.userId, typingUsers]);
 
     const filteredChats = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
@@ -627,16 +642,16 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
     const androidHeaderAnimatedStyle = useAnimatedStyle(() => {
         const opacity = interpolate(scrollY.value, [0, 40], [0, 1], Extrapolate.CLAMP);
-        const elevation = interpolate(scrollY.value, [0, 40], [0, 8], Extrapolate.CLAMP);
+        const elevation = interpolate(scrollY.value, [0, 40], [0, 4], Extrapolate.CLAMP);
         return {
             opacity,
             elevation,
             shadowColor: '#000',
             shadowOffset: { width: 0, height: 2 },
-            shadowOpacity: interpolate(scrollY.value, [0, 40], [0, 0.15], Extrapolate.CLAMP),
-            shadowRadius: 4,
-            borderBottomWidth: StyleSheet.hairlineWidth,
-            borderBottomColor: withAlpha(colors.text, interpolate(scrollY.value, [0, 40], [0, 0.08], Extrapolate.CLAMP)),
+            shadowOpacity: interpolate(scrollY.value, [0, 40], [0, 0.1], Extrapolate.CLAMP),
+            shadowRadius: 2,
+            borderBottomWidth: opacity > 0 ? StyleSheet.hairlineWidth : 0,
+            borderBottomColor: withAlpha(colors.text, interpolate(scrollY.value, [0, 40], [0, 0.05], Extrapolate.CLAMP)),
         };
     });
 
@@ -649,32 +664,27 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
 
     const searchBarStyle = useAnimatedStyle(() => {
-        // Natural opacity fades OUT when focused to reveal the pinned overlay
-        const focusOpacity = interpolate(searchFocusProgress.value, [0, 0.2], [1, 0], Extrapolate.CLAMP);
-
-        // Natural scroll collapse: height shrinks and content slides up
-        const scrollHeight = interpolate(scrollY.value, [0, 40], [44, 0], Extrapolate.CLAMP);
-        const scrollTranslateY = interpolate(scrollY.value, [0, 40], [0, -22], Extrapolate.CLAMP);
-        const scrollOpacity = interpolate(scrollY.value, [0, 30], [1, 0], Extrapolate.CLAMP);
+        // Collapse the full block (including vertical padding) so list items slide up cleanly.
+        const focusHeight = interpolate(searchFocusProgress.value, [0, 1], [SEARCH_BAR_BLOCK_HEIGHT, 0], Extrapolate.CLAMP);
+        const focusScaleY = interpolate(searchFocusProgress.value, [0, 1], [1, 0], Extrapolate.CLAMP);
 
         return {
-            height: scrollHeight,
-            opacity: Math.min(focusOpacity, scrollOpacity),
-            transform: [{ translateY: scrollTranslateY }],
+            height: focusHeight,
+            paddingTop: interpolate(searchFocusProgress.value, [0, 1], [SEARCH_BAR_VERTICAL_PADDING, 0], Extrapolate.CLAMP),
+            paddingBottom: interpolate(searchFocusProgress.value, [0, 1], [SEARCH_BAR_VERTICAL_PADDING, 0], Extrapolate.CLAMP),
+            transform: [{ scaleY: focusScaleY }],
+            opacity: 1,
             overflow: 'hidden',
         };
     });
 
     const searchInputOverlayStyle = useAnimatedStyle(() => {
         // Capture initial position based on scroll when animation started
-        const startY = insets.top + 170 - scrollYAtStart.value;
-        const targetY = insets.top + 10;
+        const startY = insets.top + (feed.length > 0 || myStories.length > 0 ? 170 : 66) - scrollYAtStart.value;
+        const targetY = insets.top + 8;
 
-        // Match the container's vertical shift (-30px)
-        const parentShift = interpolate(searchFocusProgress.value, [0, 1], [0, -30], Extrapolate.CLAMP);
-
-        // Synchronized Cross-fade: Overlay fades IN as list bar fades OUT
-        const opacity = interpolate(searchFocusProgress.value, [0, 0.15], [0, 1], Extrapolate.CLAMP);
+        // Physical expansion instead of opacity cross-fade
+        const scaleY = interpolate(searchFocusProgress.value, [0, 1], [0, 1], Extrapolate.CLAMP);
 
         // We want to feel like we "lift" the bar from the list
         // and move it to the fixed header position.
@@ -684,18 +694,21 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             left: 0,
             right: 0,
             transform: [
-                { translateY: interpolate(searchFocusProgress.value, [0, 1], [startY + parentShift, targetY], Extrapolate.CLAMP) }
+                { translateY: interpolate(searchFocusProgress.value, [0, 1], [startY, targetY], Extrapolate.CLAMP) },
+                { scaleY }
             ],
-            height: 44,
-            opacity,
+            height: SEARCH_BAR_BLOCK_HEIGHT,
+            paddingTop: SEARCH_BAR_VERTICAL_PADDING,
+            paddingBottom: SEARCH_BAR_VERTICAL_PADDING,
+            opacity: 1,
             paddingHorizontal: interpolate(searchFocusProgress.value, [0, 1], [16, 20], Extrapolate.CLAMP),
             zIndex: 4000,
         };
     });
 
     const cancelBtnStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(searchFocusProgress.value, [0.7, 1], [0, 1], Extrapolate.CLAMP),
-        transform: [{ scale: interpolate(searchFocusProgress.value, [0.7, 1], [0.8, 1], Extrapolate.CLAMP) }],
+        opacity: 1,
+        transform: [{ scale: interpolate(searchFocusProgress.value, [0.7, 1], [0, 1], Extrapolate.CLAMP) }],
         width: interpolate(searchFocusProgress.value, [0.7, 1], [0, 32], Extrapolate.CLAMP),
     }));
 
@@ -829,8 +842,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
     const containerAnimatedStyle = useAnimatedStyle(() => ({
         transform: [
-            { scale: parentScale.value },
-            { translateY: interpolate(searchFocusProgress.value, [0, 1], [0, -30], Extrapolate.CLAMP) }
+            { scale: parentScale.value }
         ],
         borderRadius: interpolate(parentScale.value, [1, 0.94], [0, 24]),
         opacity: 1,
@@ -845,7 +857,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             <Animated.View style={[{ flex: 1, backgroundColor: colors.background }, containerAnimatedStyle]}>
                 <View style={styles.container}>
                     {/* Header Overlay (Blurred for iOS, Elevated for Android) */}
-                    <View style={[styles.headerMaskContainer, { height: Math.max(80, insets.top + (Platform.OS === 'android' ? 50 : 20)) }]}>
+                    <View style={[styles.headerMaskContainer, { height: insets.top + (Platform.OS === 'android' ? 56 : 50) }]}>
                         {Platform.OS === 'android' ? (
                             <Animated.View
                                 style={[
@@ -875,7 +887,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                     </View>
 
                     {/* Header Buttons/Title */}
-                    <View style={[styles.headerContentContainer, { height: insets.top + 50, paddingTop: insets.top }]}>
+                    <View style={[styles.headerContentContainer, { height: insets.top + 56, paddingTop: insets.top }]}>
                         {/* Title Container - Centered properly in the header area */}
                         <View style={[StyleSheet.absoluteFill, { top: insets.top, alignItems: 'center', justifyContent: 'center', zIndex: -1 }]} pointerEvents="none">
                             <Animated.View key={!isConnected ? 'connecting' : (isLoading ? 'updating' : 'chats')} entering={FadeIn.duration(200)} exiting={FadeOut.duration(200)}>
@@ -904,8 +916,9 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                 >
                                     {Platform.OS === 'android' ? (
                                         <View style={[styles.glassBtnEdit, {
-                                            backgroundColor: isEditing ? colors.primary : withAlpha(colors.text, 0.08),
+                                            backgroundColor: isEditing ? colors.primary : 'transparent',
                                             borderRadius: 20,
+                                            paddingHorizontal: 8,
                                         }]}>
                                             <View style={styles.textBtnTouch}>
                                                 <Text style={[styles.headerTextBtn, { color: isEditing ? '#fff' : colors.text }]}>
@@ -931,19 +944,19 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
                         <View style={{ zIndex: 200 }}>
                             {Platform.OS === 'android' ? (
-                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
-                                    <TouchableOpacity onPress={() => safePress('openConnectionModal', () => connectionModalRef.current?.present())} style={[styles.iconBtnCircle, { backgroundColor: withAlpha(colors.text, 0.08), borderRadius: 20, width: 40, height: 40 }]}>
+                                <View style={{ flexDirection: 'row', alignItems: 'center', gap: 0 }}>
+                                    <TouchableOpacity onPress={() => safePress('openConnectionModal', () => connectionModalRef.current?.present())} style={[styles.iconBtnCircle, { width: 36, height: 36 }]}>
                                         <AnimatedShieldIcon size={22} />
                                     </TouchableOpacity>
                                     <TouchableOpacity
                                         onPress={handleOpenStoryCamera}
-                                        style={[styles.iconBtnCircle, { backgroundColor: withAlpha(colors.text, 0.08), borderRadius: 20, width: 40, height: 40 }]}
+                                        style={[styles.iconBtnCircle, { width: 36, height: 36 }]}
                                     >
-                                        <PlusCircleVibeIcon size={24} color={colors.text} />
+                                        <PlusCircleVibeIcon size={23} color={colors.text} />
                                     </TouchableOpacity>
 
-                                    <TouchableOpacity onPress={() => safePress('openMainMenuHeader', () => setShowMainMenu(true))} style={[styles.iconBtnCircle, { backgroundColor: withAlpha(colors.text, 0.08), borderRadius: 20, width: 40, height: 40 }]}>
-                                        <EditChatVibeIcon size={24} color={colors.text} strokeWidth={1.5} />
+                                    <TouchableOpacity onPress={() => safePress('openMainMenuHeader', () => setShowMainMenu(true))} style={[styles.iconBtnCircle, { width: 36, height: 36 }]}>
+                                        <EditChatVibeIcon size={23} color={colors.text} strokeWidth={1.5} />
                                     </TouchableOpacity>
                                 </View>
                             ) : (
@@ -972,7 +985,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         renderItem={renderItem}
                         extraData={[typingUsers, onlineUsers, selectedConversations, isEditing, chats.length]}
                         keyExtractor={item => item.chatId}
-                        contentContainerStyle={[styles.listContent, { paddingTop: insets.top + 60 }]}
+                        contentContainerStyle={[styles.listContent, { paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }]}
                         showsVerticalScrollIndicator={false}
                         onScroll={onScroll}
                         scrollEventThrottle={16}
@@ -981,14 +994,16 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         }
                         ListHeaderComponent={
                             <View>
-                                <View style={{ paddingBottom: 4, paddingLeft: 10 }}>
-                                    <StoryBar
-                                        size="medium"
-                                        onViewerOpen={handleOpenStoryViewer}
-                                        onAddStoryPress={handleOpenStoryCamera}
-                                        isMoving={false}
-                                    />
-                                </View>
+                                {(feed.length > 0 || myStories.length > 0) && (
+                                    <View style={{ paddingBottom: 4, paddingLeft: 10 }}>
+                                        <StoryBar
+                                            size="medium"
+                                            onViewerOpen={handleOpenStoryViewer}
+                                            onAddStoryPress={handleOpenStoryCamera}
+                                            isMoving={false}
+                                        />
+                                    </View>
+                                )}
                                 {/* Search Bar (Natural version in ScrollView) */}
                                 <Animated.View style={searchBarStyle} pointerEvents={isSearchActive ? 'none' : 'auto'}>
                                     <View
@@ -997,7 +1012,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                             alignItems: 'center',
                                             backgroundColor: colors.input || colors.card,
                                             borderRadius: 22,
-                                            height: 44,
+                                            height: SEARCH_BAR_HEIGHT,
                                             paddingHorizontal: 14,
                                             marginHorizontal: 16
                                         }}
@@ -1106,7 +1121,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 pointerEvents={isSearchActive ? 'auto' : 'none'}
                 style={[StyleSheet.absoluteFill, { zIndex: 3000 }, searchOverlayStyle]}
             >
-                <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: insets.top + 60 }}>
+                <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: insets.top + 8 + SEARCH_BAR_BLOCK_HEIGHT + 8 }}>
                     {isSearchActive && searchQuery === '' && (
                         <View style={{ flex: 1 }}>
                             {/* Latest Chat Preview */}
@@ -1169,7 +1184,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         alignItems: 'center',
                         backgroundColor: colors.input || colors.card,
                         borderRadius: 22,
-                        height: '100%',
+                        height: SEARCH_BAR_HEIGHT,
                         paddingHorizontal: 12
                     }}
                 >

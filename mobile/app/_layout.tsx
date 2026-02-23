@@ -10,6 +10,7 @@ import { useFonts, SpaceGrotesk_400Regular, SpaceGrotesk_700Bold } from '@expo-g
 import * as SplashScreen from 'expo-splash-screen'
 import { useEffect, useRef } from 'react'
 import * as Notifications from 'expo-notifications'
+import { useShallow } from 'zustand/react/shallow'
 import { useThemeStore } from '../src/lib/stores/theme-store'
 import { useAuthStore } from '../src/lib/stores/auth-store'
 import ThemeBackground from '../src/components/ThemeBackground'
@@ -57,19 +58,21 @@ export default function RootLayout() {
   const nativeCallUiRuntimeInfo = getNativeCallModule()
   const supportsNativeInAppCallUi = !!nativeCallUiRuntimeInfo?.supportsInAppUi?.()
 
-  const callUiSnapshot = useCallStore((s) => ({
-    callId: s.callId,
-    callType: s.callType,
-    callStatus: s.callStatus,
-    callDirection: s.callDirection,
-    remoteUser: s.remoteUser,
-    isMuted: s.isMuted,
-    isSpeakerOn: s.isSpeakerOn,
-    isVideoEnabled: s.isVideoEnabled,
-    callDuration: s.callDuration,
-    isFrontCamera: s.isFrontCamera,
-    incomingCallData: s.incomingCallData,
-  }))
+  const callUiSnapshot = useCallStore(
+    useShallow((s) => ({
+      callId: s.callId,
+      callType: s.callType,
+      callStatus: s.callStatus,
+      callDirection: s.callDirection,
+      remoteUser: s.remoteUser,
+      isMuted: s.isMuted,
+      isSpeakerOn: s.isSpeakerOn,
+      isVideoEnabled: s.isVideoEnabled,
+      callDuration: s.callDuration,
+      isFrontCamera: s.isFrontCamera,
+      incomingCallData: s.incomingCallData,
+    }))
+  )
 
   // Transient Agent Store for @vibe queries (global)
   const { pendingResponse, clearPending, promoteToPersistent } = useTransientAgentStore()
@@ -91,6 +94,7 @@ export default function RootLayout() {
   const handledNotificationIdsRef = useRef<Set<string>>(new Set());
   const nativeCallDrainInFlightRef = useRef(false);
   const deferredNativeCallEventsRef = useRef<any[]>([]);
+  const nativeCallUiDebugKeyRef = useRef<string>('');
 
   const drainNativeCallEvents = async () => {
     if (nativeCallDrainInFlightRef.current) return;
@@ -153,6 +157,7 @@ export default function RootLayout() {
     if (!supportsNativeInAppCallUi) return;
     const sub = addNativeCallUiListener(async (event) => {
       const type = event?.type;
+      console.log('[NativeCallUI][JS] onCallUiEvent', event);
       switch (type) {
         case 'accept':
           await useCallStore.getState().acceptCall(getUserChannel());
@@ -211,10 +216,38 @@ export default function RootLayout() {
       callUiSnapshot.callType ||
       'voice';
 
+    const callId =
+      callUiSnapshot.callId || callUiSnapshot.incomingCallData?.callId || undefined;
+    const debugKey = [
+      mode,
+      callUiSnapshot.callStatus,
+      callUiSnapshot.callDirection,
+      callId ?? '-',
+      callType,
+      callUiSnapshot.isMuted ? 'm1' : 'm0',
+      callUiSnapshot.isSpeakerOn ? 's1' : 's0',
+      callUiSnapshot.isVideoEnabled ? 'v1' : 'v0',
+      effectiveTheme,
+    ].join('|');
+    if (nativeCallUiDebugKeyRef.current !== debugKey) {
+      nativeCallUiDebugKeyRef.current = debugKey;
+      console.log('[NativeCallUI][JS] setCallUiState', {
+        mode,
+        visible: mode !== 'hidden',
+        callId,
+        callStatus: callUiSnapshot.callStatus,
+        callDirection: callUiSnapshot.callDirection,
+        callType,
+        isMuted: callUiSnapshot.isMuted,
+        isSpeakerOn: callUiSnapshot.isSpeakerOn,
+        isVideoEnabled: callUiSnapshot.isVideoEnabled,
+      });
+    }
+
     nativeCall.setCallUiState({
       visible: mode !== 'hidden',
       mode,
-      callId: callUiSnapshot.callId || callUiSnapshot.incomingCallData?.callId || undefined,
+      callId,
       callType,
       callStatus: callUiSnapshot.callStatus,
       remoteUserName: remoteName,

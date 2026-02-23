@@ -156,8 +156,10 @@ NativeChatSurface.displayName = 'NativeChatSurface';
 const styles = StyleSheet.create({
   fill: {
     flex: 1,
+    backgroundColor: 'transparent',
   },
   fallback: {
     flex: 1,
+    backgroundColor: 'transparent',
   },
 });

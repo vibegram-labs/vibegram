@@ -175,9 +175,6 @@ export default function AndroidBottomTabBar({
       <View
         style={[
           styles.row,
-          bottomInsetPadding > 0 && {
-            paddingBottom: 5 + bottomInsetPadding,
-          },
         ]}
         onLayout={(event) => {
           setRowWidth(event.nativeEvent.layout.width)

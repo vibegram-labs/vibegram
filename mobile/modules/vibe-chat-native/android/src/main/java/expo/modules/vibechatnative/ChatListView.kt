@@ -1,15 +1,24 @@
 package expo.modules.vibechatnative
 
 import android.content.Context
+import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.LinearGradient
 import android.graphics.Paint
 import android.graphics.Path
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Rect
 import android.graphics.RectF
+import android.graphics.Shader
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.GradientDrawable
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -424,6 +433,7 @@ private class VoiceWaveformView(context: Context) : View(context) {
 
 private class NativeRowsAdapter(
   private val context: Context,
+  private val appContext: AppContext? = null,
   private val emitNativeEvent: (Map<String, Any>) -> Unit,
 ) : RecyclerView.Adapter<NativeRowViewHolder>() {
   private val rows = mutableListOf<NativeRowItem>()
@@ -434,7 +444,14 @@ private class NativeRowsAdapter(
   private var externalVoiceMessageId: String? = null
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress = 0f
-  private var activeContextMenu: PopupWindow? = null
+  private data class ActiveContextMenuOverlay(
+    val popup: PopupWindow,
+    val backdropView: View,
+    val sheetWrap: View,
+    var closing: Boolean = false,
+  )
+
+  private var activeContextMenu: ActiveContextMenuOverlay? = null
 
   init {
     setHasStableIds(true)
@@ -921,7 +938,7 @@ private class NativeRowsAdapter(
     lp.gravity = if (item.isMe) Gravity.END else Gravity.START
     bubbleContainer.layoutParams = lp
 
-    val bubbleThemFill = withAlpha(appearance.bubbleThemColor, 0.82f)
+    val bubbleThemFill = appearance.bubbleThemColor
     val metaBaseColor = if (item.isMe) appearance.timeColorMe else appearance.timeColorThem
     statusView.bind(item.status, metaBaseColor)
     val showStatus = item.isMe && when (item.status?.lowercase()) {
@@ -1037,13 +1054,33 @@ private class NativeRowsAdapter(
     }
   }
 
-  private fun dismissContextMenu() {
-    activeContextMenu?.dismiss()
-    activeContextMenu = null
+  private fun dismissContextMenu(animated: Boolean = true) {
+    val active = activeContextMenu ?: return
+    if (active.closing) return
+    if (!animated) {
+      active.popup.dismiss()
+      return
+    }
+    active.closing = true
+    active.backdropView.animate()
+      .alpha(0f)
+      .setDuration(170L)
+      .start()
+    active.sheetWrap.animate()
+      .alpha(0f)
+      .translationY(dpF(36f))
+      .setDuration(220L)
+      .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
+      .setListener(object : AnimatorListenerAdapter() {
+        override fun onAnimationEnd(animation: Animator) {
+          active.popup.dismiss()
+        }
+      })
+      .start()
   }
 
   private fun showContextMenu(anchor: View, item: NativeRowItem, messageId: String) {
-    dismissContextMenu()
+    dismissContextMenu(animated = false)
 
     emitNativeEvent(
       mapOf(
@@ -1052,43 +1089,192 @@ private class NativeRowsAdapter(
       ),
     )
 
-    val container = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      setPadding(dp(10), dp(10), dp(10), dp(10))
-      background = GradientDrawable().apply {
-        shape = GradientDrawable.RECTANGLE
-        cornerRadius = dpF(18f)
-        setColor(Color.argb(246, 22, 25, 31))
+    val reactionSource = IntArray(2).also { anchor.getLocationInWindow(it) }
+    val reactionSourceX = reactionSource[0] + (anchor.width / 2f)
+    val reactionSourceY = reactionSource[1] + (anchor.height * 0.20f)
+
+    val actions = ArrayList<Pair<String, String>>()
+    actions.add("reply" to "Reply")
+    if (item.text.isNotBlank()) {
+      actions.add("copy" to "Copy")
+    }
+    if (item.isMe && item.text.isNotBlank()) {
+      actions.add("edit" to "Edit")
+    }
+    actions.add("pin" to "Pin")
+    if (item.isMe && item.status?.lowercase() == "error") {
+      actions.add("resend" to "Resend")
+    }
+    actions.add("delete" to "Delete")
+
+    fun luminance(color: Int): Float {
+      fun channel(v: Int): Float {
+        val s = (v / 255f)
+        return if (s <= 0.03928f) s / 12.92f else ((s + 0.055f) / 1.055f).pow(2.4f)
       }
-      elevation = dpF(10f)
+      return 0.2126f * channel(Color.red(color)) + 0.7152f * channel(Color.green(color)) + 0.0722f * channel(Color.blue(color))
     }
 
+    val isLightTheme = luminance(appearance.bubbleThemColor) > 0.45f
+    val cardFill = if (isLightTheme) Color.argb(236, 248, 251, 255) else Color.argb(236, 18, 22, 29)
+    val cardStroke = if (isLightTheme) Color.argb(64, 255, 255, 255) else Color.argb(30, 255, 255, 255)
+    val textColor = if (isLightTheme) Color.argb(240, 20, 24, 32) else Color.argb(236, 255, 255, 255)
+    val secondaryText = if (isLightTheme) Color.argb(190, 36, 42, 52) else Color.argb(190, 245, 247, 255)
+    val dividerColor = if (isLightTheme) Color.argb(24, 16, 24, 32) else Color.argb(26, 255, 255, 255)
+    val chipFill = if (isLightTheme) Color.argb(34, 18, 26, 38) else Color.argb(22, 255, 255, 255)
+    val rowFill = if (isLightTheme) Color.argb(18, 16, 24, 32) else Color.argb(10, 255, 255, 255)
+    val scrimColor = if (isLightTheme) Color.argb(64, 8, 12, 20) else Color.argb(92, 0, 0, 0)
+
+    fun makeCardContainer(cornerDp: Float): FrameLayout {
+      val card = FrameLayout(context).apply {
+        clipChildren = true
+        clipToPadding = true
+        background = GradientDrawable().apply {
+          shape = GradientDrawable.RECTANGLE
+          cornerRadius = dpF(cornerDp)
+          setColor(cardFill)
+          setStroke(max(1, dp(1)), cardStroke)
+        }
+        elevation = dpF(12f)
+      }
+      if (appContext != null) {
+        val glass = LiquidGlassView(context, appContext).apply {
+          layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+          )
+          setCornerRadius(cornerDp.toDouble())
+          setBlurIntensity(18.0)
+          setBlurReductionFactor(4.0)
+          setInteractive(false)
+          setPressFeedbackEnabled(false)
+          setTint(if (isLightTheme) "light" else "dark")
+          alpha = 0.92f
+        }
+        card.addView(glass)
+      }
+      return card
+    }
+
+    val overlayRoot = FrameLayout(context).apply {
+      layoutParams = ViewGroup.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        ViewGroup.LayoutParams.MATCH_PARENT,
+      )
+      isClickable = true
+      isFocusable = true
+      isFocusableInTouchMode = true
+      setBackgroundColor(Color.TRANSPARENT)
+    }
+
+    val backdropWrap = FrameLayout(context).apply {
+      layoutParams = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT,
+      )
+      alpha = 0f
+    }
+    if (appContext != null) {
+      backdropWrap.addView(
+        LiquidGlassView(context, appContext).apply {
+          layoutParams = FrameLayout.LayoutParams(
+            FrameLayout.LayoutParams.MATCH_PARENT,
+            FrameLayout.LayoutParams.MATCH_PARENT,
+          )
+          setCornerRadius(0.0)
+          setBlurIntensity(22.0)
+          setBlurReductionFactor(4.0)
+          setInteractive(false)
+          setPressFeedbackEnabled(false)
+          setEffect("clear")
+          setTint(if (isLightTheme) "light" else "dark")
+          alpha = 0.36f
+        },
+      )
+    }
+    val scrimView = View(context).apply {
+      layoutParams = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT,
+      )
+      background = ColorDrawable(scrimColor)
+    }
+    backdropWrap.addView(scrimView)
+    overlayRoot.addView(backdropWrap)
+
+    val sheetWrap = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      alpha = 0f
+      translationY = dpF(40f)
+      setPadding(dp(14), dp(14), dp(14), dp(14))
+      layoutParams = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.BOTTOM,
+      )
+      setOnClickListener { }
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+        isForceDarkAllowed = false
+      }
+    }
+    overlayRoot.addView(sheetWrap)
+
+    val reactionCard = makeCardContainer(20f)
+    val reactionContent = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(10), dp(8), dp(10), dp(10))
+    }
+    reactionContent.addView(
+      TextView(context).apply {
+        text = "React"
+        setTextColor(secondaryText)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setPadding(dp(4), dp(2), dp(4), dp(6))
+      },
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
     val reactionRow = LinearLayout(context).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
     }
-    container.addView(
+    reactionContent.addView(
       reactionRow,
       LinearLayout.LayoutParams(
         LinearLayout.LayoutParams.WRAP_CONTENT,
         LinearLayout.LayoutParams.WRAP_CONTENT,
       ),
     )
+    reactionCard.addView(
+      reactionContent,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+    sheetWrap.addView(
+      reactionCard,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ).apply {
+        gravity = Gravity.CENTER_HORIZONTAL
+      },
+    )
 
-    val reactionSource = IntArray(2).also { anchor.getLocationInWindow(it) }
-    val reactionSourceX = reactionSource[0] + (anchor.width / 2f)
-    val reactionSourceY = reactionSource[1] + (anchor.height * 0.20f)
     val reactions = listOf("👍", "👎", "❤️", "🔥", "🎉", "💩")
     for ((index, emoji) in reactions.withIndex()) {
       val chip = TextView(context).apply {
         text = emoji
         gravity = Gravity.CENTER
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 19f)
-        setPadding(dp(8), dp(6), dp(8), dp(6))
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
+        setPadding(dp(9), dp(7), dp(9), dp(7))
         background = GradientDrawable().apply {
           shape = GradientDrawable.RECTANGLE
-          cornerRadius = dpF(12f)
-          setColor(Color.argb(22, 255, 255, 255))
+          cornerRadius = dpF(14f)
+          setColor(chipFill)
         }
         setOnClickListener {
           emitNativeEvent(
@@ -1114,45 +1300,52 @@ private class NativeRowsAdapter(
       )
     }
 
-    container.addView(
-      View(context).apply {
-        background = ColorDrawable(Color.argb(28, 255, 255, 255))
+    val actionsCard = makeCardContainer(20f)
+    val actionsContent = LinearLayout(context).apply {
+      orientation = LinearLayout.VERTICAL
+      setPadding(dp(8), dp(8), dp(8), dp(8))
+    }
+    actionsContent.addView(
+      TextView(context).apply {
+        text = "Message"
+        setTextColor(secondaryText)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
+        setPadding(dp(8), dp(4), dp(8), dp(8))
       },
-      LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, dp(1)).apply {
-        topMargin = dp(10)
-        bottomMargin = dp(8)
-      },
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
     )
-
-    val actions = ArrayList<Pair<String, String>>()
-    actions.add("reply" to "Reply")
-    if (item.text.isNotBlank()) {
-      actions.add("copy" to "Copy")
-    }
-    if (item.isMe && item.text.isNotBlank()) {
-      actions.add("edit" to "Edit")
-    }
-    actions.add("pin" to "Pin")
-    if (item.isMe && item.status?.lowercase() == "error") {
-      actions.add("resend" to "Resend")
-    }
-    actions.add("delete" to "Delete")
 
     for ((i, action) in actions.withIndex()) {
       val (actionId, label) = action
+      if (i > 0) {
+        actionsContent.addView(
+          View(context).apply { background = ColorDrawable(dividerColor) },
+          LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            max(1, dp(1)),
+          ).apply {
+            marginStart = dp(8)
+            marginEnd = dp(8)
+          },
+        )
+      }
       val rowButton = TextView(context).apply {
         text = label
         gravity = Gravity.CENTER_VERTICAL
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
         setTextColor(
-          if (actionId == "delete") Color.argb(255, 255, 123, 123)
-          else Color.argb(236, 255, 255, 255),
+          if (actionId == "delete") {
+            if (isLightTheme) Color.argb(255, 217, 59, 59) else Color.argb(255, 255, 123, 123)
+          } else textColor
         )
-        setPadding(dp(10), dp(9), dp(10), dp(9))
+        setPadding(dp(12), dp(12), dp(12), dp(12))
         background = GradientDrawable().apply {
           shape = GradientDrawable.RECTANGLE
-          cornerRadius = dpF(12f)
-          setColor(Color.argb(10, 255, 255, 255))
+          cornerRadius = dpF(14f)
+          setColor(Color.TRANSPARENT)
         }
         setOnClickListener {
           emitNativeEvent(
@@ -1164,59 +1357,112 @@ private class NativeRowsAdapter(
           )
           dismissContextMenu()
         }
+        setOnTouchListener { v, event ->
+          when (event.actionMasked) {
+            MotionEvent.ACTION_DOWN -> v.background = GradientDrawable().apply {
+              shape = GradientDrawable.RECTANGLE
+              cornerRadius = dpF(14f)
+              setColor(rowFill)
+            }
+            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.background = GradientDrawable().apply {
+              shape = GradientDrawable.RECTANGLE
+              cornerRadius = dpF(14f)
+              setColor(Color.TRANSPARENT)
+            }
+          }
+          false
+        }
       }
-      container.addView(
+      actionsContent.addView(
         rowButton,
         LinearLayout.LayoutParams(
           LinearLayout.LayoutParams.MATCH_PARENT,
           LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply {
-          if (i > 0) topMargin = dp(4)
-        },
+        ),
       )
     }
+    actionsCard.addView(
+      actionsContent,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+    sheetWrap.addView(
+      actionsCard,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ).apply {
+        topMargin = dp(10)
+      },
+    )
 
     val popup = PopupWindow(
-      container,
-      ViewGroup.LayoutParams.WRAP_CONTENT,
-      ViewGroup.LayoutParams.WRAP_CONTENT,
+      overlayRoot,
+      ViewGroup.LayoutParams.MATCH_PARENT,
+      ViewGroup.LayoutParams.MATCH_PARENT,
       true,
     ).apply {
-      isOutsideTouchable = true
+      isOutsideTouchable = false
       isClippingEnabled = true
       setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-      elevation = dpF(14f)
+      elevation = dpF(20f)
       setOnDismissListener {
-        if (activeContextMenu === this) {
+        if (activeContextMenu?.popup === this) {
           activeContextMenu = null
         }
       }
     }
-    activeContextMenu = popup
-
-    container.measure(
-      View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
-      View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+    val activeOverlay = ActiveContextMenuOverlay(
+      popup = popup,
+      backdropView = backdropWrap,
+      sheetWrap = sheetWrap,
     )
-    val popupWidth = container.measuredWidth.coerceAtLeast(dp(180))
-    val popupHeight = container.measuredHeight.coerceAtLeast(dp(120))
-    popup.width = popupWidth
-    popup.height = popupHeight
+    activeContextMenu = activeOverlay
 
-    val anchorLoc = IntArray(2)
-    anchor.getLocationInWindow(anchorLoc)
-    val screenW = context.resources.displayMetrics.widthPixels
-    val screenH = context.resources.displayMetrics.heightPixels
-    val margin = dp(8)
-    val desiredX =
-      if (item.isMe) anchorLoc[0] + anchor.width - popupWidth
-      else anchorLoc[0]
-    val x = desiredX.coerceIn(margin, max(margin, screenW - popupWidth - margin))
-    val yAbove = anchorLoc[1] - popupHeight - dp(6)
-    val yBelow = anchorLoc[1] + anchor.height + dp(6)
-    val y = if (yAbove >= margin) yAbove else min(yBelow, max(margin, screenH - popupHeight - margin))
+    overlayRoot.setOnClickListener { dismissContextMenu() }
+    overlayRoot.setOnKeyListener { _, keyCode, event ->
+      if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
+        dismissContextMenu()
+        true
+      } else {
+        false
+      }
+    }
 
-    popup.showAtLocation(anchor.rootView, Gravity.NO_GRAVITY, x, y)
+    popup.showAtLocation(anchor.rootView, Gravity.NO_GRAVITY, 0, 0)
+    overlayRoot.post {
+      overlayRoot.requestFocus()
+      backdropWrap.animate()
+        .alpha(1f)
+        .setDuration(220L)
+        .setInterpolator(PathInterpolator(0.22f, 0f, 0f, 1f))
+        .start()
+      sheetWrap.animate()
+        .alpha(1f)
+        .translationY(0f)
+        .setDuration(280L)
+        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
+        .start()
+      reactionCard.scaleX = 0.985f
+      reactionCard.scaleY = 0.985f
+      reactionCard.animate()
+        .scaleX(1f)
+        .scaleY(1f)
+        .setDuration(250L)
+        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
+        .start()
+      actionsCard.scaleX = 0.985f
+      actionsCard.scaleY = 0.985f
+      actionsCard.animate()
+        .scaleX(1f)
+        .scaleY(1f)
+        .setStartDelay(20L)
+        .setDuration(260L)
+        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
+        .start()
+    }
   }
 
   fun bubbleRectInParent(position: Int, parent: View): RectF? {
@@ -1832,6 +2078,79 @@ private class NativeChatInputBar(
   }
 }
 
+private class WallpaperPatternMaskView(context: Context) : View(context) {
+  private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+  private val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    isFilterBitmap = true
+    xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+  }
+  private val drawRect = RectF()
+  private var gradientColors: IntArray = intArrayOf()
+  private var gradientLocations: FloatArray? = null
+  private var gradientOpacity: Float = 0f
+  private var maskBitmap: Bitmap? = null
+  private var gradientShader: LinearGradient? = null
+
+  init {
+    setWillNotDraw(false)
+    // PorterDuff DST_IN masking is more reliable in software on Android.
+    setLayerType(LAYER_TYPE_SOFTWARE, null)
+    visibility = GONE
+  }
+
+  fun applyPattern(
+    colors: IntArray,
+    locations: FloatArray?,
+    opacity: Float,
+    bitmap: Bitmap?,
+  ) {
+    gradientColors = colors
+    gradientLocations = locations
+    gradientOpacity = opacity.coerceIn(0f, 1f)
+    maskBitmap = bitmap
+    gradientShader = null
+    visibility =
+      if (bitmap != null && gradientColors.size >= 2 && gradientOpacity > 0.001f) VISIBLE else GONE
+    invalidate()
+  }
+
+  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    super.onSizeChanged(w, h, oldw, oldh)
+    gradientShader = null
+  }
+
+  private fun ensureShader() {
+    if (gradientShader != null) return
+    if (width <= 0 || height <= 0 || gradientColors.size < 2) return
+    gradientShader =
+      LinearGradient(
+        0f,
+        0f,
+        width.toFloat(),
+        height.toFloat(),
+        gradientColors,
+        gradientLocations,
+        Shader.TileMode.CLAMP,
+      )
+  }
+
+  override fun onDraw(canvas: Canvas) {
+    super.onDraw(canvas)
+    val bitmap = maskBitmap ?: return
+    if (width <= 0 || height <= 0 || gradientColors.size < 2 || gradientOpacity <= 0.001f) return
+    ensureShader()
+    val shader = gradientShader ?: return
+
+    drawRect.set(0f, 0f, width.toFloat(), height.toFloat())
+    val saveCount = canvas.saveLayer(drawRect, null)
+    fillPaint.shader = shader
+    fillPaint.alpha = (gradientOpacity * 255f).toInt().coerceIn(0, 255)
+    canvas.drawRect(drawRect, fillPaint)
+    canvas.drawBitmap(bitmap, null, drawRect, maskPaint)
+    canvas.restoreToCount(saveCount)
+  }
+}
+
 class ChatListView(
   context: Context,
   appContext: AppContext,
@@ -1842,11 +2161,13 @@ class ChatListView(
   private val contentFrame = FrameLayout(context)
   val recyclerView = RecyclerView(context)
   private val wallpaperView = View(context)
+  private val wallpaperPatternView = WallpaperPatternMaskView(context)
   private val overlayHost = FrameLayout(context)
-  private val inputBar = ChatNativeInputBar(context)
+  private val inputBar = ChatNativeInputBar(context, appContext)
   private val layoutManager = LinearLayoutManager(context)
-  private val adapter = NativeRowsAdapter(context) { payload -> onNativeEvent(payload) }
+  private val adapter = NativeRowsAdapter(context, appContext) { payload -> onNativeEvent(payload) }
   private var appearance = ChatListAppearance()
+  private var queuedAppearanceAfterSendTransition: ChatListAppearance? = null
   private val baseHorizontalPadding = dp(16)
   private val baseTopPadding = dp(8)
   private val baseBottomPadding = dp(12)
@@ -1865,6 +2186,13 @@ class ChatListView(
 
   private var surfaceId: String = ""
 
+  companion object {
+    private const val PREFS_NAME = "vibe_chat_native"
+    private const val PREF_THEME_ID = "chat_native_theme_id_v1"
+    private const val PREF_THEME_IS_DARK = "chat_native_theme_is_dark_v1"
+    private val wallpaperMaskBitmapCache = mutableMapOf<String, Bitmap>()
+  }
+
   private data class ActiveTransition(
     val payload: SendTransitionPayload,
     val overlay: SendTransitionOverlayView,
@@ -1878,6 +2206,8 @@ class ChatListView(
     orientation = VERTICAL
     clipChildren = false
     clipToPadding = false
+    setBackgroundColor(Color.TRANSPARENT)
+    bootstrapCachedAppearance()?.let { appearance = it }
 
     layoutManager.orientation = RecyclerView.VERTICAL
     layoutManager.stackFromEnd = true
@@ -1885,6 +2215,7 @@ class ChatListView(
     recyclerView.adapter = adapter
     recyclerView.clipChildren = false
     recyclerView.clipToPadding = false
+    recyclerView.setBackgroundColor(Color.TRANSPARENT)
     recyclerView.setPadding(baseHorizontalPadding, contentPaddingTop, baseHorizontalPadding, contentPaddingBottom)
     recyclerView.overScrollMode = View.OVER_SCROLL_ALWAYS
     recyclerView.itemAnimator = null
@@ -1923,10 +2254,16 @@ class ChatListView(
     contentFrame.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f)
     contentFrame.clipChildren = false
     contentFrame.clipToPadding = false
+    contentFrame.setBackgroundColor(Color.TRANSPARENT)
     addView(contentFrame)
 
     contentFrame.addView(
       wallpaperView,
+      FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
+    )
+
+    contentFrame.addView(
+      wallpaperPatternView,
       FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
     )
 
@@ -1939,6 +2276,7 @@ class ChatListView(
     overlayHost.isFocusable = false
     overlayHost.clipChildren = false
     overlayHost.clipToPadding = false
+    overlayHost.setBackgroundColor(Color.TRANSPARENT)
     contentFrame.addView(
       overlayHost,
       FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
@@ -2055,11 +2393,29 @@ class ChatListView(
   }
 
   fun setAppearance(rawAppearance: Map<String, Any?>) {
+    cacheNativeThemeSeed(rawAppearance)
     val next = ChatListAppearance.from(rawAppearance)
     if (appearance.visualEquals(next)) return
+    val hasPendingOrActiveSendTransition = pendingSendTransition != null || activeTransition != null
+    if (hasPendingOrActiveSendTransition) {
+      queuedAppearanceAfterSendTransition = next
+      return
+    }
+    queuedAppearanceAfterSendTransition = null
+    applyResolvedAppearance(next)
+  }
+
+  private fun applyResolvedAppearance(next: ChatListAppearance) {
     appearance = next
     adapter.setAppearance(appearance)
     applyAppearanceToView()
+  }
+
+  private fun flushQueuedAppearanceAfterTransitionIfNeeded() {
+    if (pendingSendTransition != null || activeTransition != null) return
+    val queued = queuedAppearanceAfterSendTransition ?: return
+    queuedAppearanceAfterSendTransition = null
+    applyResolvedAppearance(queued)
   }
 
   fun setContentPaddingTop(value: Double) {
@@ -2467,6 +2823,7 @@ class ChatListView(
     overlayHost.removeView(running.overlay)
     activeTransition = null
     adapter.setHiddenMessageId(null)
+    flushQueuedAppearanceAfterTransitionIfNeeded()
 
     onNativeEvent(
       mapOf(
@@ -2534,14 +2891,84 @@ class ChatListView(
 
   private fun applyAppearanceToView() {
     wallpaperView.background = GradientDrawable(
-      GradientDrawable.Orientation.TOP_BOTTOM,
+      GradientDrawable.Orientation.TL_BR,
       appearance.wallpaperGradient,
     )
     wallpaperView.alpha = appearance.wallpaperOpacity
     wallpaperView.visibility = if (appearance.backgroundMode == "gradient") View.VISIBLE else View.GONE
+    val patternBitmap =
+      if (appearance.backgroundMode == "gradient") {
+        resolveWallpaperMaskBitmap(appearance.wallpaperMaskKey)
+      } else {
+        null
+      }
+    wallpaperPatternView.applyPattern(
+      colors = appearance.wallpaperPatternGradient,
+      locations = appearance.wallpaperPatternLocations,
+      opacity = appearance.wallpaperPatternOpacity,
+      bitmap = patternBitmap,
+    )
     val bgColor = appearance.wallpaperGradient.firstOrNull() ?: appearance.bubbleThemColor
     val isDarkTheme = Color.luminance(bgColor) < 0.42f
     inputBar.applyAppearance(appearance, isDarkTheme, bgColor)
+  }
+
+  private fun cacheNativeThemeSeed(rawAppearance: Map<String, Any?>) {
+    val themeId = (rawAppearance["nativeThemeId"] as? String)?.trim()?.takeIf { it.isNotEmpty() } ?: return
+    val isDark =
+      when (val value = rawAppearance["nativeThemeIsDark"]) {
+        is Boolean -> value
+        is Number -> value.toInt() != 0
+        is String -> value.trim().lowercase() in setOf("1", "true", "yes")
+        else -> true
+      }
+    prefs().edit()
+      .putString(PREF_THEME_ID, themeId)
+      .putBoolean(PREF_THEME_IS_DARK, isDark)
+      .apply()
+  }
+
+  private fun bootstrapCachedAppearance(): ChatListAppearance? {
+    val prefs = prefs()
+    val themeId = prefs.getString(PREF_THEME_ID, null)?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    return ChatListAppearance.from(
+      mapOf(
+        "backgroundMode" to "gradient",
+        "nativeThemeId" to themeId,
+        "nativeThemeIsDark" to prefs.getBoolean(PREF_THEME_IS_DARK, true),
+      ),
+    )
+  }
+
+  private fun prefs(): SharedPreferences =
+    context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+
+  private fun resolveWallpaperMaskBitmap(maskKeyRaw: String?): Bitmap? {
+    val maskKey = maskKeyRaw?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+    wallpaperMaskBitmapCache[maskKey]?.let { return it }
+    val baseName = wallpaperMaskBaseName(maskKey) ?: return null
+
+    val drawableId = resources.getIdentifier(baseName, "drawable", context.packageName)
+      .takeIf { it != 0 }
+      ?: resources.getIdentifier(baseName, "mipmap", context.packageName).takeIf { it != 0 }
+      ?: return null
+
+    return runCatching {
+      BitmapFactory.decodeResource(resources, drawableId)
+    }.getOrNull()?.also { bitmap ->
+      wallpaperMaskBitmapCache[maskKey] = bitmap
+    }
+  }
+
+  private fun wallpaperMaskBaseName(key: String): String? {
+    return when (key) {
+      "doodles", "hearts" -> "doodle_transparent"
+      "music" -> "music_transparent"
+      "music2" -> "music2_transparent"
+      "food" -> "food_transparent"
+      "animals" -> "animals_transparent"
+      else -> null
+    }
   }
 
   private fun computeBottomAnchoredTopPadding(): Int {
@@ -2790,7 +3217,7 @@ private class SendTransitionOverlayView(
         )
       } else {
         GradientDrawable().apply {
-          setColor(withAlpha(appearance.bubbleThemColor, 0.82f))
+          setColor(appearance.bubbleThemColor)
         }
       }
     drawable.cornerRadii = floatArrayOf(
@@ -2802,7 +3229,7 @@ private class SendTransitionOverlayView(
     bubbleBackground.background = drawable
     bubbleTail.configure(
       isMe = isMe,
-      color = if (isMe) appearance.bubbleMeGradient.lastOrNull() ?: Color.WHITE else withAlpha(appearance.bubbleThemColor, 0.82f),
+      color = if (isMe) appearance.bubbleMeGradient.lastOrNull() ?: Color.WHITE else appearance.bubbleThemColor,
       visible = shape.showTail,
     )
   }

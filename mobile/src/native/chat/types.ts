@@ -59,8 +59,14 @@ export interface NativeChatViewport {
 
 export interface NativeChatAppearance {
   backgroundMode?: 'transparent' | 'gradient';
+  nativeThemeId?: string;
+  nativeThemeIsDark?: boolean;
   wallpaperGradient?: string[];
   wallpaperOpacity?: number;
+  wallpaperPatternGradient?: string[];
+  wallpaperPatternLocations?: number[];
+  wallpaperPatternOpacity?: number;
+  wallpaperMaskKey?: string;
   bubbleMeGradient?: string[];
   bubbleThemColor?: string;
   textColorMe?: string;

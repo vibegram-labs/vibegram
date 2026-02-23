@@ -1,5 +1,6 @@
 package expo.modules.vibechatnative.notifications
 
+import android.util.Log
 import expo.modules.notifications.service.ExpoFirebaseMessagingService
 import expo.modules.notifications.service.interfaces.FirebaseMessagingDelegate
 
@@ -11,5 +12,14 @@ class VibeFirebaseMessagingService : ExpoFirebaseMessagingService() {
   override fun onNewToken(token: String) {
     super.onNewToken(token)
     VibeNativeCallStore.setFcmToken(this, token)
+    Log.d("VibeNativeCall", "FCM onNewToken len=${token.length}")
+  }
+
+  override fun onMessageReceived(remoteMessage: com.google.firebase.messaging.RemoteMessage) {
+    Log.d(
+      "VibeNativeCall",
+      "FCM service onMessageReceived id=${remoteMessage.messageId} dataKeys=${remoteMessage.data.keys.sorted()}"
+    )
+    super.onMessageReceived(remoteMessage)
   }
 }

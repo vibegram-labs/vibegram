@@ -1,5 +1,6 @@
 package expo.modules.vibechatnative
 
+import android.util.Log
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
 import expo.modules.vibechatnative.notifications.VibeIncomingCallNotification
@@ -45,9 +46,14 @@ class VibeNativeCallModule : Module() {
 
     Function("setCallUiState") { payload: Map<String, Any?> ->
       val context = appContext.reactContext ?: appContext.currentActivity?.applicationContext ?: return@Function
-      VibeNativeCallUiBridge.setState(payload)
+      val mode = (payload["mode"] as? String) ?: "hidden"
       val visible = (payload["visible"] as? Boolean)
-        ?: (((payload["mode"] as? String) ?: "hidden") != "hidden")
+        ?: (mode != "hidden")
+      Log.d(
+        "VibeNativeCall",
+        "Module.setCallUiState mode=$mode visible=$visible callId=${payload["callId"] ?: payload["call_id"]} status=${payload["callStatus"]} hasActivity=${appContext.currentActivity != null}"
+      )
+      VibeNativeCallUiBridge.setState(payload)
       if (visible) {
         VibeNativeCallUiBridge.present(context)
       } else {
@@ -56,6 +62,7 @@ class VibeNativeCallModule : Module() {
     }
 
     Function("hideCallUi") {
+      Log.d("VibeNativeCall", "Module.hideCallUi")
       VibeNativeCallUiBridge.hide()
     }
 
@@ -65,9 +72,11 @@ class VibeNativeCallModule : Module() {
   }
 
   internal fun emitCallUiEvent(payload: Map<String, Any?>) {
+    Log.d("VibeNativeCall", "Module.emitCallUiEvent type=${payload["type"]} callId=${payload["callId"] ?: payload["call_id"]}")
     try {
       sendEvent("onCallUiEvent", payload)
     } catch (_: Throwable) {
+      Log.w("VibeNativeCall", "Module.emitCallUiEvent failed listenerMissing=true")
     }
   }
 }
