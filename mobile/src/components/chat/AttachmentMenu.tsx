@@ -594,8 +594,11 @@ export const AttachmentMenu = ({
                                 height: buttonSize,
                                 borderRadius: buttonSize / 2,
                                 backgroundColor: isDark
-                                    ? 'rgba(255,255,255,0.08)'
-                                    : 'rgba(15,18,28,0.06)',
+                                    ? 'rgba(28,30,38,0.66)'
+                                    : 'rgba(255,255,255,0.74)',
+                                borderColor: isDark
+                                    ? 'rgba(255,255,255,0.10)'
+                                    : 'rgba(255,255,255,0.42)',
                             },
                         ]}
                     >
@@ -624,7 +627,7 @@ const styles = StyleSheet.create({
     plusHost: {
         alignItems: 'center',
         justifyContent: 'center',
-        borderWidth: 0,
+        borderWidth: StyleSheet.hairlineWidth,
     },
     loadingContainer: {
         flex: 1,

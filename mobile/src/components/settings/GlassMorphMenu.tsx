@@ -222,7 +222,10 @@ const GlassMorphMenu = ({
             )}
 
             <GestureDetector gesture={panGesture}>
-                <AnimatedSafeLiquidGlass style={[containerStyle, anchorStyle]} intensity={25}>
+                <AnimatedSafeLiquidGlass
+                    style={[containerStyle, anchorStyle]}
+                    blurIntensity={Platform.OS === 'android' ? 5 : 25}
+                >
                     {renderTrigger && (
                         <AnimatedView style={[buttonStyle, StyleSheet.absoluteFill, s.centered]}>
                             <Pressable onPress={toggle} style={s.fullSizeCenter}>

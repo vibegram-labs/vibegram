@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
+import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 import Animated, {
     Easing,
     Extrapolation,
@@ -192,6 +192,8 @@ export default function Input({
         const solid = resolvedTheme.bubbleMe || '#3b82f6';
         return [solid, solid];
     }, [resolvedTheme]);
+    const auxButtonGlassBg = isDark ? 'rgba(28,30,38,0.66)' : 'rgba(255,255,255,0.74)';
+    const auxButtonBorder = isDark ? 'rgba(255,255,255,0.1)' : 'rgba(255,255,255,0.42)';
 
     const clearTicker = useCallback(() => {
         if (tickerRef.current) {
@@ -763,7 +765,7 @@ export default function Input({
                 pointerEvents={canSend && !isRecording ? 'none' : 'auto'}
             >
                 <Animated.View pointerEvents={isRecording && !isLocked ? 'auto' : 'none'} style={[styles.lockPill, lockPillStyle]}>
-                    <SafeLiquidGlass style={[styles.lockPillGlass, { backgroundColor: isDark ? 'rgba(25,28,40,0.8)' : 'rgba(240,240,250,0.8)' }]} blurIntensity={14} tint={effectiveTheme}>
+                    <SafeLiquidGlass style={[styles.lockPillGlass, { backgroundColor: isDark ? 'rgba(25,28,40,0.76)' : 'rgba(248,248,252,0.78)' }]} blurIntensity={Platform.OS === 'android' ? 7 : 12} tint={effectiveTheme}>
                         <Animated.View style={[styles.lockPillContent, lockContentStyle]}>
                             <Animated.View style={[styles.lockArrowWrap, lockArrowStyle]}>
                                 <ChevronUp size={14} color={isDark ? "rgba(255,255,255,0.95)" : "rgba(0,0,0,0.95)"} strokeWidth={2.5} />
@@ -783,25 +785,28 @@ export default function Input({
                             onPressOut={() => {
                                 micPressScale.value = withTiming(1, { duration: 120, easing: Easing.out(Easing.quad) });
                             }}
-                            style={styles.micPressable}
+                            style={[styles.micPressable, { backgroundColor: auxButtonGlassBg, borderColor: auxButtonBorder }]}
                         >
-                            <SafeLiquidGlass style={[styles.micGlass, { backgroundColor: isDark ? 'rgba(120,120,138,0.18)' : 'rgba(200,200,220,0.3)' }]} blurIntensity={14} tint={effectiveTheme}>
-                                <View style={styles.touchArea}>
-                                    {isRecording ? (
-                                        isLocked ? (
-                                            <VibeLogoIcon size={20} color={isDark ? "#fff" : "#000"} strokeWidth={3.8} />
-                                        ) : (
-                                            recordingModeAtStartRef.current === 'video'
-                                                ? <Video size={20} color="#fff" strokeWidth={2.6} />
-                                                : <Mic size={20} color="#fff" strokeWidth={2.6} />
-                                        )
+                            <SafeLiquidGlass
+                                style={StyleSheet.absoluteFill}
+                                blurIntensity={Platform.OS === 'android' ? 4 : 12}
+                                tint={effectiveTheme}
+                            />
+                            <View style={styles.touchArea}>
+                                {isRecording ? (
+                                    isLocked ? (
+                                        <VibeLogoIcon size={20} color={isDark ? "#fff" : "#000"} strokeWidth={3.8} />
                                     ) : (
-                                        recordingMode === 'video'
-                                            ? <Video size={18} color={isDark ? "#8fe3ff" : "#007AFF"} strokeWidth={2.5} />
-                                            : <Mic size={18} color={isDark ? "#fff" : "#000"} strokeWidth={2.5} />
-                                    )}
-                                </View>
-                            </SafeLiquidGlass>
+                                        recordingModeAtStartRef.current === 'video'
+                                            ? <Video size={20} color="#fff" strokeWidth={2.6} />
+                                            : <Mic size={20} color="#fff" strokeWidth={2.6} />
+                                    )
+                                ) : (
+                                    recordingMode === 'video'
+                                        ? <Video size={18} color={isDark ? "#8fe3ff" : "#007AFF"} strokeWidth={2.5} />
+                                        : <Mic size={18} color={isDark ? "#fff" : "#000"} strokeWidth={2.5} />
+                                )}
+                            </View>
                         </Pressable>
                     </Animated.View>
                 </GestureDetector>
@@ -830,8 +835,8 @@ const styles = StyleSheet.create({
         minHeight: COMPOSER_BASE_HEIGHT,
         borderRadius: 21,
         overflow: 'hidden',
-        borderWidth: 0,
-        backgroundColor: 'transparent',
+        borderWidth: Platform.OS === 'ios' ? 0 : undefined,
+        backgroundColor: Platform.OS === 'ios' ? 'transparent' : undefined,
     },
     replyWrap: {
         overflow: 'hidden',

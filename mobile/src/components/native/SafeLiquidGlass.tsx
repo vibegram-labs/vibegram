@@ -71,9 +71,9 @@ export default function SafeLiquidGlass({
   const isDark = effectiveColorScheme === 'dark'
   const blurTint = tint || (isDark ? 'dark' : 'light')
   const isExpoGo = Constants.appOwnership === 'expo'
+  const flattenedStyle = StyleSheet.flatten(style) || {}
 
   if (Platform.OS === 'ios' && nativeLiquidGlassAvailable && NativeLiquidGlassView) {
-    const flattenedStyle = StyleSheet.flatten(style) || {}
     const cornerRadius =
       typeof flattenedStyle.borderRadius === 'number' ? flattenedStyle.borderRadius : undefined
     const nativeTintColor =
@@ -131,24 +131,47 @@ export default function SafeLiquidGlass({
     )
   }
 
+  const styleBg = flattenedStyle.backgroundColor
+  const hasExplicitOpaqueBg = typeof styleBg === 'string' && styleBg.trim().toLowerCase() !== 'transparent'
   const glassBg =
-    tint === 'light' || !isDark ? 'rgba(255, 255, 255, 0.85)' : 'rgba(20, 20, 20, 0.85)'
+    tint === 'light' || !isDark ? 'rgba(255, 255, 255, 0.92)' : 'rgba(20, 20, 20, 0.9)'
   const glassBorder =
-    tint === 'light' || !isDark ? 'rgba(255, 255, 255, 0.3)' : 'rgba(255, 255, 255, 0.08)'
+    tint === 'light' || !isDark ? 'rgba(255, 255, 255, 0.38)' : 'rgba(255, 255, 255, 0.12)'
+  const overlayBg = hasExplicitOpaqueBg ? styleBg : glassBg
+  const styleBorderColor = (flattenedStyle as Record<string, any>).borderColor
+  const styleBorderWidth = (flattenedStyle as Record<string, any>).borderWidth
+  const styleWithoutPaint = { ...(flattenedStyle as Record<string, any>) }
+  delete styleWithoutPaint.backgroundColor
+  delete styleWithoutPaint.borderColor
+  delete styleWithoutPaint.borderWidth
+  // Android blur is visually stronger than iOS for the same intensity value.
+  // Keep it softer to avoid color shifts in the composer and floating controls.
+  const androidBlurIntensity = Math.max(10, Math.min(48, Math.round(blurIntensity * 1.15 + 4)))
 
   return (
     <View
       style={[
         {
-          backgroundColor: glassBg,
-          borderColor: glassBorder,
-          borderWidth: 1,
+          backgroundColor: 'transparent',
+          borderColor: styleBorderColor ?? glassBorder,
+          borderWidth: typeof styleBorderWidth === 'number' ? styleBorderWidth : 1,
           overflow: 'hidden',
         },
-        style,
+        styleWithoutPaint,
       ]}
       {...props}
     >
+      <BlurView
+        intensity={androidBlurIntensity}
+        tint={blurTint}
+        experimentalBlurMethod="dimezisBlurView"
+        style={StyleSheet.absoluteFill}
+        pointerEvents="none"
+      />
+      <View
+        pointerEvents="none"
+        style={[StyleSheet.absoluteFill, { backgroundColor: overlayBg as any }]}
+      />
       {children}
     </View>
   )

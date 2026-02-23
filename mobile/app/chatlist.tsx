@@ -1179,12 +1179,32 @@ export default function ChatListScreen({
     const { colors, effectiveTheme } = useThemeStore();
     const { activeTheme } = useWallpaperStore();
     const isIOS = Platform.OS === 'ios';
-    const inputVerticalPadding = isIOS ? 3 : 4;
-    const bottomInsetPadding = isIOS ? Math.min(insets.bottom, 80) : Math.max(insets.bottom, 6);
-    const footerHeight = (isIOS ? 43 : 50) + bottomInsetPadding + inputVerticalPadding * 2;
-    const listBottomPadding = footerHeight + (isIOS ? 0 : 12);
+    const inputVerticalPadding = isIOS ? 3 : 6;
+    const androidBottomSafeInset = isIOS ? 0 : Math.max(0, insets.bottom);
+    // Some Android devices report a very small/zero bottom inset in chat layouts.
+    // Keep the composer lifted above the gesture area with a stable floor.
+    const bottomInsetPadding = isIOS
+        ? Math.min(insets.bottom, 80)
+        : Math.max(22, androidBottomSafeInset + 10);
+    const androidKeyboardOpenBottomInsetPadding = isIOS
+        ? 0
+        : Math.max(10, Math.min(14, androidBottomSafeInset + 2));
+    const footerHeight = (isIOS ? 43 : 48) + bottomInsetPadding + inputVerticalPadding * 2;
+    const listBottomPadding = footerHeight + (isIOS ? 0 : 8);
     const listTopPadding = 10 + Math.max(0, topContentOffset);
-    const footerMaskHeight = footerHeight + (isIOS ? 34 : 44);
+    const nativeAndroidHeaderReserve = Platform.OS === 'android' ? (insets.top + 68) : 0;
+    const jsListTopPadding = listTopPadding + nativeAndroidHeaderReserve;
+    const nativeListTopPadding = listTopPadding + nativeAndroidHeaderReserve;
+    const footerMaskHeight = footerHeight + (isIOS ? 34 : 52);
+    const keyboardStickyOffset = Platform.OS === 'android'
+        ? {
+            opened: 10,
+            closed: 18,
+        }
+        : {
+            opened: 20,
+            closed: 10,
+        };
 
     const resolvedTheme = useMemo(() => {
         const theme = resolveThemeVariant(activeTheme, effectiveTheme === 'dark');
@@ -1241,7 +1261,7 @@ export default function ChatListScreen({
     const activeChatMessages = activeChat?.messages;
     const nativeChatRuntime = useMemo(() => getNativeChatRuntimeInfo(), []);
     const nativeChatEnabled = nativeChatRuntime.enabled;
-    const shouldUseNativeList = nativeChatEnabled;
+    const shouldUseNativeList = nativeChatEnabled && Platform.OS !== 'android';
     const normalizedSearchQuery = useMemo(() => searchQuery.trim().toLowerCase(), [searchQuery]);
     const searchActive = !shouldUseNativeList && normalizedSearchQuery.length > 0;
     const nativeSurfaceId = useMemo(
@@ -1685,6 +1705,16 @@ export default function ChatListScreen({
 
     const inputMarginStyle = useAnimatedStyle(() => ({
         marginHorizontal: interpolate(keyboardProgress.value, [0, 1], [28, 12], Extrapolation.CLAMP),
+    }));
+    const inputBottomPaddingStyle = useAnimatedStyle(() => ({
+        paddingBottom: Platform.OS === 'android'
+            ? interpolate(
+                keyboardProgress.value,
+                [0, 1],
+                [bottomInsetPadding, androidKeyboardOpenBottomInsetPadding],
+                Extrapolation.CLAMP
+            )
+            : bottomInsetPadding,
     }));
 
     const clearRecoveryTimer = useCallback((messageId: string) => {
@@ -2824,7 +2854,7 @@ export default function ChatListScreen({
                         surfaceId={nativeSurfaceId}
                         rows={nativeRows}
                         appearance={nativeAppearance}
-                        contentPaddingTop={listTopPadding}
+                        contentPaddingTop={nativeListTopPadding}
                         contentPaddingBottom={14}
                         inputBarEnabled
                         inputPlaceholder="Message"
@@ -2852,7 +2882,7 @@ export default function ChatListScreen({
                             startRenderingFromBottom: true,
                         }}
                         contentContainerStyle={{
-                            paddingTop: listTopPadding,
+                            paddingTop: jsListTopPadding,
                             paddingBottom: listBottomPadding,
                         }}
                         showsVerticalScrollIndicator={false}
@@ -2883,7 +2913,7 @@ export default function ChatListScreen({
 
             {!shouldUseNativeList && (
                 <KeyboardStickyView
-                    offset={{ opened: 20, closed: 10 }}
+                    offset={keyboardStickyOffset}
                     style={styles.inputStickyHost}
                 >
                     <View style={styles.inputStickyContainer}>
@@ -2902,7 +2932,7 @@ export default function ChatListScreen({
 
                         <Animated.View
                             ref={inputBarRef}
-                            style={[styles.inputBar, inputMarginStyle, { paddingBottom: bottomInsetPadding, paddingTop: inputVerticalPadding }]}
+                            style={[styles.inputBar, inputMarginStyle, inputBottomPaddingStyle, { paddingTop: inputVerticalPadding }]}
                         >
                             <Input
                                 autoFocus={false}
@@ -3076,6 +3106,7 @@ const styles = StyleSheet.create({
         right: 0,
         bottom: -10,
         zIndex: -1,
+        overflow: 'hidden',
     },
     bubbleWrapper: {
         maxWidth: '85%',
