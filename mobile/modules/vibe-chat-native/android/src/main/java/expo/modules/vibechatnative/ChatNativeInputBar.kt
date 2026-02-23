@@ -26,9 +26,12 @@ import android.view.ViewConfiguration
 import android.view.inputmethod.EditorInfo
 import android.widget.EditText
 import android.widget.FrameLayout
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.AppContext
+import expo.modules.vibechatnative.R
 import java.io.File
 import java.util.UUID
 import kotlin.math.ceil
@@ -55,7 +58,7 @@ internal class ChatNativeInputBar(
   private val rootColumn = LinearLayout(context)
   private val row = LinearLayout(context)
   private val attachmentButton = FrameLayout(context)
-  private val attachmentIcon = ChatNativeInputGlyphView(context)
+  private val attachmentIcon = ImageView(context)
   private val textSurface = FrameLayout(context)
   private val textSurfaceGlass = appContext?.let { LiquidGlassView(context, it) }
   private val input = EditText(context)
@@ -63,7 +66,7 @@ internal class ChatNativeInputBar(
   private val recordingDot = View(context)
   private val recordingLabel = TextView(context)
   private val actionButton = FrameLayout(context)
-  private val actionIcon = ChatNativeInputGlyphView(context)
+  private val actionIcon = ImageView(context)
 
   private val uiHandler = Handler(Looper.getMainLooper())
   private val longPressTimeoutMs = min(230, ViewConfiguration.getLongPressTimeout())
@@ -80,7 +83,7 @@ internal class ChatNativeInputBar(
   private var neutralButtonColor = Color.argb(40, 255, 255, 255)
   private var surfaceStrokeColor = Color.argb(24, 255, 255, 255)
   private var buttonStrokeColor = Color.argb(30, 255, 255, 255)
-  private var lastActionGlyph = ChatNativeInputGlyph.MIC
+  private var lastActionRes = R.drawable.ic_mic
 
   private var longPressArmed = false
   private var longPressStarted = false
@@ -118,6 +121,8 @@ internal class ChatNativeInputBar(
 
     row.orientation = LinearLayout.HORIZONTAL
     row.gravity = Gravity.BOTTOM or Gravity.CENTER_VERTICAL
+    row.clipChildren = false
+    row.clipToPadding = false
     row.layoutParams = LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.MATCH_PARENT,
       LayoutParams.WRAP_CONTENT,
@@ -180,14 +185,15 @@ internal class ChatNativeInputBar(
   private fun setupAttachmentButton() {
     attachmentButton.layoutParams = FrameLayout.LayoutParams(dp(34), dp(34)).apply {
       gravity = Gravity.START or Gravity.CENTER_VERTICAL
-      leftMargin = dp(5)
+      leftMargin = dp(6)
     }
     attachmentButton.background = circleDrawable(Color.TRANSPARENT, Color.TRANSPARENT, 0f)
     attachmentButton.clipChildren = false
     attachmentButton.clipToPadding = false
 
-    attachmentIcon.layoutParams = LayoutParams(dp(18), dp(18), Gravity.CENTER)
-    attachmentIcon.glyph = ChatNativeInputGlyph.ATTACH
+    attachmentIcon.layoutParams = LayoutParams(dp(22), dp(22), Gravity.CENTER)
+    attachmentIcon.setImageResource(R.drawable.ic_attach)
+    attachmentIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
     attachmentButton.addView(attachmentIcon)
   }
 
@@ -221,7 +227,7 @@ internal class ChatNativeInputBar(
     input.gravity = Gravity.CENTER_VERTICAL
     input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
     input.imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_EXTRACT_UI
-    input.setPadding(dp(44), dp(12), dp(44), dp(12))
+    input.setPadding(dp(46), dp(12), dp(46), dp(12))
     input.includeFontPadding = false
     textSurface.addView(input)
 
@@ -257,12 +263,13 @@ internal class ChatNativeInputBar(
   private fun setupActionButton() {
     actionButton.layoutParams = FrameLayout.LayoutParams(dp(34), dp(34)).apply {
       gravity = Gravity.END or Gravity.CENTER_VERTICAL
-      rightMargin = dp(5)
+      rightMargin = dp(6)
     }
     actionButton.background = circleDrawable(Color.TRANSPARENT, Color.TRANSPARENT, 0f)
 
-    actionIcon.layoutParams = LayoutParams(dp(18), dp(18), Gravity.CENTER)
-    actionIcon.glyph = ChatNativeInputGlyph.MIC
+    actionIcon.layoutParams = LayoutParams(dp(20), dp(20), Gravity.CENTER)
+    actionIcon.setImageResource(R.drawable.ic_mic)
+    actionIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
     actionButton.addView(actionIcon)
   }
 
@@ -423,17 +430,17 @@ internal class ChatNativeInputBar(
         isRecording || hasText -> Color.WHITE
         else -> passiveIconColor
       }
-    val nextGlyph =
+    val nextRes =
       when {
-        isRecording && isLockedRecording -> ChatNativeInputGlyph.SEND
-        isRecording -> ChatNativeInputGlyph.RECORDING_DOT
-        hasText -> ChatNativeInputGlyph.SEND
-        else -> ChatNativeInputGlyph.MIC
+        isRecording && isLockedRecording -> R.drawable.ic_send
+        isRecording -> R.drawable.ic_recording_dot
+        hasTypedText() -> R.drawable.ic_send
+        else -> R.drawable.ic_mic
       }
 
-    if (nextGlyph != lastActionGlyph) {
-      lastActionGlyph = nextGlyph
-      actionIcon.glyph = nextGlyph
+    if (nextRes != lastActionRes) {
+      lastActionRes = nextRes
+      actionIcon.setImageResource(nextRes)
       actionIcon.scaleX = 0.84f
       actionIcon.scaleY = 0.84f
       actionIcon.alpha = 0.78f
@@ -444,16 +451,16 @@ internal class ChatNativeInputBar(
         .setDuration(140L)
         .start()
     } else {
-      actionIcon.glyph = nextGlyph
+      actionIcon.setImageResource(nextRes)
     }
-    actionIcon.tintColor = actionTint
+    actionIcon.setColorFilter(actionTint)
     actionButton.background = circleDrawable(
       actionFill,
       Color.TRANSPARENT,
       0f,
     )
 
-    attachmentIcon.tintColor = passiveIconColor
+    attachmentIcon.setColorFilter(passiveIconColor)
     attachmentButton.alpha = if (isRecording) 0.45f else 1f
     attachmentButton.background = circleDrawable(
       Color.TRANSPARENT,
@@ -702,121 +709,4 @@ internal class ChatNativeInputBar(
       (Color.blue(from) * inv + Color.blue(to) * t).roundToInt(),
     )
   }
-}
-
-internal enum class ChatNativeInputGlyph {
-  ATTACH,
-  MIC,
-  SEND,
-  RECORDING_DOT,
-}
-
-internal class ChatNativeInputGlyphView(
-  context: Context,
-) : View(context) {
-  var glyph: ChatNativeInputGlyph = ChatNativeInputGlyph.MIC
-    set(value) {
-      if (field == value) return
-      field = value
-      invalidate()
-    }
-
-  var tintColor: Int = Color.WHITE
-    set(value) {
-      if (field == value) return
-      field = value
-      stroke.color = value
-      fill.color = value
-      invalidate()
-    }
-
-  private val stroke = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.STROKE
-    color = tintColor
-    strokeCap = Paint.Cap.ROUND
-    strokeJoin = Paint.Join.ROUND
-    strokeWidth = dpF(1.9f)
-  }
-  private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    color = tintColor
-  }
-  private val path = Path()
-  private val rect = RectF()
-
-  override fun onDraw(canvas: Canvas) {
-    super.onDraw(canvas)
-    val side = min(width, height).toFloat()
-    if (side <= 0f) return
-    val left = (width - side) * 0.5f
-    val top = (height - side) * 0.5f
-    canvas.save()
-    canvas.translate(left, top)
-    when (glyph) {
-      ChatNativeInputGlyph.ATTACH -> drawAttach(canvas, side)
-      ChatNativeInputGlyph.MIC -> drawMic(canvas, side)
-      ChatNativeInputGlyph.SEND -> drawSend(canvas, side)
-      ChatNativeInputGlyph.RECORDING_DOT -> drawRecordingDot(canvas, side)
-    }
-    canvas.restore()
-  }
-
-  private fun drawRecordingDot(canvas: Canvas, side: Float) {
-    canvas.drawCircle(side * 0.5f, side * 0.5f, side * 0.18f, fill)
-  }
-
-  private fun drawMic(canvas: Canvas, side: Float) {
-    val cx = side * 0.5f
-    rect.set(side * 0.36f, side * 0.20f, side * 0.64f, side * 0.56f)
-    canvas.drawRoundRect(rect, side * 0.14f, side * 0.14f, stroke)
-    canvas.drawLine(cx, side * 0.56f, cx, side * 0.72f, stroke)
-    path.reset()
-    path.moveTo(side * 0.31f, side * 0.55f)
-    path.quadTo(cx, side * 0.75f, side * 0.69f, side * 0.55f)
-    canvas.drawPath(path, stroke)
-    canvas.drawLine(side * 0.40f, side * 0.80f, side * 0.60f, side * 0.80f, stroke)
-  }
-
-  private fun drawSend(canvas: Canvas, side: Float) {
-    // Upward arrow styling for Send / Recorded
-    val cx = side * 0.5f
-    path.reset()
-    path.moveTo(cx, side * 0.22f)
-    path.lineTo(side * 0.78f, side * 0.50f)
-    path.lineTo(side * 0.60f, side * 0.50f)
-    path.lineTo(side * 0.60f, side * 0.76f)
-    path.lineTo(side * 0.40f, side * 0.76f)
-    path.lineTo(side * 0.40f, side * 0.50f)
-    path.lineTo(side * 0.22f, side * 0.50f)
-    path.close()
-    
-    val arrowPaint = Paint(fill).apply {
-      strokeJoin = Paint.Join.ROUND
-      strokeCap = Paint.Cap.ROUND
-      pathEffect = android.graphics.CornerPathEffect(side * 0.08f)
-    }
-    canvas.drawPath(path, arrowPaint)
-  }
-
-  private fun drawAttach(canvas: Canvas, side: Float) {
-    // iOS uses "plus" (not paperclip) for the attach button.
-    path.reset()
-    val cx = side * 0.5f
-    val cy = side * 0.5f
-    val arm = side * 0.22f
-    canvas.drawLine(cx - arm, cy, cx + arm, cy, stroke)
-    canvas.drawLine(cx, cy - arm, cx, cy + arm, stroke)
-  }
-
-  private fun withAlpha(color: Int, alpha: Float): Int {
-    val a = (alpha.coerceIn(0f, 1f) * 255f).roundToInt()
-    return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
-  }
-
-  private fun dpF(value: Float): Float =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value,
-      context.resources.displayMetrics,
-    )
 }

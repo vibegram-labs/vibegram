@@ -55,10 +55,14 @@ const waitForUserChannel = async (timeoutMs = 12000): Promise<any | null> => {
     while (Date.now() - startedAt < timeoutMs) {
         const channel = getUserChannel();
         const state = (channel as any)?.state;
+        const canPush =
+            typeof (channel as any)?.canPush === 'function'
+                ? !!(channel as any).canPush()
+                : state === 'joined';
         const ready =
             channel &&
             typeof channel.push === 'function' &&
-            (state === 'joined' || state === 'joining' || !state);
+            canPush;
         if (ready) return channel;
         await new Promise((resolve) => setTimeout(resolve, 120));
     }
@@ -579,32 +583,54 @@ export default function ChatScreen() {
     }, []);
 
     const handleStartCall = useCallback(async (type: 'voice' | 'video') => {
-        if (!activeChat || !activeChat.friendId) return;
+        console.log('[ChatScreen] handleStartCall invoked', {
+            type,
+            hasActiveChat: !!activeChat,
+            friendId: activeChat?.friendId,
+            selfUserId: user?.userId,
+            callStatus,
+            isConnected,
+        });
+        if (!activeChat || !activeChat.friendId) {
+            console.warn('[ChatScreen] handleStartCall aborted: missing activeChat/friendId', { type });
+            return;
+        }
         const userId = activeChat.friendId;
         if ((user?.userId || '').toUpperCase() === userId.toUpperCase()) {
             // Can't call yourself
+            console.warn('[ChatScreen] handleStartCall aborted: attempted self-call', { type, userId });
             return;
         }
         if (callStatus !== 'idle') {
             // Call in progress
+            console.warn('[ChatScreen] handleStartCall aborted: call not idle', { type, callStatus });
             return;
         }
 
         const available = await checkWebRTCAvailability();
+        console.log('[ChatScreen] checkWebRTCAvailability result', { type, available });
         if (!available) {
+            console.warn('[ChatScreen] handleStartCall aborted: WebRTC unavailable', { type });
             return;
         }
 
         if (!isConnected) {
+            console.log('[ChatScreen] initSocket requested before call', { type });
             initSocket();
         }
 
         const channel = await waitForUserChannel();
+        console.log('[ChatScreen] waitForUserChannel result', {
+            type,
+            hasChannel: !!channel,
+            canPush: !!channel && typeof channel.push === 'function',
+        });
         if (!channel) {
+            console.warn('[ChatScreen] handleStartCall aborted: no signaling channel', { type });
             return;
         }
 
-        startCall(
+        const started = await startCall(
             {
                 userId,
                 userName: activeChat.friendName || displayName,
@@ -613,6 +639,7 @@ export default function ChatScreen() {
             type,
             channel,
         );
+        console.log('[ChatScreen] startCall completed', { type, started });
     }, [
         activeChat,
         user?.userId,
@@ -625,10 +652,12 @@ export default function ChatScreen() {
     ]);
 
     const handleAudioCall = useCallback(() => {
+        console.log('[ChatScreen] handleAudioCall pressed');
         void handleStartCall('voice');
     }, [handleStartCall]);
 
     const handleVideoCall = useCallback(() => {
+        console.log('[ChatScreen] handleVideoCall pressed');
         void handleStartCall('video');
     }, [handleStartCall]);
 

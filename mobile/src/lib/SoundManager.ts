@@ -29,7 +29,7 @@ class SoundManager {
     }
 
     private async initialize() {
-        console.log('[SoundManager] Starting initialization...');
+        // console.log('[SoundManager] Starting initialization...');
         try {
             await Audio.setAudioModeAsync({
                 playsInSilentModeIOS: true,
@@ -46,10 +46,12 @@ class SoundManager {
                 this.fillPool('received')
             ]);
 
+            /*
             console.log('[SoundManager] Initialized! Pools:', {
                 sent: this.soundPools.sent.length,
                 received: this.soundPools.received.length
             });
+            */
         } catch (e) {
             console.warn('[SoundManager] Init failed:', e);
         }
@@ -70,7 +72,7 @@ class SoundManager {
         }
 
         await Promise.all(promises);
-        console.log(`[SoundManager] Pool ${type} ready: ${pool.length}`);
+        // console.log(`[SoundManager] Pool ${type} ready: ${pool.length}`);
     }
 
     private createAndAddToPool(type: SoundType) {
@@ -85,7 +87,7 @@ class SoundManager {
         const start = Date.now();
         const pool = this.soundPools[type];
 
-        console.log(`[SoundManager] Play ${type}, pool size: ${pool.length}`);
+        // console.log(`[SoundManager] Play ${type}, pool size: ${pool.length}`);
 
         const playSound = async (sound: Audio.Sound, isFallback = false) => {
             try {
@@ -95,7 +97,7 @@ class SoundManager {
                 // Set up the completion listener BEFORE playing
                 sound.setOnPlaybackStatusUpdate(async (status) => {
                     if (status.isLoaded && status.didJustFinish) {
-                        console.log(`[SoundManager] Finished playing ${type} (duration: ${Date.now() - start}ms)`);
+                        // console.log(`[SoundManager] Finished playing ${type} (duration: ${Date.now() - start}ms)`);
 
                         // Clean up
                         sound.setOnPlaybackStatusUpdate(null);
@@ -113,7 +115,7 @@ class SoundManager {
 
                 await sound.setPositionAsync(0);
                 await sound.playAsync();
-                console.log(`[SoundManager] played ${type} ${isFallback ? '(fallback) ' : ''}latency: ${Date.now() - start}ms`);
+                // console.log(`[SoundManager] played ${type} ${isFallback ? '(fallback) ' : ''}latency: ${Date.now() - start}ms`);
 
                 // Replenish pool if getting low (only if not fallback)
                 if (!isFallback && pool.length < 2) {
@@ -132,7 +134,7 @@ class SoundManager {
         if (sound) {
             playSound(sound, false);
         } else {
-            console.log(`[SoundManager] Pool empty, fallback`);
+            // console.log(`[SoundManager] Pool empty, fallback`);
             Audio.Sound.createAsync(this.soundAssets[type], { shouldPlay: false })
                 .then(({ sound: newSound }) => {
                     playSound(newSound, true);

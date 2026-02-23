@@ -9,14 +9,14 @@ export default function Index() {
     const { initTheme } = useThemeStore()
 
     useEffect(() => {
-        console.log('[Index] Mounted - isAuthenticated:', isAuthenticated, 'hydrated:', hasHydrated)
+        // console.log('[Index] Mounted - isAuthenticated:', isAuthenticated, 'hydrated:', hasHydrated)
         // Initialize theme on mount
         initTheme()
         // Check session on mount
         checkSession()
     }, [])
 
-    console.log('[Index] Rendering - isAuthenticated:', isAuthenticated, 'hydrated:', hasHydrated)
+    // console.log('[Index] Rendering - isAuthenticated:', isAuthenticated, 'hydrated:', hasHydrated)
 
     // Wait for Zustand hydration before deciding where to redirect
     if (!hasHydrated) {
@@ -25,11 +25,11 @@ export default function Index() {
 
     // If authenticated, go to tabs
     if (isAuthenticated) {
-        console.log('[Index] Redirecting to /(tabs)/home')
+        // console.log('[Index] Redirecting to /(tabs)/home')
         return <Redirect href="/(tabs)/home" />
     }
 
     // Otherwise go to auth flow
-    console.log('[Index] Redirecting to /(auth)/welcome')
+    // console.log('[Index] Redirecting to /(auth)/welcome')
     return <Redirect href="/(auth)/welcome" />
 }

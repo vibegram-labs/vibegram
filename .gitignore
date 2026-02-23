@@ -56,5 +56,14 @@ Thumbs.db
 # Test
 coverage/
 
+# Android Build Artifacts
+.gradle-local/
+mobile/.local-build-artifacts/
+*.apk
+*.aab
+*.apks
+*.jar
+*.keystore
+
 # Misc
 *.tgz

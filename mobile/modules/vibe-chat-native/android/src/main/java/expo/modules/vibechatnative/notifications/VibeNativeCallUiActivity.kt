@@ -12,7 +12,9 @@ import android.widget.FrameLayout
 import android.widget.ImageButton
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.ImageView
 import androidx.activity.ComponentActivity
+import expo.modules.vibechatnative.R
 
 class VibeNativeCallUiActivity : ComponentActivity() {
   private lateinit var root: FrameLayout
@@ -24,7 +26,7 @@ class VibeNativeCallUiActivity : ComponentActivity() {
   private lateinit var utilityRow: LinearLayout
   private lateinit var incomingRow: LinearLayout
   private lateinit var activeRow: LinearLayout
-  private val buttons = LinkedHashMap<String, ImageButton>()
+  private val buttons = LinkedHashMap<String, View>()
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -100,7 +102,10 @@ class VibeNativeCallUiActivity : ComponentActivity() {
       styleToggle("video", isVideo, palette)
       styleButton("flip", palette.surface, palette.text)
       styleButton("end", palette.red, Color.WHITE)
-      buttons["flip"]?.visibility = if ((state.boolValue("canFlipCamera") ?: false) && isVideo) View.VISIBLE else View.GONE
+      
+      val canFlip = (state.boolValue("canFlipCamera") ?: false) && isVideo
+      val flipWrap = buttons["flip"]?.parent?.parent as? View
+      flipWrap?.visibility = if (canFlip) View.VISIBLE else View.GONE
     }
   }
 
@@ -122,13 +127,15 @@ class VibeNativeCallUiActivity : ComponentActivity() {
 
   private fun buildUi() {
     root = FrameLayout(this).apply {
-      setPadding(dp(20), dp(28), dp(20), dp(20))
+      setPadding(dp(20), dp(28), dp(20), dp(32))
     }
     setContentView(root)
 
     val content = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
+      clipChildren = false
+      clipToPadding = false
       layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
     }
     root.addView(content)
@@ -165,21 +172,21 @@ class VibeNativeCallUiActivity : ComponentActivity() {
     content.addView(View(this), LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f))
 
     utilityRow = row(14)
-    utilityRow.addView(buttonStack("msg", "\u2709", "Message", 52))
-    utilityRow.addView(buttonStack("remind", "\u23F0", "Remind", 52))
+    utilityRow.addView(buttonStack("msg", "Message", 52))
+    utilityRow.addView(buttonStack("remind", "Remind", 52))
     content.addView(utilityRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(20) })
 
     incomingRow = row(20)
-    incomingRow.addView(buttonStack("incomingDecline", "\u2715", "Decline", 76))
-    incomingRow.addView(buttonStack("incomingAccept", "\u2713", "Accept", 76))
+    incomingRow.addView(buttonStack("incomingDecline", "Decline", 76))
+    incomingRow.addView(buttonStack("incomingAccept", "Accept", 76))
     content.addView(incomingRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(18) })
 
     activeRow = row(8)
-    activeRow.addView(buttonStack("mute", "\uD83C\uDFA4", "Mic", 48))
-    activeRow.addView(buttonStack("video", "\u25B6", "Video", 48))
-    activeRow.addView(buttonStack("flip", "\u21C4", "Flip", 48))
-    activeRow.addView(buttonStack("speaker", "\uD83D\uDD0A", "Audio", 48))
-    activeRow.addView(buttonStack("end", "\u2715", "End", 56))
+    activeRow.addView(buttonStack("mute", "Mic", 48))
+    activeRow.addView(buttonStack("video", "Video", 48))
+    activeRow.addView(buttonStack("flip", "Flip", 48))
+    activeRow.addView(buttonStack("speaker", "Audio", 48))
+    activeRow.addView(buttonStack("end", "End", 56))
     content.addView(activeRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(16) })
   }
 
@@ -187,23 +194,51 @@ class VibeNativeCallUiActivity : ComponentActivity() {
     return LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
-      dividerDrawable = ShapeDrawable().apply {
-        intrinsicWidth = dp(spacingDp)
-        intrinsicHeight = 1
-        paint.color = Color.TRANSPARENT
-      }
-      showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
+      clipChildren = false
+      clipToPadding = false
     }
   }
 
-  private fun buttonStack(key: String, glyph: String, label: String, sizeDp: Int): LinearLayout {
+  private fun buttonStack(key: String, label: String, sizeDp: Int): LinearLayout {
     val wrap = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER
+      clipChildren = false
+      clipToPadding = false
+      layoutParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        leftMargin = dp(8)
+        rightMargin = dp(8)
+      }
     }
-    val btn = ImageButton(this).apply {
-      background = rounded(darkPalette.surface, dp(sizeDp / 2))
-      setImageDrawable(null)
+    
+    val holder = FrameLayout(this).apply {
+      layoutParams = LinearLayout.LayoutParams(dp(sizeDp), dp(sizeDp))
+      clipChildren = false
+      clipToPadding = false
+    }
+
+    val bg = View(this).apply {
+      layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+      tag = "bg"
+    }
+
+    val icon = ImageView(this).apply {
+      layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+      scaleType = ImageView.ScaleType.CENTER_INSIDE
+      val p = dp(if (sizeDp >= 70) 20 else 12)
+      setPadding(p, p, p, p)
+      setImageResource(resolveIcon(key))
+      tag = "icon"
+    }
+
+    val clickTarget = View(this).apply {
+      layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+      isClickable = true
+      isFocusable = true
+      tag = dp(sizeDp / 2) // Cache radius
       setOnClickListener {
         val eventType =
           when (key) {
@@ -222,44 +257,63 @@ class VibeNativeCallUiActivity : ComponentActivity() {
         VibeNativeCallUiBridge.emitUiEvent(eventType)
       }
     }
-    val overlay = TextView(this).apply {
-      text = glyph
-      gravity = Gravity.CENTER
-      textSize = if (sizeDp >= 70) 26f else 18f
-      setTypeface(Typeface.DEFAULT_BOLD)
-      setTextColor(Color.WHITE)
-    }
-    val holder = FrameLayout(this).apply {
-      addView(btn, FrameLayout.LayoutParams(dp(sizeDp), dp(sizeDp)))
-      addView(overlay, FrameLayout.LayoutParams(dp(sizeDp), dp(sizeDp)))
-    }
+
+    holder.addView(bg)
+    holder.addView(icon)
+    holder.addView(clickTarget)
+
     val name = TextView(this).apply {
       text = label
       textSize = if (sizeDp >= 70) 13f else 10f
       setTypeface(Typeface.DEFAULT_BOLD)
       gravity = Gravity.CENTER
       setTextColor(Color.WHITE)
+      layoutParams = LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT
+      ).apply {
+        topMargin = dp(if (sizeDp >= 70) 8 else 5)
+      }
     }
+
     wrap.addView(holder)
-    wrap.addView(name, LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply {
-      topMargin = dp(if (sizeDp >= 70) 8 else 5)
-    })
-    buttons[key] = btn
+    wrap.addView(name)
+    buttons[key] = clickTarget
     return wrap
   }
 
   private fun styleToggle(key: String, active: Boolean, palette: Palette) {
-    styleButton(key, if (active) palette.text else palette.surface, if (active) palette.background else palette.text)
+    styleButton(key, if (active) palette.text else palette.surface, if (active) palette.background else palette.text, active)
   }
 
-  private fun styleButton(key: String, background: Int, tint: Int) {
-    buttons[key]?.let { btn ->
-      btn.background = rounded(background, btn.width.takeIf { it > 0 }?.div(2) ?: dp(24))
-      val parent = btn.parent as? FrameLayout
-      val labelView = (parent?.parent as? LinearLayout)?.getChildAt(1) as? TextView
+  private fun styleButton(key: String, background: Int, tint: Int, active: Boolean = true) {
+    buttons[key]?.let { clickTarget ->
+      val holder = clickTarget.parent as? FrameLayout ?: return@let
+      val bg = holder.getChildAt(0)
+      val icon = holder.getChildAt(1) as? ImageView
+      val wrap = holder.parent as? LinearLayout ?: return@let
+      val labelView = wrap.getChildAt(1) as? TextView
+
+      val radius = if (holder.width > 0) holder.width / 2 else (clickTarget.tag as? Int ?: dp(24))
+      bg.background = rounded(background, radius)
+      icon?.setImageResource(resolveIcon(key, active))
+      icon?.setColorFilter(tint)
       labelView?.setTextColor(tint)
-      val glyphOverlay = parent?.getChildAt(1) as? TextView
-      glyphOverlay?.setTextColor(tint)
+    }
+  }
+
+  private fun resolveIcon(key: String, active: Boolean = true): Int {
+    return when (key) {
+      "incomingAccept" -> R.drawable.ic_call_accept
+      "incomingDecline" -> R.drawable.ic_call_end
+      "msg" -> R.drawable.ic_message
+      "remind" -> R.drawable.ic_remind
+      "mute" -> if (active) R.drawable.ic_mic_off else R.drawable.ic_mic
+      "video" -> if (active) R.drawable.ic_video else R.drawable.ic_video_off
+      "flip" -> R.drawable.ic_flip_camera
+      "speaker" -> R.drawable.ic_speaker
+      "end" -> R.drawable.ic_call_end
+      else -> 0
     }
   }
 

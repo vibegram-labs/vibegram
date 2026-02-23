@@ -150,7 +150,7 @@ const LIST_WINDOW_SIZE = 7;
 const BINARY_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const EMPTY_LIST_ROWS: ListRow[] = [];
 const EMPTY_SEQUENCE_META = new Map<string, { isSequenceStart: boolean; isSequenceEnd: boolean }>();
-const CHATLIST_PERF_LOG = __DEV__;
+const CHATLIST_PERF_LOG = false;
 const chatListPerfLog = (...args: any[]) => {
     if (!CHATLIST_PERF_LOG) return;
     console.log('[ChatListPerf]', ...args);

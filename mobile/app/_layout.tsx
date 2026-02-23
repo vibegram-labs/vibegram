@@ -132,7 +132,7 @@ export default function RootLayout() {
         }
       }
     } catch (error) {
-      console.warn('[NativeCall] Failed to drain pending events', error);
+      // console.warn('[NativeCall] Failed to drain pending events', error);
     } finally {
       nativeCallDrainInFlightRef.current = false;
     }
@@ -141,6 +141,7 @@ export default function RootLayout() {
   const handleNotificationData = (data: Record<string, unknown> | undefined): boolean => {
     const handled = useCallStore.getState().handleIncomingCallPayload(data);
     if (data) {
+      /*
       console.log('[Notifications] call-payload-check', {
         handled,
         keys: Object.keys(data),
@@ -149,6 +150,7 @@ export default function RootLayout() {
         callId: typeof data.callId === 'string' ? data.callId : (typeof (data as any).call_id === 'string' ? (data as any).call_id : undefined),
         messageId: typeof data.messageId === 'string' ? data.messageId : (typeof (data as any).message_id === 'string' ? (data as any).message_id : undefined),
       });
+      */
     }
     return handled;
   };
@@ -157,7 +159,7 @@ export default function RootLayout() {
     if (!supportsNativeInAppCallUi) return;
     const sub = addNativeCallUiListener(async (event) => {
       const type = event?.type;
-      console.log('[NativeCallUI][JS] onCallUiEvent', event);
+      // console.log('[NativeCallUI][JS] onCallUiEvent', event);
       switch (type) {
         case 'accept':
           await useCallStore.getState().acceptCall(getUserChannel());
@@ -231,6 +233,7 @@ export default function RootLayout() {
     ].join('|');
     if (nativeCallUiDebugKeyRef.current !== debugKey) {
       nativeCallUiDebugKeyRef.current = debugKey;
+      /*
       console.log('[NativeCallUI][JS] setCallUiState', {
         mode,
         visible: mode !== 'hidden',
@@ -242,6 +245,7 @@ export default function RootLayout() {
         isSpeakerOn: callUiSnapshot.isSpeakerOn,
         isVideoEnabled: callUiSnapshot.isVideoEnabled,
       });
+      */
     }
 
     nativeCall.setCallUiState({
@@ -279,6 +283,7 @@ export default function RootLayout() {
   useEffect(() => {
     Notifications.getPermissionsAsync()
       .then((perm) => {
+        /*
         console.log('[Notifications] Permission snapshot', {
           status: perm.status,
           granted: perm.granted,
@@ -288,8 +293,9 @@ export default function RootLayout() {
           iosAllowsBadge: (perm as any)?.ios?.allowsBadge,
           iosAllowsSound: (perm as any)?.ios?.allowsSound,
         });
+        */
       })
-      .catch((err) => console.warn('[Notifications] Permission snapshot failed', err));
+    // .catch((err) => console.warn('[Notifications] Permission snapshot failed', err));
 
     // Foreground notification received
     notificationListener.current = Notifications.addNotificationReceivedListener(notification => {
@@ -302,6 +308,7 @@ export default function RootLayout() {
         null
       );
       const hasAlert = !!aps?.alert;
+      /*
       console.log('[Notifications] Received in foreground:', {
         id: notification.request.identifier,
         title: notification.request.content.title,
@@ -311,6 +318,7 @@ export default function RootLayout() {
         apsHasAlert: hasAlert,
         data,
       });
+      */
       if (handleNotificationData(data)) {
         void drainNativeCallEvents();
         return;
@@ -333,7 +341,7 @@ export default function RootLayout() {
       handledNotificationIdsRef.current.add(key);
       handledNotificationResponseKeys.add(key);
       const data = response.notification.request.content.data as Record<string, unknown> | undefined;
-      console.log('[Notifications] Tapped:', data);
+      // console.log('[Notifications] Tapped:', data);
       if (handleNotificationData(data)) {
         void drainNativeCallEvents();
         return;
@@ -358,7 +366,7 @@ export default function RootLayout() {
         handledNotificationIdsRef.current.add(key);
         handledNotificationResponseKeys.add(key);
         const data = response.notification.request.content.data as Record<string, unknown> | undefined;
-        console.log('[Notifications] Last response:', data);
+        // console.log('[Notifications] Last response:', data);
         if (handleNotificationData(data)) {
           void drainNativeCallEvents();
           try {
@@ -374,9 +382,11 @@ export default function RootLayout() {
           await (Notifications as any).clearLastNotificationResponseAsync?.();
         } catch { }
       })
-      .catch((error) => {
-        console.warn('[Notifications] Failed to read last response', error);
-      });
+    /*
+    .catch((error) => {
+      console.warn('[Notifications] Failed to read last response', error);
+    });
+    */
 
     return () => {
       notificationListener.current?.remove();
@@ -403,11 +413,11 @@ export default function RootLayout() {
     const { useChatStore } = require('../src/lib/ChatStore')
 
     AuthManager.getInstance().init().then((session: any) => {
-      console.log('[Layout] Auth Loaded:', !!session);
+      // console.log('[Layout] Auth Loaded:', !!session);
       // If SecureStore has a valid session but Zustand store lost it, restore auth state
       const authState = useAuthStore.getState();
       if (session && !authState.isAuthenticated && authState.hasHydrated) {
-        console.log('[Layout] Restoring auth state from SecureStore session');
+        // console.log('[Layout] Restoring auth state from SecureStore session');
         useAuthStore.getState().login({
           userId: session.userId,
           secureId: session.secureId,
@@ -428,7 +438,7 @@ export default function RootLayout() {
         });
         // Check WebRTC availability for calls (safe in Expo Go - will just report false)
         useCallStore.getState().checkWebRTCAvailability().then(available => {
-          console.log('[Layout] WebRTC available for calls:', available);
+          // console.log('[Layout] WebRTC available for calls:', available);
         });
       }
     });
@@ -451,7 +461,7 @@ export default function RootLayout() {
   useEffect(() => {
     if (!fontsLoaded || !hasHydrated) return;
 
-    console.log('[RootLayout] Auth check - segments:', segments, 'isAuthenticated:', isAuthenticated, 'hydrated:', hasHydrated)
+    // console.log('[RootLayout] Auth check - segments:', segments, 'isAuthenticated:', isAuthenticated, 'hydrated:', hasHydrated)
 
     if (isAuthenticated) {
       // Validate session in background to catch 401s if socket fails
@@ -462,11 +472,11 @@ export default function RootLayout() {
 
     if (!isAuthenticated && !inAuthGroup) {
       // Redirect to signin if not authenticated
-      console.log('[RootLayout] Not authenticated, redirecting to signin')
+      // console.log('[RootLayout] Not authenticated, redirecting to signin')
       router.replace('/(auth)/welcome')
     } else if (isAuthenticated && inAuthGroup) {
       // Redirect to home if authenticated and trying to access auth pages
-      console.log('[RootLayout] Authenticated but in auth group, redirecting to home')
+      // console.log('[RootLayout] Authenticated but in auth group, redirecting to home')
       router.replace('/(tabs)/home')
     }
   }, [isAuthenticated, segments, fontsLoaded, hasHydrated])

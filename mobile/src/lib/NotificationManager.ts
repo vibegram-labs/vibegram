@@ -16,7 +16,7 @@ async function getNotificationsModule(): Promise<ExpoNotificationsModule | null>
     if (isExpoGoAndroid()) {
         if (!warnedExpoGoUnsupported) {
             warnedExpoGoUnsupported = true;
-            console.log('[NotificationManager] Skipping expo-notifications remote push in Expo Go (Android)');
+            // console.log('[NotificationManager] Skipping expo-notifications remote push in Expo Go (Android)');
         }
         return null;
     }
@@ -79,12 +79,14 @@ function ensureNotificationHandlerConfigured(Notifications: ExpoNotificationsMod
 }
 
 export const requestPermissionsAndGetToken = async (): Promise<string | undefined> => {
+    /*
     console.log('[NotificationManager] init', {
         platform: Platform.OS,
         isDevice: Device.isDevice,
         appOwnership: Constants.appOwnership,
         executionEnvironment: Constants.executionEnvironment,
     });
+    */
 
     const Notifications = await getNotificationsModule();
     if (!Notifications) {
@@ -93,7 +95,7 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
     ensureNotificationHandlerConfigured(Notifications);
 
     if (Platform.OS === 'android') {
-        console.log('[NotificationManager] configuring Android channel: default');
+        // console.log('[NotificationManager] configuring Android channel: default');
         await Notifications.setNotificationChannelAsync('default', {
             name: 'default',
             importance: Notifications.AndroidImportance.MAX,
@@ -105,6 +107,7 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
     // NOTE: Device check removed for Simulator testing
     const existing = await Notifications.getPermissionsAsync();
     const { status: existingStatus } = existing;
+    /*
     console.log('[NotificationManager] permission status before request', {
         status: existing.status,
         canAskAgain: existing.canAskAgain,
@@ -114,6 +117,7 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
         iosAllowsBadge: (existing as any)?.ios?.allowsBadge,
         iosAllowsSound: (existing as any)?.ios?.allowsSound,
     });
+    */
     let finalStatus = existingStatus;
 
     if (existingStatus !== 'granted') {
@@ -125,6 +129,7 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
             },
         });
         finalStatus = requested.status;
+        /*
         console.log('[NotificationManager] permission status after request', {
             status: requested.status,
             canAskAgain: requested.canAskAgain,
@@ -134,28 +139,31 @@ export const requestPermissionsAndGetToken = async (): Promise<string | undefine
             iosAllowsBadge: (requested as any)?.ios?.allowsBadge,
             iosAllowsSound: (requested as any)?.ios?.allowsSound,
         });
+        */
     }
 
     if (finalStatus !== 'granted') {
-        console.log('[NotificationManager] push permission not granted');
+        // console.log('[NotificationManager] push permission not granted');
         return undefined;
     }
 
     try {
         const projectId = Constants?.expoConfig?.extra?.eas?.projectId ?? Constants?.easConfig?.projectId;
+        /*
         if (!projectId) {
-            console.log('[NotificationManager] projectId missing in Constants');
+            // console.log('[NotificationManager] projectId missing in Constants');
         } else {
-            console.log('[NotificationManager] using projectId', projectId);
+            // console.log('[NotificationManager] using projectId', projectId);
         }
+        */
 
         const tokenData = await Notifications.getExpoPushTokenAsync({
             projectId,
         });
-        console.log('[NotificationManager] Expo push token acquired', tokenData.data);
+        // console.log('[NotificationManager] Expo push token acquired', tokenData.data);
         return tokenData.data;
     } catch (e) {
-        console.log('[NotificationManager] Error fetching Expo push token', e);
+        // console.log('[NotificationManager] Error fetching Expo push token', e);
         return undefined;
     }
 };

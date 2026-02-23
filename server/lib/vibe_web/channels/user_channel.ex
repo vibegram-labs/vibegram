@@ -124,9 +124,20 @@ defmodule VibeWeb.UserChannel do
         "[UserChannel] call push skipped (recipient online) to_user=#{to_user_id} call_id=#{call_id}"
       )
     else
-      _ = Notifications.send_incoming_call_push(to_user_id, enriched_payload)
+      Task.start(fn ->
+        _ = Notifications.send_incoming_call_push(to_user_id, enriched_payload)
+      end)
     end
-    {:noreply, socket}
+
+    {:reply,
+     {:ok,
+      %{
+        "callId" => call_id,
+        "call_id" => call_id,
+        "callType" => call_type,
+        "call_type" => call_type,
+        "recipientOnline" => recipient_online
+      }}, socket}
   end
 
   @impl true

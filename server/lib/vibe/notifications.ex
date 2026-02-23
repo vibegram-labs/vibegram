@@ -10,6 +10,7 @@ defmodule Vibe.Notifications do
   @default_message_title "New message"
   @apns_voip_prod_base "https://api.push.apple.com"
   @apns_voip_sandbox_base "https://api.sandbox.push.apple.com"
+  @apns_voip_jwt_cache_ttl_secs 50 * 60
 
   def send_incoming_call_push(to_user_id, payload) when is_binary(to_user_id) and is_map(payload) do
     with to_user when not is_nil(to_user) <- Accounts.get_user(to_user_id),
@@ -448,18 +449,31 @@ defmodule Vibe.Notifications do
 
   defp apns_voip_jwt(config) do
     now = System.system_time(:second)
+    cache_key = apns_voip_jwt_cache_key(config)
 
-    header = %{"alg" => "ES256", "kid" => config.key_id}
-    claims = %{"iss" => config.team_id, "iat" => now}
+    case :persistent_term.get(cache_key, nil) do
+      %{jwt: jwt, iat: iat} when is_binary(jwt) and is_integer(iat) and now - iat < @apns_voip_jwt_cache_ttl_secs ->
+        {:ok, jwt}
 
-    signing_input =
-      base64url_encode(Jason.encode!(header)) <>
-        "." <> base64url_encode(Jason.encode!(claims))
+      _ ->
+        header = %{"alg" => "ES256", "kid" => config.key_id}
+        claims = %{"iss" => config.team_id, "iat" => now}
 
-    with {:ok, private_key} <- decode_apns_private_key(config.private_key),
-         {:ok, signature} <- sign_es256_jwt(signing_input, private_key) do
-      {:ok, signing_input <> "." <> base64url_encode(signature)}
+        signing_input =
+          base64url_encode(Jason.encode!(header)) <>
+            "." <> base64url_encode(Jason.encode!(claims))
+
+        with {:ok, private_key} <- decode_apns_private_key(config.private_key),
+             {:ok, signature} <- sign_es256_jwt(signing_input, private_key) do
+          jwt = signing_input <> "." <> base64url_encode(signature)
+          :persistent_term.put(cache_key, %{jwt: jwt, iat: now})
+          {:ok, jwt}
+        end
     end
+  end
+
+  defp apns_voip_jwt_cache_key(config) do
+    {:vibe_notifications_apns_voip_jwt, config.team_id, config.key_id, :erlang.phash2(config.private_key)}
   end
 
   defp decode_apns_private_key(pem) when is_binary(pem) do

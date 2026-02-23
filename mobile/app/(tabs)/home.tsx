@@ -495,7 +495,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const setHomeEditing = useUIStore(s => s.setHomeEditing)
     const safePress = useCallback((label: string, action: () => void | Promise<void>) => {
         try {
-            console.log(`[HomeScreen] press:${label}`)
+            // console.log(`[HomeScreen] press:${label}`)
             const maybePromise = action()
             if (maybePromise && typeof (maybePromise as Promise<void>).catch === 'function') {
                 void (maybePromise as Promise<void>).catch((error) => {
@@ -765,7 +765,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 return;
             }
             const chatType = normalizeChatType(item?.type)
-            console.log('[HomeScreen] Navigating to /chat:', item.chatId);
+            // console.log('[HomeScreen] Navigating to /chat:', item.chatId);
             setActiveChat(item.chatId)
             router.push({
                 pathname: '/chat',

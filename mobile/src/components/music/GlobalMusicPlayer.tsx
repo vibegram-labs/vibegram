@@ -149,7 +149,7 @@ export const GlobalMusicPlayer = () => {
                     shouldDuckAndroid: true,
                     playThroughEarpieceAndroid: false, // Use main speaker, not earpiece
                 });
-                console.log('[MusicPlayer] Audio mode configured');
+                // console.log('[MusicPlayer] Audio mode configured');
             } catch (e) {
                 console.error('[MusicPlayer] Failed to configure audio mode:', e);
             }
@@ -218,7 +218,7 @@ export const GlobalMusicPlayer = () => {
     const requestAudioReload = useCallback((reason: string) => {
         if (!currentTrack) return;
         if (isLoadingRef.current) return;
-        console.log('[MusicPlayer] Requesting audio reload:', reason);
+        // console.log('[MusicPlayer] Requesting audio reload:', reason);
         currentTrackUrlRef.current = null;
         setIsLoaded(false);
         setReloadToken((v) => v + 1);
@@ -228,21 +228,23 @@ export const GlobalMusicPlayer = () => {
         let isMounted = true;
 
         const loadSound = async () => {
+            /*
             console.log('[MusicPlayer] loadSound called, currentTrack:', currentTrack?.title);
             console.log('[MusicPlayer] preview_url:', currentTrack?.preview_url);
             console.log('[MusicPlayer] video_id:', currentTrack?.video_id);
+            */
 
             // Get the stream URL - either from preview_url or construct from video_id
             let streamUrl = currentTrack?.preview_url;
 
             if (!streamUrl && currentTrack?.video_id) {
                 // Fetch stream URL from backend (which caches and returns actual playable URL)
-                console.log('[MusicPlayer] Fetching stream URL for video_id:', currentTrack.video_id);
+                // console.log('[MusicPlayer] Fetching stream URL for video_id:', currentTrack.video_id);
                 try {
                     const info = await apiClient.getMusicInfo(currentTrack.video_id);
                     if (info?.stream_url) {
                         streamUrl = info.stream_url;
-                        console.log('[MusicPlayer] Got stream URL from backend:', streamUrl);
+                        // console.log('[MusicPlayer] Got stream URL from backend:', streamUrl);
                     }
                 } catch (e) {
                     console.error('[MusicPlayer] Failed to fetch stream URL:', e);
@@ -250,7 +252,7 @@ export const GlobalMusicPlayer = () => {
             }
 
             if (!streamUrl || !currentTrack) {
-                console.log('[MusicPlayer] No preview_url or video_id, skipping');
+                // console.log('[MusicPlayer] No preview_url or video_id, skipping');
                 return;
             }
 
@@ -271,13 +273,13 @@ export const GlobalMusicPlayer = () => {
 
             // Prevent duplicate loads for same track
             if (currentTrackUrlRef.current === loadKey && soundRef.current && isLoaded) {
-                console.log('[MusicPlayer] Same track, skipping duplicate load');
+                // console.log('[MusicPlayer] Same track, skipping duplicate load');
                 return;
             }
 
             // Wait if already loading
             if (isLoadingRef.current) {
-                console.log('[MusicPlayer] Already loading, queuing...');
+                // console.log('[MusicPlayer] Already loading, queuing...');
                 // Queue this load
                 setTimeout(() => {
                     if (isMounted && (currentTrack?.preview_url || currentTrack?.video_id)) {
@@ -292,7 +294,7 @@ export const GlobalMusicPlayer = () => {
 
             // Unload previous sound first
             if (soundRef.current) {
-                console.log('[MusicPlayer] Unloading previous sound');
+                // console.log('[MusicPlayer] Unloading previous sound');
                 setIsLoaded(false);
                 // Reset progress states for clean slate
                 setProgress(0);
@@ -304,7 +306,7 @@ export const GlobalMusicPlayer = () => {
                     await soundRef.current.stopAsync();
                     await soundRef.current.unloadAsync();
                 } catch (e) {
-                    console.log('[MusicPlayer] Cleanup error (ignored):', e);
+                    // console.log('[MusicPlayer] Cleanup error (ignored):', e);
                 }
                 soundRef.current = null;
             }
@@ -318,24 +320,26 @@ export const GlobalMusicPlayer = () => {
                 const shouldUseMusicCache = !isLocalFileUri(streamUrl) && currentTrack.source !== 'chat-voice';
                 const cached = shouldUseMusicCache ? getTrack(trackId) : undefined;
 
+                /*
                 console.log('[MusicPlayer] Track ID:', trackId);
                 console.log('[MusicPlayer] Cache enabled:', shouldUseMusicCache);
                 console.log('[MusicPlayer] Cached track:', cached?.local_uri ? 'YES' : 'NO');
+                */
 
                 if (shouldUseMusicCache && cached?.local_uri) {
-                    console.log('[MusicPlayer] checking if cached file exists:', cached.local_uri);
+                    // console.log('[MusicPlayer] checking if cached file exists:', cached.local_uri);
                     const fileInfo = await FileSystem.getInfoAsync(cached.local_uri);
                     if (fileInfo.exists) {
                         uriToPlay = cached.local_uri;
                         usedCache = true;
-                        console.log('[MusicPlayer] Using cached URI:', uriToPlay);
+                        // console.log('[MusicPlayer] Using cached URI:', uriToPlay);
                     } else {
                         console.warn('[MusicPlayer] Removing stale cached file reference:', cached.local_uri);
                         try { removeTrack(trackId); } catch (_) { /* ignore */ }
                         uriToPlay = streamUrl;
                     }
                 } else if (shouldUseMusicCache) {
-                    console.log('[MusicPlayer] Using stream URL:', uriToPlay);
+                    // console.log('[MusicPlayer] Using stream URL:', uriToPlay);
                     // Cache metadata
                     cacheTrack({
                         video_id: trackId,
@@ -356,18 +360,18 @@ export const GlobalMusicPlayer = () => {
                         cached_at: Date.now()
                     });
                 } else {
-                    console.log('[MusicPlayer] Using direct source URI (no cache):', uriToPlay);
+                    // console.log('[MusicPlayer] Using direct source URI (no cache):', uriToPlay);
                 }
 
                 if (!isMounted) {
-                    console.log('[MusicPlayer] Component unmounted before load');
+                    // console.log('[MusicPlayer] Component unmounted before load');
                     isLoadingRef.current = false;
                     return;
                 }
 
                 // Helper to create and wire up the Audio.Sound
                 const createSound = async (uri: string) => {
-                    console.log('[MusicPlayer] Creating Audio.Sound with URI:', uri);
+                    // console.log('[MusicPlayer] Creating Audio.Sound with URI:', uri);
                     const progressUpdateIntervalMillis = currentTrack?.title === 'Voice Message' ? 50 : 220;
                     const shouldPlayNow = !!useMusicPlayerStore.getState().isPlaying;
                     return Audio.Sound.createAsync(
@@ -387,7 +391,7 @@ export const GlobalMusicPlayer = () => {
                                     setProgress(status.positionMillis / status.durationMillis);
                                 }
                                 if (status.didJustFinish) {
-                                    console.log('[MusicPlayer] Track finished');
+                                    // console.log('[MusicPlayer] Track finished');
                                     // For voice messages, reset the player instead of playing next
                                     if (currentTrack?.title === 'Voice Message') {
                                         setStoreProgress(0);
@@ -423,12 +427,12 @@ export const GlobalMusicPlayer = () => {
 
                 const { sound: newSound } = result;
 
-                console.log('[MusicPlayer] Audio.Sound created successfully');
+                // console.log('[MusicPlayer] Audio.Sound created successfully');
 
                 if (isMounted) {
                     soundRef.current = newSound;
                     setIsLoaded(true);
-                    console.log('[MusicPlayer] Playback started');
+                    // console.log('[MusicPlayer] Playback started');
                 } else {
                     // Cleanup if component unmounted during load
                     await newSound.unloadAsync();
@@ -458,9 +462,9 @@ export const GlobalMusicPlayer = () => {
 
     // Play/Pause control
     useEffect(() => {
-        console.log('[MusicPlayer] Play/Pause effect triggered. isPlaying:', isPlaying, 'isLoaded:', isLoaded, 'soundRef exists:', !!soundRef.current);
+        // console.log('[MusicPlayer] Play/Pause effect triggered. isPlaying:', isPlaying, 'isLoaded:', isLoaded, 'soundRef exists:', !!soundRef.current);
         if (!soundRef.current || !isLoaded) {
-            console.log('[MusicPlayer] Cannot play/pause: soundRef or isLoaded is missing');
+            // console.log('[MusicPlayer] Cannot play/pause: soundRef or isLoaded is missing');
             if (isPlaying && currentTrack) {
                 requestAudioReload('play-request-before-loaded');
             }
@@ -468,14 +472,14 @@ export const GlobalMusicPlayer = () => {
         }
 
         if (isPlaying) {
-            console.log('[MusicPlayer] Calling playAsync...');
+            // console.log('[MusicPlayer] Calling playAsync...');
             soundRef.current.playAsync()
-                .then((status) => console.log('[MusicPlayer] playAsync success, status:', status))
+                // .then((status) => console.log('[MusicPlayer] playAsync success, status:', status))
                 .catch((error) => console.error('[MusicPlayer] playAsync failed:', error));
         } else {
-            console.log('[MusicPlayer] Calling pauseAsync...');
+            // console.log('[MusicPlayer] Calling pauseAsync...');
             soundRef.current.pauseAsync()
-                .then((status) => console.log('[MusicPlayer] pauseAsync success, status:', status))
+                // .then((status) => console.log('[MusicPlayer] pauseAsync success, status:', status))
                 .catch((error) => console.error('[MusicPlayer] pauseAsync failed:', error));
         }
     }, [isPlaying, isLoaded, currentTrack, requestAudioReload]);
@@ -526,7 +530,7 @@ export const GlobalMusicPlayer = () => {
             requestAudioReload('toggle-play-before-loaded');
             return;
         }
-        console.log('[MusicPlayer] togglePlay pressed. Toggling from', isPlaying, 'to', !isPlaying);
+        // console.log('[MusicPlayer] togglePlay pressed. Toggling from', isPlaying, 'to', !isPlaying);
         setIsPlaying(!isPlaying);
     };
 

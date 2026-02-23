@@ -55,6 +55,22 @@ export default function ChatScreenHeader({
 }: ChatScreenHeaderProps) {
     const insets = useSafeAreaInsets();
     const router = useRouter();
+    const debugAudioCallPress = () => {
+        console.log('[ChatScreenHeader] Audio call button pressed', {
+            platform: Platform.OS,
+            hasHandler: !!onAudioCall,
+            title,
+        });
+        onAudioCall?.();
+    };
+    const debugVideoCallPress = () => {
+        console.log('[ChatScreenHeader] Video call button pressed', {
+            platform: Platform.OS,
+            hasHandler: !!onVideoCall,
+            title,
+        });
+        onVideoCall?.();
+    };
 
     if (Platform.OS === 'android') {
         return (
@@ -97,10 +113,10 @@ export default function ChatScreenHeader({
                 </View>
 
                 <View style={styles.androidRight}>
-                    <TouchableOpacity style={styles.androidIconAction} onPress={onVideoCall} disabled={!onVideoCall}>
+                    <TouchableOpacity style={styles.androidIconAction} onPress={debugVideoCallPress} disabled={!onVideoCall}>
                         <HeaderVideoIcon color={colors.text} size={22} strokeWidth={1.3} />
                     </TouchableOpacity>
-                    <TouchableOpacity style={styles.androidIconAction} onPress={onAudioCall} disabled={!onAudioCall}>
+                    <TouchableOpacity style={styles.androidIconAction} onPress={debugAudioCallPress} disabled={!onAudioCall}>
                         <HeaderPhoneIcon color={colors.text} size={22} strokeWidth={1.3} />
                     </TouchableOpacity>
                     {onPressSearch && (

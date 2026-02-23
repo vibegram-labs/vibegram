@@ -421,6 +421,15 @@ export const useCallStore = create<CallState & CallActions>()(
                 startCall: async (remoteUser, type, socket) => {
                     const { isWebRTCAvailable, callStatus } = get();
                     const channel = resolveSignalingChannel(socket);
+                    console.log('[CallStore] startCall requested', {
+                        type,
+                        remoteUserId: remoteUser?.userId,
+                        isWebRTCAvailable,
+                        callStatus,
+                        hasSocketArg: !!socket,
+                        hasResolvedChannel: !!channel,
+                        canPush: !!channel && typeof channel.push === 'function',
+                    });
 
                     if (!isWebRTCAvailable) {
                         console.warn('[CallStore] WebRTC not available, cannot start call');
@@ -436,6 +445,7 @@ export const useCallStore = create<CallState & CallActions>()(
                     }
 
                     const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+                    console.log('[CallStore] startCall state setup', { callId, type, remoteUserId: remoteUser.userId });
 
                     set({
                         callId,
@@ -453,6 +463,7 @@ export const useCallStore = create<CallState & CallActions>()(
                             WebRTCService.initializeMedia(type === 'video'),
                             WebRTCService.fetchIceServers(),
                         ]);
+                        console.log('[CallStore] startCall media initialization result', { callId, type, mediaReady });
                         if (!mediaReady) {
                             console.warn('[CallStore] Media init returned false');
                             markCallFailed();
@@ -461,14 +472,33 @@ export const useCallStore = create<CallState & CallActions>()(
                         bindSignalingCallbacks(channel);
                         set({ hasLocalStream: true });
 
-                        channel.push('call-start', {
+                        console.log('[CallStore] pushing call-start', {
+                            callId,
+                            type,
+                            toUserId: remoteUser.userId,
+                        });
+                        const pushResult = channel.push('call-start', {
                             toUserId: remoteUser.userId,
                             callId,
                             callType: type,
                         });
+                        try {
+                            pushResult
+                                ?.receive?.('ok', (resp: any) => {
+                                    console.log('[CallStore] call-start ack ok', { callId, type, resp });
+                                })
+                                ?.receive?.('error', (resp: any) => {
+                                    console.warn('[CallStore] call-start ack error', { callId, type, resp });
+                                })
+                                ?.receive?.('timeout', () => {
+                                    console.warn('[CallStore] call-start ack timeout', { callId, type });
+                                });
+                        } catch { }
+                        console.log('[CallStore] call-start pushed', { callId, type });
 
                         // Wait longer (30s) generally, or `startWatchdog` if needed.
                         startWatchdog(40000, 'call-start-ringing');
+                        console.log('[CallStore] watchdog started for outgoing call', { callId });
 
                         return true;
                     } catch (e) {

@@ -38,7 +38,7 @@ export const useNotificationStore = create<NotificationState>()(
             lastSyncedAt: null,
 
             setNotificationsEnabled: async (enabled: boolean) => {
-                console.log('[NotificationStore] setNotificationsEnabled', { enabled });
+                // console.log('[NotificationStore] setNotificationsEnabled', { enabled });
                 set({ notificationsEnabled: enabled });
                 if (enabled) {
                     await get().initNotifications();
@@ -69,11 +69,13 @@ export const useNotificationStore = create<NotificationState>()(
                 const { forceSync = false, reason = 'unknown' } = options;
                 const { notificationsEnabled, isInitializing, initStartedAt } = get();
                 if (!notificationsEnabled) {
+                    /*
                     console.log('[NotificationStore] initNotifications skipped', {
                         notificationsEnabled,
                         isInitializing,
                         reason,
                     });
+                    */
                     return;
                 }
 
@@ -93,24 +95,26 @@ export const useNotificationStore = create<NotificationState>()(
                             pendingInitReasons: [],
                         });
                     } else {
-                    set((state) => {
-                        const hasReason = state.pendingInitReasons.includes(reason);
-                        const pendingInitReasons = hasReason
-                            ? state.pendingInitReasons
-                            : [...state.pendingInitReasons, reason];
+                        set((state) => {
+                            const hasReason = state.pendingInitReasons.includes(reason);
+                            const pendingInitReasons = hasReason
+                                ? state.pendingInitReasons
+                                : [...state.pendingInitReasons, reason];
 
-                        return {
-                            pendingInitRequested: true,
-                            pendingInitForceSync: state.pendingInitForceSync || forceSync,
-                            pendingInitReasons,
-                        };
-                    });
+                            return {
+                                pendingInitRequested: true,
+                                pendingInitForceSync: state.pendingInitForceSync || forceSync,
+                                pendingInitReasons,
+                            };
+                        });
 
-                    console.log('[NotificationStore] initNotifications queued while initializing', {
-                        reason,
-                        forceSync,
-                    });
-                    return;
+                        /*
+                        console.log('[NotificationStore] initNotifications queued while initializing', {
+                            reason,
+                            forceSync,
+                        });
+                        */
+                        return;
                     }
                 }
 
@@ -122,19 +126,21 @@ export const useNotificationStore = create<NotificationState>()(
                     pendingInitReasons: [],
                 });
                 try {
+                    /*
                     console.log('[NotificationStore] Requesting permissions and token...', {
                         reason,
                         forceSync,
                     });
+                    */
                     const token = await requestPermissionsAndGetToken();
                     if (token) {
-                        console.log('[NotificationStore] Got push token:', token);
+                        // console.log('[NotificationStore] Got push token:', token);
                         set({ pushToken: token });
 
                         // Sync with backend via AuthStore
                         const { user, updateProfileInfo } = useAuthStore.getState();
                         if (!user || !updateProfileInfo) {
-                            console.log('[NotificationStore] Cannot sync token yet (missing user or updateProfileInfo)');
+                            // console.log('[NotificationStore] Cannot sync token yet (missing user or updateProfileInfo)');
                         } else {
                             const nativeCallModule = getNativeCallModule();
                             const nativePushTokens = nativeCallModule?.getPushTokens?.() ?? null;
@@ -156,6 +162,7 @@ export const useNotificationStore = create<NotificationState>()(
                             if (syncExpired) reasons.push('syncExpired');
 
                             if (reasons.length > 0) {
+                                /*
                                 console.log('[NotificationStore] Syncing token with backend', {
                                     userId: user.userId,
                                     hadToken: !!user.pushToken,
@@ -167,23 +174,26 @@ export const useNotificationStore = create<NotificationState>()(
                                         voip: !!nativePushTokens?.voip,
                                     },
                                 });
+                                */
                                 await updateProfileInfo({ pushToken: serializedPushToken });
                                 set({
                                     lastSyncedToken: serializedPushToken,
                                     lastSyncedUserId: user.userId,
                                     lastSyncedAt: now,
                                 });
-                                console.log('[NotificationStore] Token sync completed');
+                                // console.log('[NotificationStore] Token sync completed');
                             } else {
+                                /*
                                 console.log('[NotificationStore] Token recently synced, skipping profile update', {
                                     userId: user.userId,
                                     reason,
                                     lastSyncedAt,
                                 });
+                                */
                             }
                         }
                     } else {
-                        console.log('[NotificationStore] No push token returned from NotificationManager');
+                        // console.log('[NotificationStore] No push token returned from NotificationManager');
                     }
                 } catch (error) {
                     console.error('[NotificationStore] Failed to initialize notifications:', error);

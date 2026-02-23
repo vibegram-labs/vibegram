@@ -1,4 +1,5 @@
 import type { NativeCallModule, NativeCallUiEvent } from './types';
+import { Platform } from 'react-native';
 
 const MODULE_NAME = 'VibeNativeCall';
 
@@ -30,6 +31,8 @@ const loadOptionalNativeModule = <T>(moduleName: string): T | null => {
 };
 
 export const getNativeCallModule = (): NativeCallModule | null => {
+  // Temporary kill-switch: force iOS to use the React Native call flow/UI.
+  if (Platform.OS === 'ios') return null;
   if (cachedModule) return cachedModule;
   const resolved = loadOptionalNativeModule<NativeCallModule>(MODULE_NAME);
   if (resolved || !__DEV__) {
