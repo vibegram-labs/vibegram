@@ -25,7 +25,10 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   /// Add your server's leaf cert + at least one backup/intermediate hash.
   /// Generate with: openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64
   /// Set to empty to disable pinning (e.g. during development).
-  static var pinnedSPKIHashes: Set<String> = []
+  static var pinnedSPKIHashes: Set<String> = [
+    "u6dScLDuE2TrAks7ct4HDBekXo9byFES6oApqW/pAjQ=",
+    "AlSQhgtJirc8ahLyekmtX+Iw+v46yPYRLJt9Cq1GlB0=",
+  ]
 
   /// Whether certificate pinning is enforced. Disabled when no hashes are configured.
   static var pinningEnabled: Bool { !pinnedSPKIHashes.isEmpty }
@@ -150,8 +153,8 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
         payload,
       ]
       guard JSONSerialization.isValidJSONObject(frame),
-            let data = try? JSONSerialization.data(withJSONObject: frame),
-            let text = String(data: data, encoding: .utf8)
+        let data = try? JSONSerialization.data(withJSONObject: frame),
+        let text = String(data: data, encoding: .utf8)
       else {
         self.callbacks.onError("serialize_frame_failed:\(event)")
         return
@@ -194,8 +197,8 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
     }
 
     guard let data,
-          let raw = try? JSONSerialization.jsonObject(with: data) as? [Any],
-          raw.count >= 5
+      let raw = try? JSONSerialization.jsonObject(with: data) as? [Any],
+      raw.count >= 5
     else { return }
 
     let topic = raw[2] as? String ?? ""
@@ -279,7 +282,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
   ) {
     guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-          let serverTrust = challenge.protectionSpace.serverTrust
+      let serverTrust = challenge.protectionSpace.serverTrust
     else {
       completionHandler(.cancelAuthenticationChallenge, nil)
       return
@@ -302,7 +305,8 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
     let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] ?? []
     for cert in certChain {
       if let spkiHash = Self.sha256SPKIHash(of: cert),
-         Self.pinnedSPKIHashes.contains(spkiHash) {
+        Self.pinnedSPKIHashes.contains(spkiHash)
+      {
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
         return
       }
@@ -347,7 +351,7 @@ final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
     completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
   ) {
     guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
-          let serverTrust = challenge.protectionSpace.serverTrust
+      let serverTrust = challenge.protectionSpace.serverTrust
     else {
       completionHandler(.cancelAuthenticationChallenge, nil)
       return
@@ -367,7 +371,8 @@ final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
     let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] ?? []
     for cert in certChain {
       if let spkiHash = ChatPhoenixClient.sha256SPKIHash(of: cert),
-         ChatPhoenixClient.pinnedSPKIHashes.contains(spkiHash) {
+        ChatPhoenixClient.pinnedSPKIHashes.contains(spkiHash)
+      {
         completionHandler(.useCredential, URLCredential(trust: serverTrust))
         return
       }
