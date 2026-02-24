@@ -73,7 +73,7 @@ const TYPING_MASK_WIDTH = 84;
 const TYPING_SHIMMER_BAND_WIDTH = 120;
 const TYPING_SHIMMER_START = -TYPING_SHIMMER_BAND_WIDTH;
 const TYPING_SHIMMER_END = TYPING_MASK_WIDTH + TYPING_SHIMMER_BAND_WIDTH;
-const CHAT_PROFILE_PERF_LOG = __DEV__;
+const CHAT_PROFILE_PERF_LOG = false;
 const chatProfilePerfLog = (...args: any[]) => {
     if (!CHAT_PROFILE_PERF_LOG) return;
     console.log('[ChatProfilePerf]', ...args);
@@ -435,27 +435,13 @@ export default function ChatScreen() {
         if (!activeChat?.friendId) return;
 
         profileNavInFlightRef.current = true;
-        chatProfilePerfLog('avatarTap:push:user-profile', {
-            chatId: activeChat.chatId,
-            friendId: activeChat.friendId,
-            dt: Date.now() - tapTs,
-        });
         router.push({
             pathname: '/user-profile',
             params: {
                 userId: activeChat.friendId,
                 chatId: activeChat.chatId,
-                username: activeChat.friendName || displayName,
-                profileImage: activeChat.friendImage || '',
-                isOnline: headerIsOnline ? '1' : '0',
             }
         });
-        requestAnimationFrame(() => {
-            chatProfilePerfLog('avatarTap:postPush:rAF', { dt: Date.now() - tapTs });
-        });
-        setTimeout(() => {
-            chatProfilePerfLog('avatarTap:postPush:timeout16', { dt: Date.now() - tapTs });
-        }, 16);
         setTimeout(() => { profileNavInFlightRef.current = false; }, 400);
     }, [activeChat, effectiveChatType, router, displayName, headerIsOnline]);
 

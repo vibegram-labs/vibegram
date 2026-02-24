@@ -56,6 +56,26 @@ public class ChatNativeListModule: Module {
         view.setRows(rows)
       }
 
+      Prop("engineSurfaceId") { (view: ChatListView, value: String?) in
+        view.setEngineSurfaceId(value ?? "")
+      }
+
+      Prop("chatId") { (view: ChatListView, value: String?) in
+        view.setEngineChatId(value ?? "")
+      }
+
+      Prop("myUserId") { (view: ChatListView, value: String?) in
+        view.setEngineMyUserId(value ?? "")
+      }
+
+      Prop("peerUserId") { (view: ChatListView, value: String?) in
+        view.setEnginePeerUserId(value ?? "")
+      }
+
+      Prop("statusAuthorityEnabled") { (view: ChatListView, enabled: Bool) in
+        view.setStatusAuthorityEnabled(enabled)
+      }
+
       Prop("appearance") { (view: ChatListView, appearance: [String: Any]) in
         view.setAppearance(appearance)
       }

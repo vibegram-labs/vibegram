@@ -65,7 +65,7 @@ const toText = (m: Message): string => {
     return (m.plaintext || m.caption || '').toString();
 };
 
-const USER_PROFILE_PERF_LOG = __DEV__;
+const USER_PROFILE_PERF_LOG = false;
 const userProfilePerfLog = (...args: any[]) => {
     if (!USER_PROFILE_PERF_LOG) return;
     console.log('[UserProfilePerf]', ...args);
@@ -263,7 +263,6 @@ export default function UserProfileRoute() {
                     linkItems: [],
                     pinnedItems: [],
                 });
-                userProfilePerfLog('content:skip:no-chat', { dt: Date.now() - startedAt });
                 return;
             }
 
@@ -279,21 +278,11 @@ export default function UserProfileRoute() {
                 // Use existing local messages immediately so profile screen mounts fast.
                 // Only refetch if we have no local history yet.
                 if (localMessageCount === 0) {
-                    userProfilePerfLog('content:loadMessages:start', { chatId: resolvedChatId });
                     try {
                         await loadMessages(resolvedChatId);
                     } catch {
                         // Continue with whatever local messages are currently available.
                     }
-                    userProfilePerfLog('content:loadMessages:done', {
-                        chatId: resolvedChatId,
-                        dt: Date.now() - startedAt,
-                    });
-                } else {
-                    userProfilePerfLog('content:use-local-cache-first', {
-                        chatId: resolvedChatId,
-                        localMessageCount,
-                    });
                 }
 
                 if (cancelled) return;
@@ -312,13 +301,6 @@ export default function UserProfileRoute() {
                         data: derived,
                     });
                 }
-                userProfilePerfLog('content:messages:derived', {
-                    chatId: resolvedChatId,
-                    sourceCount: sourceMessages.length,
-                    cacheHit: cachedDerived?.signature === signature,
-                    dt: Date.now() - deriveStart,
-                    totalDt: Date.now() - startedAt,
-                });
                 if (cancelled) return;
 
                 // PHASE 1: Apply derived content IMMEDIATELY so the screen appears fast.
@@ -333,16 +315,6 @@ export default function UserProfileRoute() {
                     fileItems: derived.fileItems,
                     linkItems: derived.linkItems,
                     pinnedItems: hasFreshPinnedCache ? pinnedCached.items : [],
-                });
-                userProfilePerfLog('content:apply:phase1', {
-                    chatId: resolvedChatId,
-                    media: derived.mediaItems.length,
-                    videos: derived.videoItems.length,
-                    images: derived.imageItems.length,
-                    files: derived.fileItems.length,
-                    links: derived.linkItems.length,
-                    pinnedFromCache: hasFreshPinnedCache ? pinnedCached.items.length : 0,
-                    totalDt: Date.now() - startedAt,
                 });
 
                 // PHASE 2: Fetch pinned messages in the background (non-blocking).
@@ -369,12 +341,6 @@ export default function UserProfileRoute() {
                         pinnedItemsCache.set(resolvedChatId, { items: pinned, cachedAt: Date.now() });
                         // Incrementally update just the pinned items
                         setContentData((prev) => ({ ...prev, pinnedItems: pinned }));
-                        userProfilePerfLog('content:pinned:loaded', {
-                            chatId: resolvedChatId,
-                            count: pinned.length,
-                            dt: Date.now() - pinnedStart,
-                            totalDt: Date.now() - startedAt,
-                        });
                     } catch {
                         // Pinned messages failed — screen already shows content, no action needed
                     }

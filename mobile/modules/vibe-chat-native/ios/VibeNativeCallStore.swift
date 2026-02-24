@@ -12,7 +12,12 @@ public final class VibeNativeCallStore {
     static let apnsToken = "vibe.native.call.apnsToken"
     static let activeCallsByCallId = "vibe.native.call.activeCallsByCallId"
     static let payloadByUuid = "vibe.native.call.payloadByUuid"
+    static let nativeEngineConfig = "vibe.native.call.nativeEngineConfig"
+    static let nativeIceConfig = "vibe.native.call.nativeIceConfig"
+    static let nativeSignalingEvents = "vibe.native.call.nativeSignalingEvents"
   }
+
+  private let maxNativeSignalingEvents = 240
 
   private init() {}
 
@@ -40,6 +45,83 @@ public final class VibeNativeCallStore {
       result["voip"] = defaults.string(forKey: Keys.voipToken) as Any
       result["apns"] = defaults.string(forKey: Keys.apnsToken) as Any
       return result
+    }
+  }
+
+  public func setNativeEngineConfig(_ payload: [String: Any]) {
+    queue.sync {
+      guard JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload)
+      else {
+        NSLog("[VibeNativeCall][Store] setNativeEngineConfig invalidPayload")
+        return
+      }
+      defaults.set(data, forKey: Keys.nativeEngineConfig)
+      NSLog("[VibeNativeCall][Store] setNativeEngineConfig keys=[%@]", payload.keys.sorted().joined(separator: ","))
+    }
+  }
+
+  public func getNativeEngineConfig() -> [String: Any] {
+    queue.sync {
+      guard let data = defaults.data(forKey: Keys.nativeEngineConfig),
+            let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else {
+        return [:]
+      }
+      return decoded
+    }
+  }
+
+  public func setNativeIceConfig(_ payload: [String: Any]) {
+    queue.sync {
+      guard JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload)
+      else {
+        NSLog("[VibeNativeCall][Store] setNativeIceConfig invalidPayload")
+        return
+      }
+      defaults.set(data, forKey: Keys.nativeIceConfig)
+      NSLog("[VibeNativeCall][Store] setNativeIceConfig keys=[%@]", payload.keys.sorted().joined(separator: ","))
+    }
+  }
+
+  public func getNativeIceConfig() -> [String: Any] {
+    queue.sync {
+      guard let data = defaults.data(forKey: Keys.nativeIceConfig),
+            let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else {
+        return [:]
+      }
+      return decoded
+    }
+  }
+
+  public func appendNativeSignalingEvent(_ payload: [String: Any]) {
+    queue.sync {
+      var events = readNativeSignalingEventsLocked()
+      events.append(payload)
+      if events.count > maxNativeSignalingEvents {
+        events = Array(events.suffix(maxNativeSignalingEvents))
+      }
+      writeNativeSignalingEventsLocked(events)
+      let eventName = (payload["event"] as? String) ?? "-"
+      let direction = (payload["direction"] as? String) ?? "-"
+      NSLog("[VibeNativeCall][Store] appendNativeSignalingEvent dir=%@ event=%@ count=%d", direction, eventName, events.count)
+    }
+  }
+
+  public func getNativeSignalingEvents(limit: Int? = nil) -> [[String: Any]] {
+    queue.sync {
+      let events = readNativeSignalingEventsLocked()
+      guard let limit, limit > 0, events.count > limit else { return events }
+      return Array(events.suffix(limit))
+    }
+  }
+
+  public func clearNativeSignalingEvents() {
+    queue.sync {
+      defaults.removeObject(forKey: Keys.nativeSignalingEvents)
+      NSLog("[VibeNativeCall][Store] clearNativeSignalingEvents")
     }
   }
 
@@ -138,5 +220,18 @@ public final class VibeNativeCallStore {
   private func writePendingEventsLocked(_ events: [[String: Any]]) {
     guard let data = try? JSONSerialization.data(withJSONObject: events) else { return }
     defaults.set(data, forKey: Keys.pendingEvents)
+  }
+
+  private func readNativeSignalingEventsLocked() -> [[String: Any]] {
+    guard let raw = defaults.data(forKey: Keys.nativeSignalingEvents) else { return [] }
+    guard let decoded = try? JSONSerialization.jsonObject(with: raw) as? [[String: Any]] else {
+      return []
+    }
+    return decoded
+  }
+
+  private func writeNativeSignalingEventsLocked(_ events: [[String: Any]]) {
+    guard let data = try? JSONSerialization.data(withJSONObject: events) else { return }
+    defaults.set(data, forKey: Keys.nativeSignalingEvents)
   }
 }

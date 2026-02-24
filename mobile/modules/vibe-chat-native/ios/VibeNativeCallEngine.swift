@@ -1,0 +1,438 @@
+import Foundation
+
+public final class VibeNativeCallEngine {
+  public static let shared = VibeNativeCallEngine()
+
+  private let queue = DispatchQueue(label: "vibe.native.call.engine")
+  private let store = VibeNativeCallStore.shared
+  private var turnRefreshInFlight = false
+
+  private enum Keys {
+    static let state = "state"
+    static let callId = "callId"
+    static let callType = "callType"
+    static let direction = "direction"
+    static let relayMode = "relayMode"
+    static let socketUrl = "socketUrl"
+    static let turnCredentialsUrl = "turnCredentialsUrl"
+    static let configuredAt = "configuredAt"
+    static let updatedAt = "updatedAt"
+    static let note = "note"
+    static let turnState = "turnState"
+    static let turnIceServerCount = "turnIceServerCount"
+    static let turnIceTransportPolicy = "turnIceTransportPolicy"
+    static let turnServerIceTransportPolicy = "turnServerIceTransportPolicy"
+    static let turnExpiresAt = "turnExpiresAt"
+    static let turnLastFetchAt = "turnLastFetchAt"
+    static let turnLastError = "turnLastError"
+    static let signalingState = "signalingState"
+    static let userChannelTopic = "userChannelTopic"
+    static let signalingEventCount = "signalingEventCount"
+    static let signalingInboundCount = "signalingInboundCount"
+    static let signalingOutboundCount = "signalingOutboundCount"
+    static let signalingLastEvent = "signalingLastEvent"
+    static let signalingLastDirection = "signalingLastDirection"
+    static let signalingLastTopic = "signalingLastTopic"
+    static let signalingLastAt = "signalingLastAt"
+    static let signalingLastError = "signalingLastError"
+  }
+
+  private var state: [String: Any] = [
+    Keys.state: "idle",
+    Keys.updatedAt: 0,
+    Keys.turnState: "idle",
+    Keys.signalingState: "idle",
+  ]
+
+  private init() {}
+
+  public func configure(_ payload: [String: Any]) -> [String: Any] {
+    let result = queue.sync {
+      store.setNativeEngineConfig(payload)
+      var next = state
+      next[Keys.state] = "configured"
+      next[Keys.relayMode] = payload["relayMode"] ?? payload["connectionMode"] ?? payload["iceTransportPolicy"]
+      next[Keys.socketUrl] = payload["socketUrl"] ?? payload["signalingUrl"]
+      next[Keys.turnCredentialsUrl] = payload["turnCredentialsUrl"] ?? payload["turnUrl"]
+      next[Keys.userChannelTopic] = payload["userChannelTopic"] ?? payload["topic"]
+      let now = Int(Date().timeIntervalSince1970 * 1000)
+      next[Keys.configuredAt] = now
+      next[Keys.updatedAt] = now
+      next[Keys.signalingState] = "mirroring"
+      next[Keys.note] = "Native engine scaffolding configured; signaling/media port pending."
+      state = next
+      NSLog("[VibeNativeCall][Engine] configure keys=[%@]", payload.keys.sorted().joined(separator: ","))
+      return next
+    }
+    refreshTurnConfig(force: true)
+    return result
+  }
+
+  public func getConfig() -> [String: Any] {
+    store.getNativeEngineConfig()
+  }
+
+  public func getStatus() -> [String: Any] {
+    queue.sync { state }
+  }
+
+  public func getIceConfig() -> [String: Any] {
+    store.getNativeIceConfig()
+  }
+
+  public func getSignalingJournal(limit: Int? = nil) -> [[String: Any]] {
+    store.getNativeSignalingEvents(limit: limit)
+  }
+
+  @discardableResult
+  public func clearSignalingJournal() -> [String: Any] {
+    store.clearNativeSignalingEvents()
+    let now = nowMs()
+    return queue.sync {
+      var next = state
+      next[Keys.signalingEventCount] = 0
+      next[Keys.signalingInboundCount] = 0
+      next[Keys.signalingOutboundCount] = 0
+      next[Keys.signalingLastEvent] = nil
+      next[Keys.signalingLastDirection] = nil
+      next[Keys.signalingLastTopic] = nil
+      next[Keys.signalingLastError] = nil
+      next[Keys.signalingLastAt] = now
+      next[Keys.updatedAt] = now
+      state = next
+      return next
+    }
+  }
+
+  @discardableResult
+  public func refreshTurnConfig(force: Bool = false) -> [String: Any] {
+    let config = store.getNativeEngineConfig()
+    let now = nowMs()
+
+    guard let urlString = normalizedString(config["turnCredentialsUrl"] ?? config["turnUrl"]),
+          let url = URL(string: urlString)
+    else {
+      return queue.sync {
+        var next = state
+        next[Keys.turnState] = "missing-url"
+        next[Keys.turnLastError] = "Missing turnCredentialsUrl"
+        next[Keys.updatedAt] = now
+        state = next
+        return next
+      }
+    }
+
+    let cachedIce = store.getNativeIceConfig()
+    if !force,
+       let expiresAt = intValue(cachedIce["expiresAt"]),
+       expiresAt > (now + 5_000)
+    {
+      return queue.sync {
+        var next = state
+        next[Keys.turnState] = "ready"
+        next[Keys.turnIceServerCount] = (cachedIce["iceServers"] as? [Any])?.count ?? 0
+        next[Keys.turnIceTransportPolicy] = cachedIce["iceTransportPolicy"]
+        next[Keys.turnServerIceTransportPolicy] = cachedIce["serverIceTransportPolicy"]
+        next[Keys.turnExpiresAt] = cachedIce["expiresAt"]
+        next[Keys.turnLastFetchAt] = cachedIce["fetchedAt"]
+        next[Keys.turnLastError] = nil
+        next[Keys.updatedAt] = now
+        state = next
+        return next
+      }
+    }
+
+    let shouldForceRelay = forceRelayEnabled(config)
+    let started = queue.sync {
+      if turnRefreshInFlight {
+        return false
+      }
+      turnRefreshInFlight = true
+      var next = state
+      next[Keys.turnState] = "fetching"
+      next[Keys.turnLastError] = nil
+      next[Keys.updatedAt] = now
+      state = next
+      return true
+    }
+    guard started else { return getStatus() }
+
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 12
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      guard let self else { return }
+      let finishedAt = self.nowMs()
+
+      if let error {
+        self.finishTurnRefreshError("network:\(error.localizedDescription)", at: finishedAt)
+        return
+      }
+
+      if let http = response as? HTTPURLResponse, !(200 ... 299).contains(http.statusCode) {
+        self.finishTurnRefreshError("http:\(http.statusCode)", at: finishedAt)
+        return
+      }
+
+      guard let data,
+            let decoded = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+      else {
+        self.finishTurnRefreshError("invalid-json", at: finishedAt)
+        return
+      }
+
+      let iceServers = (decoded["iceServers"] as? [Any]) ?? []
+      let ttl = max(self.intValue(decoded["ttl"]) ?? 3600, 30)
+      let serverPolicy = self.normalizeTransportPolicy(decoded["iceTransportPolicy"])
+      let effectivePolicy = shouldForceRelay ? "relay" : serverPolicy
+      let fetchedAt = finishedAt
+      let expiresAt = fetchedAt + (ttl * 1000)
+
+      let iceConfig: [String: Any] = [
+        "iceServers": iceServers,
+        "ttl": ttl,
+        "fetchedAt": fetchedAt,
+        "expiresAt": expiresAt,
+        "serverIceTransportPolicy": serverPolicy,
+        "iceTransportPolicy": effectivePolicy,
+        "forceRelay": shouldForceRelay,
+      ]
+      self.store.setNativeIceConfig(iceConfig)
+
+      self.queue.async {
+        self.turnRefreshInFlight = false
+        var next = self.state
+        next[Keys.turnState] = "ready"
+        next[Keys.turnIceServerCount] = iceServers.count
+        next[Keys.turnIceTransportPolicy] = effectivePolicy
+        next[Keys.turnServerIceTransportPolicy] = serverPolicy
+        next[Keys.turnExpiresAt] = expiresAt
+        next[Keys.turnLastFetchAt] = fetchedAt
+        next[Keys.turnLastError] = nil
+        next[Keys.updatedAt] = fetchedAt
+        next[Keys.note] = "Native engine scaffolding configured; TURN config ready."
+        self.state = next
+        NSLog(
+          "[VibeNativeCall][Engine] turn fetch ok servers=%d policy=%@ forceRelay=%@",
+          iceServers.count,
+          effectivePolicy,
+          shouldForceRelay ? "true" : "false"
+        )
+      }
+    }.resume()
+
+    return getStatus()
+  }
+
+  public func startOutgoing(_ payload: [String: Any]) -> [String: Any] {
+    recordSignalingEvent(payload, defaultEvent: "call-start", defaultDirection: "outbound")
+    return transition(
+      stateValue: "starting",
+      payload: payload,
+      direction: "outgoing",
+      note: "Native engine scaffolding only; JS signaling/media still active."
+    )
+  }
+
+  public func acceptIncoming(_ payload: [String: Any]) -> [String: Any] {
+    recordSignalingEvent(payload, defaultEvent: "call-accepted", defaultDirection: "outbound")
+    return transition(
+      stateValue: "accepting",
+      payload: payload,
+      direction: "incoming",
+      note: "Native engine scaffolding only; JS signaling/media still active."
+    )
+  }
+
+  public func handleSignal(_ payload: [String: Any]) -> [String: Any] {
+    recordSignalingEvent(payload, defaultEvent: "webrtc-signal", defaultDirection: "inbound")
+    return queue.sync {
+      var next = state
+      next[Keys.updatedAt] = Int(Date().timeIntervalSince1970 * 1000)
+      next["lastSignalType"] = payload["type"] ?? payload["signalType"]
+      next[Keys.note] = "Signal observed by native scaffolding."
+      state = next
+      NSLog("[VibeNativeCall][Engine] handleSignal type=%@", String(describing: payload["type"] ?? payload["signalType"]))
+      return next
+    }
+  }
+
+  public func endCall(_ payload: [String: Any]) -> [String: Any] {
+    let inferredDirection: String = ((payload["remote"] as? Bool) == true) ? "inbound" : "outbound"
+    recordSignalingEvent(payload, defaultEvent: "call-end", defaultDirection: inferredDirection)
+    return transition(
+      stateValue: "ended",
+      payload: payload,
+      direction: payload["direction"] as? String,
+      note: "End observed by native scaffolding."
+    )
+  }
+
+  private func transition(
+    stateValue: String,
+    payload: [String: Any],
+    direction: String?,
+    note: String
+  ) -> [String: Any] {
+    queue.sync {
+      var next = state
+      next[Keys.state] = stateValue
+      next[Keys.callId] = payload["callId"] ?? payload["call_id"]
+      next[Keys.callType] = payload["callType"] ?? payload["call_type"]
+      if let direction { next[Keys.direction] = direction }
+      next[Keys.updatedAt] = Int(Date().timeIntervalSince1970 * 1000)
+      next[Keys.note] = note
+      state = next
+      NSLog(
+        "[VibeNativeCall][Engine] transition state=%@ callId=%@ type=%@",
+        stateValue,
+        String(describing: next[Keys.callId] ?? "-"),
+        String(describing: next[Keys.callType] ?? "-")
+      )
+      return next
+    }
+  }
+
+  private func finishTurnRefreshError(_ error: String, at timestamp: Int) {
+    queue.async {
+      self.turnRefreshInFlight = false
+      var next = self.state
+      next[Keys.turnState] = "error"
+      next[Keys.turnLastError] = error
+      next[Keys.turnLastFetchAt] = timestamp
+      next[Keys.updatedAt] = timestamp
+      self.state = next
+      NSLog("[VibeNativeCall][Engine] turn fetch error=%@", error)
+    }
+  }
+
+  private func recordSignalingEvent(
+    _ payload: [String: Any],
+    defaultEvent: String,
+    defaultDirection: String
+  ) {
+    let ts = nowMs()
+    let eventName = normalizedString(payload["event"]) ?? defaultEvent
+    let direction = normalizedString(payload["direction"]) ?? defaultDirection
+    let config = store.getNativeEngineConfig()
+    let topic = normalizedString(payload["topic"]) ?? normalizedString(config["userChannelTopic"])
+    var entry: [String: Any] = [
+      "timestamp": ts,
+      "event": eventName,
+      "direction": direction,
+      "payload": makeJsonSafeDictionary(payload),
+    ]
+    if let topic { entry["topic"] = topic }
+    if let callId = payload["callId"] ?? payload["call_id"] { entry["callId"] = callId }
+    if let callType = payload["callType"] ?? payload["call_type"] { entry["callType"] = callType }
+    if let signalType = payload["type"] ?? payload["signalType"] { entry["signalType"] = signalType }
+    store.appendNativeSignalingEvent(entry)
+
+    queue.async {
+      var next = self.state
+      next[Keys.signalingState] = "mirroring"
+      next[Keys.signalingLastEvent] = eventName
+      next[Keys.signalingLastDirection] = direction
+      next[Keys.signalingLastTopic] = topic
+      next[Keys.signalingLastAt] = ts
+      next[Keys.signalingLastError] = nil
+      let total = (next[Keys.signalingEventCount] as? Int) ?? 0
+      next[Keys.signalingEventCount] = total + 1
+      if direction == "inbound" {
+        next[Keys.signalingInboundCount] = ((next[Keys.signalingInboundCount] as? Int) ?? 0) + 1
+      } else if direction == "outbound" {
+        next[Keys.signalingOutboundCount] = ((next[Keys.signalingOutboundCount] as? Int) ?? 0) + 1
+      }
+      next[Keys.updatedAt] = ts
+      self.state = next
+      NSLog("[VibeNativeCall][Engine] signaling journal dir=%@ event=%@", direction, eventName)
+    }
+  }
+
+  private func nowMs() -> Int {
+    Int(Date().timeIntervalSince1970 * 1000)
+  }
+
+  private func normalizedString(_ value: Any?) -> String? {
+    guard let text = value as? String else { return nil }
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func intValue(_ value: Any?) -> Int? {
+    switch value {
+    case let int as Int:
+      return int
+    case let num as NSNumber:
+      return num.intValue
+    case let str as String:
+      return Int(str)
+    default:
+      return nil
+    }
+  }
+
+  private func boolValue(_ value: Any?) -> Bool {
+    switch value {
+    case let bool as Bool:
+      return bool
+    case let num as NSNumber:
+      return num.boolValue
+    case let str as String:
+      let raw = str.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      return raw == "1" || raw == "true" || raw == "yes"
+    default:
+      return false
+    }
+  }
+
+  private func forceRelayEnabled(_ config: [String: Any]) -> Bool {
+    if boolValue(config["forceRelay"]) { return true }
+    if normalizeTransportPolicy(config["relayMode"]) == "relay" { return true }
+    if normalizeTransportPolicy(config["connectionMode"]) == "relay" { return true }
+    return false
+  }
+
+  private func normalizeTransportPolicy(_ value: Any?) -> String {
+    guard let raw = normalizedString(value)?.lowercased() else { return "all" }
+    return raw == "relay" ? "relay" : "all"
+  }
+
+  private func makeJsonSafeDictionary(_ value: [String: Any]) -> [String: Any] {
+    if JSONSerialization.isValidJSONObject(value) {
+      return value
+    }
+    var out: [String: Any] = [:]
+    for (key, raw) in value {
+      out[key] = makeJsonSafeValue(raw)
+    }
+    if JSONSerialization.isValidJSONObject(out) {
+      return out
+    }
+    return ["raw": String(describing: value)]
+  }
+
+  private func makeJsonSafeValue(_ value: Any) -> Any {
+    switch value {
+    case let dict as [String: Any]:
+      return makeJsonSafeDictionary(dict)
+    case let arr as [Any]:
+      return arr.map { makeJsonSafeValue($0) }
+    case is NSString, is NSNumber, is NSNull:
+      return value
+    case let str as String:
+      return str
+    case let num as Int:
+      return num
+    case let num as Double:
+      return num
+    case let num as Float:
+      return Double(num)
+    case let bool as Bool:
+      return bool
+    default:
+      return String(describing: value)
+    }
+  }
+}

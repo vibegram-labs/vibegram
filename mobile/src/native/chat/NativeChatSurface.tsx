@@ -33,6 +33,11 @@ export interface NativeChatSurfaceRef {
 interface NativeChatSurfaceProps {
   surfaceId: string;
   rows: NativeChatRow[];
+  engineSurfaceId?: string;
+  chatId?: string;
+  myUserId?: string;
+  peerUserId?: string;
+  statusAuthorityEnabled?: boolean;
   appearance?: NativeChatAppearance;
   contentPaddingTop?: number;
   contentPaddingBottom?: number;
@@ -55,7 +60,7 @@ interface NativeChatSurfaceProps {
 }
 
 export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurfaceProps>(
-  ({ surfaceId, rows, appearance, contentPaddingTop, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
+  ({ surfaceId, rows, engineSurfaceId, chatId, myUserId, peerUserId, statusAuthorityEnabled, appearance, contentPaddingTop, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
     const nativeListModule = useMemo(() => getNativeChatListModule(), []);
     const debugNativeEvents = __DEV__ && (globalThis as any).__VIBE_NATIVE_CHAT_DEBUG === true;
     const reportNativeError = (error: unknown, context: string) => {
@@ -115,6 +120,11 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
         style={styles.fill}
         surfaceId={surfaceId}
         rows={rows}
+        engineSurfaceId={engineSurfaceId}
+        chatId={chatId}
+        myUserId={myUserId}
+        peerUserId={peerUserId}
+        statusAuthorityEnabled={statusAuthorityEnabled}
         appearance={appearance}
         contentPaddingTop={contentPaddingTop}
         contentPaddingBottom={contentPaddingBottom}

@@ -156,7 +156,7 @@ class SoundManager {
         if (this.callRingSound) return this.callRingSound;
         try {
             const { sound } = await Audio.Sound.createAsync(this.callRingAsset, {
-                isLooping: true,
+                isLooping: false,
                 shouldPlay: false,
                 volume: 1.0,
             });
@@ -168,24 +168,39 @@ class SoundManager {
         }
     }
 
-    public async startCallRingLoop(delayMs: number = 900) {
+    public async startCallRingLoop(repeatDelayMs: number = 1800) {
+        if (this.callRingActive) return;
         this.callRingActive = true;
+
         if (this.callRingBusy) {
-            await this.callRingBusy;
+            // Already a loop running or starting
             return;
         }
 
         this.callRingBusy = (async () => {
-            if (delayMs > 0) {
-                await new Promise((resolve) => setTimeout(resolve, delayMs));
-            }
             const sound = await this.ensureCallRingSound();
-            if (!sound || !this.callRingActive) return;
-            try {
-                await sound.setPositionAsync(0);
-                await sound.playAsync();
-            } catch (e) {
-                console.warn('[SoundManager] Failed to start callRing loop:', e);
+            if (!sound) return;
+
+            while (this.callRingActive) {
+                try {
+                    await sound.setPositionAsync(0);
+                    await sound.playAsync();
+
+                    // Wait for duration
+                    const status = await sound.getStatusAsync();
+                    const duration = (status.isLoaded && status.durationMillis) ? status.durationMillis : 3500;
+
+                    // Wait for duration + gap
+                    let waitRemaining = duration + repeatDelayMs;
+                    while (waitRemaining > 0 && this.callRingActive) {
+                        const sleep = Math.min(waitRemaining, 200);
+                        await new Promise(r => setTimeout(r, sleep));
+                        waitRemaining -= sleep;
+                    }
+                } catch (e) {
+                    console.warn('[SoundManager] Call ring loop error:', e);
+                    break;
+                }
             }
         })();
 

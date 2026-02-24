@@ -28,7 +28,7 @@ const chatStoreMessageLog = (...args: any[]) => {
         }
     }
 };
-const CHATSTORE_HISTORY_PERF_LOG = __DEV__;
+const CHATSTORE_HISTORY_PERF_LOG = false;
 const chatStoreHistoryPerfLog = (...args: any[]) => {
     if (!CHATSTORE_HISTORY_PERF_LOG) return;
     console.log('[ChatStore][HistoryPerf]', ...args);
@@ -1036,6 +1036,133 @@ export const getPhoenixSocket = (): PhxSocket | null => socket;
 // Export a getter for the joined user channel (used by call signaling)
 export const getUserChannel = (): Channel | null => userChannel;
 
+let nativeChatEngineModuleCache: any | null | undefined;
+const getNativeChatEngineShadowModule = (): any | null => {
+    if (nativeChatEngineModuleCache !== undefined) return nativeChatEngineModuleCache;
+    try {
+        // Lazy require avoids startup/circular dependency issues for non-native paths.
+        const runtime = require('../native/chat/runtime');
+        nativeChatEngineModuleCache = runtime?.getNativeChatEngineModule?.() ?? null;
+    } catch {
+        nativeChatEngineModuleCache = null;
+    }
+    return nativeChatEngineModuleCache;
+};
+
+const fireAndForgetChatEngineShadowCall = (
+    methodName:
+        | 'setChatEngineConfig'
+        | 'connectChatEngine'
+        | 'disconnectChatEngine'
+        | 'sendEncryptedMessage'
+        | 'sendDeliveryReceipt'
+        | 'sendReadReceipt',
+    payload?: Record<string, unknown>,
+) => {
+    try {
+        const nativeChatEngine = getNativeChatEngineShadowModule();
+        const method = nativeChatEngine?.[methodName];
+        if (typeof method !== 'function') return;
+        const result = payload === undefined ? method() : method(payload);
+        void Promise.resolve(result).catch((error) => {
+            chatStoreLog(`[ChatStore] ChatEngine shadow ${methodName} failed`, error);
+        });
+    } catch (error) {
+        chatStoreLog(`[ChatStore] ChatEngine shadow ${methodName} unavailable`, error);
+    }
+};
+
+const mirrorChatEngineDeliveryReceiptPush = (chatId: string, messageId: string) => {
+    if (!chatId || !messageId) return;
+    fireAndForgetChatEngineShadowCall('sendDeliveryReceipt', { chatId, messageId });
+};
+
+const mirrorChatEngineReadReceiptPush = (chatId: string, messageId: string) => {
+    if (!chatId || !messageId) return;
+    fireAndForgetChatEngineShadowCall('sendReadReceipt', { chatId, messageId });
+};
+
+const tryNativeChatEngineSendEncryptedMessage = async (
+    chatId: string,
+    messageId: string,
+    messagePayload: Record<string, unknown>,
+): Promise<boolean> => {
+    try {
+        const nativeChatEngine = getNativeChatEngineShadowModule();
+        const method = nativeChatEngine?.sendEncryptedMessage;
+        if (typeof method !== 'function') return false;
+        const result = await Promise.resolve(method({
+            chatId,
+            messageId,
+            message: messagePayload,
+        }));
+        return !!(result as any)?.accepted;
+    } catch (error) {
+        chatStoreLog('[ChatStore] ChatEngine native sendEncryptedMessage failed', error);
+        return false;
+    }
+};
+
+const tryNativeChatEngineEditMessage = async (
+    chatId: string,
+    messageId: string,
+    encryptedContent: string,
+    editedAt: number,
+): Promise<boolean> => {
+    try {
+        const nativeChatEngine = getNativeChatEngineShadowModule();
+        const method = nativeChatEngine?.sendEditMessage;
+        if (typeof method !== 'function') return false;
+        const result = await Promise.resolve(method({
+            chatId,
+            messageId,
+            encryptedContent,
+            editedAt,
+        }));
+        return !!(result as any)?.accepted;
+    } catch (error) {
+        chatStoreLog('[ChatStore] ChatEngine native sendEditMessage failed', error);
+        return false;
+    }
+};
+
+const tryNativeChatEngineReceiptPush = async (
+    methodName: 'sendDeliveryReceipt' | 'sendReadReceipt',
+    chatId: string,
+    messageId: string,
+): Promise<boolean> => {
+    try {
+        const nativeChatEngine = getNativeChatEngineShadowModule();
+        const method = nativeChatEngine?.[methodName];
+        if (typeof method !== 'function') return false;
+        const result = await Promise.resolve(method({ chatId, messageId }));
+        return !!(result as any)?.accepted;
+    } catch (error) {
+        chatStoreLog(`[ChatStore] ChatEngine native ${methodName} failed`, error);
+        return false;
+    }
+};
+
+const configureChatEngineShadowTransport = (apiBaseUrl: string, socketUrl: string, auth: any) => {
+    if (!socketUrl || !auth?.userId) return;
+    fireAndForgetChatEngineShadowCall('setChatEngineConfig', {
+        apiBaseUrl,
+        socketUrl,
+        authToken: auth.loginToken || auth.userId,
+        userId: auth.userId,
+        userChannelTopic: `user:${auth.userId}`,
+        privateKeyPem: auth?.keyPair?.privateKey,
+    });
+};
+
+const connectChatEngineShadowTransport = () => {
+    fireAndForgetChatEngineShadowCall('connectChatEngine');
+};
+
+const disconnectChatEngineShadowTransport = () => {
+    fireAndForgetChatEngineShadowCall('disconnectChatEngine');
+};
+
 // Export a function to reset socket (for development/hot-reload issues)
 export const resetSocketConnection = () => {
 
@@ -1085,6 +1212,7 @@ export const resetSocketConnection = () => {
 
     // Reset flag so socket can be re-initialized
     socketInitialized = false;
+    disconnectChatEngineShadowTransport();
 
 
 };
@@ -1128,6 +1256,8 @@ export const useChatStore = create<ChatState>()(
                     socketInitialized = false; // Reset so it can try again later
                     return;
                 }
+
+                configureChatEngineShadowTransport(baseUrl, socketUrl, auth);
 
 
 
@@ -1187,6 +1317,7 @@ export const useChatStore = create<ChatState>()(
                 };
 
                 socket.onOpen(() => {
+                    connectChatEngineShadowTransport();
 
                     set({ isConnected: true });
 
@@ -1383,6 +1514,7 @@ export const useChatStore = create<ChatState>()(
                         // Handle incoming call request
                         userChannel.on('call-start', (payload: any) => {
                             try {
+                                const { useAuthStore } = require('./stores/auth-store');
                                 const selfUserId = (useAuthStore.getState().user?.userId || '').trim().toUpperCase();
                                 const fromUserIdRaw =
                                     (typeof payload?.fromUserId === 'string' ? payload.fromUserId : '') ||
@@ -1502,6 +1634,7 @@ export const useChatStore = create<ChatState>()(
 
                 socket.onClose((e) => {
                     // console.log('[ChatStore] Phoenix Socket Disconnected', e);
+                    disconnectChatEngineShadowTransport();
                     queueRecoverableMessages();
                     // Clear channel references so they get re-joined on reconnect
                     // This ensures fresh handlers are attached
@@ -1511,6 +1644,7 @@ export const useChatStore = create<ChatState>()(
                 });
 
                 socket.onError((e) => {
+                    disconnectChatEngineShadowTransport();
                     queueRecoverableMessages();
                     // Don't clear channels here - let onClose handle it
                     // Just update connection status
@@ -2421,7 +2555,6 @@ export const useChatStore = create<ChatState>()(
                 if ((existing.plaintext || '').trim() === nextText) return true;
 
                 const channel = chatChannels.get(chatId);
-                if (!channel) return false;
 
                 const friendPublicKey = extractPublicKey(chat) || await warmFriendPublicKey(chatId, chat.friendId, set, get);
                 if (!friendPublicKey) return false;
@@ -2477,6 +2610,16 @@ export const useChatStore = create<ChatState>()(
                         }
                     }
 
+                    const nativeAccepted = await tryNativeChatEngineEditMessage(chatId, messageId, encrypted, editedAt);
+                    if (nativeAccepted) {
+                        if (__DEV__) {
+                            chatStoreLog('[ChatStore] editMessage native push accepted', { chatId, messageId });
+                        }
+                        return true;
+                    }
+
+                    if (!channel) return false;
+
                     channel.push("edit-message", {
                         messageId,
                         encryptedContent: encrypted,
@@ -2487,7 +2630,7 @@ export const useChatStore = create<ChatState>()(
                         console.warn('[ChatStore] edit-message timeout:', messageId);
                     });
                     if (__DEV__) {
-                        chatStoreLog('[ChatStore] editMessage push sent', { chatId, messageId });
+                        chatStoreLog('[ChatStore] editMessage JS fallback push sent', { chatId, messageId });
                     }
 
                     return true;
@@ -3082,7 +3225,34 @@ export const useChatStore = create<ChatState>()(
                         recentlyProcessedMsgIds.add(msgId);
                         setTimeout(() => recentlyProcessedMsgIds.delete(msgId), 10000);
 
-                        // Play sent sound immediately (optimistic)
+                        const nativeSendAccepted = await tryNativeChatEngineSendEncryptedMessage(chatId, msgId, payload as Record<string, unknown>);
+                        if (nativeSendAccepted) {
+                            releaseEphemeralChannel();
+                            get().clearUploadProgress(msgId);
+                            chatStoreLog('[ChatStore] Native ChatEngine send accepted', { chatId, msgId });
+                            SoundManager.play('sent');
+
+                            const { offlineQueue } = get();
+                            if (offlineQueue.some((m) => m.id === msgId)) {
+                                set({ offlineQueue: offlineQueue.filter((m) => m.id !== msgId) });
+                            }
+
+                            const latestChats = get().chats;
+                            const idx = latestChats.findIndex(c => c.chatId === chatId);
+                            if (idx > -1) {
+                                const updated = [...latestChats];
+                                updated[idx] = {
+                                    ...updated[idx],
+                                    messages: updated[idx].messages.map(m =>
+                                        m.id === msgId ? { ...m, status: 'sent' as const } : m
+                                    )
+                                };
+                                set({ chats: updated });
+                            }
+                            return;
+                        }
+
+                        // Play sent sound immediately (optimistic) for JS transport fallback.
                         SoundManager.play('sent');
 
                         sendChannel.push("message", payload).receive("ok", () => {
@@ -3605,9 +3775,13 @@ export const useChatStore = create<ChatState>()(
             sendReadReceipt: (chatId, messageId) => {
                 if (!isValidBinaryId(messageId)) return;
                 const channel = chatChannels.get(chatId);
-                if (channel) {
-                    channel.push("read-receipt", { messageId });
-                }
+                void (async () => {
+                    const nativeAccepted = await tryNativeChatEngineReceiptPush('sendReadReceipt', chatId, messageId);
+                    if (!nativeAccepted && channel) {
+                        channel.push("read-receipt", { messageId });
+                        mirrorChatEngineReadReceiptPush(chatId, messageId);
+                    }
+                })();
 
                 // Update local status immediately to prevent duplicate requests
                 const { chats } = get();
@@ -3640,9 +3814,13 @@ export const useChatStore = create<ChatState>()(
             sendDeliveryReceipt: (chatId, messageId) => {
                 if (!isValidBinaryId(messageId)) return;
                 const channel = chatChannels.get(chatId);
-                if (channel) {
-                    channel.push("delivery-receipt", { messageId });
-                }
+                void (async () => {
+                    const nativeAccepted = await tryNativeChatEngineReceiptPush('sendDeliveryReceipt', chatId, messageId);
+                    if (!nativeAccepted && channel) {
+                        channel.push("delivery-receipt", { messageId });
+                        mirrorChatEngineDeliveryReceiptPush(chatId, messageId);
+                    }
+                })();
             },
 
             deleteChat: async (chatId) => {

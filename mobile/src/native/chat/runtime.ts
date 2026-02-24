@@ -2,15 +2,19 @@ import Constants, { ExecutionEnvironment } from 'expo-constants';
 
 import type {
   NativeChatCoreModule,
+  NativeChatEngineModule,
   NativeChatListModule,
   NativeChatRuntimeInfo,
 } from './types';
 
 const CORE_MODULE_NAME = 'ChatNativeCore';
 const LIST_MODULE_NAME = 'ChatNativeList';
+const ENGINE_MODULE_NAME = 'ChatEngine';
+const ENGINE_MODULE_NAME_LEGACY = 'ChatNativeEngine';
 
 let cachedCoreModule: NativeChatCoreModule | null | undefined;
 let cachedListModule: NativeChatListModule | null | undefined;
+let cachedEngineModule: NativeChatEngineModule | null | undefined;
 
 const resolveRemoteFlag = (): boolean => {
   const envFlag = process.env.EXPO_PUBLIC_NATIVE_CHAT_ENABLED;
@@ -76,6 +80,7 @@ export const getNativeChatCoreModule = (): NativeChatCoreModule | null => {
 export const clearNativeChatModuleCache = (): void => {
   cachedCoreModule = undefined;
   cachedListModule = undefined;
+  cachedEngineModule = undefined;
 };
 
 export const getNativeModuleProxyKeys = (): string[] => {
@@ -95,6 +100,17 @@ export const getNativeChatListModule = (): NativeChatListModule | null => {
   const resolved = loadOptionalNativeModule<NativeChatListModule>(LIST_MODULE_NAME);
   if (resolved || !__DEV__) {
     cachedListModule = resolved;
+  }
+  return resolved ?? null;
+};
+
+export const getNativeChatEngineModule = (): NativeChatEngineModule | null => {
+  if (cachedEngineModule) return cachedEngineModule;
+  const resolved =
+    loadOptionalNativeModule<NativeChatEngineModule>(ENGINE_MODULE_NAME)
+    || loadOptionalNativeModule<NativeChatEngineModule>(ENGINE_MODULE_NAME_LEGACY);
+  if (resolved || !__DEV__) {
+    cachedEngineModule = resolved;
   }
   return resolved ?? null;
 };

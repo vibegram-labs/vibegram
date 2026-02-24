@@ -3,7 +3,7 @@ import '../src/lib/i18n';
 import { Stack, useRouter, useSegments } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
-import { View, Appearance, Platform, AppState } from 'react-native'
+import { View, Appearance, Platform, AppState, NativeModules } from 'react-native'
 import { KeyboardProvider } from 'react-native-keyboard-controller'
 import * as NavigationBar from 'expo-navigation-bar';
 import { useFonts, SpaceGrotesk_400Regular, SpaceGrotesk_700Bold } from '@expo-google-fonts/space-grotesk'
@@ -70,7 +70,10 @@ export default function RootLayout() {
       isMuted: s.isMuted,
       isSpeakerOn: s.isSpeakerOn,
       isVideoEnabled: s.isVideoEnabled,
+      hasLocalStream: s.hasLocalStream,
+      hasRemoteStream: s.hasRemoteStream,
       callDuration: s.callDuration,
+      endReason: (s as any).endReason,
       isFrontCamera: s.isFrontCamera,
       incomingCallData: s.incomingCallData,
     }))
@@ -281,6 +284,74 @@ export default function RootLayout() {
   }, [enableNativeInAppCallUi]);
 
   useEffect(() => {
+    if (Platform.OS !== 'ios') return;
+    try {
+      const holder = NativeModules?.VibeReactBridgeHolder;
+      console.log('[NativeCallDebug][JS] BridgeHolder module', {
+        exists: !!holder,
+        keys: holder ? Object.keys(holder) : [],
+      });
+      holder?.ping?.();
+    } catch { }
+  }, []);
+
+  useEffect(() => {
+    const nativeCall = getNativeCallModule();
+    if (!nativeCall?.setNativeEngineConfig) return;
+
+    try {
+      const ProxyManager = require('../src/lib/ProxyManager').default;
+      const AuthManager = require('../src/lib/AuthManager').default;
+      const proxy = ProxyManager.getInstance();
+      const authSession = AuthManager.getInstance().getSession();
+
+      const baseUrl = proxy.getBestUrl();
+      const socketUrl = `${baseUrl.replace(/^http/, 'ws')}/socket`;
+      const relayMode = proxy.getConnectionMode?.() || 'direct';
+
+      const payload: Record<string, unknown> = {
+        platform: Platform.OS,
+        baseUrl,
+        socketUrl,
+        turnCredentialsUrl: `${baseUrl}/api/turn-credentials`,
+        relayMode,
+        forceRelay: relayMode === 'relay',
+        userId: user?.userId || authSession?.userId || undefined,
+        authToken: user?.loginToken || authSession?.loginToken || undefined,
+        userChannelTopic: (user?.userId || authSession?.userId)
+          ? `user:${user?.userId || authSession?.userId}`
+          : undefined,
+        signalingEvents: ['call-start', 'call-accepted', 'call-end', 'webrtc-signal'],
+      };
+
+      nativeCall.setNativeEngineConfig(payload);
+      const turnRefresh = nativeCall.nativeRefreshTurnConfig?.();
+      const status = nativeCall.getNativeEngineStatus?.();
+      const ice = nativeCall.getNativeIceConfig?.();
+      console.log('[NativeCallDebug][JS] setNativeEngineConfig', {
+        baseUrl,
+        socketUrl,
+        relayMode,
+        hasAuthToken: !!payload.authToken,
+        userId: payload.userId,
+        nativeState: status?.state,
+        nativeTurnState: status?.turnState,
+        nativeTurnRefreshState: turnRefresh && typeof turnRefresh === 'object'
+          ? (turnRefresh as Record<string, unknown>).turnState
+          : undefined,
+        nativeIceServers: Array.isArray(ice?.iceServers) ? ice.iceServers.length : undefined,
+        nativeIcePolicy: ice?.iceTransportPolicy,
+        nativeSignalingState: status?.signalingState,
+        nativeSignalingEvents: status?.signalingEventCount,
+        nativeSignalingInbound: status?.signalingInboundCount,
+        nativeSignalingOutbound: status?.signalingOutboundCount,
+      });
+    } catch (error) {
+      console.warn('[NativeCallDebug][JS] setNativeEngineConfig failed', error);
+    }
+  }, [user?.userId, user?.loginToken]);
+
+  useEffect(() => {
     if (Platform.OS !== 'ios' || enableNativeInAppCallUi) return;
     getNativeCallModule()?.hideCallUi?.();
   }, [enableNativeInAppCallUi]);
@@ -290,9 +361,7 @@ export default function RootLayout() {
     const nativeCall = getNativeCallModule();
     if (!nativeCall?.setCallUiState) return;
 
-    const isInCallLike =
-      callUiSnapshot.callStatus !== 'idle' &&
-      callUiSnapshot.callStatus !== 'ended';
+    const isInCallLike = callUiSnapshot.callStatus !== 'idle';
     const isIncoming =
       callUiSnapshot.callDirection === 'incoming' &&
       callUiSnapshot.callStatus === 'ringing' &&
@@ -316,6 +385,25 @@ export default function RootLayout() {
 
     const callId =
       callUiSnapshot.callId || callUiSnapshot.incomingCallData?.callId || undefined;
+    let localStreamId: string | undefined;
+    let remoteStreamId: string | undefined;
+    try {
+      const WebRTCService = require('../src/lib/services/WebRTCService').default;
+      const getNativeStreamHandle = (stream: any): string | undefined => {
+        if (!stream) return undefined;
+        try {
+          const reactTag = typeof stream.toURL === 'function' ? stream.toURL() : undefined;
+          if (typeof reactTag === 'string' && reactTag.length > 0) return reactTag;
+        } catch { }
+        return typeof stream.id === 'string' && stream.id.length > 0 ? stream.id : undefined;
+      };
+      if (callUiSnapshot.hasLocalStream) {
+        localStreamId = getNativeStreamHandle(WebRTCService?.getLocalStream?.());
+      }
+      if (callUiSnapshot.hasRemoteStream) {
+        remoteStreamId = getNativeStreamHandle(WebRTCService?.getRemoteStream?.());
+      }
+    } catch { }
     const debugKey = [
       mode,
       callUiSnapshot.callStatus,
@@ -325,6 +413,8 @@ export default function RootLayout() {
       callUiSnapshot.isMuted ? 'm1' : 'm0',
       callUiSnapshot.isSpeakerOn ? 's1' : 's0',
       callUiSnapshot.isVideoEnabled ? 'v1' : 'v0',
+      localStreamId ?? '-',
+      remoteStreamId ?? '-',
       effectiveTheme,
     ].join('|');
     if (nativeCallUiDebugKeyRef.current !== debugKey) {
@@ -356,7 +446,10 @@ export default function RootLayout() {
       isSpeakerOn: callUiSnapshot.isSpeakerOn,
       isVideoEnabled: callUiSnapshot.isVideoEnabled,
       canFlipCamera: callType === 'video',
+      localStreamId,
+      remoteStreamId,
       callDuration: callUiSnapshot.callDuration,
+      endReason: (callUiSnapshot as any).endReason || undefined,
       isDark: effectiveTheme === 'dark',
       nativeThemeId: activeWallpaperThemeId,
       nativeThemeIsDark: effectiveTheme === 'dark',

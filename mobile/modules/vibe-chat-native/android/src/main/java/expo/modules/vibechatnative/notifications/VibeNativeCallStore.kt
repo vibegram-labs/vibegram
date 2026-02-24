@@ -8,6 +8,10 @@ import org.json.JSONObject
 private const val VIBE_CALL_STORE_PREFS = "vibe_native_call_store"
 private const val KEY_PENDING_EVENTS = "pending_events"
 private const val KEY_FCM_TOKEN = "fcm_token"
+private const val KEY_NATIVE_ENGINE_CONFIG = "native_engine_config"
+private const val KEY_NATIVE_ICE_CONFIG = "native_ice_config"
+private const val KEY_NATIVE_SIGNALING_EVENTS = "native_signaling_events"
+private const val MAX_NATIVE_SIGNALING_EVENTS = 240
 
 internal object VibeNativeCallStore {
   private fun prefs(context: Context) =
@@ -41,6 +45,101 @@ internal object VibeNativeCallStore {
     } catch (t: Throwable) {
       Log.w("VibeCallStore", "enqueueEvent failed type=$eventType ${t.message}", t)
     }
+  }
+
+  fun setNativeEngineConfig(context: Context, payload: Map<String, Any?>) {
+    try {
+      val json = JSONObject()
+      payload.forEach { (key, value) -> json.put(key, value) }
+      prefs(context).edit().putString(KEY_NATIVE_ENGINE_CONFIG, json.toString()).apply()
+      Log.d("VibeCallStore", "setNativeEngineConfig keys=${payload.keys.sorted().joinToString(",")}")
+    } catch (t: Throwable) {
+      Log.w("VibeCallStore", "setNativeEngineConfig failed ${t.message}", t)
+    }
+  }
+
+  fun getNativeEngineConfig(context: Context): Map<String, Any?> {
+    val raw = prefs(context).getString(KEY_NATIVE_ENGINE_CONFIG, null)
+    if (raw.isNullOrBlank()) return emptyMap()
+    return try {
+      jsonObjectToMap(JSONObject(raw))
+    } catch (t: Throwable) {
+      Log.w("VibeCallStore", "getNativeEngineConfig failed ${t.message}", t)
+      emptyMap()
+    }
+  }
+
+  fun setNativeIceConfig(context: Context, payload: Map<String, Any?>) {
+    try {
+      val json = JSONObject()
+      payload.forEach { (key, value) -> json.put(key, value) }
+      prefs(context).edit().putString(KEY_NATIVE_ICE_CONFIG, json.toString()).apply()
+      Log.d("VibeCallStore", "setNativeIceConfig keys=${payload.keys.sorted().joinToString(",")}")
+    } catch (t: Throwable) {
+      Log.w("VibeCallStore", "setNativeIceConfig failed ${t.message}", t)
+    }
+  }
+
+  fun getNativeIceConfig(context: Context): Map<String, Any?> {
+    val raw = prefs(context).getString(KEY_NATIVE_ICE_CONFIG, null)
+    if (raw.isNullOrBlank()) return emptyMap()
+    return try {
+      jsonObjectToMap(JSONObject(raw))
+    } catch (t: Throwable) {
+      Log.w("VibeCallStore", "getNativeIceConfig failed ${t.message}", t)
+      emptyMap()
+    }
+  }
+
+  fun appendNativeSignalingEvent(context: Context, payload: Map<String, Any?>) {
+    try {
+      val current = prefs(context).getString(KEY_NATIVE_SIGNALING_EVENTS, null)
+      val array = if (current.isNullOrBlank()) JSONArray() else JSONArray(current)
+      val item = JSONObject()
+      payload.forEach { (key, value) -> item.put(key, value) }
+      array.put(item)
+      val out = if (array.length() > MAX_NATIVE_SIGNALING_EVENTS) {
+        val trimmed = JSONArray()
+        val start = array.length() - MAX_NATIVE_SIGNALING_EVENTS
+        for (i in start until array.length()) trimmed.put(array.opt(i))
+        trimmed
+      } else {
+        array
+      }
+      prefs(context).edit().putString(KEY_NATIVE_SIGNALING_EVENTS, out.toString()).apply()
+      Log.d(
+        "VibeCallStore",
+        "appendNativeSignalingEvent dir=${payload["direction"] ?: "-"} event=${payload["event"] ?: "-"} count=${out.length()}"
+      )
+    } catch (t: Throwable) {
+      Log.w("VibeCallStore", "appendNativeSignalingEvent failed ${t.message}", t)
+    }
+  }
+
+  fun getNativeSignalingEvents(context: Context, limit: Int? = null): List<Map<String, Any?>> {
+    val raw = prefs(context).getString(KEY_NATIVE_SIGNALING_EVENTS, null)
+    if (raw.isNullOrBlank()) return emptyList()
+    return try {
+      val array = JSONArray(raw)
+      val results = ArrayList<Map<String, Any?>>(array.length())
+      for (index in 0 until array.length()) {
+        val item = array.optJSONObject(index) ?: continue
+        results.add(jsonObjectToMap(item))
+      }
+      if (limit != null && limit > 0 && results.size > limit) {
+        results.takeLast(limit)
+      } else {
+        results
+      }
+    } catch (t: Throwable) {
+      Log.w("VibeCallStore", "getNativeSignalingEvents failed ${t.message}", t)
+      emptyList()
+    }
+  }
+
+  fun clearNativeSignalingEvents(context: Context) {
+    prefs(context).edit().remove(KEY_NATIVE_SIGNALING_EVENTS).apply()
+    Log.d("VibeCallStore", "clearNativeSignalingEvents")
   }
 
   fun enqueueIncomingCall(context: Context, payload: Map<String, String>) {
@@ -110,4 +209,3 @@ internal object VibeNativeCallStore {
     return list
   }
 }
-

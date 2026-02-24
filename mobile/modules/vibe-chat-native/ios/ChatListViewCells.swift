@@ -930,6 +930,7 @@ final class ChatListCell: UICollectionViewCell {
   private var externalVoiceMessageId: String?
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress: CGFloat = 0.0
+  var resolveDisplayStatus: ((ChatListRow) -> String?)?
   var onVoiceBubbleTap: ((ChatListRow) -> Void)?
 
   override init(frame: CGRect) {
@@ -1154,6 +1155,7 @@ final class ChatListCell: UICollectionViewCell {
     externalVoiceMessageId = nil
     externalVoiceIsPlaying = false
     externalVoiceProgress = 0.0
+    resolveDisplayStatus = nil
     applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
     mediaWaveformView.setWaveform(nil)
     statusImageView.isHidden = true
@@ -1583,7 +1585,7 @@ final class ChatListCell: UICollectionViewCell {
   }
 
   private func configureStatus(for newRow: ChatListRow, baseColor: UIColor) {
-    let newStatus = newRow.status?.lowercased()
+    let newStatus = (resolveDisplayStatus?(newRow) ?? newRow.status)?.lowercased()
 
     statusLabel.text = nil
     statusLabel.textColor = baseColor
@@ -1610,7 +1612,7 @@ final class ChatListCell: UICollectionViewCell {
     case "read":
       statusImageView.image = bubbleStatusCheckImage(
         double: true,
-        color: UIColor(red: 0.0, green: 0.64, blue: 1.0, alpha: 1.0)
+        color: UIColor(red: 0.0, green: 163.0 / 255.0, blue: 1.0, alpha: 1.0)  // #00A3FF
       )
       statusImageView.isHidden = false
     case "error":

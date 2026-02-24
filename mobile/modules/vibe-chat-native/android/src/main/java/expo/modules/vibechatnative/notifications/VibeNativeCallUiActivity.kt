@@ -1,9 +1,9 @@
 package expo.modules.vibechatnative.notifications
 
+import android.content.Context
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.graphics.drawable.ShapeDrawable
 import android.os.Bundle
 import android.util.Log
 import android.view.Gravity
@@ -15,9 +15,13 @@ import android.widget.TextView
 import android.widget.ImageView
 import androidx.activity.ComponentActivity
 import expo.modules.vibechatnative.R
+import java.lang.reflect.Method
 
 class VibeNativeCallUiActivity : ComponentActivity() {
   private lateinit var root: FrameLayout
+  private lateinit var videoCanvas: FrameLayout
+  private lateinit var remoteVideoHost: FrameLayout
+  private lateinit var localPreviewHost: FrameLayout
   private lateinit var chip: TextView
   private lateinit var avatar: FrameLayout
   private lateinit var initials: TextView
@@ -25,8 +29,17 @@ class VibeNativeCallUiActivity : ComponentActivity() {
   private lateinit var statusText: TextView
   private lateinit var utilityRow: LinearLayout
   private lateinit var incomingRow: LinearLayout
+  private lateinit var activeBar: FrameLayout
   private lateinit var activeRow: LinearLayout
   private val buttons = LinkedHashMap<String, View>()
+  private var remoteVideoView: View? = null
+  private var localPreviewView: View? = null
+  private var webRtcViewClass: Class<*>? = null
+  private var setStreamUrlMethod: Method? = null
+  private var setObjectFitMethod: Method? = null
+  private var setMirrorMethod: Method? = null
+  private var attachedRemoteStreamId: String? = null
+  private var attachedLocalStreamId: String? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     super.onCreate(savedInstanceState)
@@ -37,6 +50,7 @@ class VibeNativeCallUiActivity : ComponentActivity() {
 
   override fun onDestroy() {
     Log.d("VibeNativeCall", "UiActivity.onDestroy finishing=$isFinishing")
+    detachVideoRenderers()
     super.onDestroy()
     VibeNativeCallUiBridge.detachActivity(this)
   }
@@ -72,12 +86,14 @@ class VibeNativeCallUiActivity : ComponentActivity() {
       val remoteName = state.stringValue("remoteUserName") ?: "Unknown"
       initials.text = remoteName.firstOrNull()?.uppercase() ?: "?"
       nameText.text = remoteName
-
       val callType = state.stringValue("callType") ?: "voice"
-      chip.text = when (mode) {
-        "incoming" -> if (callType == "video") "Incoming video call" else "Incoming voice call"
-        else -> if (callType == "video") "Vibe Video" else "Vibe Audio"
+
+      val chipText = when {
+        mode == "active" && (state.stringValue("callStatus") ?: "") == "active" -> "Encrypted"
+        else -> null
       }
+      chip.text = chipText ?: ""
+      chip.visibility = if (chipText != null) View.VISIBLE else View.GONE
 
       statusText.text = if (mode == "incoming") {
         "Tap accept to answer"
@@ -87,7 +103,8 @@ class VibeNativeCallUiActivity : ComponentActivity() {
 
       utilityRow.visibility = if (mode == "incoming") View.VISIBLE else View.GONE
       incomingRow.visibility = if (mode == "incoming") View.VISIBLE else View.GONE
-      activeRow.visibility = if (mode == "active") View.VISIBLE else View.GONE
+      activeBar.visibility = if (mode == "active") View.VISIBLE else View.GONE
+      activeBar.background = glassBar(isDark)
 
       styleButton("incomingDecline", palette.red, Color.WHITE)
       styleButton("incomingAccept", palette.blue, Color.WHITE)
@@ -97,6 +114,9 @@ class VibeNativeCallUiActivity : ComponentActivity() {
       val isMuted = state.boolValue("isMuted") ?: false
       val isSpeaker = state.boolValue("isSpeakerOn") ?: false
       val isVideo = state.boolValue("isVideoEnabled") ?: false
+      val showVideoCanvas = mode == "active" && callType == "video"
+      updateVideoUi(state, showVideoCanvas, isVideo)
+      avatar.visibility = if (showVideoCanvas) View.GONE else View.VISIBLE
       styleToggle("mute", isMuted, palette)
       styleToggle("speaker", isSpeaker, palette)
       styleToggle("video", isVideo, palette)
@@ -110,11 +130,17 @@ class VibeNativeCallUiActivity : ComponentActivity() {
   }
 
   private fun activeStatus(state: Map<String, Any?>): String {
+    val endReason = state.stringValue("endReason")?.lowercase()
     return when (state.stringValue("callStatus")) {
       "connecting" -> "Connecting..."
       "reconnecting" -> "Reconnecting..."
       "ringing" -> "Ringing..."
       "active" -> formatDuration(state.longValue("callDuration") ?: 0L)
+      "ended" -> when (endReason) {
+        "rejected", "declined" -> "Rejected"
+        "missed" -> "Missed"
+        else -> "Ended"
+      }
       else -> state.stringValue("callStatus") ?: "In call"
     }
   }
@@ -126,16 +152,46 @@ class VibeNativeCallUiActivity : ComponentActivity() {
   }
 
   private fun buildUi() {
-    root = FrameLayout(this).apply {
-      setPadding(dp(20), dp(28), dp(20), dp(32))
-    }
+    root = FrameLayout(this)
     setContentView(root)
+
+    videoCanvas = FrameLayout(this).apply {
+      layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+      setBackgroundColor(Color.BLACK)
+      visibility = View.GONE
+      isClickable = false
+      isFocusable = false
+    }
+    remoteVideoHost = FrameLayout(this).apply {
+      layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
+      setBackgroundColor(Color.BLACK)
+      visibility = View.GONE
+    }
+    localPreviewHost = FrameLayout(this).apply {
+      layoutParams = FrameLayout.LayoutParams(dp(118), dp(168), Gravity.TOP or Gravity.END).apply {
+        topMargin = dp(62)
+        rightMargin = dp(14)
+      }
+      background = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        cornerRadius = dp(14).toFloat()
+        setColor(Color.argb(150, 0, 0, 0))
+        setStroke(dp(1), Color.argb(32, 255, 255, 255))
+      }
+      clipChildren = true
+      clipToPadding = true
+      visibility = View.GONE
+    }
+    videoCanvas.addView(remoteVideoHost)
+    videoCanvas.addView(localPreviewHost)
+    root.addView(videoCanvas)
 
     val content = LinearLayout(this).apply {
       orientation = LinearLayout.VERTICAL
       gravity = Gravity.CENTER_HORIZONTAL
       clipChildren = false
       clipToPadding = false
+      setPadding(dp(20), dp(28), dp(20), dp(32))
       layoutParams = FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT)
     }
     root.addView(content)
@@ -181,13 +237,21 @@ class VibeNativeCallUiActivity : ComponentActivity() {
     incomingRow.addView(buttonStack("incomingAccept", "Accept", 76))
     content.addView(incomingRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(18) })
 
+    activeBar = FrameLayout(this).apply {
+      clipChildren = false
+      clipToPadding = false
+      setPadding(dp(10), dp(6), dp(10), dp(6))
+    }
     activeRow = row(8)
     activeRow.addView(buttonStack("mute", "Mic", 48))
     activeRow.addView(buttonStack("video", "Video", 48))
     activeRow.addView(buttonStack("flip", "Flip", 48))
     activeRow.addView(buttonStack("speaker", "Audio", 48))
     activeRow.addView(buttonStack("end", "End", 56))
-    content.addView(activeRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(16) })
+    activeBar.addView(activeRow, FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT).apply {
+      gravity = Gravity.CENTER
+    })
+    content.addView(activeBar, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { bottomMargin = dp(16) })
   }
 
   private fun row(spacingDp: Int): LinearLayout {
@@ -196,6 +260,12 @@ class VibeNativeCallUiActivity : ComponentActivity() {
       gravity = Gravity.CENTER
       clipChildren = false
       clipToPadding = false
+      showDividers = LinearLayout.SHOW_DIVIDER_MIDDLE
+      dividerDrawable = GradientDrawable().apply {
+        shape = GradientDrawable.RECTANGLE
+        setColor(Color.TRANSPARENT)
+        setSize(dp(spacingDp), 1)
+      }
     }
   }
 
@@ -209,8 +279,8 @@ class VibeNativeCallUiActivity : ComponentActivity() {
         LinearLayout.LayoutParams.WRAP_CONTENT,
         LinearLayout.LayoutParams.WRAP_CONTENT
       ).apply {
-        leftMargin = dp(8)
-        rightMargin = dp(8)
+        leftMargin = dp(2)
+        rightMargin = dp(2)
       }
     }
     
@@ -286,6 +356,122 @@ class VibeNativeCallUiActivity : ComponentActivity() {
     styleButton(key, if (active) palette.text else palette.surface, if (active) palette.background else palette.text, active)
   }
 
+  private fun updateVideoUi(state: Map<String, Any?>, wantsVideoCanvas: Boolean, wantsLocalPreview: Boolean) {
+    if (!wantsVideoCanvas) {
+      videoCanvas.visibility = View.GONE
+      remoteVideoHost.visibility = View.GONE
+      localPreviewHost.visibility = View.GONE
+      detachVideoRenderers()
+      return
+    }
+
+    videoCanvas.visibility = View.VISIBLE
+    ensureVideoRenderers()
+
+    val remoteStreamId = state.stringValue("remoteStreamId")
+    val localStreamId = state.stringValue("localStreamId")
+
+    remoteVideoHost.visibility = View.VISIBLE
+    localPreviewHost.visibility = if (wantsLocalPreview && !localStreamId.isNullOrBlank()) View.VISIBLE else View.GONE
+
+    bindVideoView(remoteVideoView, remoteStreamId, isLocal = false)
+    bindVideoView(localPreviewView, if (wantsLocalPreview) localStreamId else null, isLocal = true)
+  }
+
+  private fun ensureVideoRenderers() {
+    val reactContext = VibeNativeCallUiBridge.getReactContext()
+    if (reactContext == null) {
+      Log.w("VibeNativeCall", "UiActivity.ensureVideoRenderers missingReactContext=true")
+      return
+    }
+    val viewContext = reactContext as? Context
+    if (viewContext == null) {
+      Log.w("VibeNativeCall", "UiActivity.ensureVideoRenderers invalidReactContext=true")
+      return
+    }
+    if (!ensureWebRtcReflection()) {
+      return
+    }
+    if (remoteVideoView == null) {
+      remoteVideoView = createWebRtcView(viewContext, mirror = false)
+      remoteVideoView?.let { remoteVideoHost.addView(it) }
+    }
+    if (localPreviewView == null) {
+      localPreviewView = createWebRtcView(viewContext, mirror = true)
+      localPreviewView?.let { localPreviewHost.addView(it) }
+    }
+  }
+
+  private fun bindVideoView(view: View?, streamId: String?, isLocal: Boolean) {
+    if (view == null) return
+    val lastId = if (isLocal) attachedLocalStreamId else attachedRemoteStreamId
+    if (lastId == streamId) return
+    try {
+      setStreamUrlMethod?.invoke(view, streamId)
+      if (isLocal) {
+        attachedLocalStreamId = streamId
+      } else {
+        attachedRemoteStreamId = streamId
+      }
+      Log.d("VibeNativeCall", "UiActivity.bindVideoView local=$isLocal streamId=$streamId")
+    } catch (t: Throwable) {
+      Log.w("VibeNativeCall", "UiActivity.bindVideoView failed local=$isLocal streamId=$streamId err=${t.message}", t)
+    }
+  }
+
+  private fun detachVideoRenderers() {
+    try {
+      remoteVideoView?.let { setStreamUrlMethod?.invoke(it, null) }
+    } catch (_: Throwable) { }
+    try {
+      localPreviewView?.let { setStreamUrlMethod?.invoke(it, null) }
+    } catch (_: Throwable) { }
+    attachedRemoteStreamId = null
+    attachedLocalStreamId = null
+  }
+
+  private fun ensureWebRtcReflection(): Boolean {
+    try {
+      if (webRtcViewClass == null) {
+        webRtcViewClass = Class.forName("com.oney.WebRTCModule.WebRTCView")
+      }
+      val cls = webRtcViewClass ?: return false
+      if (setObjectFitMethod == null) {
+        setObjectFitMethod = cls.getMethod("setObjectFit", String::class.java)
+      }
+      if (setMirrorMethod == null) {
+        setMirrorMethod = cls.getMethod("setMirror", java.lang.Boolean.TYPE)
+      }
+      if (setStreamUrlMethod == null) {
+        setStreamUrlMethod = cls.getDeclaredMethod("setStreamURL", String::class.java).apply {
+          isAccessible = true
+        }
+      }
+      return true
+    } catch (t: Throwable) {
+      Log.w("VibeNativeCall", "UiActivity.ensureWebRtcReflection failed err=${t.message}", t)
+      return false
+    }
+  }
+
+  private fun createWebRtcView(context: Context, mirror: Boolean): View? {
+    try {
+      val cls = webRtcViewClass ?: return null
+      val ctor = cls.getConstructor(Context::class.java)
+      val view = ctor.newInstance(context) as? View ?: return null
+      setObjectFitMethod?.invoke(view, "cover")
+      setMirrorMethod?.invoke(view, mirror)
+      view.layoutParams = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT,
+      )
+      return view
+    } catch (t: Throwable) {
+      Log.w("VibeNativeCall", "UiActivity.createWebRtcView failed mirror=$mirror err=${t.message}", t)
+      return null
+    }
+  }
+
   private fun styleButton(key: String, background: Int, tint: Int, active: Boolean = true) {
     buttons[key]?.let { clickTarget ->
       val holder = clickTarget.parent as? FrameLayout ?: return@let
@@ -323,6 +509,15 @@ class VibeNativeCallUiActivity : ComponentActivity() {
       cornerRadius = radius.toFloat()
       setColor(color)
       setStroke(dp(1), Color.argb(26, 255, 255, 255))
+    }
+  }
+
+  private fun glassBar(isDark: Boolean): GradientDrawable {
+    return GradientDrawable().apply {
+      shape = GradientDrawable.RECTANGLE
+      cornerRadius = dp(39).toFloat()
+      setColor(if (isDark) Color.argb(18, 255, 255, 255) else Color.argb(10, 0, 0, 0))
+      setStroke(dp(1), if (isDark) Color.argb(20, 255, 255, 255) else Color.argb(15, 0, 0, 0))
     }
   }
 

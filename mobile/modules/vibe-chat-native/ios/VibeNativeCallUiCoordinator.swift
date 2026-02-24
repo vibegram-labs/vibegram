@@ -1,10 +1,18 @@
+import ExpoModulesCore
 import Foundation
 import UIKit
+
+#if canImport(WebRTC)
+  import WebRTC
+#elseif canImport(JitsiWebRTC)
+  import JitsiWebRTC
+#endif
 
 final class VibeNativeCallUiCoordinator {
   static let shared = VibeNativeCallUiCoordinator()
 
   private weak var module: VibeNativeCallModule?
+  private var retainedReactBridgeObject: AnyObject?
   private var overlayWindow: UIWindow?
   private weak var controller: VibeNativeCallScreenController?
   private var state: [String: Any] = [:]
@@ -14,12 +22,22 @@ final class VibeNativeCallUiCoordinator {
   func attach(module: VibeNativeCallModule) {
     NSLog("[VibeNativeCall][UiCoord] attach module")
     self.module = module
+    captureReactBridgeObject(module.appContext?.reactBridge)
+    captureReactBridgeObject(legacyReactBridgeObject(from: module))
   }
 
   func detach(module: VibeNativeCallModule) {
     if self.module === module {
       NSLog("[VibeNativeCall][UiCoord] detach module")
       self.module = nil
+    }
+  }
+
+  func captureReactBridgeObject(_ bridge: AnyObject?) {
+    guard let bridge else { return }
+    if retainedReactBridgeObject !== bridge {
+      retainedReactBridgeObject = bridge
+      NSLog("[VibeNativeCall][UiCoord] captured reactBridge")
     }
   }
 
@@ -57,6 +75,56 @@ final class VibeNativeCallUiCoordinator {
     var payload = extra
     payload["type"] = type
     module?.emitCallUiEvent(payload)
+  }
+
+  func reactBridgeObject() -> AnyObject? {
+    if let bridge = bridgeHolderReactBridgeObject() {
+      NSLog("[VibeNativeCall][UiCoord] using bridge holder object")
+      captureReactBridgeObject(bridge)
+      return bridge
+    }
+    if let bridge = module?.appContext?.reactBridge {
+      captureReactBridgeObject(bridge)
+      return bridge
+    }
+    if let bridge = module.flatMap({ legacyReactBridgeObject(from: $0) }) {
+      captureReactBridgeObject(bridge)
+      return bridge
+    }
+    if let retainedReactBridgeObject {
+      return retainedReactBridgeObject
+    }
+    if let currentBridge = currentReactBridgeObject() {
+      captureReactBridgeObject(currentBridge)
+      return currentBridge
+    }
+    return nil
+  }
+
+  private func currentReactBridgeObject() -> AnyObject? {
+    guard let bridgeClass = NSClassFromString("RCTBridge") as? NSObject.Type else { return nil }
+    let selector = NSSelectorFromString("currentBridge")
+    guard bridgeClass.responds(to: selector) else { return nil }
+    return bridgeClass.perform(selector)?.takeUnretainedValue() as AnyObject?
+  }
+
+  private func bridgeHolderReactBridgeObject() -> AnyObject? {
+    guard let holderClass = NSClassFromString("VibeReactBridgeHolder") as? NSObject.Type else {
+      return nil
+    }
+    let selector = NSSelectorFromString("currentBridgeObject")
+    guard holderClass.responds(to: selector) else { return nil }
+    return holderClass.perform(selector)?.takeUnretainedValue() as AnyObject?
+  }
+
+  private func legacyReactBridgeObject(from module: VibeNativeCallModule) -> AnyObject? {
+    guard let legacyProxy = module.appContext?.legacyModulesProxy as? NSObject else { return nil }
+    let bridge = legacyProxy.value(forKey: "bridge") as AnyObject?
+    if bridge == nil {
+      NSLog("[VibeNativeCall][UiCoord] legacy proxy bridge unavailable")
+    }
+    if let bridge { return bridge }
+    return nil
   }
 
   private func applyStateOnMain(_ payload: [String: Any]) {
@@ -120,6 +188,8 @@ final class VibeNativeCallScreenController: UIViewController {
   private var currentState: [String: Any] = [:]
   private var statusTick: Int = 0
   private var statusTicker: Timer?
+  private let statusShimmerMaskLayer = CAGradientLayer()
+  private var isStatusShimmerActive = false
   private var lastStatusKindKey: String = ""
   private var lastRenderedStatusText: String = ""
   private var currentAvatarImageUrl: String?
@@ -130,9 +200,21 @@ final class VibeNativeCallScreenController: UIViewController {
   private let wallpaperPatternMaskLayer = CALayer()
   private let wallpaperTopScrimLayer = CAGradientLayer()
   private let wallpaperBottomScrimLayer = CAGradientLayer()
+  private let videoCanvasView = UIView()
+  private let remoteVideoHostView = UIView()
+  private let localPreviewHostView = UIView()
+  private var remoteVideoRenderer: RTCMTLVideoView?
+  private var localPreviewRenderer: RTCMTLVideoView?
+  private var attachedRemoteVideoTrack: RTCVideoTrack?
+  private var attachedLocalVideoTrack: RTCVideoTrack?
+  private var attachedRemoteStreamId: String?
+  private var attachedLocalStreamId: String?
+  private var localPreviewAttachRetryWorkItem: DispatchWorkItem?
 
   private let rootStack = UIStackView()
   private let chipLabel = NativeCallInsetLabel()
+  private let chipWrap = UIView()
+  private let avatarSpacerView = UIView()
   private let avatarView = UIView()
   private let avatarImageView = UIImageView()
   private let initialsLabel = UILabel()
@@ -147,11 +229,13 @@ final class VibeNativeCallScreenController: UIViewController {
   private let incomingRow = UIStackView()
   private let activeBar = UIView()
   private let activeBarEffect = UIVisualEffectView()
+  private let activeBarTintOverlay = UIView()
   private let activeRow = UIStackView()
   private let activeLeadingRow = UIStackView()
 
   private var buttons: [String: UIButton] = [:]
   private var buttonLabels: [String: UILabel] = [:]
+  private var buttonStacks: [String: UIView] = [:]
   private var actionChips: [String: NativeCallActionChip] = [:]
 
   private static var wallpaperMaskImageCache: [String: CGImage] = [:]
@@ -168,6 +252,8 @@ final class VibeNativeCallScreenController: UIViewController {
   deinit {
     statusTicker?.invalidate()
     avatarImageTask?.cancel()
+    localPreviewAttachRetryWorkItem?.cancel()
+    detachVideoRenderers()
   }
 
   override func viewDidLoad() {
@@ -184,6 +270,7 @@ final class VibeNativeCallScreenController: UIViewController {
     wallpaperPatternMaskLayer.frame = wallpaperPatternLayer.bounds
     wallpaperTopScrimLayer.frame = view.bounds
     wallpaperBottomScrimLayer.frame = view.bounds
+    statusShimmerMaskLayer.frame = statusLabel.bounds
   }
 
   func applyState(_ state: [String: Any]) {
@@ -200,16 +287,17 @@ final class VibeNativeCallScreenController: UIViewController {
     view.backgroundColor = palette.background
     applyWallpaperAppearance(from: state, palette: palette, preferWallpaper: callType == "voice")
 
-    if mode == "incoming" {
-      chipLabel.text = "Incoming call"
-    } else if mode == "active" {
-      chipLabel.text = status == "active" ? "Encrypted" : "Connecting"
+    if mode == "active", status == "active" {
+      chipLabel.text = "Encrypted"
     } else {
       chipLabel.text = nil
     }
+    chipWrap.isHidden = (chipLabel.text == nil)
     chipLabel.textColor = palette.textSubtle
-    chipLabel.backgroundColor = palette.surfaceSoft
-    chipLabel.layer.borderColor = palette.glassBorder.cgColor
+    chipLabel.backgroundColor = .clear
+    chipLabel.layer.borderColor = UIColor.clear.cgColor
+    chipLabel.layer.borderWidth = 0
+    chipLabel.textInsets = UIEdgeInsets(top: 2, left: 10, bottom: 2, right: 10)
 
     let remoteName =
       normalizedString(state["remoteUserName"])
@@ -231,6 +319,7 @@ final class VibeNativeCallScreenController: UIViewController {
     let isSpeaker = (state["isSpeakerOn"] as? Bool) ?? false
     let isVideo = (state["isVideoEnabled"] as? Bool) ?? false
     let canFlipCamera = ((state["canFlipCamera"] as? Bool) ?? false) && isVideo
+    updateVideoPresentation(mode: mode, callType: callType, state: state)
 
     styleButton("incomingDecline", bg: palette.danger, symbol: "phone.down.fill", fg: .white)
     styleButton(
@@ -242,66 +331,57 @@ final class VibeNativeCallScreenController: UIViewController {
     styleButton("msg", bg: palette.controlBg, symbol: "message.fill", fg: palette.text)
     styleButton("remind", bg: palette.controlBg, symbol: "bell.fill", fg: palette.text)
 
-    styleActionChip(
+    styleButton(
       "mute",
-      title: "Mic",
+      bg: isMuted ? palette.controlActiveBg : palette.controlBg,
       symbol: isMuted ? "mic.slash.fill" : "mic.fill",
-      fill: isMuted ? palette.controlActiveBg : .clear,
-      iconTint: isMuted ? palette.background : palette.text,
-      textTint: isMuted ? palette.background : palette.text,
-      border: .clear,
-      showTitle: true
+      fg: isMuted ? palette.background : palette.text,
+      labelColor: isMuted ? palette.text : palette.textSubtle
     )
-    styleActionChip(
+    styleButton(
       "video",
-      title: "Cam",
+      bg: isVideo ? palette.controlActiveBg : palette.controlBg,
       symbol: isVideo ? "video.fill" : "video.slash.fill",
-      fill: isVideo ? palette.controlActiveBg : .clear,
-      iconTint: isVideo ? palette.background : palette.text,
-      textTint: isVideo ? palette.background : palette.text,
-      border: .clear,
-      showTitle: true
+      fg: isVideo ? palette.background : palette.text,
+      labelColor: isVideo ? palette.text : palette.textSubtle
     )
-    styleActionChip(
+    styleButton(
       "speaker",
-      title: "",
+      bg: isSpeaker ? palette.controlActiveBg : palette.controlBg,
       symbol: "speaker.wave.2.fill",
-      fill: isSpeaker ? palette.controlActiveBg : .clear,
-      iconTint: isSpeaker ? palette.background : palette.text,
-      textTint: isSpeaker ? palette.background : palette.text,
-      border: .clear,
-      showTitle: false
+      fg: isSpeaker ? palette.background : palette.text,
+      labelColor: isSpeaker ? palette.text : palette.textSubtle
     )
-    styleActionChip(
+    styleButton(
       "flip",
-      title: "Flip",
+      bg: palette.controlBg,
       symbol: "arrow.triangle.2.circlepath.camera.fill",
-      fill: .clear,
-      iconTint: palette.text,
-      textTint: palette.text,
-      border: .clear,
-      showTitle: true
+      fg: palette.text,
+      labelColor: palette.textSubtle
     )
-    styleActionChip(
-      "end",
-      title: "End",
-      symbol: "phone.down.fill",
-      fill: palette.danger,
-      iconTint: .white,
-      textTint: .white,
-      border: palette.danger.withAlphaComponent(0.42),
-      showTitle: true
+    styleButton(
+      "return",
+      bg: palette.controlBg,
+      symbol: "return",
+      fg: palette.text,
+      labelColor: palette.textSubtle
     )
+    styleButton(
+      "end", bg: palette.danger, symbol: "phone.down.fill", fg: .white, labelColor: .white)
 
     let canShowFlipChip = canFlipCamera && view.bounds.width >= 460
-    actionChips["flip"]?.isHidden = !canShowFlipChip
-    activeBar.backgroundColor =
+    buttonStacks["flip"]?.isHidden = !canShowFlipChip
+    activeBar.backgroundColor = .clear
+    activeBarEffect.backgroundColor = .clear
+    activeBarEffect.contentView.backgroundColor = .clear
+    activeBarTintOverlay.backgroundColor =
       palette.isDark
-      ? UIColor.white.withAlphaComponent(0.12) : UIColor.black.withAlphaComponent(0.06)
+      ? UIColor.white.withAlphaComponent(0.06) : UIColor.black.withAlphaComponent(0.04)
     activeBar.layer.borderColor =
       palette.isDark
       ? UIColor.white.withAlphaComponent(0.08).cgColor
       : UIColor.black.withAlphaComponent(0.06).cgColor
+    activeBarEffect.alpha = palette.isDark ? 0.92 : 0.78
 
     updateStatusPresentation(animated: true)
     setNeedsStatusBarAppearanceUpdate()
@@ -332,6 +412,47 @@ final class VibeNativeCallScreenController: UIViewController {
 
   private func setupUi() {
     view.isOpaque = true
+    videoCanvasView.translatesAutoresizingMaskIntoConstraints = false
+    videoCanvasView.backgroundColor = .black
+    videoCanvasView.isHidden = true
+    videoCanvasView.isUserInteractionEnabled = false
+    view.addSubview(videoCanvasView)
+
+    remoteVideoHostView.translatesAutoresizingMaskIntoConstraints = false
+    remoteVideoHostView.backgroundColor = .black
+    remoteVideoHostView.isUserInteractionEnabled = false
+    videoCanvasView.addSubview(remoteVideoHostView)
+
+    localPreviewHostView.translatesAutoresizingMaskIntoConstraints = false
+    localPreviewHostView.backgroundColor = UIColor.black.withAlphaComponent(0.75)
+    localPreviewHostView.layer.cornerRadius = 14
+    localPreviewHostView.layer.cornerCurve = .continuous
+    localPreviewHostView.layer.masksToBounds = true
+    localPreviewHostView.layer.borderWidth = 1
+    localPreviewHostView.layer.borderColor = UIColor.white.withAlphaComponent(0.16).cgColor
+    localPreviewHostView.isHidden = true
+    localPreviewHostView.isUserInteractionEnabled = false
+    videoCanvasView.addSubview(localPreviewHostView)
+
+    NSLayoutConstraint.activate([
+      videoCanvasView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      videoCanvasView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      videoCanvasView.topAnchor.constraint(equalTo: view.topAnchor),
+      videoCanvasView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+      remoteVideoHostView.leadingAnchor.constraint(equalTo: videoCanvasView.leadingAnchor),
+      remoteVideoHostView.trailingAnchor.constraint(equalTo: videoCanvasView.trailingAnchor),
+      remoteVideoHostView.topAnchor.constraint(equalTo: videoCanvasView.topAnchor),
+      remoteVideoHostView.bottomAnchor.constraint(equalTo: videoCanvasView.bottomAnchor),
+
+      localPreviewHostView.widthAnchor.constraint(equalToConstant: 118),
+      localPreviewHostView.heightAnchor.constraint(equalToConstant: 168),
+      localPreviewHostView.trailingAnchor.constraint(
+        equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -14),
+      localPreviewHostView.topAnchor.constraint(
+        equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 62),
+    ])
+
     view.addSubview(rootStack)
     rootStack.axis = .vertical
     rootStack.alignment = .center
@@ -356,9 +477,9 @@ final class VibeNativeCallScreenController: UIViewController {
     chipLabel.layer.borderWidth = 1
     chipLabel.translatesAutoresizingMaskIntoConstraints = false
 
-    let chipWrap = UIView()
     chipWrap.setContentHuggingPriority(.required, for: .horizontal)
     chipWrap.setContentCompressionResistancePriority(.required, for: .horizontal)
+    chipLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
     chipWrap.addSubview(chipLabel)
     NSLayoutConstraint.activate([
       chipLabel.leadingAnchor.constraint(equalTo: chipWrap.leadingAnchor),
@@ -399,12 +520,12 @@ final class VibeNativeCallScreenController: UIViewController {
       initialsLabel.centerYAnchor.constraint(equalTo: avatarView.centerYAnchor),
     ])
 
-    let avatarSpacer = UIView()
-    avatarSpacer.addSubview(avatarView)
-    avatarView.centerXAnchor.constraint(equalTo: avatarSpacer.centerXAnchor).isActive = true
-    avatarView.topAnchor.constraint(equalTo: avatarSpacer.topAnchor, constant: 28).isActive = true
-    avatarView.bottomAnchor.constraint(equalTo: avatarSpacer.bottomAnchor).isActive = true
-    rootStack.addArrangedSubview(avatarSpacer)
+    avatarSpacerView.addSubview(avatarView)
+    avatarView.centerXAnchor.constraint(equalTo: avatarSpacerView.centerXAnchor).isActive = true
+    avatarView.topAnchor.constraint(equalTo: avatarSpacerView.topAnchor, constant: 28).isActive =
+      true
+    avatarView.bottomAnchor.constraint(equalTo: avatarSpacerView.bottomAnchor).isActive = true
+    rootStack.addArrangedSubview(avatarSpacerView)
 
     nameLabel.font = .systemFont(ofSize: 30, weight: .bold)
     nameLabel.textAlignment = .center
@@ -473,54 +594,73 @@ final class VibeNativeCallScreenController: UIViewController {
     rootStack.addArrangedSubview(incomingRow)
 
     activeBar.translatesAutoresizingMaskIntoConstraints = false
-    activeBar.layer.cornerRadius = 32
+    activeBar.layer.cornerRadius = 34
     activeBar.layer.cornerCurve = .continuous
     activeBar.layer.masksToBounds = true
     activeBar.layer.borderWidth = 0.7
 
-    activeBarEffect.frame = activeBar.bounds
-    activeBarEffect.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    activeBarEffect.translatesAutoresizingMaskIntoConstraints = false
     activeBarEffect.effect = makeGlassEffect()
     activeBarEffect.alpha = 1.0
+    activeBarEffect.backgroundColor = .clear
+    activeBarEffect.contentView.backgroundColor = .clear
     activeBarEffect.isUserInteractionEnabled = false
+    activeBarEffect.layer.cornerRadius = 34
+    activeBarEffect.layer.cornerCurve = .continuous
+    activeBarEffect.layer.masksToBounds = true
     activeBar.addSubview(activeBarEffect)
+    NSLayoutConstraint.activate([
+      activeBarEffect.leadingAnchor.constraint(equalTo: activeBar.leadingAnchor),
+      activeBarEffect.trailingAnchor.constraint(equalTo: activeBar.trailingAnchor),
+      activeBarEffect.topAnchor.constraint(equalTo: activeBar.topAnchor),
+      activeBarEffect.bottomAnchor.constraint(equalTo: activeBar.bottomAnchor),
+    ])
+
+    activeBarTintOverlay.translatesAutoresizingMaskIntoConstraints = false
+    activeBarTintOverlay.isUserInteractionEnabled = false
+    activeBarTintOverlay.backgroundColor = .clear
+    activeBarTintOverlay.layer.cornerRadius = 39
+    activeBarTintOverlay.layer.cornerCurve = .continuous
+    activeBarTintOverlay.layer.masksToBounds = true
+    activeBarEffect.contentView.addSubview(activeBarTintOverlay)
+    NSLayoutConstraint.activate([
+      activeBarTintOverlay.leadingAnchor.constraint(
+        equalTo: activeBarEffect.contentView.leadingAnchor),
+      activeBarTintOverlay.trailingAnchor.constraint(
+        equalTo: activeBarEffect.contentView.trailingAnchor),
+      activeBarTintOverlay.topAnchor.constraint(equalTo: activeBarEffect.contentView.topAnchor),
+      activeBarTintOverlay.bottomAnchor.constraint(
+        equalTo: activeBarEffect.contentView.bottomAnchor),
+    ])
 
     activeRow.axis = .horizontal
     activeRow.alignment = .center
-    activeRow.spacing = 12
+    activeRow.spacing = 10
+    activeRow.distribution = .fill
     activeRow.translatesAutoresizingMaskIntoConstraints = false
     activeBar.addSubview(activeRow)
-
-    activeLeadingRow.axis = .horizontal
-    activeLeadingRow.alignment = .center
-    activeLeadingRow.spacing = 10
-    activeLeadingRow.setContentHuggingPriority(.required, for: .horizontal)
-    activeLeadingRow.setContentCompressionResistancePriority(.required, for: .horizontal)
-
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "mute", title: "Mic", width: 66))
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "video", title: "Cam", width: 68))
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "speaker", title: "", width: 52))
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "flip", title: "Flip", width: 66))
-
-    let activeSpacer = UIView()
-    activeSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-    activeSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-
-    let endChip = makeActionChip(key: "end", title: "End", width: 84)
-
-    activeRow.addArrangedSubview(activeLeadingRow)
-    activeRow.addArrangedSubview(activeSpacer)
-    activeRow.addArrangedSubview(endChip)
+    activeRow.addArrangedSubview(
+      makeButtonStack(key: "mute", label: "Mic", size: 48, showLabel: false))
+    activeRow.addArrangedSubview(
+      makeButtonStack(key: "video", label: "Video", size: 48, showLabel: false))
+    activeRow.addArrangedSubview(
+      makeButtonStack(key: "return", label: "Return", size: 48, showLabel: false))
+    activeRow.addArrangedSubview(
+      makeButtonStack(key: "speaker", label: "Speaker", size: 48, showLabel: false))
+    activeRow.addArrangedSubview(
+      makeButtonStack(key: "flip", label: "Flip", size: 48, showLabel: false))
+    activeRow.addArrangedSubview(
+      makeButtonStack(key: "end", label: "End", size: 56, showLabel: false))
 
     rootStack.addArrangedSubview(activeBar)
 
     NSLayoutConstraint.activate([
-      activeRow.leadingAnchor.constraint(equalTo: activeBar.leadingAnchor, constant: 10),
-      activeRow.trailingAnchor.constraint(equalTo: activeBar.trailingAnchor, constant: -10),
-      activeRow.topAnchor.constraint(equalTo: activeBar.topAnchor, constant: 5),
-      activeRow.bottomAnchor.constraint(equalTo: activeBar.bottomAnchor, constant: -5),
-      activeBar.heightAnchor.constraint(equalToConstant: 64),
-      activeBar.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
+      activeRow.leadingAnchor.constraint(equalTo: activeBar.leadingAnchor, constant: 18),
+      activeRow.trailingAnchor.constraint(equalTo: activeBar.trailingAnchor, constant: -18),
+      activeRow.centerXAnchor.constraint(equalTo: activeBar.centerXAnchor),
+      activeRow.topAnchor.constraint(equalTo: activeBar.topAnchor, constant: 6),
+      activeRow.bottomAnchor.constraint(equalTo: activeBar.bottomAnchor, constant: -6),
+      activeBar.heightAnchor.constraint(equalToConstant: 68),
     ])
   }
 
@@ -578,6 +718,205 @@ final class VibeNativeCallScreenController: UIViewController {
     task.resume()
   }
 
+  private func updateVideoPresentation(mode: String, callType: String, state: [String: Any]) {
+    let isActiveVideo = mode == "active" && callType == "video"
+    videoCanvasView.isHidden = !isActiveVideo
+    avatarSpacerView.isHidden = isActiveVideo
+    avatarView.isHidden = isActiveVideo
+
+    guard isActiveVideo else {
+      localPreviewHostView.isHidden = true
+      detachVideoRenderers()
+      return
+    }
+
+    ensureVideoRenderers()
+
+    let remoteStreamId = normalizedString(state["remoteStreamId"])
+    let localStreamId = normalizedString(state["localStreamId"])
+    let wantsLocalPreview = ((state["isVideoEnabled"] as? Bool) ?? false)
+
+    attachRemoteVideo(streamId: remoteStreamId)
+    attachLocalPreview(streamId: wantsLocalPreview ? localStreamId : nil)
+
+    localPreviewHostView.isHidden = !wantsLocalPreview || localStreamId == nil
+  }
+
+  private func ensureVideoRenderers() {
+    if remoteVideoRenderer == nil {
+      let renderer = RTCMTLVideoView(frame: .zero)
+      renderer.translatesAutoresizingMaskIntoConstraints = false
+      renderer.videoContentMode = .scaleAspectFill
+      renderer.isUserInteractionEnabled = false
+      remoteVideoHostView.addSubview(renderer)
+      NSLayoutConstraint.activate([
+        renderer.leadingAnchor.constraint(equalTo: remoteVideoHostView.leadingAnchor),
+        renderer.trailingAnchor.constraint(equalTo: remoteVideoHostView.trailingAnchor),
+        renderer.topAnchor.constraint(equalTo: remoteVideoHostView.topAnchor),
+        renderer.bottomAnchor.constraint(equalTo: remoteVideoHostView.bottomAnchor),
+      ])
+      remoteVideoRenderer = renderer
+    }
+
+    if localPreviewRenderer == nil {
+      let renderer = RTCMTLVideoView(frame: .zero)
+      renderer.translatesAutoresizingMaskIntoConstraints = false
+      renderer.videoContentMode = .scaleAspectFill
+      renderer.isUserInteractionEnabled = false
+      renderer.transform = CGAffineTransform(scaleX: -1, y: 1)
+      localPreviewHostView.addSubview(renderer)
+      NSLayoutConstraint.activate([
+        renderer.leadingAnchor.constraint(equalTo: localPreviewHostView.leadingAnchor),
+        renderer.trailingAnchor.constraint(equalTo: localPreviewHostView.trailingAnchor),
+        renderer.topAnchor.constraint(equalTo: localPreviewHostView.topAnchor),
+        renderer.bottomAnchor.constraint(equalTo: localPreviewHostView.bottomAnchor),
+      ])
+      localPreviewRenderer = renderer
+    }
+  }
+
+  private func detachVideoRenderers() {
+    if let track = attachedRemoteVideoTrack, let renderer = remoteVideoRenderer {
+      track.remove(renderer)
+    }
+    if let track = attachedLocalVideoTrack, let renderer = localPreviewRenderer {
+      track.remove(renderer)
+    }
+    attachedRemoteVideoTrack = nil
+    attachedLocalVideoTrack = nil
+    attachedRemoteStreamId = nil
+    attachedLocalStreamId = nil
+  }
+
+  private func attachRemoteVideo(streamId: String?) {
+    guard let renderer = remoteVideoRenderer else { return }
+    if attachedRemoteStreamId == streamId { return }
+    if let track = attachedRemoteVideoTrack {
+      track.remove(renderer)
+    }
+    attachedRemoteVideoTrack = nil
+    attachedRemoteStreamId = streamId
+    guard let track = resolveVideoTrack(streamId: streamId) else {
+      NSLog("[VibeNativeCall][UiScreen] attachRemoteVideo no track streamId=%@", streamId ?? "nil")
+      return
+    }
+    NSLog("[VibeNativeCall][UiScreen] attachRemoteVideo streamId=%@", streamId ?? "nil")
+    attachedRemoteVideoTrack = track
+    track.add(renderer)
+  }
+
+  private func attachLocalPreview(streamId: String?) {
+    guard let renderer = localPreviewRenderer else { return }
+    if attachedLocalStreamId == streamId { return }
+    if let track = attachedLocalVideoTrack {
+      track.remove(renderer)
+    }
+    attachedLocalVideoTrack = nil
+    attachedLocalStreamId = streamId
+    guard let track = resolveVideoTrack(streamId: streamId) else {
+      NSLog("[VibeNativeCall][UiScreen] attachLocalPreview no track streamId=%@", streamId ?? "nil")
+      scheduleLocalPreviewAttachRetry(streamId: streamId)
+      return
+    }
+    NSLog("[VibeNativeCall][UiScreen] attachLocalPreview streamId=%@", streamId ?? "nil")
+    localPreviewAttachRetryWorkItem?.cancel()
+    localPreviewAttachRetryWorkItem = nil
+    attachedLocalVideoTrack = track
+    track.add(renderer)
+  }
+
+  private func scheduleLocalPreviewAttachRetry(streamId: String?) {
+    localPreviewAttachRetryWorkItem?.cancel()
+    guard let streamId else { return }
+    let workItem = DispatchWorkItem { [weak self] in
+      guard let self else { return }
+      guard self.attachedLocalStreamId == streamId, self.attachedLocalVideoTrack == nil else {
+        return
+      }
+      NSLog("[VibeNativeCall][UiScreen] retry attachLocalPreview streamId=%@", streamId)
+      self.attachLocalPreview(streamId: streamId)
+    }
+    localPreviewAttachRetryWorkItem = workItem
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.18, execute: workItem)
+  }
+
+  private func resolveVideoTrack(streamId: String?) -> RTCVideoTrack? {
+    guard
+      let streamId,
+      let stream = resolveMediaStream(reactTag: streamId)
+    else { return nil }
+    let track = stream.videoTracks.first
+    if track == nil {
+      NSLog("[VibeNativeCall][UiScreen] resolveVideoTrack no video tracks streamId=%@", streamId)
+    }
+    return track
+  }
+
+  private func resolveMediaStream(reactTag: String) -> RTCMediaStream? {
+    guard let bridgeObject = coordinator?.reactBridgeObject() as? NSObject else {
+      NSLog("[VibeNativeCall][UiScreen] resolveMediaStream no reactBridge reactTag=%@", reactTag)
+      return nil
+    }
+
+    let moduleObject: NSObject? = {
+      let lazySelector = NSSelectorFromString("moduleForName:lazilyLoadIfNecessary:")
+      if bridgeObject.responds(to: lazySelector),
+        let result = bridgeObject.perform(
+          lazySelector, with: "WebRTCModule", with: NSNumber(value: true))?
+          .takeUnretainedValue() as? NSObject
+      {
+        return result
+      }
+      let selector = NSSelectorFromString("moduleForName:")
+      if bridgeObject.responds(to: selector),
+        let result = bridgeObject.perform(selector, with: "WebRTCModule")?.takeUnretainedValue()
+          as? NSObject
+      {
+        return result
+      }
+      return nil
+    }()
+
+    guard let webRtcModule = moduleObject else {
+      NSLog("[VibeNativeCall][UiScreen] resolveMediaStream no WebRTCModule reactTag=%@", reactTag)
+      return nil
+    }
+
+    let streamSelector = NSSelectorFromString("streamForReactTag:")
+    guard webRtcModule.responds(to: streamSelector) else {
+      NSLog(
+        "[VibeNativeCall][UiScreen] resolveMediaStream missing streamForReactTag selector reactTag=%@",
+        reactTag)
+      return nil
+    }
+
+    let workerQueueSelector = NSSelectorFromString("workerQueue")
+    let workerQueue =
+      webRtcModule.responds(to: workerQueueSelector)
+      ? (webRtcModule.perform(workerQueueSelector)?.takeUnretainedValue() as? DispatchQueue)
+      : nil
+
+    var resolvedStream: RTCMediaStream?
+    let resolveBlock = {
+      let streamObj = webRtcModule.perform(streamSelector, with: reactTag)?.takeUnretainedValue()
+      resolvedStream = streamObj as? RTCMediaStream
+    }
+
+    if let workerQueue {
+      workerQueue.sync(execute: resolveBlock)
+    } else {
+      NSLog(
+        "[VibeNativeCall][UiScreen] resolveMediaStream no workerQueue fallback main reactTag=%@",
+        reactTag)
+      resolveBlock()
+    }
+
+    if resolvedStream == nil {
+      NSLog("[VibeNativeCall][UiScreen] resolveMediaStream miss reactTag=%@", reactTag)
+    }
+    return resolvedStream
+  }
+
   private func updateStatusPresentation(animated: Bool) {
     let palette = palette(for: currentState)
     let mode = (currentState["mode"] as? String) ?? "hidden"
@@ -603,9 +942,22 @@ final class VibeNativeCallScreenController: UIViewController {
       lastRenderedStatusText = nextText
     }
 
-    statusLabel.textColor = presentation.signal.statusTextColor(in: palette)
-    applyConnectionSignal(presentation.signal, palette: palette)
-    setStatusTickerEnabled(presentation.animatesDots)
+    let shouldShimmer =
+      presentation.kindKey == "connecting"
+      || presentation.kindKey == "ringing"
+      || presentation.kindKey == "reconnecting"
+
+    statusLabel.textColor =
+      shouldShimmer
+      ? palette.textDim.withAlphaComponent(palette.isDark ? 0.92 : 0.84)
+      : presentation.signal.statusTextColor(in: palette)
+    setStatusShimmerEnabled(shouldShimmer)
+    applyConnectionSignal(
+      presentation.signal,
+      palette: palette,
+      showsDot: presentation.kindKey == "active"
+    )
+    setStatusTickerEnabled(false)
   }
 
   private func setStatusTickerEnabled(_ enabled: Bool) {
@@ -658,6 +1010,18 @@ final class VibeNativeCallScreenController: UIViewController {
     case "failed":
       return .init(
         kindKey: "failed", baseText: "Connection lost", animatesDots: false, signal: .poor)
+    case "ended":
+      let reason = ((state["endReason"] as? String) ?? "").lowercased()
+      let text: String
+      switch reason {
+      case "rejected", "declined":
+        text = "Rejected"
+      case "missed":
+        text = "Missed"
+      default:
+        text = "Ended"
+      }
+      return .init(kindKey: "ended", baseText: text, animatesDots: false, signal: .neutral)
     case "active":
       return .init(kindKey: "active", baseText: "", animatesDots: false, signal: .good)
     default:
@@ -677,14 +1041,53 @@ final class VibeNativeCallScreenController: UIViewController {
       let total = (state["callDuration"] as? NSNumber)?.intValue ?? 0
       return "\(total / 60):" + String(format: "%02d", total % 60)
     }
-    guard presentation.animatesDots else {
-      return presentation.baseText
-    }
-    let dots = String(repeating: ".", count: statusTick)
-    return presentation.baseText + dots
+    return presentation.baseText
   }
 
-  private func applyConnectionSignal(_ signal: ConnectionSignal, palette: Palette) {
+  private func setStatusShimmerEnabled(_ enabled: Bool) {
+    guard enabled != isStatusShimmerActive else { return }
+    isStatusShimmerActive = enabled
+
+    statusShimmerMaskLayer.removeAllAnimations()
+
+    if enabled {
+      statusShimmerMaskLayer.startPoint = CGPoint(x: 0, y: 0.5)
+      statusShimmerMaskLayer.endPoint = CGPoint(x: 1, y: 0.5)
+      statusShimmerMaskLayer.colors = [
+        UIColor.white.withAlphaComponent(0.10).cgColor,
+        UIColor.white.withAlphaComponent(0.62).cgColor,
+        UIColor.white.withAlphaComponent(0.10).cgColor,
+      ]
+      statusShimmerMaskLayer.locations = [0.0, 0.18, 0.36]
+      statusShimmerMaskLayer.frame = statusLabel.bounds
+      statusLabel.layer.mask = statusShimmerMaskLayer
+
+      let animation = CABasicAnimation(keyPath: "locations")
+      animation.fromValue = [-0.45, -0.2, 0.05]
+      animation.toValue = [0.95, 1.2, 1.45]
+      animation.duration = 1.08
+      animation.repeatCount = .infinity
+      animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      animation.isRemovedOnCompletion = false
+      statusShimmerMaskLayer.add(animation, forKey: "shimmer")
+    } else {
+      statusLabel.layer.mask = nil
+    }
+  }
+
+  private func applyConnectionSignal(
+    _ signal: ConnectionSignal,
+    palette: Palette,
+    showsDot: Bool
+  ) {
+    connectionDotHost.isHidden = !showsDot
+    if !showsDot {
+      connectionDotGlow.layer.removeAllAnimations()
+      connectionDotView.layer.removeAnimation(forKey: "dotPulse")
+      connectionDotGlow.alpha = 0
+      return
+    }
+
     let color = signal.dotColor(in: palette)
     connectionDotView.backgroundColor = color
     connectionDotGlow.backgroundColor = color.withAlphaComponent(0.24)
@@ -916,6 +1319,7 @@ final class VibeNativeCallScreenController: UIViewController {
     }
 
     buttons[key] = button
+    buttonStacks[key] = stack
     return stack
   }
 
@@ -964,14 +1368,20 @@ final class VibeNativeCallScreenController: UIViewController {
     )
   }
 
-  private func styleButton(_ key: String, bg: UIColor, symbol: String, fg: UIColor) {
+  private func styleButton(
+    _ key: String,
+    bg: UIColor,
+    symbol: String,
+    fg: UIColor,
+    labelColor: UIColor? = nil
+  ) {
     guard let button = buttons[key] else { return }
     button.backgroundColor = bg
     button.tintColor = fg
 
     let config = UIImage.SymbolConfiguration(weight: .semibold)
     button.setImage(UIImage(systemName: symbol, withConfiguration: config), for: .normal)
-    buttonLabels[key]?.textColor = palette(for: currentState).textSubtle
+    buttonLabels[key]?.textColor = labelColor ?? palette(for: currentState).textSubtle
   }
 
   private func palette(for state: [String: Any]) -> Palette {
@@ -1018,7 +1428,13 @@ private enum ConnectionSignal {
 }
 
 private final class NativeCallInsetLabel: UILabel {
-  var textInsets = UIEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
+  var textInsets = UIEdgeInsets(top: 6, left: 14, bottom: 6, right: 14) {
+    didSet {
+      guard oldValue != textInsets else { return }
+      invalidateIntrinsicContentSize()
+      setNeedsDisplay()
+    }
+  }
 
   override func drawText(in rect: CGRect) {
     super.drawText(in: rect.inset(by: textInsets))

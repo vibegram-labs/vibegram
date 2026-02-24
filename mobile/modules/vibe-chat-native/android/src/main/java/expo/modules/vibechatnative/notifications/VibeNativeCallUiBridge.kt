@@ -85,4 +85,8 @@ internal object VibeNativeCallUiBridge {
     }
     moduleRef?.get()?.emitCallUiEvent(body)
   }
+
+  fun getReactContext(): Context? {
+    return moduleRef?.get()?.appContext?.reactContext
+  }
 }

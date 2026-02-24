@@ -59,9 +59,9 @@ interface QualityTier {
 
 const QUALITY_TIERS: QualityTier[] = [
     { label: '1080p', maxBitrate: 2_500_000, scaleDown: 1.0, maxFramerate: 30 },
-    { label: '720p',  maxBitrate: 1_500_000, scaleDown: 1.5, maxFramerate: 30 },
-    { label: '480p',  maxBitrate: 800_000,   scaleDown: 2.0, maxFramerate: 24 },
-    { label: '360p',  maxBitrate: 400_000,   scaleDown: 3.0, maxFramerate: 15 },
+    { label: '720p', maxBitrate: 1_500_000, scaleDown: 1.5, maxFramerate: 30 },
+    { label: '480p', maxBitrate: 800_000, scaleDown: 2.0, maxFramerate: 24 },
+    { label: '360p', maxBitrate: 400_000, scaleDown: 3.0, maxFramerate: 15 },
 ];
 
 class WebRTCService {
@@ -140,10 +140,10 @@ class WebRTCService {
             RTCIceCandidate = webrtc.RTCIceCandidate;
             mediaDevices = webrtc.mediaDevices;
             MediaStream = webrtc.MediaStream;
-            this.RTCView = webrtc.RTCView;
-
             webrtcAvailable = true;
+            console.log('[WebRTCService] react-native-webrtc loaded successfully');
         } catch (e) {
+            console.warn('[WebRTCService] Error loading react-native-webrtc:', e);
             webrtcAvailable = false;
         }
 
@@ -177,14 +177,18 @@ class WebRTCService {
      * Caches the result for the TTL period. Falls back to built-in TURN-TLS-443.
      */
     async fetchIceServers(): Promise<void> {
+        console.log('[WebRTCService] fetchIceServers called');
         // Use cache if still valid
         if (cachedIceConfig && (Date.now() - cachedIceConfig.fetchedAt) < cachedIceConfig.ttl * 1000) {
+            console.log('[WebRTCService] Using cached ICE config');
             return;
         }
 
         try {
+            console.log('[WebRTCService] Fetching turn credentials from api-client...');
             const { apiClient } = require('../api-client');
             const result = await apiClient.getTurnCredentials();
+            console.log('[WebRTCService] getTurnCredentials result:', result);
 
             if (result && result.iceServers && result.iceServers.length > 0) {
                 cachedIceConfig = {
@@ -231,7 +235,9 @@ class WebRTCService {
      * Uses adaptive constraints — ideal 1080p, min 480p
      */
     async initializeMedia(withVideo: boolean = false): Promise<boolean> {
+        console.log('[WebRTCService] initializeMedia called withVideo:', withVideo);
         const available = await this.loadWebRTC();
+        console.log('[WebRTCService] initializeMedia loadWebRTC result:', available, 'mediaDevices:', !!mediaDevices);
         if (!available || !mediaDevices) return false;
 
         try {
@@ -245,7 +251,9 @@ class WebRTCService {
                 } : false,
             };
 
+            console.log('[WebRTCService] Calling getUserMedia with constraints:', JSON.stringify(constraints));
             this.localStream = await mediaDevices.getUserMedia(constraints);
+            console.log('[WebRTCService] getUserMedia success, stream id:', this.localStream?.id);
 
             // Start InCallManager for proper audio routing
             if (InCallManager) {

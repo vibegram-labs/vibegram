@@ -61,6 +61,7 @@ import {
     type BubbleMenuAction,
 } from '../src/components/chat/menus/menu-config';
 import {
+    getNativeChatEngineModule,
     getNativeChatRuntimeInfo,
     mapMessagesToNativeRows,
     NativeChatSurface,
@@ -1176,6 +1177,7 @@ export default function ChatListScreen({
     const retryMessage = useChatStore(s => s.retryMessage);
     const deleteFailedMessage = useChatStore(s => s.deleteFailedMessage);
     const isConnected = useChatStore(s => s.isConnected);
+    const onlineUsers = useChatStore(s => s.onlineUsers);
     const uploadProgressById = useChatStore(s => s.uploadProgress);
     const { colors, effectiveTheme } = useThemeStore();
     const { activeTheme } = useWallpaperStore();
@@ -2733,7 +2735,19 @@ export default function ChatListScreen({
             dt: Date.now() - t0,
         });
         return rows;
-    }, [visibleMessages, uploadProgressById]);
+    }, [visibleMessages, uploadProgressById, onlineUsers]);
+
+    useEffect(() => {
+        if (!shouldUseNativeList) return;
+        const nativeChatEngine = getNativeChatEngineModule();
+        if (!nativeChatEngine?.setPresenceSnapshot) return;
+        const userIds = Array.from(onlineUsers).filter((id): id is string => typeof id === 'string' && id.length > 0);
+        try {
+            void nativeChatEngine.setPresenceSnapshot({ userIds });
+        } catch (error) {
+            console.warn('[ChatList] setPresenceSnapshot failed', error);
+        }
+    }, [shouldUseNativeList, onlineUsers]);
 
     const currentPinnedMessageId = pinnedMessageIds.length > 0
         ? pinnedMessageIds[Math.min(activePinnedIndex, pinnedMessageIds.length - 1)]
@@ -2865,6 +2879,11 @@ export default function ChatListScreen({
                         ref={nativeSurfaceRef}
                         surfaceId={nativeSurfaceId}
                         rows={nativeRows}
+                        engineSurfaceId={nativeSurfaceId}
+                        chatId={effectiveChatId || undefined}
+                        myUserId={user?.userId || undefined}
+                        peerUserId={activeChat?.friendId || undefined}
+                        statusAuthorityEnabled
                         appearance={nativeAppearance}
                         contentPaddingTop={nativeListTopPadding}
                         contentPaddingBottom={14}

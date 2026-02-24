@@ -16,6 +16,8 @@ Pod::Spec.new do |s|
 
   s.dependency 'ExpoModulesCore'
   s.dependency 'Giphy'
+  # Needed by VibeNativeCallUiCoordinator native video renderer (RTCMTLVideoView / RTCVideoTrack)
+  s.dependency 'JitsiWebRTC', '~> 124.0.0'
   s.frameworks = ['CallKit', 'PushKit', 'AVFoundation']
 
   s.source_files = 'ios/**/*.{swift,h,m,mm}'

@@ -39,8 +39,17 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var pendingRowsPayload: [[String: Any]]?
   private var sourceRowsPayload: [[String: Any]] = []
   private var nativeSendEnabled = false
+  private var engineSurfaceId: String = ""
+  private var engineChatId: String = ""
+  private var engineMyUserId: String = ""
+  private var enginePeerUserId: String = ""
+  private var engineOpenedChatId: String = ""
+  private var statusAuthorityEnabled = false
   private var nativeOutgoingRowsById: [String: [String: Any]] = [:]
   private var nativeOutgoingOrder: [String] = []
+  private var nativeEngineRowsById: [String: [String: Any]] = [:]
+  private var nativeEngineOrder: [String] = []
+  private var nativeDeletedMessageIds = Set<String>()
   private var isInternalScrollAdjustment = false
   private var isUpdatingBottomInset = false
   private var activeVoicePlaybackMessageId: String?
@@ -153,6 +162,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     NotificationCenter.default.addObserver(
       self, selector: #selector(keyboardWillHide(_:)),
       name: UIResponder.keyboardWillHideNotification, object: nil)
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleChatEngineChanged(_:)),
+      name: ChatEngine.didChangeNotification,
+      object: nil
+    )
 
     NSLog("[ChatListView] init COMPLETE")
   }
@@ -164,6 +179,15 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
   deinit {
     NotificationCenter.default.removeObserver(self)
+    updateChatEngineChannelBinding(forceDetach: true)
+    if !engineSurfaceId.isEmpty {
+      _ = ChatEngine.shared.unbindSurface(["surfaceId": engineSurfaceId])
+    }
+  }
+
+  override public func didMoveToWindow() {
+    super.didMoveToWindow()
+    updateChatEngineChannelBinding()
   }
 
   override public func layoutSubviews() {
@@ -657,11 +681,55 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
   }
 
+  func setEngineSurfaceId(_ value: String) {
+    let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if engineSurfaceId == next { return }
+    if !engineSurfaceId.isEmpty {
+      _ = ChatEngine.shared.unbindSurface(["surfaceId": engineSurfaceId])
+    }
+    engineSurfaceId = next
+    updateChatEngineBinding()
+  }
+
+  func setEngineChatId(_ value: String) {
+    let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if engineChatId == next { return }
+    engineChatId = next
+    nativeEngineRowsById.removeAll()
+    nativeEngineOrder.removeAll()
+    nativeDeletedMessageIds.removeAll()
+    updateChatEngineBinding()
+    updateChatEngineChannelBinding()
+    refreshVisibleStatuses(reason: "chatId")
+  }
+
+  func setEngineMyUserId(_ value: String) {
+    let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if engineMyUserId == next { return }
+    engineMyUserId = next
+    updateChatEngineBinding()
+  }
+
+  func setEnginePeerUserId(_ value: String) {
+    let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if enginePeerUserId == next { return }
+    enginePeerUserId = next
+    updateChatEngineBinding()
+    refreshVisibleStatuses(reason: "peerUserId")
+  }
+
+  func setStatusAuthorityEnabled(_ enabled: Bool) {
+    if statusAuthorityEnabled == enabled { return }
+    statusAuthorityEnabled = enabled
+    refreshVisibleStatuses(reason: "statusAuthorityEnabled")
+  }
+
   func setAppearance(_ rawAppearance: [String: Any]) {
     Self.cacheNativeThemeSeed(from: rawAppearance)
     let next = ChatListAppearance.from(raw: rawAppearance)
     let visualChanged = appearance.visualKey != next.visualKey
-    let hasPendingOrActiveSendTransition = pendingSendTransition != nil || activeSendTransition != nil
+    let hasPendingOrActiveSendTransition =
+      pendingSendTransition != nil || activeSendTransition != nil
     if visualChanged && hasPendingOrActiveSendTransition {
       queuedAppearanceAfterSendTransition = next
       return
@@ -685,7 +753,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private func flushQueuedAppearanceAfterTransitionIfNeeded() {
-    guard activeSendTransition == nil, pendingSendTransition == nil, let queued = queuedAppearanceAfterSendTransition
+    guard activeSendTransition == nil, pendingSendTransition == nil,
+      let queued = queuedAppearanceAfterSendTransition
     else {
       return
     }
@@ -894,6 +963,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return UICollectionViewCell()
     }
     cell.applyAppearance(appearance)
+    cell.resolveDisplayStatus = { [weak self] row in
+      self?.resolvedDisplayStatus(for: row)
+    }
     cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
     // Removed onVoiceBubbleTap so iOS uses Native Audio playback for Voice bubbles (like Android)
     cell.setExternalVoicePlayback(
@@ -912,6 +984,94 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     return cell
   }
 
+  @objc private func handleChatEngineChanged(_ note: Notification) {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.handleChatEngineChanged(note)
+      }
+      return
+    }
+    guard statusAuthorityEnabled else { return }
+    let changedChatId = (note.userInfo?["chatId"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let changedChatId, !changedChatId.isEmpty, changedChatId != engineChatId {
+      return
+    }
+    let reason = (note.userInfo?["reason"] as? String) ?? "engine"
+    if reason == "chatMessageInserted"
+      || reason == "chatMessageEdited"
+      || reason == "chatMessageDeleted"
+      || reason == "chatMessageChanged"
+    {
+      let messageId = normalizedMessageId(note.userInfo?["messageId"])
+      let action = (note.userInfo?["action"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+      syncNativeEngineMessageMutation(reason: reason, messageId: messageId, action: action)
+      return
+    }
+    if reason == "chatRowsReloaded" {
+      setRows(sourceRowsPayload)
+      return
+    }
+    refreshVisibleStatuses(reason: reason)
+  }
+
+  private func updateChatEngineBinding() {
+    guard !engineSurfaceId.isEmpty else { return }
+    _ = ChatEngine.shared.bindSurface([
+      "surfaceId": engineSurfaceId,
+      "chatId": engineChatId,
+      "myUserId": engineMyUserId,
+      "peerUserId": enginePeerUserId,
+    ])
+  }
+
+  private func updateChatEngineChannelBinding(forceDetach: Bool = false) {
+    let desiredChatId: String?
+    if forceDetach || window == nil {
+      desiredChatId = nil
+    } else {
+      desiredChatId = engineChatId.isEmpty ? nil : engineChatId
+    }
+
+    if !engineOpenedChatId.isEmpty, engineOpenedChatId != desiredChatId {
+      _ = ChatEngine.shared.closeChatChannel(["chatId": engineOpenedChatId])
+      engineOpenedChatId = ""
+    }
+
+    if let desiredChatId, engineOpenedChatId != desiredChatId {
+      _ = ChatEngine.shared.openChatChannel(["chatId": desiredChatId])
+      engineOpenedChatId = desiredChatId
+    }
+  }
+
+  private func resolvedDisplayStatus(for row: ChatListRow) -> String? {
+    guard statusAuthorityEnabled else {
+      return row.status?.lowercased()
+    }
+    return ChatEngine.shared.resolveDisplayStatus(
+      chatId: engineChatId.isEmpty ? nil : engineChatId,
+      messageId: row.messageId,
+      rawStatus: row.status,
+      isMe: row.isMe,
+      peerUserId: enginePeerUserId.isEmpty ? nil : enginePeerUserId
+    )
+  }
+
+  private func refreshVisibleStatuses(reason: String) {
+    guard statusAuthorityEnabled else { return }
+    guard window != nil else { return }
+    guard !rows.isEmpty else { return }
+    for case let cell as ChatListCell in collectionView.visibleCells {
+      guard let indexPath = collectionView.indexPath(for: cell), indexPath.item < rows.count else {
+        continue
+      }
+      cell.resolveDisplayStatus = { [weak self] row in
+        self?.resolvedDisplayStatus(for: row)
+      }
+      cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
+    }
+    NSLog("[ChatListView] refreshVisibleStatuses reason=%@", reason)
+  }
+
   public func collectionView(
     _ collectionView: UICollectionView,
     layout collectionViewLayout: UICollectionViewLayout,
@@ -926,7 +1086,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return CGSize(width: width, height: 30.0)
     }
     if shouldSuppressMessageFromLayout(row.messageId) {
-      // Keep the outgoing row out of layout while send transition is pending/active.
       return CGSize(width: width, height: 0.001)
     }
     return CGSize(width: width, height: estimateMessageHeight(row, rowWidth: width))
@@ -1169,9 +1328,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     guard let hiddenMessageId, let messageId, messageId == hiddenMessageId else {
       return false
     }
-    // Suppress only while transition is pending (pre-animation). Once active,
-    // the row must participate in layout so the list pushes smoothly.
-    return pendingSendTransition != nil
+    // Suppress for the ENTIRE transition (pending + active) so the list
+    // never shifts. The reveal happens in completeTransition with a smooth
+    // additive animation.
+    return pendingSendTransition != nil || activeSendTransition != nil
   }
 
   private func filteredRowsPayloadForSendTransition(from rows: [[String: Any]]) -> [[String: Any]] {
@@ -1234,13 +1394,69 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private func mergedRowsPayload(from baseRows: [[String: Any]]) -> [[String: Any]] {
-    guard nativeSendEnabled, !nativeOutgoingOrder.isEmpty else {
+    let effectiveBaseRows: [[String: Any]] = {
+      guard statusAuthorityEnabled, !engineChatId.isEmpty else { return baseRows }
+      let nativeRows = ChatEngine.shared.getChatRows(["chatId": engineChatId])
+      if !nativeRows.isEmpty || baseRows.isEmpty {
+        return nativeRows
+      }
       return baseRows
+    }()
+
+    var engineMergedRows = effectiveBaseRows
+    if !nativeEngineRowsById.isEmpty || !nativeDeletedMessageIds.isEmpty {
+      var filteredBase: [[String: Any]] = []
+      filteredBase.reserveCapacity(effectiveBaseRows.count)
+      var baseMessageIds = Set<String>()
+
+      for row in effectiveBaseRows {
+        if let messageId = messageId(fromRawRow: row) {
+          if nativeDeletedMessageIds.contains(messageId) {
+            continue
+          }
+          baseMessageIds.insert(messageId)
+        }
+        filteredBase.append(row)
+      }
+
+      nativeDeletedMessageIds = nativeDeletedMessageIds.filter { deletedId in
+        baseMessageIds.contains(deletedId) || nativeEngineRowsById[deletedId] != nil
+      }.reduce(into: Set<String>()) { $0.insert($1) }
+
+      var mergedRows: [[String: Any]] = []
+      mergedRows.reserveCapacity(filteredBase.count + nativeEngineRowsById.count)
+      for row in filteredBase {
+        if let messageId = messageId(fromRawRow: row),
+          let overlay = nativeEngineRowsById[messageId]
+        {
+          mergedRows.append(mergeMessageRowPreservingShape(baseRow: row, overlayRow: overlay))
+        } else {
+          mergedRows.append(row)
+        }
+      }
+
+      var nextEngineOrder: [String] = []
+      nextEngineOrder.reserveCapacity(nativeEngineOrder.count)
+      for messageId in nativeEngineOrder {
+        guard let overlay = nativeEngineRowsById[messageId] else { continue }
+        if baseMessageIds.contains(messageId) {
+          nextEngineOrder.append(messageId)
+          continue
+        }
+        mergedRows.append(overlay)
+        nextEngineOrder.append(messageId)
+      }
+      nativeEngineOrder = nextEngineOrder
+      engineMergedRows = mergedRows
     }
 
-    var merged = baseRows
+    guard nativeSendEnabled, !nativeOutgoingOrder.isEmpty else {
+      return engineMergedRows
+    }
+
+    var merged = engineMergedRows
     var baseMessageIds = Set<String>()
-    for row in baseRows {
+    for row in engineMergedRows {
       if let messageId = messageId(fromRawRow: row) {
         baseMessageIds.insert(messageId)
       }
@@ -1260,6 +1476,65 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
     nativeOutgoingOrder = nextOrder
     return merged
+  }
+
+  private func mergeMessageRowPreservingShape(baseRow: [String: Any], overlayRow: [String: Any])
+    -> [String: Any]
+  {
+    guard
+      let baseMessage = baseRow["message"] as? [String: Any],
+      let overlayMessage = overlayRow["message"] as? [String: Any]
+    else {
+      return overlayRow
+    }
+
+    var mergedMessage = baseMessage
+    for (key, value) in overlayMessage {
+      mergedMessage[key] = value
+    }
+    if let baseBubbleShape = baseMessage["bubbleShape"] {
+      mergedMessage["bubbleShape"] = baseBubbleShape
+    }
+
+    var mergedRow = baseRow
+    for (key, value) in overlayRow {
+      mergedRow[key] = value
+    }
+    mergedRow["message"] = mergedMessage
+    return mergedRow
+  }
+
+  private func syncNativeEngineMessageMutation(reason: String, messageId: String?, action: String?) {
+    let resolvedMessageId = messageId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let resolvedChatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !resolvedChatId.isEmpty, !resolvedMessageId.isEmpty else { return }
+
+    let normalizedAction = action?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let isDeleteReason = reason == "chatMessageDeleted" || normalizedAction == "deleted"
+
+    if isDeleteReason {
+      nativeEngineRowsById.removeValue(forKey: resolvedMessageId)
+      nativeDeletedMessageIds.insert(resolvedMessageId)
+    } else if reason == "chatMessageInserted" || reason == "chatMessageEdited" || reason == "chatMessageChanged" {
+      if let row = ChatEngine.shared.getLiveMessageRow([
+        "chatId": resolvedChatId,
+        "messageId": resolvedMessageId,
+      ]) {
+        nativeEngineRowsById[resolvedMessageId] = row
+        nativeDeletedMessageIds.remove(resolvedMessageId)
+        if !nativeEngineOrder.contains(resolvedMessageId) {
+          nativeEngineOrder.append(resolvedMessageId)
+        }
+      } else if ChatEngine.shared.isLiveMessageDeleted([
+        "chatId": resolvedChatId,
+        "messageId": resolvedMessageId,
+      ]) {
+        nativeEngineRowsById.removeValue(forKey: resolvedMessageId)
+        nativeDeletedMessageIds.insert(resolvedMessageId)
+      }
+    }
+
+    setRows(sourceRowsPayload)
   }
 
   private func queueNativeOutgoingMessage(
@@ -1402,8 +1677,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     activeSendTransition = state
     onNativeEvent(["type": "sendTransitionStarted", "messageId": payload.messageId])
 
-    // Promote the hidden outgoing row into layout now (as an invisible row)
-    // so the list shift is synchronized with transition motion.
+    // Re-insert the hidden row into the data source so it exists (at 0.001
+    // height) during the transition. shouldSuppressMessageFromLayout keeps
+    // its height collapsed until completeTransition.
     if isApplyingRowsUpdate {
       pendingRowsPayload = sourceRowsPayload
     } else {
@@ -1447,40 +1723,77 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       "[ChatListView] completeTransition — revealing message '%@'", transition.payload.messageId)
     transition.invalidate()
     transition.overlayContainer.removeFromSuperview()
-    activeSendTransition = nil
 
+    // --- Record pre-reveal screen positions for additive animation -----------
+    let preRevealOffset = collectionView.contentOffset.y
+    var preRevealScreenY: [String: CGFloat] = [:]
+    for cell in collectionView.visibleCells {
+      guard let ip = collectionView.indexPath(for: cell), ip.item < rows.count else { continue }
+      preRevealScreenY[rows[ip.item].key] = cell.center.y - preRevealOffset
+    }
+
+    // --- Clear transition state so the cell is no longer suppressed ----------
+    activeSendTransition = nil
     let revealedMessageId = hiddenMessageId
     hiddenMessageId = nil
+
+    // Force the cell to full height + visible content
     if let revealedMessageId, let rowIndex = indexForMessage(revealedMessageId),
       rowIndex < rows.count
     {
       let indexPath = IndexPath(item: rowIndex, section: 0)
-      UIView.performWithoutAnimation {
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
-          cell.applyAppearance(appearance)
-          cell.configure(row: rows[rowIndex], hiddenMessageId: nil)
-          cell.alpha = 1.0
-          cell.contentView.alpha = 1.0
-          cell.layer.opacity = 1.0
-          cell.contentView.layer.opacity = 1.0
-          cell.layer.removeAllAnimations()
-          cell.contentView.layer.removeAllAnimations()
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
+      // Invalidate to let sizeForItemAt return real height now
+      flowLayout.invalidateLayout()
+      collectionView.layoutIfNeeded()
+      updateBottomAnchorInset()
+      collectionView.layoutIfNeeded()
+      if shouldAutoScroll {
+        scrollToBottom(animated: false)
+      }
+      if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
+        cell.applyAppearance(appearance)
+        cell.configure(row: rows[rowIndex], hiddenMessageId: nil)
+        cell.alpha = 1.0
+        cell.contentView.alpha = 1.0
+        cell.layer.opacity = 1.0
+        cell.contentView.layer.opacity = 1.0
+        cell.layer.removeAllAnimations()
+        cell.contentView.layer.removeAllAnimations()
+      } else {
+        if #available(iOS 15.0, *) {
+          collectionView.reconfigureItems(at: [indexPath])
         } else {
-          if #available(iOS 15.0, *) {
-            collectionView.reconfigureItems(at: [indexPath])
-          } else {
-            collectionView.reloadItems(at: [indexPath])
-          }
+          collectionView.reloadItems(at: [indexPath])
         }
-        CATransaction.commit()
+      }
+      CATransaction.commit()
+
+      // --- Apply additive animations to smoothly push existing cells ---------
+      let postRevealOffset = collectionView.contentOffset.y
+      let animDuration: CFTimeInterval = TelegramSendMorphProfile.duration
+      let animTiming = chatListSendVerticalTiming
+      for cell in collectionView.visibleCells {
+        guard let ip = collectionView.indexPath(for: cell), ip.item < rows.count else { continue }
+        let key = rows[ip.item].key
+        guard let oldScreenY = preRevealScreenY[key] else { continue }
+        let currentScreenY = cell.center.y - postRevealOffset
+        let delta = pixelAlignedValue(oldScreenY - currentScreenY)
+        guard abs(delta) > 0.5 else { continue }
+        let anim = CABasicAnimation(keyPath: "position.y")
+        anim.fromValue = delta as NSNumber
+        anim.toValue = 0.0 as NSNumber
+        anim.isAdditive = true
+        anim.duration = animDuration
+        anim.timingFunction = animTiming
+        anim.isRemovedOnCompletion = true
+        cell.layer.add(anim, forKey: "revealShift")
       }
     } else if revealedMessageId != nil {
-      // If the row is not yet materialized (e.g. async source update), ask the
-      // list to apply latest payload once so the message becomes visible.
       setRows(sourceRowsPayload)
     }
+    previousOffsetY = collectionView.contentOffset.y
     flushQueuedAppearanceAfterTransitionIfNeeded()
     onNativeEvent(["type": "sendTransitionCompleted", "messageId": revealedMessageId ?? ""])
   }
@@ -1589,7 +1902,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         return image
       }
       if let path = bundle.path(forResource: baseName, ofType: "png"),
-         let image = UIImage(contentsOfFile: path)?.cgImage {
+        let image = UIImage(contentsOfFile: path)?.cgImage
+      {
         Self.wallpaperMaskImageCache[normalizedKey] = image
         return image
       }

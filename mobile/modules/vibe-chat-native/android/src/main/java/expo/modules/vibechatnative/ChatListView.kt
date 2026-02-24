@@ -441,6 +441,7 @@ private class NativeRowsAdapter(
   private val pendingBottomInsertKeys = LinkedHashSet<String>()
   private var hiddenMessageId: String? = null
   private var appearance = ChatListAppearance()
+  private var statusResolver: ((NativeRowItem) -> String?)? = null
   private val voicePlayback = VoicePlaybackCoordinator()
   private var externalVoiceMessageId: String? = null
   private var externalVoiceIsPlaying = false
@@ -704,6 +705,15 @@ private class NativeRowsAdapter(
     notifyDataSetChanged()
   }
 
+  fun setStatusResolver(resolver: ((NativeRowItem) -> String?)?) {
+    statusResolver = resolver
+    notifyDataSetChanged()
+  }
+
+  fun refreshStatusDecorations() {
+    notifyDataSetChanged()
+  }
+
   fun setVoicePlayback(messageId: String?, isPlaying: Boolean, progress: Float) {
     val clampedProgress = progress.coerceIn(0f, 1f)
     if (
@@ -960,8 +970,9 @@ private class NativeRowsAdapter(
 
     val bubbleThemFill = appearance.bubbleThemColor
     val metaBaseColor = if (item.isMe) appearance.timeColorMe else appearance.timeColorThem
-    statusView.bind(item.status, metaBaseColor)
-    val showStatus = item.isMe && when (item.status?.lowercase()) {
+    val displayStatus = statusResolver?.invoke(item) ?: item.status
+    statusView.bind(displayStatus, metaBaseColor)
+    val showStatus = item.isMe && when (displayStatus?.lowercase()) {
       "pending", "sent", "delivered", "read", "error" -> true
       else -> false
     }
@@ -2210,6 +2221,17 @@ class ChatListView(
   private var activeTransition: ActiveTransition? = null
 
   private var surfaceId: String = ""
+  private var engineSurfaceId: String = ""
+  private var engineChatId: String = ""
+  private var engineMyUserId: String = ""
+  private var enginePeerUserId: String = ""
+  private var engineOpenedChatId: String = ""
+  private var statusAuthorityEnabled: Boolean = false
+  private val engineListenerId = "chat-list-view-${System.identityHashCode(this)}"
+  private var sourceRowsPayload: List<Map<String, Any?>> = emptyList()
+  private val nativeEngineRowsById = linkedMapOf<String, Map<String, Any?>>()
+  private val nativeEngineOrder = mutableListOf<String>()
+  private val nativeDeletedMessageIds = linkedSetOf<String>()
 
   companion object {
     private const val PREFS_NAME = "vibe_chat_native"
@@ -2245,6 +2267,7 @@ class ChatListView(
     recyclerView.overScrollMode = View.OVER_SCROLL_ALWAYS
     recyclerView.itemAnimator = null
     adapter.setAppearance(appearance)
+    adapter.setStatusResolver { item -> resolveDisplayStatus(item) }
     applyAppearanceToView()
 
     recyclerView.addOnScrollListener(object : RecyclerView.OnScrollListener() {
@@ -2391,21 +2414,81 @@ class ChatListView(
     }
   }
 
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    updateChatEngineBinding()
+    updateChatEngineChannelBinding()
+    registerChatEngineListener()
+  }
+
+  override fun onDetachedFromWindow() {
+    updateChatEngineChannelBinding(forceDetach = true)
+    ChatEngine.setListener(engineListenerId, null)
+    if (engineSurfaceId.isNotBlank()) {
+      ChatEngine.unbindSurface(mapOf("surfaceId" to engineSurfaceId))
+    }
+    super.onDetachedFromWindow()
+  }
+
   fun setSurfaceId(value: String) {
     surfaceId = value
     ChatListRegistry.register(surfaceId, this)
   }
 
+  fun setEngineSurfaceId(value: String) {
+    if (engineSurfaceId == value) return
+    if (engineSurfaceId.isNotBlank()) {
+      ChatEngine.unbindSurface(mapOf("surfaceId" to engineSurfaceId))
+    }
+    engineSurfaceId = value.trim()
+    updateChatEngineBinding()
+    registerChatEngineListener()
+  }
+
+  fun setEngineChatId(value: String) {
+    val next = value.trim()
+    if (engineChatId == next) return
+    engineChatId = next
+    nativeEngineRowsById.clear()
+    nativeEngineOrder.clear()
+    nativeDeletedMessageIds.clear()
+    updateChatEngineBinding()
+    updateChatEngineChannelBinding()
+    refreshStatusDecorations("chatId")
+  }
+
+  fun setEngineMyUserId(value: String) {
+    val next = value.trim()
+    if (engineMyUserId == next) return
+    engineMyUserId = next
+    updateChatEngineBinding()
+  }
+
+  fun setEnginePeerUserId(value: String) {
+    val next = value.trim()
+    if (enginePeerUserId == next) return
+    enginePeerUserId = next
+    updateChatEngineBinding()
+    refreshStatusDecorations("peerUserId")
+  }
+
+  fun setStatusAuthorityEnabled(enabled: Boolean) {
+    if (statusAuthorityEnabled == enabled) return
+    statusAuthorityEnabled = enabled
+    refreshStatusDecorations("statusAuthorityEnabled")
+  }
+
   private var parseGeneration = 0
 
   fun setRows(input: List<Map<String, Any?>>) {
+    sourceRowsPayload = input
     val previousDistanceFromBottom = currentDistanceFromBottom()
     val wasNearBottom = previousDistanceFromBottom <= LIST_BOTTOM_THRESHOLD || shouldAutoScroll
 
     // Parse rows on background thread to avoid blocking the UI during navigation
     val generation = ++parseGeneration
     diffExecutor.execute {
-      val next = parseRows(input)
+      val next = parseRows(mergedRowsPayload(input))
       mainHandler.post {
         if (generation != parseGeneration) return@post // stale, skip
         rows.clear()
@@ -2424,6 +2507,80 @@ class ChatListView(
         }
       }
     }
+  }
+
+  private fun updateChatEngineBinding() {
+    if (engineSurfaceId.isBlank()) return
+    ChatEngine.bindSurface(
+      mapOf(
+        "surfaceId" to engineSurfaceId,
+        "chatId" to engineChatId,
+        "myUserId" to engineMyUserId,
+        "peerUserId" to enginePeerUserId,
+      ),
+    )
+  }
+
+  private fun updateChatEngineChannelBinding(forceDetach: Boolean = false) {
+    val desiredChatId = if (!forceDetach && isAttachedToWindow) {
+      engineChatId.takeIf { it.isNotBlank() }
+    } else {
+      null
+    }
+
+    if (engineOpenedChatId.isNotBlank() && engineOpenedChatId != desiredChatId) {
+      ChatEngine.closeChatChannel(mapOf("chatId" to engineOpenedChatId))
+      engineOpenedChatId = ""
+    }
+
+    if (!desiredChatId.isNullOrBlank() && engineOpenedChatId != desiredChatId) {
+      ChatEngine.openChatChannel(mapOf("chatId" to desiredChatId))
+      engineOpenedChatId = desiredChatId
+    }
+  }
+
+  private fun registerChatEngineListener() {
+    if (engineSurfaceId.isBlank() || !isAttachedToWindow) return
+    ChatEngine.setListener(engineListenerId) { reason, chatId, messageId ->
+      if (!statusAuthorityEnabled) return@setListener
+      if (chatId != null && chatId.isNotBlank() && engineChatId.isNotBlank() && chatId != engineChatId) {
+        return@setListener
+      }
+      if (
+        reason == "chatMessageInserted" ||
+          reason == "chatMessageEdited" ||
+          reason == "chatMessageDeleted" ||
+          reason == "chatMessageChanged"
+      ) {
+        post { syncNativeEngineMessageMutation(reason, messageId) }
+        return@setListener
+      }
+      if (reason == "chatRowsReloaded") {
+        post { setRows(sourceRowsPayload) }
+        return@setListener
+      }
+      post { refreshStatusDecorations(reason) }
+    }
+  }
+
+  private fun refreshStatusDecorations(reason: String) {
+    if (!statusAuthorityEnabled) return
+    if (rows.isEmpty()) return
+    adapter.refreshStatusDecorations()
+    android.util.Log.d("ChatListView", "refreshStatusDecorations reason=$reason")
+  }
+
+  private fun resolveDisplayStatus(item: NativeRowItem): String? {
+    if (!statusAuthorityEnabled) {
+      return item.status?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+    }
+    return ChatEngine.resolveDisplayStatus(
+      chatId = engineChatId.takeIf { it.isNotBlank() },
+      messageId = item.messageId,
+      rawStatus = item.status,
+      isMe = item.isMe,
+      peerUserId = enginePeerUserId.takeIf { it.isNotBlank() },
+    )
   }
 
   fun setAppearance(rawAppearance: Map<String, Any?>) {
@@ -2586,6 +2743,112 @@ class ChatListView(
     ) {
       overlayHost.removeView(burst)
     }
+  }
+
+  private fun messageIdFromRawRow(row: Map<String, Any?>): String? {
+    val message = row["message"] as? Map<*, *> ?: return null
+    val raw = message["id"] ?: message["messageId"] ?: message["message_id"] ?: return null
+    return raw.toString().trim().takeIf { it.isNotEmpty() }
+  }
+
+  private fun mergeMessageRowPreservingShape(
+    baseRow: Map<String, Any?>,
+    overlayRow: Map<String, Any?>,
+  ): Map<String, Any?> {
+    val baseMessage = baseRow["message"] as? Map<*, *> ?: return overlayRow
+    val overlayMessage = overlayRow["message"] as? Map<*, *> ?: return overlayRow
+    val mergedMessage = linkedMapOf<String, Any?>()
+    baseMessage.forEach { (k, v) -> if (k != null) mergedMessage[k.toString()] = v }
+    overlayMessage.forEach { (k, v) -> if (k != null) mergedMessage[k.toString()] = v }
+    if (baseMessage["bubbleShape"] != null) {
+      mergedMessage["bubbleShape"] = baseMessage["bubbleShape"]
+    }
+    return linkedMapOf<String, Any?>().apply {
+      baseRow.forEach { (k, v) -> this[k] = v }
+      overlayRow.forEach { (k, v) -> this[k] = v }
+      this["message"] = mergedMessage
+    }
+  }
+
+  private fun mergedRowsPayload(baseRows: List<Map<String, Any?>>): List<Map<String, Any?>> {
+    val effectiveBaseRows: List<Map<String, Any?>> = if (statusAuthorityEnabled && engineChatId.isNotBlank()) {
+      val nativeRows = ChatEngine.getChatRows(mapOf("chatId" to engineChatId))
+      if (nativeRows.isNotEmpty() || baseRows.isEmpty()) nativeRows else baseRows
+    } else {
+      baseRows
+    }
+
+    if (nativeEngineRowsById.isEmpty() && nativeDeletedMessageIds.isEmpty()) {
+      return effectiveBaseRows
+    }
+
+    val filteredBase = ArrayList<Map<String, Any?>>(effectiveBaseRows.size)
+    val baseMessageIds = linkedSetOf<String>()
+    for (row in effectiveBaseRows) {
+      val messageId = messageIdFromRawRow(row)
+      if (messageId != null && nativeDeletedMessageIds.contains(messageId)) {
+        continue
+      }
+      if (messageId != null) baseMessageIds.add(messageId)
+      filteredBase.add(row)
+    }
+
+    // Clear stale deletion markers once JS rows have caught up.
+    nativeDeletedMessageIds.removeAll { deletedId -> deletedId !in baseMessageIds && nativeEngineRowsById[deletedId] == null }
+
+    val merged = ArrayList<Map<String, Any?>>(filteredBase.size + nativeEngineRowsById.size)
+    for (row in filteredBase) {
+      val messageId = messageIdFromRawRow(row)
+      if (messageId != null) {
+        val overlay = nativeEngineRowsById[messageId]
+        if (overlay != null) {
+          merged.add(mergeMessageRowPreservingShape(row, overlay))
+          continue
+        }
+      }
+      merged.add(row)
+    }
+
+    val nextOrder = ArrayList<String>(nativeEngineOrder.size)
+    for (messageId in nativeEngineOrder) {
+      val overlay = nativeEngineRowsById[messageId] ?: continue
+      if (baseMessageIds.contains(messageId)) {
+        nextOrder.add(messageId)
+        continue
+      }
+      merged.add(overlay)
+      nextOrder.add(messageId)
+    }
+    nativeEngineOrder.clear()
+    nativeEngineOrder.addAll(nextOrder)
+    return merged
+  }
+
+  private fun syncNativeEngineMessageMutation(reason: String, messageId: String?) {
+    val resolvedMessageId = messageId?.trim().orEmpty()
+    val resolvedChatId = engineChatId.trim()
+    if (resolvedChatId.isEmpty() || resolvedMessageId.isEmpty()) return
+
+    when (reason) {
+      "chatMessageDeleted" -> {
+        nativeEngineRowsById.remove(resolvedMessageId)
+        nativeDeletedMessageIds.add(resolvedMessageId)
+      }
+      "chatMessageInserted", "chatMessageEdited", "chatMessageChanged" -> {
+        val row = ChatEngine.getLiveMessageRow(
+          mapOf("chatId" to resolvedChatId, "messageId" to resolvedMessageId),
+        )
+        if (row != null) {
+          nativeEngineRowsById[resolvedMessageId] = row
+          nativeDeletedMessageIds.remove(resolvedMessageId)
+          if (!nativeEngineOrder.contains(resolvedMessageId)) {
+            nativeEngineOrder.add(resolvedMessageId)
+          }
+        }
+      }
+    }
+
+    setRows(sourceRowsPayload)
   }
 
   private fun parseRows(input: List<Map<String, Any?>>): List<NativeRowItem> {

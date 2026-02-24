@@ -167,6 +167,26 @@ const normalizeIncomingCallPayload = (
     };
 };
 
+const notifyNativeCallEngine = (
+    method:
+        | 'nativeStartOutgoingCall'
+        | 'nativeAcceptIncomingCall'
+        | 'nativeHandleSignal'
+        | 'nativeEndCall',
+    payload: Record<string, unknown>
+) => {
+    try {
+        const { getNativeCallModule } = require('../../native/call/runtime');
+        const nativeCall = getNativeCallModule?.();
+        const fn = nativeCall?.[method];
+        if (typeof fn === 'function') {
+            fn(payload);
+        }
+    } catch {
+        // Native module is optional; ignore failures while JS remains source of truth.
+    }
+};
+
 interface CallState {
     // WebRTC availability
     isWebRTCAvailable: boolean;
@@ -392,6 +412,15 @@ export const useCallStore = create<CallState & CallActions>()(
                     type: signalType,
                     ...payload,
                 });
+
+                notifyNativeCallEngine('nativeHandleSignal', {
+                    direction: 'outbound',
+                    event: 'webrtc-signal',
+                    toUserId: remoteUser.userId,
+                    callId,
+                    type: signalType,
+                    ...payload,
+                });
             };
 
             const bindSignalingCallbacks = (channelOverride?: any) => {
@@ -532,6 +561,29 @@ export const useCallStore = create<CallState & CallActions>()(
                         return false;
                     }
 
+                    if (require('react-native').Platform.OS === 'android') {
+                        const { PermissionsAndroid } = require('react-native');
+                        try {
+                            const perms = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+                            if (type === 'video') {
+                                perms.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+                            }
+                            console.log('[CallStore] Requesting Android permissions:', perms);
+                            const granted = await PermissionsAndroid.requestMultiple(perms);
+                            console.log('[CallStore] Android permissions granted result:', granted);
+                            if (
+                                granted[PermissionsAndroid.PERMISSIONS.RECORD_AUDIO] !== PermissionsAndroid.RESULTS.GRANTED ||
+                                (type === 'video' && granted[PermissionsAndroid.PERMISSIONS.CAMERA] !== PermissionsAndroid.RESULTS.GRANTED)
+                            ) {
+                                console.warn('[CallStore] Permissions denied on Android before startCall');
+                                return false;
+                            }
+                        } catch (e) {
+                            console.warn('[CallStore] Failed to request permissions:', e);
+                            return false;
+                        }
+                    }
+
                     const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                     console.log('[CallStore] startCall state setup', { callId, type, remoteUserId: remoteUser.userId });
                     clearTerminalReset();
@@ -550,19 +602,28 @@ export const useCallStore = create<CallState & CallActions>()(
                         signalingChannel: channel,
                         endReason: null,
                     });
+                    notifyNativeCallEngine('nativeStartOutgoingCall', {
+                        callId,
+                        callType: type,
+                        toUserId: remoteUser.userId,
+                        toUserName: remoteUser.userName,
+                        toUserImage: remoteUser.userImage,
+                    });
 
                     try {
+                        console.log('[CallStore] Pre-fetching TURN credentials and initializing media...', { callId, type });
                         // Pre-fetch TURN credentials (runs in parallel with media init)
                         const [mediaReady] = await Promise.all([
                             WebRTCService.initializeMedia(type === 'video'),
                             WebRTCService.fetchIceServers(),
                         ]);
-                        console.log('[CallStore] startCall media initialization result', { callId, type, mediaReady });
+                        console.log('[CallStore] startCall media initialization result:', { callId, type, mediaReady });
                         if (!mediaReady) {
                             console.warn('[CallStore] Media init returned false');
                             markCallFailed();
                             return false;
                         }
+                        console.log('[CallStore] Binding signaling callbacks...');
                         bindSignalingCallbacks(channel);
                         set({ hasLocalStream: true });
 
@@ -671,6 +732,7 @@ export const useCallStore = create<CallState & CallActions>()(
                                 userImage: mergedIncoming.fromUserImage,
                             },
                             callType: mergedIncoming.callType,
+                            isVideoEnabled: mergedIncoming.callType === 'video',
                         });
                         return;
                     }
@@ -686,11 +748,21 @@ export const useCallStore = create<CallState & CallActions>()(
                         callDirection: 'incoming',
                         callId: normalized.callId,
                         callType: normalized.callType,
+                        isVideoEnabled: normalized.callType === 'video',
                         remoteUser: {
                             userId: normalized.fromUserId,
                             userName: normalized.fromUserName,
                             userImage: normalized.fromUserImage,
                         },
+                    });
+                    notifyNativeCallEngine('nativeHandleSignal', {
+                        direction: 'inbound',
+                        event: 'call-start',
+                        callId: normalized.callId,
+                        callType: normalized.callType,
+                        fromUserId: normalized.fromUserId,
+                        fromUserName: normalized.fromUserName,
+                        fromUserImage: normalized.fromUserImage,
                     });
                     try {
                         console.log('[CallStore][CallDebug] skip incoming ring loop (receiver uses native call sound)', {
@@ -713,6 +785,8 @@ export const useCallStore = create<CallState & CallActions>()(
                         });
                     } catch { }
                     if (!incomingCallData) return false;
+                    const effectiveCallType: CallType =
+                        incomingCallData.callType === 'video' ? 'video' : 'voice';
                     let isWebRTCAvailable = get().isWebRTCAvailable;
                     if (!isWebRTCAvailable) {
                         try {
@@ -730,6 +804,27 @@ export const useCallStore = create<CallState & CallActions>()(
                         return false;
                     }
 
+                    if (require('react-native').Platform.OS === 'android') {
+                        const { PermissionsAndroid } = require('react-native');
+                        try {
+                            const perms = [PermissionsAndroid.PERMISSIONS.RECORD_AUDIO];
+                            if (effectiveCallType === 'video') {
+                                perms.push(PermissionsAndroid.PERMISSIONS.CAMERA);
+                            }
+                            const granted = await PermissionsAndroid.requestMultiple(perms);
+                            if (
+                                granted[PermissionsAndroid.PERMISSIONS.RECORD_AUDIO] !== PermissionsAndroid.RESULTS.GRANTED ||
+                                (effectiveCallType === 'video' && granted[PermissionsAndroid.PERMISSIONS.CAMERA] !== PermissionsAndroid.RESULTS.GRANTED)
+                            ) {
+                                console.warn('[CallStore] Permissions denied on Android before acceptCall');
+                                return false;
+                            }
+                        } catch (e) {
+                            console.warn('[CallStore] Failed to request permissions:', e);
+                            return false;
+                        }
+                    }
+
                     void SoundManager.stopCallRingLoop();
                     clearTerminalReset();
                     set({
@@ -739,11 +834,21 @@ export const useCallStore = create<CallState & CallActions>()(
                         rtcConnectionState: null,
                         isPeerConnected: false,
                         hasRemoteStream: false,
+                        callType: effectiveCallType,
+                        isVideoEnabled: effectiveCallType === 'video',
+                    });
+                    notifyNativeCallEngine('nativeAcceptIncomingCall', {
+                        callId: incomingCallData.callId,
+                        callType: effectiveCallType,
+                        fromUserId: incomingCallData.fromUserId,
+                        fromUserName: incomingCallData.fromUserName,
+                        fromUserImage: incomingCallData.fromUserImage,
                     });
                     try {
                         console.log('[CallStore][CallDebug] acceptCall state->connecting', {
                             callId: incomingCallData.callId,
                             callType: get().callType,
+                            effectiveCallType,
                             connectionPhase: get().connectionPhase,
                         });
                     } catch { }
@@ -751,7 +856,7 @@ export const useCallStore = create<CallState & CallActions>()(
                     try {
                         // Pre-fetch TURN credentials in parallel with media init
                         const [mediaReady] = await Promise.all([
-                            WebRTCService.initializeMedia(callType === 'video'),
+                            WebRTCService.initializeMedia(effectiveCallType === 'video'),
                             WebRTCService.fetchIceServers(),
                         ]);
                         try {
@@ -759,6 +864,7 @@ export const useCallStore = create<CallState & CallActions>()(
                                 callId: incomingCallData.callId,
                                 incomingType: incomingCallData.callType,
                                 stateCallType: get().callType,
+                                effectiveCallType,
                                 mediaReady,
                             });
                         } catch { }
@@ -808,6 +914,12 @@ export const useCallStore = create<CallState & CallActions>()(
                             reason: 'declined',
                         });
                     }
+                    notifyNativeCallEngine('nativeEndCall', {
+                        callId: callId ?? incomingCallData?.callId,
+                        callType: callType ?? incomingCallData?.callType,
+                        direction: 'incoming',
+                        reason: 'declined',
+                    });
 
                     // Add to history as declined
                     if (callId && remoteUser) {
@@ -840,6 +952,11 @@ export const useCallStore = create<CallState & CallActions>()(
                             hasRemoteUser: !!remoteUser,
                         });
                     } catch { }
+                    notifyNativeCallEngine('nativeHandleSignal', {
+                        direction: 'inbound',
+                        event: 'call-accepted',
+                        ...(asRecord(payload) || {}),
+                    });
                     if (acceptedCallId && callId && acceptedCallId !== callId) return;
                     if (callDirection !== 'outgoing' || !remoteUser) return;
                     const channel = resolveSignalingChannel(current.signalingChannel);
@@ -858,12 +975,12 @@ export const useCallStore = create<CallState & CallActions>()(
                         hasRemoteStream: false,
                     });
                     try {
-                            console.log('[CallStore][CallDebug] handleCallAccepted state->connecting', {
-                                callId: get().callId,
-                                callType: get().callType,
-                                connectionPhase: get().connectionPhase,
-                            });
-                        } catch { }
+                        console.log('[CallStore][CallDebug] handleCallAccepted state->connecting', {
+                            callId: get().callId,
+                            callType: get().callType,
+                            connectionPhase: get().connectionPhase,
+                        });
+                    } catch { }
                     void SoundManager.stopCallRingLoop();
                     void SoundManager.playSocketReadyCue();
                     startWatchdog(20000, 'handle-call-accepted-connecting');
@@ -900,6 +1017,11 @@ export const useCallStore = create<CallState & CallActions>()(
                     if (sdpText && sdpText.includes('m=video')) {
                         set({ callType: 'video' });
                     }
+                    notifyNativeCallEngine('nativeHandleSignal', {
+                        direction: 'inbound',
+                        event: 'webrtc-signal',
+                        ...(asRecord(data) || {}),
+                    });
                     try {
                         bindSignalingCallbacks();
                         const forceRelay = shouldForceRelay();
@@ -948,6 +1070,13 @@ export const useCallStore = create<CallState & CallActions>()(
                         rawReason === 'declined'
                             ? (callDirection === 'outgoing' ? 'rejected' : 'declined')
                             : (rawReason || 'ended');
+                    notifyNativeCallEngine('nativeEndCall', {
+                        callId: callId ?? endedCallId,
+                        callType: callType ?? undefined,
+                        direction: callDirection ?? undefined,
+                        reason: terminalReason,
+                        remote: true,
+                    });
                     set({
                         callStatus: 'ended',
                         endReason: terminalReason,
@@ -970,6 +1099,13 @@ export const useCallStore = create<CallState & CallActions>()(
                             reason: 'ended',
                         });
                     }
+                    notifyNativeCallEngine('nativeEndCall', {
+                        callId: callId ?? undefined,
+                        callType: callType ?? undefined,
+                        direction: callDirection ?? undefined,
+                        reason: 'ended',
+                        toUserId: remoteUser?.userId,
+                    });
 
                     // Save to history before resetting
                     if (callId && remoteUser) {

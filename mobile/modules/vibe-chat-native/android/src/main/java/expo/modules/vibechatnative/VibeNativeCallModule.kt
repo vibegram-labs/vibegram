@@ -25,6 +25,54 @@ class VibeNativeCallModule : Module() {
       true
     }
 
+    Function("setNativeEngineConfig") { payload: Map<String, Any?> ->
+      val context = appContext.reactContext ?: appContext.currentActivity?.applicationContext ?: return@Function emptyMap<String, Any?>()
+      NativeCallEngine.configure(context, payload)
+    }
+
+    Function("getNativeEngineConfig") {
+      val context = appContext.reactContext ?: appContext.currentActivity?.applicationContext ?: return@Function emptyMap<String, Any?>()
+      NativeCallEngine.getConfig(context)
+    }
+
+    Function("getNativeEngineStatus") {
+      NativeCallEngine.getStatus()
+    }
+
+    Function("getNativeIceConfig") {
+      val context = appContext.reactContext ?: appContext.currentActivity?.applicationContext ?: return@Function emptyMap<String, Any?>()
+      NativeCallEngine.getIceConfig(context)
+    }
+
+    Function("getNativeSignalingJournal") {
+      NativeCallEngine.getSignalingJournal()
+    }
+
+    Function("clearNativeSignalingJournal") {
+      NativeCallEngine.clearSignalingJournal()
+    }
+
+    Function("nativeRefreshTurnConfig") {
+      val context = appContext.reactContext ?: appContext.currentActivity?.applicationContext ?: return@Function emptyMap<String, Any?>()
+      NativeCallEngine.refreshTurnConfig(context, force = true)
+    }
+
+    Function("nativeStartOutgoingCall") { payload: Map<String, Any?> ->
+      NativeCallEngine.startOutgoing(payload)
+    }
+
+    Function("nativeAcceptIncomingCall") { payload: Map<String, Any?> ->
+      NativeCallEngine.acceptIncoming(payload)
+    }
+
+    Function("nativeHandleSignal") { payload: Map<String, Any?> ->
+      NativeCallEngine.handleSignal(payload)
+    }
+
+    Function("nativeEndCall") { payload: Map<String, Any?> ->
+      NativeCallEngine.endCall(payload)
+    }
+
     Function("drainPendingEvents") {
       VibeNativeCallStore.drainEvents(appContext.reactContext ?: appContext.currentActivity?.applicationContext ?: return@Function emptyList<Map<String, Any?>>())
     }

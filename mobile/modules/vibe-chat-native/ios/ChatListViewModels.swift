@@ -313,7 +313,8 @@ private func optionalWaveformEqual(_ lhs: [CGFloat]?, _ rhs: [CGFloat]?, epsilon
 func chatListRowContentEqual(_ lhs: ChatListRow, _ rhs: ChatListRow) -> Bool {
   return lhs.kind == rhs.kind && lhs.key == rhs.key && lhs.label == rhs.label
     && lhs.text == rhs.text && lhs.timestamp == rhs.timestamp && lhs.isMe == rhs.isMe
-    && lhs.status == rhs.status && lhs.isEdited == rhs.isEdited && lhs.isPinned == rhs.isPinned
+    && lhs.status == rhs.status
+    && lhs.isEdited == rhs.isEdited && lhs.isPinned == rhs.isPinned
     && lhs.messageId == rhs.messageId && lhs.reactionEmoji == rhs.reactionEmoji
     && lhs.messageType == rhs.messageType
     && lhs.mediaUrl == rhs.mediaUrl && lhs.fileName == rhs.fileName

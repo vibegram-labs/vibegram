@@ -5,7 +5,7 @@ import UIKit
 // ---------------------------------------------------------------------------
 
 public enum TelegramSendMorphProfile {
-  static let duration: CFTimeInterval = 0.3
+  static let duration: CFTimeInterval = 0.35
 
   static let horizontalTiming = CAMediaTimingFunction(
     controlPoints: Float(0.23), Float(1.0), Float(0.32), Float(1.0)
@@ -19,17 +19,17 @@ public enum TelegramSendMorphProfile {
   // Fade it in later while the source bubble is still visible to avoid a
   // transparent gap and reduce the "solid color" flash.
   static let bubbleFadeFrom: Float = 0.10
-  static let bubbleFadeDelay: CFTimeInterval = 0.04
-  static let bubbleFadeDuration: CFTimeInterval = 0.15
+  static let bubbleFadeDelay: CFTimeInterval = 0.0
+  static let bubbleFadeDuration: CFTimeInterval = 0.20
 
   static let bubbleContentFadeDelay: CFTimeInterval = 0.0
-  static let bubbleContentFadeDuration: CFTimeInterval = 0.09
+  static let bubbleContentFadeDuration: CFTimeInterval = 0.20
 
   static let sourceBackgroundFadeDelay: CFTimeInterval = 0.0
-  static let sourceBackgroundFadeDuration: CFTimeInterval = 0.22
+  static let sourceBackgroundFadeDuration: CFTimeInterval = 0.15
 
   static let sourceTextFadeDelay: CFTimeInterval = 0.0
-  static let sourceTextFadeDuration: CFTimeInterval = 0.10
+  static let sourceTextFadeDuration: CFTimeInterval = 0.15
 }
 
 final class SendTransitionState: NSObject {
