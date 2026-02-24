@@ -181,8 +181,30 @@ final class ChatEngine {
   private var deletedMessageIdsByChat: [String: Set<String>] = [:]
   private var cachedDecryptPrivateKeyPem: String?
   private var cachedDecryptPrivateKey: SecKey?
+  private var cachedDecryptKeyTimestamp: Date?
+  /// Time-to-live for the cached private key in memory (seconds).
+  /// After this period of inactivity the key is cleared and re-derived from Keychain on next use.
+  private let keyTTL: TimeInterval = 300
 
-  private init() {}
+  private init() {
+    // Clear cached private key when the app moves to the background
+    // to reduce the window of exposure to memory dump attacks.
+    NotificationCenter.default.addObserver(
+      forName: UIApplication.willResignActiveNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] _ in
+      self?.clearCachedKeyOnBackground()
+    }
+  }
+
+  private func clearCachedKeyOnBackground() {
+    queue.async {
+      self.cachedDecryptPrivateKey = nil
+      self.cachedDecryptPrivateKeyPem = nil
+      self.cachedDecryptKeyTimestamp = nil
+    }
+  }
 
   func configure(_ payload: [String: Any]) -> [String: Any] {
     store.setConfig(payload)
@@ -239,6 +261,10 @@ final class ChatEngine {
       deletedMessageIdsByChat.removeAll()
       historyRowsByChat.removeAll()
       historyLoadingChats.removeAll()
+      // Clear cached private key on disconnect to reduce memory exposure.
+      cachedDecryptPrivateKey = nil
+      cachedDecryptPrivateKeyPem = nil
+      cachedDecryptKeyTimestamp = nil
       state["connected"] = false
       state["state"] = "disconnected"
       state["updatedAt"] = now
@@ -813,11 +839,14 @@ final class ChatEngine {
       deletedMessageIdsByChat.removeAll()
       }
       if phoenixClient == nil {
-        var params: [String: String] = [:]
-        if let authToken, !authToken.isEmpty {
-          params["token"] = authToken
-        }
-        let client = ChatPhoenixClient(baseURL: socketURL, params: params, callbacks: callbacks)
+        // Pass auth token separately so it goes in the Authorization header,
+        // not as a URL query parameter (prevents token leakage in logs/proxies).
+        let client = ChatPhoenixClient(
+          baseURL: socketURL,
+          params: [:],
+          authToken: authToken,
+          callbacks: callbacks
+        )
         phoenixClient = client
         nativeSocketSignature = signature
       }
@@ -1134,12 +1163,20 @@ final class ChatEngine {
     else {
       return nil
     }
+    // Check TTL: clear cached key if it has expired to limit in-memory exposure.
+    if let ts = cachedDecryptKeyTimestamp, Date().timeIntervalSince(ts) >= keyTTL {
+      cachedDecryptPrivateKey = nil
+      cachedDecryptPrivateKeyPem = nil
+      cachedDecryptKeyTimestamp = nil
+    }
     if let cached = cachedDecryptPrivateKey, cachedDecryptPrivateKeyPem == pem {
+      cachedDecryptKeyTimestamp = Date()
       return cached
     }
     let key = chatEnginePrivateKey(from: pem)
     cachedDecryptPrivateKeyPem = pem
     cachedDecryptPrivateKey = key
+    cachedDecryptKeyTimestamp = Date()
     return key
   }
 
@@ -1299,15 +1336,17 @@ final class ChatEngine {
     let timestampMs = parseLongValue(payload["timestamp"]) ?? Int64(nowMs())
     let isMe = normalizedUpper(fromId) != nil && normalizedUpper(fromId) == currentUserIdLocked()
 
+    let hadEncryptedContent = encryptedContent != nil && !encryptedContent!.isEmpty
     let decryptedText: String = {
       guard let encryptedContent, !encryptedContent.isEmpty, let privateKey = decryptPrivateKeyLocked() else {
         return ""
       }
       return chatEngineDecryptHybridMessage(privateKey: privateKey, ciphertext: encryptedContent, isMyMessage: isMe)
     }()
+    let decryptionFailed = hadEncryptedContent && decryptedText.isEmpty
 
     let decryptedFields = parseDecryptedMessagePayload(decryptedText)
-    let row = buildLiveRowPayloadLocked(
+    var row = buildLiveRowPayloadLocked(
       chatId: chatId,
       messageId: messageId,
       fromId: fromId,
@@ -1316,6 +1355,12 @@ final class ChatEngine {
       encryptedContent: encryptedContent,
       decryptedFields: decryptedFields
     )
+    // Signal decryption failure to the UI layer so it can show an appropriate indicator
+    // instead of a blank bubble.
+    if decryptionFailed, var message = row["message"] as? [String: Any] {
+      message["decryptionFailed"] = true
+      row["message"] = message
+    }
     upsertLiveMessageRowLocked(chatId: chatId, messageId: messageId, row: row)
     appendJournalLocked(event: "native-message-row-upsert", payload: [
       "chatId": chatId,
@@ -1482,7 +1527,9 @@ final class ChatEngine {
     }
     appendJournalLocked(event: "native-chat-history-load-start", payload: ["chatId": chatId])
 
-    let session = URLSession.shared
+    // Use a pinned URLSession with the same cert pinning + TLS enforcement
+    // as the WebSocket connection, instead of URLSession.shared.
+    let session = ChatPhoenixClient.makePinnedURLSession()
     session.dataTask(with: request) { [weak self] data, response, error in
       guard let self else { return }
       self.queue.async {
@@ -1560,6 +1607,8 @@ final class ChatEngine {
       let isEdited = ((raw["isEdited"] as? Bool) == true)
       let editedAt = raw["editedAt"] ?? raw["edited_at"]
       let isMe = normalizedUpper(fromId) != nil && normalizedUpper(fromId) == currentUserIdLocked()
+      let hadEncryptedContent = encryptedContent != nil && !encryptedContent!.isEmpty
+      var historyDecryptionFailed = false
       let decryptedFields: [String: Any] = {
         if let encryptedContent, !encryptedContent.isEmpty, let privateKey = decryptPrivateKeyLocked() {
           let decrypted = chatEngineDecryptHybridMessage(
@@ -1569,6 +1618,7 @@ final class ChatEngine {
           )
           let parsed = parseDecryptedMessagePayload(decrypted)
           if !parsed.isEmpty { return parsed }
+          historyDecryptionFailed = true
         }
         return plaintextFallback.isEmpty ? [:] : ["text": plaintextFallback]
       }()
@@ -1588,6 +1638,9 @@ final class ChatEngine {
         if let reactionEmoji = normalizedString(raw["reactionEmoji"] ?? raw["reaction_emoji"]) {
           message["reactionEmoji"] = reactionEmoji
         }
+        if hadEncryptedContent && historyDecryptionFailed {
+          message["decryptionFailed"] = true
+        }
         row["message"] = message
       }
       return row
@@ -1598,8 +1651,21 @@ final class ChatEngine {
     store.appendJournal([
       "event": event,
       "timestamp": nowMs(),
-      "payload": makeJSONSafeMap(payload),
+      "payload": sanitizeJournalPayload(makeJSONSafeMap(payload)),
     ])
+  }
+
+  /// Truncate sensitive identifiers in journal payloads to prevent
+  /// leaking full chat/message/user IDs in plaintext storage.
+  private func sanitizeJournalPayload(_ payload: [String: Any]) -> [String: Any] {
+    let sensitiveKeys: Set<String> = ["chatId", "messageId", "userId", "peerUserId", "fromId"]
+    var out = payload
+    for key in sensitiveKeys {
+      if let value = out[key] as? String, value.count > 8 {
+        out[key] = String(value.prefix(8)) + "..."
+      }
+    }
+    return out
   }
 
   private func postChangeLocked(reason: String, userInfo: [String: Any]) {

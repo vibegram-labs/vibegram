@@ -25,16 +25,39 @@ defmodule VibeWeb.UserSocket do
     # Client hasn't logged in yet, refuse cleanly
     :error
   end
-  def connect(%{"token" => token} = _params, socket, _connect_info) do
-    # Verify token
-    case Vibe.Accounts.get_user_by_token(token) do
-      {:ok, user} ->
-        {:ok, assign(socket, :user_id, user.id)}
+  def connect(params, socket, connect_info) do
+    # Priority: Authorization header (mobile clients) > query param (web client).
+    # Mobile clients send the token as a Bearer header to avoid leaking it in
+    # URL query strings (visible in logs, proxies, referer headers, etc.).
+    token =
+      case extract_bearer_from_connect_info(connect_info) do
+        nil -> params["token"]
+        header_token -> header_token
+      end
+
+    case token do
+      nil ->
+        :error
+      t when is_binary(t) and t != "" ->
+        case Vibe.Accounts.get_user_by_token(t) do
+          {:ok, user} ->
+            {:ok, assign(socket, :user_id, user.id)}
+          _ ->
+            :error
+        end
       _ ->
         :error
     end
   end
-  def connect(_params, _socket, _connect_info), do: :error
+
+  # Extract the Bearer token from the x_headers forwarded via connect_info.
+  defp extract_bearer_from_connect_info(%{x_headers: headers}) when is_list(headers) do
+    Enum.find_value(headers, fn
+      {"authorization", "Bearer " <> token} -> String.trim(token)
+      _ -> nil
+    end)
+  end
+  defp extract_bearer_from_connect_info(_), do: nil
 
   # Socket id's are topics that allow you to identify all sockets for a given user:
   #

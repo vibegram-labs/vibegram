@@ -1,7 +1,9 @@
+import CommonCrypto
 import Foundation
+import Security
 
 @available(iOS 13.0, *)
-final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate {
+final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSessionDelegate {
   struct EventFrame {
     let joinRef: String?
     let ref: String?
@@ -17,8 +19,20 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate {
     let onEvent: (_ frame: EventFrame) -> Void
   }
 
+  // MARK: - Certificate Pinning Configuration
+
+  /// SPKI SHA-256 hashes for certificate pinning.
+  /// Add your server's leaf cert + at least one backup/intermediate hash.
+  /// Generate with: openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64
+  /// Set to empty to disable pinning (e.g. during development).
+  static var pinnedSPKIHashes: Set<String> = []
+
+  /// Whether certificate pinning is enforced. Disabled when no hashes are configured.
+  static var pinningEnabled: Bool { !pinnedSPKIHashes.isEmpty }
+
   private let baseURL: URL
   private let params: [String: String]
+  private let authToken: String?
   private let callbacks: Callbacks
   private let queue = DispatchQueue(label: "vibe.chat.phoenix.client")
   private var session: URLSession?
@@ -27,9 +41,10 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate {
   private var nextRefValue: Int = 1
   private var isClosing = false
 
-  init(baseURL: URL, params: [String: String], callbacks: Callbacks) {
+  init(baseURL: URL, params: [String: String], authToken: String? = nil, callbacks: Callbacks) {
     self.baseURL = baseURL
     self.params = params
+    self.authToken = authToken
     self.callbacks = callbacks
     super.init()
     queue.setSpecific(key: queueKey, value: 1)
@@ -45,8 +60,16 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate {
       self.isClosing = false
       let config = URLSessionConfiguration.default
       config.timeoutIntervalForRequest = 30
+      config.tlsMinimumSupportedProtocolVersion = .TLSv12
       let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
-      let task = session.webSocketTask(with: url)
+
+      // Use a URLRequest so we can attach the Authorization header
+      // instead of leaking the token in the URL query string.
+      var request = URLRequest(url: url)
+      if let token = self.authToken, !token.isEmpty {
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+      }
+      let task = session.webSocketTask(with: request)
       self.session = session
       self.task = task
       task.resume()
@@ -246,5 +269,110 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate {
       if self.isClosing { return }
       self.callbacks.onClose(Int(closeCode.rawValue), reasonText)
     }
+  }
+
+  // MARK: - Certificate Pinning (URLSessionDelegate)
+
+  func urlSession(
+    _ session: URLSession,
+    didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+          let serverTrust = challenge.protectionSpace.serverTrust
+    else {
+      completionHandler(.cancelAuthenticationChallenge, nil)
+      return
+    }
+
+    // If pinning is not configured, fall through to default validation.
+    guard Self.pinningEnabled else {
+      completionHandler(.performDefaultHandling, nil)
+      return
+    }
+
+    // Evaluate the server trust first with standard validation.
+    var error: CFError?
+    guard SecTrustEvaluateWithError(serverTrust, &error) else {
+      completionHandler(.cancelAuthenticationChallenge, nil)
+      return
+    }
+
+    // Check each certificate in the chain for a matching SPKI hash.
+    let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] ?? []
+    for cert in certChain {
+      if let spkiHash = Self.sha256SPKIHash(of: cert),
+         Self.pinnedSPKIHashes.contains(spkiHash) {
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        return
+      }
+    }
+
+    // No pin matched — reject.
+    completionHandler(.cancelAuthenticationChallenge, nil)
+  }
+
+  /// Compute the SHA-256 hash of the certificate's Subject Public Key Info (SPKI).
+  static func sha256SPKIHash(of certificate: SecCertificate) -> String? {
+    guard let publicKey = SecCertificateCopyKey(certificate) else { return nil }
+    var error: Unmanaged<CFError>?
+    guard let publicKeyData = SecKeyCopyExternalRepresentation(publicKey, &error) as Data? else {
+      _ = error?.takeRetainedValue()
+      return nil
+    }
+    var hash = [UInt8](repeating: 0, count: Int(CC_SHA256_DIGEST_LENGTH))
+    publicKeyData.withUnsafeBytes { buffer in
+      _ = CC_SHA256(buffer.baseAddress, CC_LONG(buffer.count), &hash)
+    }
+    return Data(hash).base64EncodedString()
+  }
+
+  /// Shared pinned URLSession for HTTP requests (e.g. chat history).
+  /// Uses the same pinning and TLS configuration as the WebSocket session.
+  static func makePinnedURLSession(delegate: URLSessionDelegate? = nil) -> URLSession {
+    let config = URLSessionConfiguration.default
+    config.timeoutIntervalForRequest = 30
+    config.tlsMinimumSupportedProtocolVersion = .TLSv12
+    let pinnedDelegate = delegate ?? PinnedSessionDelegate()
+    return URLSession(configuration: config, delegate: pinnedDelegate, delegateQueue: nil)
+  }
+}
+
+/// Standalone delegate for HTTP requests that need cert pinning (e.g. history fetch).
+@available(iOS 13.0, *)
+final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
+  func urlSession(
+    _ session: URLSession,
+    didReceive challenge: URLAuthenticationChallenge,
+    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
+  ) {
+    guard challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+          let serverTrust = challenge.protectionSpace.serverTrust
+    else {
+      completionHandler(.cancelAuthenticationChallenge, nil)
+      return
+    }
+
+    guard ChatPhoenixClient.pinningEnabled else {
+      completionHandler(.performDefaultHandling, nil)
+      return
+    }
+
+    var error: CFError?
+    guard SecTrustEvaluateWithError(serverTrust, &error) else {
+      completionHandler(.cancelAuthenticationChallenge, nil)
+      return
+    }
+
+    let certChain = SecTrustCopyCertificateChain(serverTrust) as? [SecCertificate] ?? []
+    for cert in certChain {
+      if let spkiHash = ChatPhoenixClient.sha256SPKIHash(of: cert),
+         ChatPhoenixClient.pinnedSPKIHashes.contains(spkiHash) {
+        completionHandler(.useCredential, URLCredential(trust: serverTrust))
+        return
+      }
+    }
+
+    completionHandler(.cancelAuthenticationChallenge, nil)
   }
 }

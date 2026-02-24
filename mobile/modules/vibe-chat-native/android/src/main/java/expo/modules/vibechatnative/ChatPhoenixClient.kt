@@ -2,10 +2,13 @@ package expo.modules.vibechatnative
 
 import android.os.Handler
 import android.os.Looper
+import okhttp3.CertificatePinner
+import okhttp3.ConnectionSpec
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
+import okhttp3.TlsVersion
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import org.json.JSONArray
@@ -15,6 +18,7 @@ import java.util.concurrent.atomic.AtomicLong
 internal class ChatPhoenixClient(
   private val socketUrl: String,
   private val params: Map<String, String>,
+  private val authToken: String? = null,
   private val callbacks: Callbacks,
 ) {
   interface Callbacks {
@@ -30,7 +34,33 @@ internal class ChatPhoenixClient(
     )
   }
 
-  private val okHttp = OkHttpClient()
+  companion object {
+    /// SPKI SHA-256 hashes for certificate pinning.
+    /// Add your server's leaf cert + at least one backup/intermediate hash.
+    /// Generate with: openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64
+    /// Set to empty to disable pinning (e.g. during development).
+    var pinnedSPKIHashes: Map<String, List<String>> = emptyMap()
+
+    /// Build a pinned OkHttpClient for reuse (e.g. chat history HTTP requests).
+    fun buildPinnedHttpClient(): OkHttpClient {
+      val builder = OkHttpClient.Builder()
+        .connectionSpecs(listOf(
+          ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+            .tlsVersions(TlsVersion.TLS_1_2, TlsVersion.TLS_1_3)
+            .build(),
+        ))
+      if (pinnedSPKIHashes.isNotEmpty()) {
+        val pinnerBuilder = CertificatePinner.Builder()
+        pinnedSPKIHashes.forEach { (host, hashes) ->
+          hashes.forEach { hash -> pinnerBuilder.add(host, "sha256/$hash") }
+        }
+        builder.certificatePinner(pinnerBuilder.build())
+      }
+      return builder.build()
+    }
+  }
+
+  private val okHttp = buildPinnedHttpClient()
   private val refCounter = AtomicLong(1L)
   private val mainHandler = Handler(Looper.getMainLooper())
   @Volatile private var webSocket: WebSocket? = null
@@ -44,7 +74,12 @@ internal class ChatPhoenixClient(
     }
     disconnect()
     isClosing = false
-    val request = Request.Builder().url(httpUrl).build()
+    // Send auth token as Authorization header instead of URL query parameter.
+    val requestBuilder = Request.Builder().url(httpUrl)
+    if (!authToken.isNullOrBlank()) {
+      requestBuilder.header("Authorization", "Bearer $authToken")
+    }
+    val request = requestBuilder.build()
     webSocket = okHttp.newWebSocket(
       request,
       object : WebSocketListener() {

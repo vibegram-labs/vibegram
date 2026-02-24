@@ -149,7 +149,13 @@ internal object ChatEngine {
   private val deletedMessageIdsByChat = linkedMapOf<String, MutableSet<String>>()
   private var cachedDecryptPrivateKeyPem: String? = null
   private var cachedDecryptPrivateKey: PrivateKey? = null
-  private val historyHttpClient by lazy { OkHttpClient() }
+  private var cachedDecryptKeyTimestampMs: Long = 0L
+  /// Time-to-live for the cached private key in memory (milliseconds).
+  /// After this period of inactivity the key is cleared and re-derived from secure storage.
+  private val keyTTLMs: Long = 300_000L
+  // Use the same pinned OkHttpClient with cert pinning + TLS enforcement
+  // for history HTTP requests as the WebSocket connection uses.
+  private val historyHttpClient by lazy { ChatPhoenixClient.buildPinnedHttpClient() }
 
   fun configure(context: Context, payload: Map<String, Any?>): Map<String, Any?> {
     appContextRef = context.applicationContext
@@ -230,11 +236,12 @@ internal object ChatEngine {
         deletedMessageIdsByChat.clear()
       }
       if (phoenixClient == null) {
-        val params = linkedMapOf<String, String>()
-        if (!authToken.isNullOrBlank()) params["token"] = authToken
+        // Pass auth token separately so it goes in the Authorization header,
+        // not as a URL query parameter (prevents token leakage in logs/proxies).
         phoenixClient = ChatPhoenixClient(
           socketUrl = socketUrl,
-          params = params,
+          params = emptyMap(),
+          authToken = authToken,
           callbacks = object : ChatPhoenixClient.Callbacks {
             override fun onOpen() = onNativeSocketOpen(userTopic)
             override fun onClosed(code: Int, reason: String?) = onNativeSocketClosed(code, reason)
@@ -283,6 +290,10 @@ internal object ChatEngine {
       historyLoadingChats.clear()
       liveMessageRowsByChat.clear()
       deletedMessageIdsByChat.clear()
+      // Clear cached private key on disconnect to reduce memory exposure.
+      cachedDecryptPrivateKey = null
+      cachedDecryptPrivateKeyPem = null
+      cachedDecryptKeyTimestampMs = 0L
       state["connected"] = false
       state["state"] = "disconnected"
       state["updatedAt"] = System.currentTimeMillis()
@@ -709,17 +720,27 @@ internal object ChatEngine {
 
   private fun decryptPrivateKeyLocked(): PrivateKey? {
     val pem = normalized(getConfigValueLocked("privateKeyPem") ?: getConfigValueLocked("privateKey")) ?: return null
+    // Check TTL: clear cached key if it has expired to limit in-memory exposure.
+    val now = System.currentTimeMillis()
+    if (cachedDecryptKeyTimestampMs > 0 && (now - cachedDecryptKeyTimestampMs) >= keyTTLMs) {
+      cachedDecryptPrivateKey = null
+      cachedDecryptPrivateKeyPem = null
+      cachedDecryptKeyTimestampMs = 0L
+    }
     if (cachedDecryptPrivateKey != null && cachedDecryptPrivateKeyPem == pem) {
+      cachedDecryptKeyTimestampMs = now
       return cachedDecryptPrivateKey
     }
     return try {
       val key = chatEngineLoadPrivateKeyFromPem(pem)
       cachedDecryptPrivateKeyPem = pem
       cachedDecryptPrivateKey = key
+      cachedDecryptKeyTimestampMs = now
       key
     } catch (_: Throwable) {
       cachedDecryptPrivateKeyPem = pem
       cachedDecryptPrivateKey = null
+      cachedDecryptKeyTimestampMs = 0L
       null
     }
   }
@@ -862,11 +883,13 @@ internal object ChatEngine {
     val timestampMs = parseLongValue(payload["timestamp"]) ?: System.currentTimeMillis()
     val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
 
-    val decryptedText = if (!encryptedContent.isNullOrBlank()) {
-      decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent, isMe) }.orEmpty()
+    val hadEncryptedContent = !encryptedContent.isNullOrBlank()
+    val decryptedText = if (hadEncryptedContent) {
+      decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
     } else {
       ""
     }
+    val decryptionFailed = hadEncryptedContent && decryptedText.isEmpty()
     val decryptedFields = parseDecryptedMessagePayload(decryptedText)
     val row = buildLiveRowPayloadLocked(
       chatId = chatId,
@@ -877,6 +900,13 @@ internal object ChatEngine {
       encryptedContent = encryptedContent,
       decryptedFields = decryptedFields,
     )
+    // Signal decryption failure to the UI layer so it can show an appropriate indicator
+    // instead of a blank bubble.
+    if (decryptionFailed) {
+      val message = (row["message"] as? MutableMap<String, Any?>) ?: mutableMapOf()
+      message["decryptionFailed"] = true
+      (row as? MutableMap<String, Any?>)?.put("message", message)
+    }
     upsertLiveMessageRowLocked(chatId, messageId, row)
     appendJournalLocked("native-message-row-upsert", mapOf("chatId" to chatId, "messageId" to messageId, "type" to type))
     state["updatedAt"] = System.currentTimeMillis()
@@ -1004,11 +1034,21 @@ internal object ChatEngine {
       val editedAt = raw.opt("editedAt") ?: raw.opt("edited_at")
       val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
 
-      val decryptedFields = if (!encryptedContent.isNullOrBlank()) {
+      val hadEncryptedContent = !encryptedContent.isNullOrBlank()
+      var historyDecryptionFailed = false
+      val decryptedFields = if (hadEncryptedContent) {
         val privateKey = decryptPrivateKeyLocked()
-        val decrypted = privateKey?.let { chatEngineDecryptHybridMessage(it, encryptedContent, isMe) }.orEmpty()
+        val decrypted = privateKey?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
         val parsed = parseDecryptedMessagePayload(decrypted)
-        if (parsed.isEmpty() && plaintextFallback.isNotBlank()) mapOf("text" to plaintextFallback) else parsed
+        if (parsed.isEmpty() && plaintextFallback.isNotBlank()) {
+          historyDecryptionFailed = true
+          mapOf("text" to plaintextFallback)
+        } else if (parsed.isEmpty()) {
+          historyDecryptionFailed = true
+          emptyMap()
+        } else {
+          parsed
+        }
       } else if (plaintextFallback.isNotBlank()) {
         mapOf("text" to plaintextFallback)
       } else {
@@ -1030,6 +1070,9 @@ internal object ChatEngine {
       if (!serverStatus.isNullOrBlank()) message["status"] = serverStatus
       val reactionEmoji = normalized(raw.opt("reactionEmoji") ?: raw.opt("reaction_emoji"))
       if (!reactionEmoji.isNullOrBlank()) message["reactionEmoji"] = reactionEmoji
+      if (hadEncryptedContent && historyDecryptionFailed) {
+        message["decryptionFailed"] = true
+      }
       row["message"] = message
       rows.add(row)
     }
@@ -1371,9 +1414,23 @@ internal object ChatEngine {
     val entry = linkedMapOf<String, Any?>(
       "event" to event,
       "timestamp" to System.currentTimeMillis(),
-      "payload" to payload,
+      "payload" to sanitizeJournalPayload(payload),
     )
     ChatEngineStore.appendJournal(ctx, entry)
+  }
+
+  /// Truncate sensitive identifiers in journal payloads to prevent
+  /// leaking full chat/message/user IDs in plaintext storage.
+  private fun sanitizeJournalPayload(payload: Map<String, Any?>): Map<String, Any?> {
+    val sensitiveKeys = setOf("chatId", "messageId", "userId", "peerUserId", "fromId")
+    val out = payload.toMutableMap()
+    for (key in sensitiveKeys) {
+      val value = out[key] as? String
+      if (value != null && value.length > 8) {
+        out[key] = value.take(8) + "..."
+      }
+    }
+    return out
   }
 
   private fun emitChangeLocked(reason: String, chatId: String?, messageId: String?) {

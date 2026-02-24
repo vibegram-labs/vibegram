@@ -13,8 +13,11 @@ final class ChatEngineStore {
 
   func setConfig(_ payload: [String: Any]) {
     queue.async {
-      guard JSONSerialization.isValidJSONObject(payload),
-            let data = try? JSONSerialization.data(withJSONObject: payload)
+      // Migrate sensitive values (private keys, auth tokens) to Keychain,
+      // replacing them with sentinels in the plaintext config blob.
+      let sanitized = SecureKeyStore.shared.migrateAndSanitize(payload)
+      guard JSONSerialization.isValidJSONObject(sanitized),
+            let data = try? JSONSerialization.data(withJSONObject: sanitized)
       else { return }
       self.defaults.set(data, forKey: self.configKey)
     }
@@ -25,7 +28,8 @@ final class ChatEngineStore {
       guard let data = defaults.data(forKey: configKey),
             let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
       else { return [:] }
-      return obj
+      // Reassemble: replace sentinels with actual secrets from Keychain.
+      return SecureKeyStore.shared.reassemble(obj)
     }
   }
 

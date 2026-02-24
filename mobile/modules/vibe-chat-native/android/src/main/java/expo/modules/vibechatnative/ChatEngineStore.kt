@@ -14,13 +14,18 @@ internal object ChatEngineStore {
     context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
   fun setConfig(context: Context, payload: Map<String, Any?>) {
-    prefs(context).edit().putString(KEY_CONFIG, JSONObject(payload).toString()).apply()
+    // Migrate sensitive values (private keys, auth tokens) to EncryptedSharedPreferences,
+    // replacing them with sentinels in the plaintext config blob.
+    val sanitized = SecureKeyStore.migrateAndSanitize(context, payload)
+    prefs(context).edit().putString(KEY_CONFIG, JSONObject(sanitized).toString()).apply()
   }
 
   fun getConfig(context: Context): Map<String, Any?> {
     val raw = prefs(context).getString(KEY_CONFIG, null) ?: return emptyMap()
     return try {
-      jsonObjectToMap(JSONObject(raw))
+      val config = jsonObjectToMap(JSONObject(raw))
+      // Reassemble: replace sentinels with actual secrets from encrypted storage.
+      SecureKeyStore.reassemble(context, config)
     } catch (_: Throwable) {
       emptyMap()
     }

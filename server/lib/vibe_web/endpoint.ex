@@ -16,7 +16,12 @@ defmodule VibeWeb.Endpoint do
   ]
 
   socket "/socket", VibeWeb.UserSocket,
-    websocket: [check_origin: Application.get_env(:vibe, VibeWeb.Endpoint)[:check_origin] || false],
+    websocket: [
+      check_origin: Application.get_env(:vibe, VibeWeb.Endpoint)[:check_origin] || false,
+      # Forward HTTP headers to UserSocket.connect/3 so the mobile clients'
+      # Authorization: Bearer token is available during WebSocket upgrade.
+      connect_info: [:x_headers]
+    ],
     longpoll: false
 
   socket "/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]]
