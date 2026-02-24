@@ -21,6 +21,32 @@ class VibeIncomingCallActionReceiver : BroadcastReceiver() {
     VibeNativeCallStore.enqueueAction(context, action, payload)
 
     if (action == VibeIncomingCallNotification.ACTION_ANSWER) {
+      val callType = (payload["callType"] ?: payload["call_type"] ?: "voice").lowercase().let {
+        if (it == "video") "video" else "voice"
+      }
+      val callerName = payload["fromUserName"] ?: payload["from_user_name"] ?: payload["fromUserId"] ?: "Incoming call"
+      val callerImage = payload["fromUserImage"] ?: payload["from_user_image"]
+      try {
+        val uiState = linkedMapOf<String, Any?>(
+          "visible" to true,
+          "mode" to "active",
+          "callStatus" to "connecting",
+          "callId" to (payload["callId"] ?: payload["call_id"]),
+          "callType" to callType,
+          "remoteUserName" to callerName,
+          "remoteUserImage" to callerImage,
+          "isMuted" to false,
+          "isSpeakerOn" to false,
+          "isVideoEnabled" to (callType == "video"),
+          "canFlipCamera" to (callType == "video"),
+          "callDuration" to 0L,
+        )
+        Log.d("VibeIncomingCall", "Answer action presenting native call UI callId=${uiState["callId"]} callType=$callType")
+        VibeNativeCallUiBridge.setState(uiState)
+        VibeNativeCallUiBridge.present(context)
+      } catch (t: Throwable) {
+        Log.w("VibeIncomingCall", "Failed to present native call UI on answer ${t.message}", t)
+      }
       try {
         val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
         launchIntent?.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
@@ -44,4 +70,3 @@ class VibeIncomingCallActionReceiver : BroadcastReceiver() {
     }
   }
 }
-

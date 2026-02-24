@@ -132,7 +132,7 @@ final class VibeNativeCallScreenController: UIViewController {
   private let wallpaperBottomScrimLayer = CAGradientLayer()
 
   private let rootStack = UIStackView()
-  private let chipLabel = UILabel()
+  private let chipLabel = NativeCallInsetLabel()
   private let avatarView = UIView()
   private let avatarImageView = UIImageView()
   private let initialsLabel = UILabel()
@@ -200,10 +200,13 @@ final class VibeNativeCallScreenController: UIViewController {
     view.backgroundColor = palette.background
     applyWallpaperAppearance(from: state, palette: palette, preferWallpaper: callType == "voice")
 
-    chipLabel.text =
-      mode == "incoming"
-      ? (callType == "video" ? "Incoming video call" : "Incoming voice call")
-      : (callType == "video" ? "Vibe Video" : "Vibe Audio")
+    if mode == "incoming" {
+      chipLabel.text = "Incoming call"
+    } else if mode == "active" {
+      chipLabel.text = status == "active" ? "Encrypted" : "Connecting"
+    } else {
+      chipLabel.text = nil
+    }
     chipLabel.textColor = palette.textSubtle
     chipLabel.backgroundColor = palette.surfaceSoft
     chipLabel.layer.borderColor = palette.glassBorder.cgColor
@@ -243,41 +246,41 @@ final class VibeNativeCallScreenController: UIViewController {
       "mute",
       title: "Mic",
       symbol: isMuted ? "mic.slash.fill" : "mic.fill",
-      fill: isMuted ? palette.controlActiveBg : palette.controlBg,
+      fill: isMuted ? palette.controlActiveBg : .clear,
       iconTint: isMuted ? palette.background : palette.text,
       textTint: isMuted ? palette.background : palette.text,
-      border: palette.glassBorder,
+      border: .clear,
       showTitle: true
     )
     styleActionChip(
       "video",
       title: "Cam",
       symbol: isVideo ? "video.fill" : "video.slash.fill",
-      fill: isVideo ? palette.controlActiveBg : palette.controlBg,
+      fill: isVideo ? palette.controlActiveBg : .clear,
       iconTint: isVideo ? palette.background : palette.text,
       textTint: isVideo ? palette.background : palette.text,
-      border: palette.glassBorder,
+      border: .clear,
       showTitle: true
     )
     styleActionChip(
       "speaker",
-      title: "Audio",
-      symbol: "speaker.wave.3.fill",
-      fill: isSpeaker ? palette.controlActiveBg : palette.controlBg,
+      title: "",
+      symbol: "speaker.wave.2.fill",
+      fill: isSpeaker ? palette.controlActiveBg : .clear,
       iconTint: isSpeaker ? palette.background : palette.text,
       textTint: isSpeaker ? palette.background : palette.text,
-      border: palette.glassBorder,
+      border: .clear,
       showTitle: false
     )
     styleActionChip(
       "flip",
       title: "Flip",
       symbol: "arrow.triangle.2.circlepath.camera.fill",
-      fill: palette.controlBg,
+      fill: .clear,
       iconTint: palette.text,
       textTint: palette.text,
-      border: palette.glassBorder,
-      showTitle: false
+      border: .clear,
+      showTitle: true
     )
     styleActionChip(
       "end",
@@ -292,8 +295,13 @@ final class VibeNativeCallScreenController: UIViewController {
 
     let canShowFlipChip = canFlipCamera && view.bounds.width >= 460
     actionChips["flip"]?.isHidden = !canShowFlipChip
-    activeBar.backgroundColor = palette.controlBarBg
-    activeBar.layer.borderColor = palette.glassBorder.cgColor
+    activeBar.backgroundColor =
+      palette.isDark
+      ? UIColor.white.withAlphaComponent(0.12) : UIColor.black.withAlphaComponent(0.06)
+    activeBar.layer.borderColor =
+      palette.isDark
+      ? UIColor.white.withAlphaComponent(0.08).cgColor
+      : UIColor.black.withAlphaComponent(0.06).cgColor
 
     updateStatusPresentation(animated: true)
     setNeedsStatusBarAppearanceUpdate()
@@ -335,11 +343,13 @@ final class VibeNativeCallScreenController: UIViewController {
       rootStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
       rootStack.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
       rootStack.bottomAnchor.constraint(
-        equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16)
+        equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
     ])
 
     chipLabel.font = .systemFont(ofSize: 14, weight: .semibold)
     chipLabel.textAlignment = .center
+    chipLabel.numberOfLines = 1
+    chipLabel.lineBreakMode = .byTruncatingTail
     chipLabel.layer.cornerRadius = 18
     chipLabel.layer.cornerCurve = .continuous
     chipLabel.layer.masksToBounds = true
@@ -347,12 +357,14 @@ final class VibeNativeCallScreenController: UIViewController {
     chipLabel.translatesAutoresizingMaskIntoConstraints = false
 
     let chipWrap = UIView()
+    chipWrap.setContentHuggingPriority(.required, for: .horizontal)
+    chipWrap.setContentCompressionResistancePriority(.required, for: .horizontal)
     chipWrap.addSubview(chipLabel)
     NSLayoutConstraint.activate([
       chipLabel.leadingAnchor.constraint(equalTo: chipWrap.leadingAnchor),
       chipLabel.trailingAnchor.constraint(equalTo: chipWrap.trailingAnchor),
       chipLabel.topAnchor.constraint(equalTo: chipWrap.topAnchor),
-      chipLabel.bottomAnchor.constraint(equalTo: chipWrap.bottomAnchor)
+      chipLabel.bottomAnchor.constraint(equalTo: chipWrap.bottomAnchor),
     ])
     rootStack.addArrangedSubview(chipWrap)
 
@@ -363,7 +375,7 @@ final class VibeNativeCallScreenController: UIViewController {
     avatarView.layer.borderWidth = 1
     NSLayoutConstraint.activate([
       avatarView.widthAnchor.constraint(equalToConstant: 156),
-      avatarView.heightAnchor.constraint(equalToConstant: 156)
+      avatarView.heightAnchor.constraint(equalToConstant: 156),
     ])
 
     avatarImageView.translatesAutoresizingMaskIntoConstraints = false
@@ -375,7 +387,7 @@ final class VibeNativeCallScreenController: UIViewController {
       avatarImageView.leadingAnchor.constraint(equalTo: avatarView.leadingAnchor),
       avatarImageView.trailingAnchor.constraint(equalTo: avatarView.trailingAnchor),
       avatarImageView.topAnchor.constraint(equalTo: avatarView.topAnchor),
-      avatarImageView.bottomAnchor.constraint(equalTo: avatarView.bottomAnchor)
+      avatarImageView.bottomAnchor.constraint(equalTo: avatarView.bottomAnchor),
     ])
 
     initialsLabel.translatesAutoresizingMaskIntoConstraints = false
@@ -384,7 +396,7 @@ final class VibeNativeCallScreenController: UIViewController {
     avatarView.addSubview(initialsLabel)
     NSLayoutConstraint.activate([
       initialsLabel.centerXAnchor.constraint(equalTo: avatarView.centerXAnchor),
-      initialsLabel.centerYAnchor.constraint(equalTo: avatarView.centerYAnchor)
+      initialsLabel.centerYAnchor.constraint(equalTo: avatarView.centerYAnchor),
     ])
 
     let avatarSpacer = UIView()
@@ -405,7 +417,7 @@ final class VibeNativeCallScreenController: UIViewController {
     connectionDotHost.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       connectionDotHost.widthAnchor.constraint(equalToConstant: 14),
-      connectionDotHost.heightAnchor.constraint(equalToConstant: 14)
+      connectionDotHost.heightAnchor.constraint(equalToConstant: 14),
     ])
 
     connectionDotGlow.translatesAutoresizingMaskIntoConstraints = false
@@ -416,7 +428,7 @@ final class VibeNativeCallScreenController: UIViewController {
       connectionDotGlow.centerXAnchor.constraint(equalTo: connectionDotHost.centerXAnchor),
       connectionDotGlow.centerYAnchor.constraint(equalTo: connectionDotHost.centerYAnchor),
       connectionDotGlow.widthAnchor.constraint(equalToConstant: 14),
-      connectionDotGlow.heightAnchor.constraint(equalToConstant: 14)
+      connectionDotGlow.heightAnchor.constraint(equalToConstant: 14),
     ])
 
     connectionDotView.translatesAutoresizingMaskIntoConstraints = false
@@ -426,7 +438,7 @@ final class VibeNativeCallScreenController: UIViewController {
       connectionDotView.centerXAnchor.constraint(equalTo: connectionDotHost.centerXAnchor),
       connectionDotView.centerYAnchor.constraint(equalTo: connectionDotHost.centerYAnchor),
       connectionDotView.widthAnchor.constraint(equalToConstant: 8),
-      connectionDotView.heightAnchor.constraint(equalToConstant: 8)
+      connectionDotView.heightAnchor.constraint(equalToConstant: 8),
     ])
 
     statusLabel.font = .monospacedDigitSystemFont(ofSize: 15, weight: .semibold)
@@ -461,14 +473,16 @@ final class VibeNativeCallScreenController: UIViewController {
     rootStack.addArrangedSubview(incomingRow)
 
     activeBar.translatesAutoresizingMaskIntoConstraints = false
-    activeBar.layer.cornerRadius = 30
+    activeBar.layer.cornerRadius = 32
     activeBar.layer.cornerCurve = .continuous
     activeBar.layer.masksToBounds = true
-    activeBar.layer.borderWidth = 1
+    activeBar.layer.borderWidth = 0.7
 
     activeBarEffect.frame = activeBar.bounds
     activeBarEffect.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     activeBarEffect.effect = makeGlassEffect()
+    activeBarEffect.alpha = 1.0
+    activeBarEffect.isUserInteractionEnabled = false
     activeBar.addSubview(activeBarEffect)
 
     activeRow.axis = .horizontal
@@ -483,16 +497,16 @@ final class VibeNativeCallScreenController: UIViewController {
     activeLeadingRow.setContentHuggingPriority(.required, for: .horizontal)
     activeLeadingRow.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "mute", title: "Mic", width: 60))
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "video", title: "Cam", width: 60))
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "speaker", title: "Audio", width: 50))
-    activeLeadingRow.addArrangedSubview(makeActionChip(key: "flip", title: "Flip", width: 50))
+    activeLeadingRow.addArrangedSubview(makeActionChip(key: "mute", title: "Mic", width: 66))
+    activeLeadingRow.addArrangedSubview(makeActionChip(key: "video", title: "Cam", width: 68))
+    activeLeadingRow.addArrangedSubview(makeActionChip(key: "speaker", title: "", width: 52))
+    activeLeadingRow.addArrangedSubview(makeActionChip(key: "flip", title: "Flip", width: 66))
 
     let activeSpacer = UIView()
     activeSpacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
     activeSpacer.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-    let endChip = makeActionChip(key: "end", title: "End", width: 96)
+    let endChip = makeActionChip(key: "end", title: "End", width: 84)
 
     activeRow.addArrangedSubview(activeLeadingRow)
     activeRow.addArrangedSubview(activeSpacer)
@@ -501,17 +515,17 @@ final class VibeNativeCallScreenController: UIViewController {
     rootStack.addArrangedSubview(activeBar)
 
     NSLayoutConstraint.activate([
-      activeRow.leadingAnchor.constraint(equalTo: activeBar.leadingAnchor, constant: 12),
-      activeRow.trailingAnchor.constraint(equalTo: activeBar.trailingAnchor, constant: -12),
-      activeRow.topAnchor.constraint(equalTo: activeBar.topAnchor, constant: 8),
-      activeRow.bottomAnchor.constraint(equalTo: activeBar.bottomAnchor, constant: -8),
-      activeBar.heightAnchor.constraint(equalToConstant: 72),
-      activeBar.widthAnchor.constraint(equalTo: rootStack.widthAnchor)
+      activeRow.leadingAnchor.constraint(equalTo: activeBar.leadingAnchor, constant: 10),
+      activeRow.trailingAnchor.constraint(equalTo: activeBar.trailingAnchor, constant: -10),
+      activeRow.topAnchor.constraint(equalTo: activeBar.topAnchor, constant: 5),
+      activeRow.bottomAnchor.constraint(equalTo: activeBar.bottomAnchor, constant: -5),
+      activeBar.heightAnchor.constraint(equalToConstant: 64),
+      activeBar.widthAnchor.constraint(equalTo: rootStack.widthAnchor),
     ])
   }
 
   private func makeActionChip(key: String, title: String, width: CGFloat) -> NativeCallActionChip {
-    let chip = NativeCallActionChip(title: title, width: width, height: 52)
+    let chip = NativeCallActionChip(title: title, width: width, height: 54)
     chip.accessibilityIdentifier = key
     chip.addTarget(self, action: #selector(onButtonTap(_:)), for: .touchUpInside)
     actionChips[key] = chip
@@ -630,7 +644,8 @@ final class VibeNativeCallScreenController: UIViewController {
     let status = (state["callStatus"] as? String) ?? "active"
     switch status {
     case "connecting":
-      return .init(kindKey: "connecting", baseText: "Connecting", animatesDots: true, signal: .warning)
+      return .init(
+        kindKey: "connecting", baseText: "Connecting", animatesDots: true, signal: .warning)
     case "reconnecting":
       return .init(
         kindKey: "reconnecting",
@@ -641,7 +656,8 @@ final class VibeNativeCallScreenController: UIViewController {
     case "ringing":
       return .init(kindKey: "ringing", baseText: "Ringing", animatesDots: true, signal: .warning)
     case "failed":
-      return .init(kindKey: "failed", baseText: "Connection lost", animatesDots: false, signal: .poor)
+      return .init(
+        kindKey: "failed", baseText: "Connection lost", animatesDots: false, signal: .poor)
     case "active":
       return .init(kindKey: "active", baseText: "", animatesDots: false, signal: .good)
     default:
@@ -654,7 +670,9 @@ final class VibeNativeCallScreenController: UIViewController {
     }
   }
 
-  private func renderedStatusText(for presentation: CallStatusPresentation, state: [String: Any]) -> String {
+  private func renderedStatusText(for presentation: CallStatusPresentation, state: [String: Any])
+    -> String
+  {
     if presentation.kindKey == "active" {
       let total = (state["callDuration"] as? NSNumber)?.intValue ?? 0
       return "\(total / 60):" + String(format: "%02d", total % 60)
@@ -728,7 +746,9 @@ final class VibeNativeCallScreenController: UIViewController {
     connectionDotView.layer.add(dotPulse, forKey: "dotPulse")
   }
 
-  private func applyWallpaperAppearance(from state: [String: Any], palette: Palette, preferWallpaper: Bool) {
+  private func applyWallpaperAppearance(
+    from state: [String: Any], palette: Palette, preferWallpaper: Bool
+  ) {
     let fallbackGradient = palette.backgroundGradient
     let wallpaperGradient =
       preferWallpaper
@@ -752,9 +772,11 @@ final class VibeNativeCallScreenController: UIViewController {
     )
     wallpaperLayer.isHidden = false
 
-    let patternGradient = parseGradient(state["wallpaperPatternGradient"] as? [String], fallback: [])
+    let patternGradient = parseGradient(
+      state["wallpaperPatternGradient"] as? [String], fallback: [])
     let patternLocations = parseNumberArray(state["wallpaperPatternLocations"])
-    let patternOpacity = CGFloat((state["wallpaperPatternOpacity"] as? NSNumber)?.doubleValue ?? 0.0)
+    let patternOpacity = CGFloat(
+      (state["wallpaperPatternOpacity"] as? NSNumber)?.doubleValue ?? 0.0)
     let maskKey = normalizedString(state["wallpaperMaskKey"])
 
     let canShowPattern =
@@ -763,8 +785,7 @@ final class VibeNativeCallScreenController: UIViewController {
       && patternOpacity > 0.001
       && (maskKey?.isEmpty == false)
 
-    if
-      canShowPattern,
+    if canShowPattern,
       let maskKey,
       let maskImage = resolvedWallpaperMaskImage(for: maskKey)
     {
@@ -783,12 +804,12 @@ final class VibeNativeCallScreenController: UIViewController {
 
     wallpaperTopScrimLayer.colors = [
       palette.background.withAlphaComponent(palette.isDark ? 0.34 : 0.08).cgColor,
-      UIColor.clear.cgColor
+      UIColor.clear.cgColor,
     ]
     wallpaperBottomScrimLayer.colors = [
       UIColor.clear.cgColor,
       palette.background.withAlphaComponent(palette.isDark ? 0.18 : 0.08).cgColor,
-      palette.background.withAlphaComponent(palette.isDark ? 0.68 : 0.36).cgColor
+      palette.background.withAlphaComponent(palette.isDark ? 0.68 : 0.36).cgColor,
     ]
   }
 
@@ -813,7 +834,8 @@ final class VibeNativeCallScreenController: UIViewController {
         return image
       }
       if let path = bundle.path(forResource: baseName, ofType: "png"),
-         let image = UIImage(contentsOfFile: path)?.cgImage {
+        let image = UIImage(contentsOfFile: path)?.cgImage
+      {
         Self.wallpaperMaskImageCache[normalizedKey] = image
         return image
       }
@@ -850,7 +872,7 @@ final class VibeNativeCallScreenController: UIViewController {
     container.translatesAutoresizingMaskIntoConstraints = false
     NSLayoutConstraint.activate([
       container.widthAnchor.constraint(equalToConstant: size),
-      container.heightAnchor.constraint(equalToConstant: size)
+      container.heightAnchor.constraint(equalToConstant: size),
     ])
 
     let glass = UIVisualEffectView()
@@ -859,12 +881,13 @@ final class VibeNativeCallScreenController: UIViewController {
     glass.layer.cornerCurve = .continuous
     glass.layer.masksToBounds = true
     glass.effect = makeGlassEffect()
+    glass.isUserInteractionEnabled = false
     container.addSubview(glass)
     NSLayoutConstraint.activate([
       glass.leadingAnchor.constraint(equalTo: container.leadingAnchor),
       glass.trailingAnchor.constraint(equalTo: container.trailingAnchor),
       glass.topAnchor.constraint(equalTo: container.topAnchor),
-      glass.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+      glass.bottomAnchor.constraint(equalTo: container.bottomAnchor),
     ])
 
     let button = UIButton(type: .system)
@@ -878,7 +901,7 @@ final class VibeNativeCallScreenController: UIViewController {
       button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
       button.trailingAnchor.constraint(equalTo: container.trailingAnchor),
       button.topAnchor.constraint(equalTo: container.topAnchor),
-      button.bottomAnchor.constraint(equalTo: container.bottomAnchor)
+      button.bottomAnchor.constraint(equalTo: container.bottomAnchor),
     ])
 
     stack.addArrangedSubview(container)
@@ -994,8 +1017,35 @@ private enum ConnectionSignal {
   }
 }
 
+private final class NativeCallInsetLabel: UILabel {
+  var textInsets = UIEdgeInsets(top: 6, left: 14, bottom: 6, right: 14)
+
+  override func drawText(in rect: CGRect) {
+    super.drawText(in: rect.inset(by: textInsets))
+  }
+
+  override var intrinsicContentSize: CGSize {
+    let base = super.intrinsicContentSize
+    return CGSize(
+      width: base.width + textInsets.left + textInsets.right,
+      height: base.height + textInsets.top + textInsets.bottom
+    )
+  }
+
+  override func sizeThatFits(_ size: CGSize) -> CGSize {
+    let insetSize = CGSize(
+      width: max(0, size.width - textInsets.left - textInsets.right),
+      height: max(0, size.height - textInsets.top - textInsets.bottom)
+    )
+    let base = super.sizeThatFits(insetSize)
+    return CGSize(
+      width: base.width + textInsets.left + textInsets.right,
+      height: base.height + textInsets.top + textInsets.bottom
+    )
+  }
+}
+
 private final class NativeCallActionChip: UIControl {
-  private let blurView = UIVisualEffectView()
   private let fillView = UIView()
   private let pressedOverlayView = UIView()
   private let contentStack = UIStackView()
@@ -1011,62 +1061,56 @@ private final class NativeCallActionChip: UIControl {
 
     NSLayoutConstraint.activate([
       widthAnchor.constraint(equalToConstant: width),
-      heightAnchor.constraint(equalToConstant: height)
-    ])
-
-    blurView.translatesAutoresizingMaskIntoConstraints = false
-    blurView.effect = makeGlassEffect()
-    blurView.layer.cornerCurve = .continuous
-    blurView.layer.masksToBounds = true
-    addSubview(blurView)
-    NSLayoutConstraint.activate([
-      blurView.leadingAnchor.constraint(equalTo: leadingAnchor),
-      blurView.trailingAnchor.constraint(equalTo: trailingAnchor),
-      blurView.topAnchor.constraint(equalTo: topAnchor),
-      blurView.bottomAnchor.constraint(equalTo: bottomAnchor)
+      heightAnchor.constraint(equalToConstant: height),
     ])
 
     fillView.translatesAutoresizingMaskIntoConstraints = false
     fillView.isUserInteractionEnabled = false
-    blurView.contentView.addSubview(fillView)
+    fillView.layer.cornerCurve = .continuous
+    fillView.layer.masksToBounds = true
+    addSubview(fillView)
     NSLayoutConstraint.activate([
-      fillView.leadingAnchor.constraint(equalTo: blurView.contentView.leadingAnchor),
-      fillView.trailingAnchor.constraint(equalTo: blurView.contentView.trailingAnchor),
-      fillView.topAnchor.constraint(equalTo: blurView.contentView.topAnchor),
-      fillView.bottomAnchor.constraint(equalTo: blurView.contentView.bottomAnchor)
+      fillView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      fillView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      fillView.topAnchor.constraint(equalTo: topAnchor),
+      fillView.bottomAnchor.constraint(equalTo: bottomAnchor),
     ])
 
     pressedOverlayView.translatesAutoresizingMaskIntoConstraints = false
     pressedOverlayView.isUserInteractionEnabled = false
     pressedOverlayView.backgroundColor = UIColor(white: 1.0, alpha: 0.08)
+    pressedOverlayView.layer.cornerCurve = .continuous
+    pressedOverlayView.layer.masksToBounds = true
     pressedOverlayView.alpha = 0
-    blurView.contentView.addSubview(pressedOverlayView)
+    addSubview(pressedOverlayView)
     NSLayoutConstraint.activate([
-      pressedOverlayView.leadingAnchor.constraint(equalTo: blurView.contentView.leadingAnchor),
-      pressedOverlayView.trailingAnchor.constraint(equalTo: blurView.contentView.trailingAnchor),
-      pressedOverlayView.topAnchor.constraint(equalTo: blurView.contentView.topAnchor),
-      pressedOverlayView.bottomAnchor.constraint(equalTo: blurView.contentView.bottomAnchor)
+      pressedOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      pressedOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      pressedOverlayView.topAnchor.constraint(equalTo: topAnchor),
+      pressedOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor),
     ])
 
     contentStack.axis = .horizontal
     contentStack.alignment = .center
-    contentStack.spacing = 5
+    contentStack.distribution = .fill
+    contentStack.spacing = 3
     contentStack.isUserInteractionEnabled = false
     contentStack.translatesAutoresizingMaskIntoConstraints = false
     addSubview(contentStack)
     NSLayoutConstraint.activate([
-      contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
-      contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -8),
-      contentStack.topAnchor.constraint(equalTo: topAnchor),
-      contentStack.bottomAnchor.constraint(equalTo: bottomAnchor)
+      contentStack.centerXAnchor.constraint(equalTo: centerXAnchor),
+      contentStack.centerYAnchor.constraint(equalTo: centerYAnchor),
+      contentStack.leadingAnchor.constraint(greaterThanOrEqualTo: leadingAnchor, constant: 4),
+      contentStack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
     ])
 
     iconView.translatesAutoresizingMaskIntoConstraints = false
     iconView.contentMode = .scaleAspectFit
-    iconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+    iconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
+      pointSize: 15, weight: .semibold)
     NSLayoutConstraint.activate([
-      iconView.widthAnchor.constraint(equalToConstant: 14),
-      iconView.heightAnchor.constraint(equalToConstant: 14)
+      iconView.widthAnchor.constraint(equalToConstant: 16),
+      iconView.heightAnchor.constraint(equalToConstant: 16),
     ])
     contentStack.addArrangedSubview(iconView)
 
@@ -1082,10 +1126,8 @@ private final class NativeCallActionChip: UIControl {
   override func layoutSubviews() {
     super.layoutSubviews()
     layer.cornerRadius = bounds.height / 2
-    blurView.layer.cornerRadius = bounds.height / 2
     fillView.layer.cornerRadius = bounds.height / 2
     pressedOverlayView.layer.cornerRadius = bounds.height / 2
-    blurView.layer.borderWidth = 1
   }
 
   override var isHighlighted: Bool {
@@ -1103,6 +1145,7 @@ private final class NativeCallActionChip: UIControl {
         options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
       ) {
         self.transform = CGAffineTransform(scaleX: scale, y: scale)
+        self.alpha = isPressed ? 0.78 : 1.0
         self.pressedOverlayView.alpha = isPressed ? 1.0 : 0.0
       }
     }
@@ -1124,7 +1167,7 @@ private final class NativeCallActionChip: UIControl {
     iconView.tintColor = iconTintColor
     iconView.image = UIImage(systemName: symbol)
     fillView.backgroundColor = fillColor
-    blurView.layer.borderColor = borderColor.cgColor
+    layer.borderColor = borderColor.cgColor
   }
 }
 
@@ -1155,7 +1198,7 @@ private struct Palette {
     background: UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 1),
     backgroundGradient: [
       UIColor(red: 0.06, green: 0.07, blue: 0.09, alpha: 1),
-      UIColor(red: 0.03, green: 0.04, blue: 0.06, alpha: 1)
+      UIColor(red: 0.03, green: 0.04, blue: 0.06, alpha: 1),
     ],
     text: .white,
     textSubtle: UIColor.white.withAlphaComponent(0.66),
@@ -1181,7 +1224,7 @@ private struct Palette {
     background: UIColor(red: 0.96, green: 0.97, blue: 0.99, alpha: 1),
     backgroundGradient: [
       UIColor(red: 0.96, green: 0.97, blue: 0.99, alpha: 1),
-      UIColor(red: 0.93, green: 0.95, blue: 0.98, alpha: 1)
+      UIColor(red: 0.93, green: 0.95, blue: 0.98, alpha: 1),
     ],
     text: UIColor(white: 0.08, alpha: 1),
     textSubtle: UIColor.black.withAlphaComponent(0.58),
@@ -1269,10 +1312,10 @@ private func parseHexColor(_ value: String) -> UIColor? {
     return UIColor(red: r, green: g, blue: b, alpha: 1.0)
   }
 
-  let r = CGFloat((rgba & 0xFF000000) >> 24) / 255.0
-  let g = CGFloat((rgba & 0x00FF0000) >> 16) / 255.0
-  let b = CGFloat((rgba & 0x0000FF00) >> 8) / 255.0
-  let a = CGFloat(rgba & 0x000000FF) / 255.0
+  let r = CGFloat((rgba & 0xFF00_0000) >> 24) / 255.0
+  let g = CGFloat((rgba & 0x00FF_0000) >> 16) / 255.0
+  let b = CGFloat((rgba & 0x0000_FF00) >> 8) / 255.0
+  let a = CGFloat(rgba & 0x0000_00FF) / 255.0
   return UIColor(red: r, green: g, blue: b, alpha: a)
 }
 

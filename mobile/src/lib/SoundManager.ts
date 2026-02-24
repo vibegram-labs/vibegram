@@ -1,19 +1,27 @@
 import { Audio, InterruptionModeIOS, InterruptionModeAndroid } from 'expo-av';
 
-type SoundType = 'sent' | 'received';
+type SoundType = 'sent' | 'received' | 'socketReady';
 
 class SoundManager {
     private static instance: SoundManager;
     private soundAssets: Record<SoundType, any> = {
         sent: require('../../assets/sounds/sent.mp3'),
-        received: require('../../assets/sounds/received.mp3')
+        received: require('../../assets/sounds/received.mp3'),
+        socketReady: require('../../assets/sounds/socket-ready.mp3'),
     };
 
     // Pre-loaded sound pools for instant playback
     private soundPools: Record<SoundType, Audio.Sound[]> = {
         sent: [],
-        received: []
+        received: [],
+        socketReady: [],
     };
+
+    private callRingAsset = require('../../assets/sounds/call-ring.mp3');
+    private callRingSound: Audio.Sound | null = null;
+    private callRingActive = false;
+    private callRingBusy: Promise<void> | null = null;
+    private lastSocketReadyCueAt = 0;
 
     private poolSize = 4;
 
@@ -43,7 +51,8 @@ class SoundManager {
             // Pre-load sound pools in parallel
             await Promise.all([
                 this.fillPool('sent'),
-                this.fillPool('received')
+                this.fillPool('received'),
+                this.fillPool('socketReady'),
             ]);
 
             /*
@@ -141,6 +150,74 @@ class SoundManager {
                 })
                 .catch(console.warn);
         }
+    }
+
+    private async ensureCallRingSound(): Promise<Audio.Sound | null> {
+        if (this.callRingSound) return this.callRingSound;
+        try {
+            const { sound } = await Audio.Sound.createAsync(this.callRingAsset, {
+                isLooping: true,
+                shouldPlay: false,
+                volume: 1.0,
+            });
+            this.callRingSound = sound;
+            return sound;
+        } catch (e) {
+            console.warn('[SoundManager] Failed to load callRing:', e);
+            return null;
+        }
+    }
+
+    public async startCallRingLoop(delayMs: number = 900) {
+        this.callRingActive = true;
+        if (this.callRingBusy) {
+            await this.callRingBusy;
+            return;
+        }
+
+        this.callRingBusy = (async () => {
+            if (delayMs > 0) {
+                await new Promise((resolve) => setTimeout(resolve, delayMs));
+            }
+            const sound = await this.ensureCallRingSound();
+            if (!sound || !this.callRingActive) return;
+            try {
+                await sound.setPositionAsync(0);
+                await sound.playAsync();
+            } catch (e) {
+                console.warn('[SoundManager] Failed to start callRing loop:', e);
+            }
+        })();
+
+        try {
+            await this.callRingBusy;
+        } finally {
+            this.callRingBusy = null;
+        }
+    }
+
+    public async stopCallRingLoop() {
+        this.callRingActive = false;
+        const sound = this.callRingSound;
+        if (!sound) return;
+        try {
+            const status = await sound.getStatusAsync();
+            if (status.isLoaded && status.isPlaying) {
+                await sound.stopAsync();
+            }
+            if (status.isLoaded) {
+                await sound.setPositionAsync(0);
+            }
+        } catch {
+            // ignore
+        }
+    }
+
+    public playSocketReadyCue() {
+        const now = Date.now();
+        if (now - this.lastSocketReadyCueAt < 900) return;
+        this.lastSocketReadyCueAt = now;
+        this.play('socketReady');
     }
 }
 

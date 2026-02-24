@@ -208,6 +208,7 @@ const VideoBubbleBody = React.memo(({ item }: { item: ChatListBubbleMessage }) =
                                 source={{ uri: item.mediaUrl }}
                                 style={styles.noteVideo}
                                 resizeMode={ResizeMode.COVER}
+                                stayAwake={false}
                                 shouldPlay={false}
                                 isLooping
                                 progressUpdateIntervalMillis={50}
@@ -300,6 +301,7 @@ const VideoBubbleBody = React.memo(({ item }: { item: ChatListBubbleMessage }) =
                             source={{ uri: item.mediaUrl }}
                             style={styles.videoRect}
                             resizeMode={ResizeMode.COVER}
+                            stayAwake={false}
                             shouldPlay={false}
                             isLooping={false}
                             progressUpdateIntervalMillis={80}

@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Pressable, StyleSheet, Text, View } from 'react-native'
+import { Image, Pressable, StyleSheet, Text, View } from 'react-native'
+import { Circle, MessageCircle, Phone, Settings, Sparkles, Users } from 'lucide-react-native'
 
 import { theme } from '../../lib/theme'
 import Animated, {
@@ -72,6 +73,50 @@ function AndroidTabItem({
     }
   })
 
+  const iconSize = isVibeTab(tab) ? 21 : 20
+  const imageSource = focused
+    ? (tab.iconSource ?? tab.unfocusedIconSource)
+    : (tab.unfocusedIconSource ?? tab.iconSource)
+
+  const renderFallbackIcon = () => {
+    const key = tab.key.trim().toLowerCase()
+    const symbol = (focused ? tab.sfSymbol : (tab.unfocusedSfSymbol ?? tab.sfSymbol) ?? '').toLowerCase()
+
+    if (tab.renderIcon) {
+      return tab.renderIcon({ focused, color, size: iconSize })
+    }
+
+    if (imageSource) {
+      return (
+        <Image
+          source={imageSource}
+          resizeMode="contain"
+          style={[
+            styles.assetIcon,
+            isVibeTab(tab) ? styles.vibeAssetIcon : null,
+          ]}
+        />
+      )
+    }
+
+    if (key === 'contacts' || symbol.includes('person.2')) {
+      return <Users size={iconSize} color={color} strokeWidth={2.2} />
+    }
+    if (key === 'calls' || symbol.includes('phone')) {
+      return <Phone size={iconSize} color={color} strokeWidth={2.2} />
+    }
+    if (key === 'home' || symbol.includes('bubble.left')) {
+      return <MessageCircle size={iconSize} color={color} strokeWidth={2.2} />
+    }
+    if (key === 'settings' || symbol.includes('person.crop.circle')) {
+      return <Settings size={iconSize} color={color} strokeWidth={2.2} />
+    }
+    if (key === 'vibe' || symbol.includes('sparkles')) {
+      return <Sparkles size={iconSize} color={color} strokeWidth={2.2} />
+    }
+    return <Circle size={iconSize - 2} color={color} strokeWidth={2.2} />
+  }
+
   return (
     <Pressable
       onPress={onPress}
@@ -87,7 +132,7 @@ function AndroidTabItem({
     >
       <Animated.View style={[styles.tabInner, animatedContentStyle]}>
         <View style={styles.iconWrap}>
-          {tab.renderIcon ? tab.renderIcon({ focused, color, size: isVibeTab(tab) ? 21 : 20 }) : null}
+          {renderFallbackIcon()}
         </View>
         {labeled && (
           <Text
@@ -171,7 +216,7 @@ export default function AndroidBottomTabBar({
   )
 
   return (
-    <View style={[styles.surface, { backgroundColor: surfaceBg }]}>
+    <View style={[styles.surface, { backgroundColor: surfaceBg, paddingBottom: bottomInsetPadding + 2 }]}>
       <View
         style={[
           styles.row,
@@ -256,6 +301,14 @@ const styles = StyleSheet.create({
     height: 20,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  assetIcon: {
+    width: 20,
+    height: 20,
+  },
+  vibeAssetIcon: {
+    width: 22,
+    height: 22,
   },
   label: {
     marginTop: 2,

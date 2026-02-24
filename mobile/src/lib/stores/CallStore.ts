@@ -7,8 +7,9 @@
 
 import { create } from 'zustand';
 import WebRTCService from '../services/WebRTCService';
-import AppSoundService from '../services/AppSoundService';
+import SoundManager from '../SoundManager';
 import ProxyManager from '../ProxyManager';
+import { useAuthStore } from './auth-store';
 
 // Detect if we're behind strict network filtering and should force TURN relay
 const shouldForceRelay = (): boolean => {
@@ -199,6 +200,7 @@ interface CallState {
     // Timing
     callStartTime: number | null;
     callDuration: number;
+    endReason: string | null;
 
     // Incoming call data (for modal)
     incomingCallData: {
@@ -275,6 +277,7 @@ const initialState: CallState = {
     connectionPhase: 'idle',
     callStartTime: null,
     callDuration: 0,
+    endReason: null,
     incomingCallData: null,
     signalingChannel: null,
 };
@@ -282,6 +285,23 @@ const initialState: CallState = {
 export const useCallStore = create<CallState & CallActions>()(
     persist(
         (set, get) => {
+            let terminalResetTimeout: ReturnType<typeof setTimeout> | null = null;
+            const clearTerminalReset = () => {
+                if (terminalResetTimeout) {
+                    clearTimeout(terminalResetTimeout);
+                    terminalResetTimeout = null;
+                }
+            };
+            const scheduleTerminalReset = (expectedCallId: string | null, delayMs: number = 1400) => {
+                clearTerminalReset();
+                terminalResetTimeout = setTimeout(() => {
+                    const current = get();
+                    if (current.callStatus !== 'ended') return;
+                    if (expectedCallId && current.callId && current.callId !== expectedCallId) return;
+                    get().resetCall();
+                }, delayMs);
+            };
+
             const clearWatchdog = () => {
                 const state = get() as any;
                 if (state._callWatchdogTimeout) {
@@ -303,9 +323,10 @@ export const useCallStore = create<CallState & CallActions>()(
             };
 
             const markCallFailed = () => {
+                clearTerminalReset();
                 clearWatchdog();
-                void AppSoundService.stopIncomingRingLoop();
-                set({ callStatus: 'failed' });
+                void SoundManager.stopCallRingLoop();
+                set({ callStatus: 'failed', endReason: null });
                 setTimeout(() => {
                     if (get().callStatus === 'failed') {
                         get().resetCall();
@@ -338,7 +359,7 @@ export const useCallStore = create<CallState & CallActions>()(
                         patch.callStartTime = Date.now();
                     }
                     set(patch as Partial<CallState>);
-                    void AppSoundService.stopIncomingRingLoop();
+                    void SoundManager.stopCallRingLoop();
                     WebRTCService.startBandwidthMonitor();
                     return;
                 }
@@ -513,6 +534,7 @@ export const useCallStore = create<CallState & CallActions>()(
 
                     const callId = `call_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
                     console.log('[CallStore] startCall state setup', { callId, type, remoteUserId: remoteUser.userId });
+                    clearTerminalReset();
 
                     set({
                         callId,
@@ -526,6 +548,7 @@ export const useCallStore = create<CallState & CallActions>()(
                         remoteUser,
                         isVideoEnabled: type === 'video',
                         signalingChannel: channel,
+                        endReason: null,
                     });
 
                     try {
@@ -566,6 +589,10 @@ export const useCallStore = create<CallState & CallActions>()(
                                 });
                         } catch { }
                         console.log('[CallStore] call-start pushed', { callId, type });
+                        void SoundManager.startCallRingLoop();
+                        try {
+                            console.log('[CallStore][CallDebug] outgoing ring loop started', { callId, type });
+                        } catch { }
 
                         // Wait longer (30s) generally, or `startWatchdog` if needed.
                         startWatchdog(40000, 'call-start-ringing');
@@ -582,6 +609,32 @@ export const useCallStore = create<CallState & CallActions>()(
                 handleIncomingCallPayload: (payload) => {
                     const normalized = normalizeIncomingCallPayload(payload);
                     if (!normalized) return false;
+                    const selfUserId = (useAuthStore.getState().user?.userId || '').trim().toUpperCase();
+                    const fromUserId = (normalized.fromUserId || '').trim().toUpperCase();
+                    if (selfUserId && fromUserId && selfUserId === fromUserId) {
+                        try {
+                            console.log('[CallStore] Ignoring self-originated incoming payload', {
+                                callId: normalized.callId,
+                                fromUserId: normalized.fromUserId,
+                                keys: payload ? Object.keys(payload) : [],
+                            });
+                        } catch { }
+                        return false;
+                    }
+                    const current = get();
+                    if (
+                        current.callDirection === 'outgoing' &&
+                        !!current.callId &&
+                        current.callId === normalized.callId
+                    ) {
+                        try {
+                            console.log('[CallStore] Ignoring echoed incoming payload for active outgoing call', {
+                                callId: normalized.callId,
+                                fromUserId: normalized.fromUserId,
+                            });
+                        } catch { }
+                        return false;
+                    }
                     try {
                         console.log('[CallStore] Incoming call payload accepted', {
                             fromUserId: normalized.fromUserId,
@@ -623,6 +676,7 @@ export const useCallStore = create<CallState & CallActions>()(
                     }
 
                     set({
+                        endReason: null,
                         incomingCallData: normalized,
                         callStatus: 'ringing',
                         connectionPhase: 'ringing',
@@ -638,19 +692,46 @@ export const useCallStore = create<CallState & CallActions>()(
                             userImage: normalized.fromUserImage,
                         },
                     });
-                    void AppSoundService.startIncomingRingLoop();
+                    try {
+                        console.log('[CallStore][CallDebug] skip incoming ring loop (receiver uses native call sound)', {
+                            callId: normalized.callId,
+                            callType: normalized.callType,
+                        });
+                    } catch { }
                 },
 
                 acceptCall: async (socket) => {
-                    const { incomingCallData, isWebRTCAvailable, callType } = get();
+                    const { incomingCallData, callType } = get();
                     const channel = resolveSignalingChannel(socket);
-                    if (!incomingCallData || !isWebRTCAvailable) return false;
+                    try {
+                        console.log('[CallStore][CallDebug] acceptCall requested', {
+                            incomingCallId: incomingCallData?.callId,
+                            incomingType: incomingCallData?.callType,
+                            stateCallType: callType,
+                            hasChannel: !!channel,
+                            isWebRTCAvailable: get().isWebRTCAvailable,
+                        });
+                    } catch { }
+                    if (!incomingCallData) return false;
+                    let isWebRTCAvailable = get().isWebRTCAvailable;
+                    if (!isWebRTCAvailable) {
+                        try {
+                            isWebRTCAvailable = await get().checkWebRTCAvailability();
+                        } catch {
+                            isWebRTCAvailable = false;
+                        }
+                    }
+                    if (!isWebRTCAvailable) {
+                        console.warn('[CallStore] WebRTC unavailable, cannot accept call');
+                        return false;
+                    }
                     if (!channel) {
                         console.warn('[CallStore] User channel unavailable, cannot accept call');
                         return false;
                     }
 
-                    void AppSoundService.stopIncomingRingLoop();
+                    void SoundManager.stopCallRingLoop();
+                    clearTerminalReset();
                     set({
                         callStatus: 'connecting',
                         connectionPhase: 'signaling',
@@ -659,6 +740,13 @@ export const useCallStore = create<CallState & CallActions>()(
                         isPeerConnected: false,
                         hasRemoteStream: false,
                     });
+                    try {
+                        console.log('[CallStore][CallDebug] acceptCall state->connecting', {
+                            callId: incomingCallData.callId,
+                            callType: get().callType,
+                            connectionPhase: get().connectionPhase,
+                        });
+                    } catch { }
 
                     try {
                         // Pre-fetch TURN credentials in parallel with media init
@@ -666,7 +754,19 @@ export const useCallStore = create<CallState & CallActions>()(
                             WebRTCService.initializeMedia(callType === 'video'),
                             WebRTCService.fetchIceServers(),
                         ]);
+                        try {
+                            console.log('[CallStore][CallDebug] acceptCall media initialization result', {
+                                callId: incomingCallData.callId,
+                                incomingType: incomingCallData.callType,
+                                stateCallType: get().callType,
+                                mediaReady,
+                            });
+                        } catch { }
                         if (!mediaReady) {
+                            console.warn('[CallStore][CallDebug] acceptCall media init failed', {
+                                callId: incomingCallData.callId,
+                                callType: incomingCallData.callType,
+                            });
                             markCallFailed();
                             return false;
                         }
@@ -678,6 +778,13 @@ export const useCallStore = create<CallState & CallActions>()(
                             callId: incomingCallData.callId,
                         });
 
+                        void SoundManager.playSocketReadyCue();
+                        try {
+                            console.log('[CallStore][CallDebug] acceptCall pushed call-accepted', {
+                                callId: incomingCallData.callId,
+                                callType: get().callType,
+                            });
+                        } catch { }
                         set({ connectionPhase: 'peer-connecting' });
                         startWatchdog(20000, 'accept-connecting');
 
@@ -689,7 +796,8 @@ export const useCallStore = create<CallState & CallActions>()(
                 },
 
                 declineCall: (socket) => {
-                    void AppSoundService.stopIncomingRingLoop();
+                    void SoundManager.stopCallRingLoop();
+                    clearTerminalReset();
                     const { incomingCallData, callId, remoteUser, callType, callDirection, signalingChannel } = get();
                     const channel = resolveSignalingChannel(socket || signalingChannel);
 
@@ -715,13 +823,23 @@ export const useCallStore = create<CallState & CallActions>()(
                         set({ callHistory: [record, ...get().callHistory] });
                     }
 
-                    get().resetCall();
+                    set({ callStatus: 'ended', endReason: 'declined', incomingCallData: null, connectionPhase: 'idle' });
+                    scheduleTerminalReset(callId ?? null, 900);
                 },
 
                 handleCallAccepted: async (payload) => {
                     const current = get();
                     const { callDirection, remoteUser, callId } = current;
                     const acceptedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
+                    try {
+                        console.log('[CallStore][CallDebug] handleCallAccepted received', {
+                            acceptedCallId,
+                            currentCallId: callId,
+                            callDirection,
+                            currentType: current.callType,
+                            hasRemoteUser: !!remoteUser,
+                        });
+                    } catch { }
                     if (acceptedCallId && callId && acceptedCallId !== callId) return;
                     if (callDirection !== 'outgoing' || !remoteUser) return;
                     const channel = resolveSignalingChannel(current.signalingChannel);
@@ -739,6 +857,15 @@ export const useCallStore = create<CallState & CallActions>()(
                         isPeerConnected: false,
                         hasRemoteStream: false,
                     });
+                    try {
+                            console.log('[CallStore][CallDebug] handleCallAccepted state->connecting', {
+                                callId: get().callId,
+                                callType: get().callType,
+                                connectionPhase: get().connectionPhase,
+                            });
+                        } catch { }
+                    void SoundManager.stopCallRingLoop();
+                    void SoundManager.playSocketReadyCue();
                     startWatchdog(20000, 'handle-call-accepted-connecting');
 
                     try {
@@ -791,9 +918,10 @@ export const useCallStore = create<CallState & CallActions>()(
                 },
 
                 handleCallEnded: (payload) => {
-                    void AppSoundService.stopIncomingRingLoop();
+                    void SoundManager.stopCallRingLoop();
                     const { callId, remoteUser, callType, callDirection, callStatus, callDuration } = get();
                     const endedCallId = asNonEmptyString(payload?.callId) || asNonEmptyString(payload?.call_id);
+                    const rawReason = asNonEmptyString((payload as any)?.reason)?.toLowerCase() || null;
                     if (endedCallId && callId && endedCallId !== callId) {
                         return;
                     }
@@ -816,11 +944,22 @@ export const useCallStore = create<CallState & CallActions>()(
                         set({ callHistory: [record, ...get().callHistory] });
                     }
 
-                    get().resetCall();
+                    const terminalReason =
+                        rawReason === 'declined'
+                            ? (callDirection === 'outgoing' ? 'rejected' : 'declined')
+                            : (rawReason || 'ended');
+                    set({
+                        callStatus: 'ended',
+                        endReason: terminalReason,
+                        incomingCallData: null,
+                        connectionPhase: 'idle',
+                    });
+                    scheduleTerminalReset(callId ?? endedCallId ?? null, 1400);
                 },
 
                 endCall: (socket) => {
-                    void AppSoundService.stopIncomingRingLoop();
+                    void SoundManager.stopCallRingLoop();
+                    clearTerminalReset();
                     const { remoteUser, callId, callType, callDirection, callStatus, callDuration, signalingChannel } = get();
                     const channel = resolveSignalingChannel(socket || signalingChannel);
 
@@ -850,7 +989,8 @@ export const useCallStore = create<CallState & CallActions>()(
                         set({ callHistory: [record, ...get().callHistory] });
                     }
 
-                    get().resetCall();
+                    set({ callStatus: 'ended', endReason: 'ended', incomingCallData: null, connectionPhase: 'idle' });
+                    scheduleTerminalReset(callId ?? null, 900);
                 },
 
                 toggleMute: () => {
@@ -928,8 +1068,9 @@ export const useCallStore = create<CallState & CallActions>()(
                 },
 
                 resetCall: () => {
+                    clearTerminalReset();
                     clearWatchdog();
-                    void AppSoundService.stopIncomingRingLoop();
+                    void SoundManager.stopCallRingLoop();
                     WebRTCService.cleanup();
                     WebRTCService.onIceCandidate = null;
                     WebRTCService.onOffer = null;

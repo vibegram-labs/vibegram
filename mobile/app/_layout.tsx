@@ -99,6 +99,62 @@ export default function RootLayout() {
   const nativeCallUiDebugKeyRef = useRef<string>('');
   const resolvedCallWallpaperTheme = resolveThemeVariant(activeWallpaperTheme, effectiveTheme === 'dark')
 
+  const waitForCallSignalingChannel = async (timeoutMs = 12000) => {
+    const { useChatStore } = require('../src/lib/ChatStore');
+    const startedAt = Date.now();
+    while (Date.now() - startedAt < timeoutMs) {
+      const channel = getUserChannel();
+      const state = (channel as any)?.state;
+      const canPush =
+        typeof (channel as any)?.canPush === 'function'
+          ? !!(channel as any).canPush()
+          : state === 'joined';
+      if (channel && typeof (channel as any)?.push === 'function' && canPush) {
+        return channel;
+      }
+      if (!useChatStore.getState().isConnected) {
+        useChatStore.getState().initSocket();
+      }
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+    return null;
+  };
+
+  const forcePresentNativeCallUiConnecting = (reason: string) => {
+    if (!enableNativeInAppCallUi) return;
+    const nativeCall = getNativeCallModule();
+    if (!nativeCall?.setCallUiState) return;
+    const snapshot = useCallStore.getState();
+    const callType =
+      snapshot.incomingCallData?.callType ||
+      snapshot.callType ||
+      'voice';
+    const callId =
+      snapshot.callId ||
+      snapshot.incomingCallData?.callId;
+    nativeCall.setCallUiState({
+      visible: true,
+      mode: 'active',
+      callId,
+      callType,
+      callStatus: snapshot.callStatus === 'idle' ? 'connecting' : snapshot.callStatus,
+      remoteUserName: snapshot.incomingCallData?.fromUserName || snapshot.remoteUser?.userName,
+      remoteUserImage: snapshot.incomingCallData?.fromUserImage || snapshot.remoteUser?.userImage,
+      isMuted: snapshot.isMuted,
+      isSpeakerOn: snapshot.isSpeakerOn,
+      isVideoEnabled: snapshot.isVideoEnabled,
+      canFlipCamera: callType === 'video',
+      callDuration: snapshot.callDuration || 0,
+      isDark: effectiveTheme === 'dark',
+    });
+    console.log('[NativeCallDebug][JS] force present native UI', {
+      reason,
+      callId,
+      callType,
+      callStatus: snapshot.callStatus,
+    });
+  };
+
   const drainNativeCallEvents = async () => {
     if (nativeCallDrainInFlightRef.current) return;
     const nativeCall = getNativeCallModule();
@@ -120,10 +176,28 @@ export default function RootLayout() {
 
         if (type === 'callAction') {
           const action = typeof (payload as any).action === 'string' ? ((payload as any).action as string).toLowerCase() : '';
-          useCallStore.getState().handleIncomingCallPayload(payload);
+          const acceptedIncomingPayload = useCallStore.getState().handleIncomingCallPayload(payload);
+          console.log('[NativeCallDebug][JS] pending callAction', {
+            action,
+            acceptedIncomingPayload,
+            callId: (payload as any)?.callId ?? (payload as any)?.call_id,
+            callType: (payload as any)?.callType ?? (payload as any)?.call_type,
+          });
           if (action === 'answer') {
-            const accepted = await useCallStore.getState().acceptCall(undefined as any);
+            if (!acceptedIncomingPayload) {
+              console.log('[NativeCallDebug][JS] skip answer because payload not accepted');
+              continue;
+            }
+            const channel = await waitForCallSignalingChannel();
+            const accepted = await useCallStore.getState().acceptCall(channel as any);
+            console.log('[NativeCallDebug][JS] answer result', {
+              accepted,
+              hasChannel: !!channel,
+              callStatus: useCallStore.getState().callStatus,
+              callType: useCallStore.getState().callType,
+            });
             if (accepted) {
+              forcePresentNativeCallUiConnecting('pending-answer');
               nativeCall.clearIncomingCallUi?.(payload);
             } else {
               deferredNativeCallEventsRef.current.push(raw);
@@ -165,7 +239,19 @@ export default function RootLayout() {
       // console.log('[NativeCallUI][JS] onCallUiEvent', event);
       switch (type) {
         case 'accept':
-          await useCallStore.getState().acceptCall(getUserChannel());
+          {
+            const channel = await waitForCallSignalingChannel();
+            const accepted = await useCallStore.getState().acceptCall(channel as any);
+            console.log('[NativeCallDebug][JS] in-app accept result', {
+              accepted,
+              hasChannel: !!channel,
+              callStatus: useCallStore.getState().callStatus,
+              callType: useCallStore.getState().callType,
+            });
+            if (accepted) {
+              forcePresentNativeCallUiConnecting('in-app-accept');
+            }
+          }
           break;
         case 'decline':
           useCallStore.getState().declineCall(getUserChannel());
@@ -212,7 +298,9 @@ export default function RootLayout() {
       callUiSnapshot.callStatus === 'ringing' &&
       !!callUiSnapshot.incomingCallData;
 
-    const mode = !isInCallLike ? 'hidden' : (isIncoming ? 'incoming' : 'active');
+    // Keep incoming UI OS-native (CallKit / system notification UI). Show the custom in-app
+    // native screen only after accept / during active call states.
+    const mode = !isInCallLike ? 'hidden' : (isIncoming ? 'hidden' : 'active');
     const remoteName =
       callUiSnapshot.incomingCallData?.fromUserName ||
       callUiSnapshot.remoteUser?.userName ||

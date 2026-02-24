@@ -11,7 +11,6 @@ import { decryptMessagesBatch, encryptMessageNativeFirst } from '../native/chat/
 import * as Crypto from 'expo-crypto';
 import * as FileSystem from 'expo-file-system/legacy';
 import SoundManager from './SoundManager';
-import AppSoundService from './services/AppSoundService';
 import { uploadMedia } from './api-client';
 import { useEncryptedMediaStore } from './stores/encrypted-media-store';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
@@ -1274,7 +1273,7 @@ export const useChatStore = create<ChatState>()(
                         userChannel = socket!.channel(`user:${auth.userId}`, {});
                         userChannel.join()
                             .receive("ok", resp => {
-                                void AppSoundService.playSocketReadyCue();
+                                // Do not play call intro sound on normal app/socket connect.
                             })
                             .receive("error", resp => { });
 
@@ -1384,11 +1383,61 @@ export const useChatStore = create<ChatState>()(
                         // Handle incoming call request
                         userChannel.on('call-start', (payload: any) => {
                             try {
+                                const selfUserId = (useAuthStore.getState().user?.userId || '').trim().toUpperCase();
+                                const fromUserIdRaw =
+                                    (typeof payload?.fromUserId === 'string' ? payload.fromUserId : '') ||
+                                    (typeof payload?.from_user_id === 'string' ? payload.from_user_id : '');
+                                const toUserIdRaw =
+                                    (typeof payload?.toUserId === 'string' ? payload.toUserId : '') ||
+                                    (typeof payload?.to_user_id === 'string' ? payload.to_user_id : '');
+                                const callIdRaw =
+                                    (typeof payload?.callId === 'string' ? payload.callId : '') ||
+                                    (typeof payload?.call_id === 'string' ? payload.call_id : '');
+                                const fromUserIdUpper = fromUserIdRaw.trim().toUpperCase();
+                                const toUserIdUpper = toUserIdRaw.trim().toUpperCase();
+
+                                if (selfUserId && fromUserIdUpper && selfUserId === fromUserIdUpper) {
+                                    console.log('[ChatStore][CallDebug] ignore call-start self-originated', {
+                                        callId: callIdRaw || undefined,
+                                        fromUserId: fromUserIdRaw || undefined,
+                                        toUserId: toUserIdRaw || undefined,
+                                    });
+                                    return;
+                                }
+                                if (selfUserId && toUserIdUpper && selfUserId !== toUserIdUpper) {
+                                    console.log('[ChatStore][CallDebug] ignore call-start not-for-self', {
+                                        callId: callIdRaw || undefined,
+                                        fromUserId: fromUserIdRaw || undefined,
+                                        toUserId: toUserIdRaw || undefined,
+                                        selfUserId: selfUserId.slice(0, 8),
+                                    });
+                                    return;
+                                }
+
+                                const explicitCallType =
+                                    (typeof payload?.callType === 'string' ? payload.callType : '') ||
+                                    (typeof payload?.call_type === 'string' ? payload.call_type : '') ||
+                                    ((typeof payload?.type === 'string' && payload.type.toLowerCase() === 'video') ? 'video' : 'voice');
+                                if (!payload?.callType) payload.callType = explicitCallType;
+                                if (!payload?.call_type) payload.call_type = explicitCallType;
+
                                 // Dynamic import to avoid crashes if CallStore fails to load
                                 const { useCallStore } = require('./stores/CallStore');
                                 const callStore = useCallStore.getState();
+                                console.log('[ChatStore][CallDebug] call-start received', {
+                                    callId: callIdRaw || undefined,
+                                    fromUserId: fromUserIdRaw || undefined,
+                                    toUserId: toUserIdRaw || undefined,
+                                    type: payload?.callType || payload?.call_type,
+                                    rawType: payload?.type,
+                                    rawEvent: payload?.event,
+                                });
                                 const handled = callStore.handleIncomingCallPayload(payload);
                                 if (!handled) {
+                                    console.log('[ChatStore][CallDebug] call-start fallback enrichment path', {
+                                        callId: callIdRaw || undefined,
+                                        fromUserId: fromUserIdRaw || undefined,
+                                    });
                                     // Fallback enrichment from chat list when backend payload has minimal fields.
                                     const fromUserId =
                                         (typeof payload?.fromUserId === 'string' ? payload.fromUserId : '') ||
@@ -1397,6 +1446,10 @@ export const useChatStore = create<ChatState>()(
                                         (typeof payload?.callId === 'string' ? payload.callId : '') ||
                                         (typeof payload?.call_id === 'string' ? payload.call_id : '');
                                     if (fromUserId && callId) {
+                                        if (selfUserId && fromUserId.toUpperCase() === selfUserId) {
+                                            console.log('[ChatStore][CallDebug] skip fallback incoming self-originated', { callId, fromUserId });
+                                            return;
+                                        }
                                         const { chats } = get();
                                         const callerChat = chats.find(c =>
                                             c.friendId?.toUpperCase() === fromUserId.toUpperCase()

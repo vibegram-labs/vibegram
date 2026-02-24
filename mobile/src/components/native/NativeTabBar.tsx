@@ -3,6 +3,7 @@ import {
     Image,
     NativeSyntheticEvent,
     Platform,
+    processColor,
     StyleSheet,
     Text,
     TouchableOpacity,
@@ -20,6 +21,7 @@ import Animated, {
 } from 'react-native-reanimated';
 import type { SharedValue } from 'react-native-reanimated';
 import SafeLiquidGlass from './SafeLiquidGlass';
+import AndroidBottomTabBar from './AndroidBottomTabBar';
 
 interface NativeTabPressPayload {
     index: number;
@@ -37,8 +39,8 @@ interface NativeTabViewItem {
 interface NativeChatTabsViewProps {
     tabs: NativeTabViewItem[];
     currentIndex: number;
-    activeTintColor?: ColorValue;
-    inactiveTintColor?: ColorValue;
+    activeTintColor?: number | null;
+    inactiveTintColor?: number | null;
     isDark?: boolean;
     onIndexChange?: (event: NativeSyntheticEvent<NativeTabPressPayload>) => void;
     style?: any;
@@ -124,13 +126,15 @@ export default function NativeTabBar({
     };
 
     const shouldUseNativeTabs =
-        (Platform.OS === 'ios' || Platform.OS === 'android') &&
+        Platform.OS === 'ios' &&
         nativeTabsAvailable &&
         NativeChatTabsView &&
         tabs.length > 0;
     if (shouldUseNativeTabs) {
         const NativeTabsComponent = NativeChatTabsView as React.ComponentType<NativeChatTabsViewProps>;
         const normalizedIndex = Math.max(0, Math.min(currentIndex, tabs.length - 1));
+        const nativeActiveTintColor = processColor(activeTintColor) ?? null;
+        const nativeInactiveTintColor = processColor(inactiveTintColor) ?? null;
 
         const nativeTabs = tabs.map((tab) => {
             const source = tab.iconSource;
@@ -173,12 +177,27 @@ export default function NativeTabBar({
                     style={styles.nativeTabsBar}
                     tabs={nativeTabs}
                     currentIndex={normalizedIndex}
-                    activeTintColor={activeTintColor}
-                    inactiveTintColor={inactiveTintColor}
+                    activeTintColor={nativeActiveTintColor}
+                    inactiveTintColor={nativeInactiveTintColor}
                     isDark={isDark}
                     onIndexChange={handleNativeIndexChange}
                 />
             </View>
+        );
+    }
+
+    if (Platform.OS === 'android') {
+        return (
+            <AndroidBottomTabBar
+                currentIndex={currentIndex}
+                onIndexChange={onIndexChange}
+                tabs={tabs}
+                activeTintColor={activeTintColor}
+                inactiveTintColor={inactiveTintColor}
+                isDark={isDark}
+                labeled={labeled}
+                onVibePress={onVibePress}
+            />
         );
     }
 
