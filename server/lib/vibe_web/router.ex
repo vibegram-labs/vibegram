@@ -120,6 +120,12 @@ defmodule VibeWeb.Router do
     post "/group/:id/members", GroupController, :add_members
     delete "/group/:id/members/:user_id", GroupController, :remove_member
 
+    # Group Agent
+    post "/group/:id/agent", GroupAgentController, :create
+    get "/group/:id/agent", GroupAgentController, :show
+    put "/group/:id/agent", GroupAgentController, :update
+    delete "/group/:id/agent", GroupAgentController, :delete
+
     # Channels
     post "/channel", ChannelController, :create
     get "/channels", ChannelController, :index

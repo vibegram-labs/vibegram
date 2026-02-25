@@ -2,6 +2,7 @@ defmodule VibeWeb.ChatChannel do
   use VibeWeb, :channel
   alias Vibe.Chat
   alias Vibe.Notifications
+  alias Vibe.AI.GroupAgent
   require Logger
 
   @impl true
@@ -49,6 +50,9 @@ defmodule VibeWeb.ChatChannel do
 
       # BROADCAST IMMEDIATELY for instant message delivery
       broadcast!(socket, "message", payload)
+
+      # Check for @vibe agent mention and dispatch to group agent
+      maybe_dispatch_agent(chat_id, data, user_id)
 
       # Persist to database asynchronously (don't block message delivery)
       Task.start(fn ->
@@ -207,6 +211,46 @@ defmodule VibeWeb.ChatChannel do
 
       {:error, reason} ->
         {:reply, {:error, %{reason: inspect(reason)}}, socket}
+    end
+  end
+
+  # ── Agent Dispatch ──
+
+  defp maybe_dispatch_agent(chat_id, data, user_id) do
+    agent_mention = data["agentMention"] || false
+    agent_text = data["agentText"]
+
+    if agent_mention && is_binary(agent_text) && agent_text != "" do
+      metadata = %{
+        "image_urls" => data["agentImageUrls"] || [],
+        "reply_to_id" => data["replyToId"],
+        "message_id" => data["id"]
+      }
+
+      Task.start(fn ->
+        # Broadcast typing indicator from agent
+        VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "typing", %{
+          "userId" => GroupAgent.agent_user_id(),
+          "isAgent" => true
+        })
+
+        case GroupAgent.handle_mention(chat_id, agent_text, user_id, metadata) do
+          {:ok, _response} ->
+            Logger.info("[ChatChannel] Agent responded in chat #{chat_id}")
+
+          {:error, :no_agent} ->
+            Logger.debug("[ChatChannel] No agent configured for chat #{chat_id}")
+
+          {:error, reason} ->
+            Logger.error("[ChatChannel] Agent dispatch failed for chat #{chat_id}: #{inspect(reason)}")
+        end
+
+        # Stop typing indicator
+        VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "stop-typing", %{
+          "userId" => GroupAgent.agent_user_id(),
+          "isAgent" => true
+        })
+      end)
     end
   end
 

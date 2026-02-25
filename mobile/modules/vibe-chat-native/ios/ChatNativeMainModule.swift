@@ -146,6 +146,14 @@ public class ChatNativeMainModule: Module {
         view.setPage(value ?? "chat", animated: true)
       }
 
+      Prop("isGroupOrChannel") { (view: ChatMainView, value: Bool?) in
+        view.setIsGroupOrChannel(value ?? false)
+      }
+
+      Prop("agentConfig") { (view: ChatMainView, value: [String: Any]?) in
+        view.setAgentConfig(value)
+      }
+
       Events("onViewportChanged", "onNativeEvent")
     }
   }

@@ -1003,6 +1003,7 @@ final class ChatListCell: UICollectionViewCell {
 
   let bubbleView = BubbleBackgroundView()
   let tailView = BubbleTailView()
+  private let agentSenderLabel = UILabel()
   private let messageLabel = UILabel()
   private let mediaContainerView = UIView()
   private let mediaPrimaryIconView = UIImageView()
@@ -1042,6 +1043,7 @@ final class ChatListCell: UICollectionViewCell {
 
     contentView.addSubview(bubbleView)
     contentView.addSubview(tailView)
+    contentView.addSubview(agentSenderLabel)
     contentView.addSubview(messageLabel)
     contentView.addSubview(mediaContainerView)
     mediaContainerView.addSubview(mediaPrimaryIconView)
@@ -1063,6 +1065,11 @@ final class ChatListCell: UICollectionViewCell {
 
     contentView.addSubview(reactionPillView)
     reactionPillView.addSubview(reactionLabel)
+
+    agentSenderLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
+    agentSenderLabel.textColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    agentSenderLabel.isHidden = true
+    agentSenderLabel.numberOfLines = 1
 
     messageLabel.numberOfLines = 0
     messageLabel.font = bubbleMessageFont
@@ -1130,6 +1137,7 @@ final class ChatListCell: UICollectionViewCell {
 
     bubbleView.isHidden = true
     tailView.isHidden = true
+    agentSenderLabel.isHidden = true
     messageLabel.isHidden = true
     mediaContainerView.isHidden = true
     mediaPrimaryIconView.isHidden = true
@@ -1201,7 +1209,16 @@ final class ChatListCell: UICollectionViewCell {
       }
       mediaContainerView.isHidden = isGhostHidden || row.visualKind == .text
       metaContainerView.isHidden = isGhostHidden
-      messageLabel.text = row.text
+
+      // Agent message: show sender label, use plainContent for text
+      if row.isAgentMessage {
+        agentSenderLabel.text = "✦ \(row.agentName ?? "Vibe AI")"
+        agentSenderLabel.isHidden = isGhostHidden
+        messageLabel.text = row.plainContent ?? row.text
+      } else {
+        agentSenderLabel.isHidden = true
+        messageLabel.text = row.text
+      }
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
       editedLabel.isHidden = !row.isEdited
@@ -1215,14 +1232,25 @@ final class ChatListCell: UICollectionViewCell {
         reactionPillView.isHidden = true
       }
 
-      bubbleView.configure(
-        isMe: row.isMe, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
-      tailView.configure(
-        isMe: row.isMe,
-        visible: !isGhostHidden && row.shape.showTail,
-        appearance: appearance
-      )
-      let textColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
+      if row.isAgentMessage {
+        // Agent messages use "them" styling (not isMe) with a subtle tint
+        bubbleView.configure(
+          isMe: false, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
+        tailView.configure(
+          isMe: false,
+          visible: !isGhostHidden && row.shape.showTail,
+          appearance: appearance
+        )
+      } else {
+        bubbleView.configure(
+          isMe: row.isMe, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
+        tailView.configure(
+          isMe: row.isMe,
+          visible: !isGhostHidden && row.shape.showTail,
+          appearance: appearance
+        )
+      }
+      let textColor = row.isMe ? appearance.textColorMe : (row.isAgentMessage ? appearance.textColorThem : appearance.textColorThem)
       let metaColor = resolvedMetaColor(for: textColor)
       messageLabel.textColor = textColor
       editedLabel.textColor = metaColor
@@ -1333,6 +1361,7 @@ final class ChatListCell: UICollectionViewCell {
     let metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
     let bubbleWidth = metrics.bubbleWidth
     let bubbleHeight = metrics.bubbleHeight
+    let agentLabelHeight: CGFloat = row.isAgentMessage ? 18.0 : 0.0
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
     let bubbleFrame = pixelAlignedRect(
@@ -1342,6 +1371,19 @@ final class ChatListCell: UICollectionViewCell {
         width: ceil(bubbleWidth),
         height: ceil(bubbleHeight)
       ))
+
+    // Agent sender label positioned above the bubble
+    if row.isAgentMessage && !agentSenderLabel.isHidden {
+      agentSenderLabel.frame = pixelAlignedRect(
+        CGRect(
+          x: bubbleFrame.minX + bubbleHorizontalPadding,
+          y: bubbleFrame.minY - agentLabelHeight - 2,
+          width: bubbleWidth - (bubbleHorizontalPadding * 2),
+          height: agentLabelHeight
+        ))
+    } else {
+      agentSenderLabel.frame = .zero
+    }
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)

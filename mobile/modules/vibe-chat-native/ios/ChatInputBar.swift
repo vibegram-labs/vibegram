@@ -8,6 +8,7 @@ import UniformTypeIdentifiers
 
 protocol ChatInputBarDelegate: AnyObject {
   func inputBarDidSend(text: String)
+  func inputBarDidSendWithAgentMention(text: String, agentText: String)
   func inputBarDidTapAttachment()
   func inputBarDidTapAction()
   func inputBarTextDidChange(text: String)
@@ -1832,7 +1833,19 @@ final class ChatInputBar: UIView {
     setGifPanelVisible(false, animated: true)
     let t = currentText
     guard !t.isEmpty else { return }
-    delegate?.inputBarDidSend(text: t)
+
+    // Detect @vibe mention for group agent
+    let lowered = t.lowercased()
+    if lowered.contains("@vibe") {
+      // Strip the @vibe prefix from the agent text to get the actual query
+      let agentText = t
+        .replacingOccurrences(of: "@vibe", with: "", options: .caseInsensitive)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      let finalAgentText = agentText.isEmpty ? t : agentText
+      delegate?.inputBarDidSendWithAgentMention(text: t, agentText: finalAgentText)
+    } else {
+      delegate?.inputBarDidSend(text: t)
+    }
   }
 
   @objc private func cancelOverlayTapped() {

@@ -3,6 +3,8 @@ import type { NativeBubbleShape, NativeChatMessagePayload, NativeChatRow } from 
 const BUBBLE_RADIUS = 18;
 const BUBBLE_INNER_RADIUS = 5;
 
+export const AGENT_USER_ID = '00000000-0000-0000-0000-000000000001';
+
 export interface RuntimeChatMessage {
   id: string;
   chatId?: string;
@@ -25,6 +27,8 @@ export interface RuntimeChatMessage {
   replyToId?: string;
   reactionEmoji?: string;
   encryptedContent?: string;
+  plainContent?: string;
+  agentName?: string;
 }
 
 const toDayKey = (timestampMs: number) => {
@@ -106,13 +110,15 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
     const isSequenceStart = !previous || previous.isMe !== current.isMe;
     const isSequenceEnd = !next || next.isMe !== current.isMe;
 
+    const isAgentMessage = current.fromId === AGENT_USER_ID;
+
     const payload: NativeChatMessagePayload = {
       id: normalizedId,
       chatId: current.chatId,
       fromId: current.fromId,
       timestampMs: current.timestampMs,
       timestamp: current.timestamp || formatTimeLabel(current.timestampMs),
-      text: current.text,
+      text: isAgentMessage ? (current.plainContent || current.text) : current.text,
       type: current.type,
       status: current.status,
       mediaUrl: current.mediaUrl,
@@ -126,11 +132,14 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
       editedAt: current.editedAt,
       replyToId: current.replyToId,
       reactionEmoji: current.reactionEmoji,
-      encryptedContent: current.encryptedContent,
+      encryptedContent: isAgentMessage ? undefined : current.encryptedContent,
       metadata: current.waveform && current.waveform.length > 0
         ? { waveform: current.waveform }
         : undefined,
       bubbleShape: resolveBubbleShape(current.isMe, isSequenceStart, isSequenceEnd, current.type),
+      isAgentMessage,
+      agentName: isAgentMessage ? (current.agentName || 'Vibe AI') : undefined,
+      plainContent: isAgentMessage ? (current.plainContent || current.text) : undefined,
     };
 
     rows.push({

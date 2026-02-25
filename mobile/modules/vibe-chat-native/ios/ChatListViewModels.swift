@@ -93,6 +93,11 @@ struct ChatListRow {
   let isVideoNote: Bool
   let uploadProgress: Double?
 
+  // Agent message fields
+  let isAgentMessage: Bool
+  let agentName: String?
+  let plainContent: String?
+
   var visualKind: MessageVisualKind {
     guard kind == .message else {
       return .text
@@ -179,6 +184,9 @@ struct ChatListRow {
       waveform = nil
       isVideoNote = false
       uploadProgress = nil
+      isAgentMessage = false
+      agentName = nil
+      plainContent = nil
       return
     }
 
@@ -250,6 +258,11 @@ struct ChatListRow {
       ?? parseDouble(message["upload_progress"])
       ?? parseDouble(metadata?["uploadProgress"])
       ?? parseDouble(metadata?["upload_progress"])
+
+    // Agent message fields
+    isAgentMessage = (message["isAgentMessage"] as? Bool) ?? false
+    agentName = message["agentName"] as? String
+    plainContent = message["plainContent"] as? String
   }
 }
 
@@ -363,6 +376,9 @@ func chatListRowContentEqual(_ lhs: ChatListRow, _ rhs: ChatListRow) -> Bool {
     && optionalWaveformEqual(lhs.waveform, rhs.waveform)
     && optionalDoubleEqual(lhs.uploadProgress, rhs.uploadProgress)
     && bubbleShapeEqual(lhs.shape, rhs.shape)
+    && lhs.isAgentMessage == rhs.isAgentMessage
+    && lhs.agentName == rhs.agentName
+    && lhs.plainContent == rhs.plainContent
 }
 
 struct SendTransitionPayload {

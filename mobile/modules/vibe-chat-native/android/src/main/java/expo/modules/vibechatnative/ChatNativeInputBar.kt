@@ -47,6 +47,7 @@ internal class ChatNativeInputBar(
     fun onTextChanged(text: String)
     fun onAttachmentPressed()
     fun onSendText(text: String, messageId: String)
+    fun onSendTextWithAgentMention(text: String, agentText: String, messageId: String)
     fun onRecordingState(isRecording: Boolean, isLocked: Boolean)
     fun onRecordingVad(level: Float)
     fun onRecordingCanceled()
@@ -408,7 +409,19 @@ internal class ChatNativeInputBar(
     }
     val text = input.text?.toString()?.trim().orEmpty()
     if (text.isEmpty()) return
-    listener?.onSendText(text, "android-native-${UUID.randomUUID()}")
+    val messageId = "android-native-${UUID.randomUUID()}"
+
+    // Detect @vibe mention for group agent (mirrors iOS ChatInputBar)
+    val lowered = text.lowercase()
+    if (lowered.contains("@vibe")) {
+      val agentText = text
+        .replace(Regex("@vibe", RegexOption.IGNORE_CASE), "")
+        .trim()
+      val finalAgentText = agentText.ifEmpty { text }
+      listener?.onSendTextWithAgentMention(text, finalAgentText, messageId)
+    } else {
+      listener?.onSendText(text, messageId)
+    }
     input.setText("")
   }
 

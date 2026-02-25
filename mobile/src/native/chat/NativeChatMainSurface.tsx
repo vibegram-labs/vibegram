@@ -3,6 +3,7 @@ import { Platform, StyleSheet, View } from 'react-native';
 
 import { getNativeChatMainModule, isNativeChatEnabled } from './runtime';
 import type {
+  NativeChatAgentConfig,
   NativeChatAppearance,
   NativeChatRow,
   NativeReactionFxPayload,
@@ -61,6 +62,8 @@ interface NativeChatMainSurfaceProps {
   avatarUri?: string;
   isOnline?: boolean;
   isChatMuted?: boolean;
+  isGroupOrChannel?: boolean;
+  agentConfig?: NativeChatAgentConfig | null;
   page?: NativeChatMainPage;
   onViewportChanged?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
@@ -93,6 +96,8 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
     avatarUri,
     isOnline,
     isChatMuted,
+    isGroupOrChannel,
+    agentConfig,
     page,
     onViewportChanged,
     onNativeEvent,
@@ -201,6 +206,8 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         avatarUri={avatarUri}
         isOnline={isOnline}
         isChatMuted={isChatMuted}
+        isGroupOrChannel={isGroupOrChannel}
+        agentConfig={agentConfig}
         page={page}
         onViewportChanged={(event: any) => {
           try {

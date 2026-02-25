@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo } from 'react';
-import { Platform, Text, View } from 'react-native';
+import { Linking, Platform, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as Clipboard from 'expo-clipboard';
 
 import { useChatStore } from '../src/lib/ChatStore';
 import { useAuthStore } from '../src/lib/stores/auth-store';
@@ -199,6 +200,34 @@ export default function ChatScreen() {
     }
 
     if (type === 'headerAvatarPressed') {
+      return;
+    }
+
+    if (type === 'headerSearchPressed') {
+      if (effectiveChatId) {
+        router.push({ pathname: '/chat', params: { id: effectiveChatId, openSearch: '1' } });
+      }
+      return;
+    }
+
+    if (type === 'profileContentPressed') {
+      const url = typeof payload.url === 'string' ? payload.url.trim() : '';
+      if (url) {
+        Linking.openURL(url).catch((error) => {
+          console.warn('[chat/native-main] failed to open profile url', { url, error });
+        });
+      }
+      return;
+    }
+
+    if (type === 'profileUsernamePressed') {
+      const handle = typeof payload.handle === 'string' ? payload.handle.trim() : '';
+      if (handle) {
+        const normalized = handle.startsWith('@') ? handle : `@${handle}`;
+        Clipboard.setStringAsync(normalized).catch((error) => {
+          console.warn('[chat/native-main] failed to copy profile handle', { handle: normalized, error });
+        });
+      }
       return;
     }
 
@@ -468,7 +497,11 @@ export default function ChatScreen() {
         headerTitle={displayName}
         headerSubtitle={subtitle}
         profileName={displayName}
-        profileHandle={activeChat?.friendId ? `id: ${activeChat.friendId}` : subtitle}
+        profileHandle={
+          activeChat?.friendName
+            ? `@${activeChat.friendName}`
+            : (activeChat?.friendId ? `id: ${activeChat.friendId}` : subtitle)
+        }
         profileBio={activeChat?.description || ''}
         avatarUri={activeChat?.friendImage || undefined}
         isOnline={isOnline}

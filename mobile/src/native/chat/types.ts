@@ -32,6 +32,9 @@ export interface NativeChatMessagePayload {
   bubbleShape?: NativeBubbleShape;
   encryptedContent?: string;
   metadata?: Record<string, unknown>;
+  isAgentMessage?: boolean;
+  agentName?: string;
+  plainContent?: string;
 }
 
 export interface NativeChatMessageRow {
@@ -133,6 +136,15 @@ export interface NativeChatListModule {
   ) => Promise<void>;
   startSendTransition?: (surfaceId: string, payload: NativeSendTransitionPayload) => Promise<void>;
   playReactionFx?: (surfaceId: string, payload: NativeReactionFxPayload) => Promise<void>;
+}
+
+export interface NativeChatAgentConfig {
+  id?: string;
+  chat_id?: string;
+  name?: string;
+  system_prompt?: string;
+  enabled?: boolean;
+  avatar_url?: string;
 }
 
 export interface NativeChatMainModule {
