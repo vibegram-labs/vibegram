@@ -83,11 +83,11 @@ class ChatNativeMainModule : Module() {
       }
 
       Prop("contentPaddingTop") { view: ChatMainView, value: Double ->
-        view.setContentPaddingTop(value)
+        view.applyContentPaddingTop(value)
       }
 
       Prop("contentPaddingBottom") { view: ChatMainView, value: Double ->
-        view.setContentPaddingBottom(value)
+        view.applyContentPaddingBottom(value)
       }
 
       Prop("voicePlayback") { view: ChatMainView, payload: Map<String, Any?> ->
@@ -134,8 +134,14 @@ class ChatNativeMainModule : Module() {
         view.setIsOnline(value ?: false)
       }
 
+      Prop("isChatMuted") { view: ChatMainView, value: Boolean? ->
+        view.setIsChatMuted(value ?: false)
+      }
+
       Prop("page") { view: ChatMainView, value: String? ->
-        view.setPage(value ?: "chat", true)
+        // Do not coerce null/undefined to "chat". When JS omits the prop,
+        // forcing "chat" here fights native page transitions (e.g. avatar -> profile).
+        value?.let { view.setPage(it, true) }
       }
     }
   }

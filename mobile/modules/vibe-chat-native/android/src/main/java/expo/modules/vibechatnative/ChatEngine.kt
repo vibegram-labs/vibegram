@@ -5,6 +5,7 @@ import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
+import expo.modules.vibechatnative.notifications.VibeNativeCallStore
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -266,11 +267,145 @@ internal object ChatEngine {
   // Use the same pinned OkHttpClient with cert pinning + TLS enforcement
   // for history HTTP requests as the WebSocket connection uses.
   private val historyHttpClient by lazy { ChatPhoenixClient.buildPinnedHttpClient() }
+  private const val fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+
+  private fun hasNativeSocketConfigLocked(): Boolean {
+    val ctx = appContextRef ?: return false
+    val config = ChatEngineStore.getConfig(ctx)
+    val socketUrl = normalized(config["socketUrl"] ?: config["url"])
+    val userId = normalized(config["userId"])
+    val token = normalized(config["authToken"] ?: config["token"])
+    return socketUrl != null && userId != null && token != null
+  }
+
+  private fun deriveSocketUrlFromApiBase(apiBaseUrl: String): String? {
+    val trimmed = apiBaseUrl.trim().trimEnd('/')
+    if (trimmed.isBlank()) return null
+    return trimmed.replaceFirst(Regex("^http", RegexOption.IGNORE_CASE), "ws") + "/socket"
+  }
+
+  @Suppress("LongMethod")
+  private fun bootstrapConfigFromNativeSessionIfNeededLocked(trigger: String): Boolean {
+    if (hasNativeSocketConfigLocked()) return true
+    val ctx = appContextRef ?: run {
+      appendJournalLocked(
+        "native-config-bootstrap-skip",
+        mapOf("trigger" to trigger, "reason" to "missing_context"),
+      )
+      return false
+    }
+
+    val existing = ChatEngineStore.getConfig(ctx)
+    val nativeCallConfig = try {
+      VibeNativeCallStore.getNativeEngineConfig(ctx)
+    } catch (_: Throwable) {
+      emptyMap()
+    }
+
+    val userId = normalized(existing["userId"] ?: nativeCallConfig["userId"])
+      ?: run {
+        appendJournalLocked(
+          "native-config-bootstrap-skip",
+          mapOf("trigger" to trigger, "reason" to "missing_user_id"),
+        )
+        return false
+      }
+
+    val apiBase =
+      normalized(
+        existing["apiBaseUrl"] ?: existing["baseUrl"] ?: nativeCallConfig["baseUrl"]
+          ?: nativeCallConfig["apiBaseUrl"],
+      )
+        ?: fallbackApiBaseURL
+    val socketUrl =
+      normalized(
+        existing["socketUrl"] ?: existing["url"] ?: nativeCallConfig["socketUrl"]
+          ?: nativeCallConfig["signalingUrl"],
+      )
+        ?: deriveSocketUrlFromApiBase(apiBase)
+        ?: run {
+          appendJournalLocked(
+            "native-config-bootstrap-skip",
+            mapOf("trigger" to trigger, "reason" to "missing_socket_url"),
+          )
+          return false
+        }
+    val token =
+      normalized(
+        existing["authToken"] ?: existing["token"] ?: nativeCallConfig["authToken"]
+          ?: nativeCallConfig["token"],
+      ) ?: userId
+
+    val merged = LinkedHashMap(existing)
+    merged["apiBaseUrl"] = apiBase
+    merged["socketUrl"] = socketUrl
+    merged["authToken"] = token
+    merged["userId"] = userId
+    if (normalized(existing["userChannelTopic"]) == null) {
+      merged["userChannelTopic"] = "user:$userId"
+    }
+    if (normalized(existing["privateKeyPem"] ?: existing["privateKey"]) == null) {
+      val privateKeyPem = normalized(nativeCallConfig["privateKeyPem"] ?: nativeCallConfig["privateKey"])
+      if (!privateKeyPem.isNullOrBlank()) {
+        merged["privateKeyPem"] = privateKeyPem
+      }
+    }
+    if (normalized(existing["publicKeyPem"] ?: existing["publicKey"]) == null) {
+      val publicKeyPem = normalized(nativeCallConfig["publicKeyPem"] ?: nativeCallConfig["publicKey"])
+      if (!publicKeyPem.isNullOrBlank()) {
+        merged["publicKeyPem"] = publicKeyPem
+      }
+    }
+
+    ChatEngineStore.setConfig(ctx, merged)
+    state["state"] = "configured-native-bootstrap"
+    state["updatedAt"] = System.currentTimeMillis()
+    state["configuredAt"] = state["updatedAt"]
+    state["configKeys"] = merged.keys.sorted()
+    state["note"] = "ChatEngine configured from native session"
+    state["presenceSource"] = if (nativePresenceActive) "native" else "shadow"
+    appendJournalLocked(
+      "native-config-bootstrap",
+      mapOf(
+        "trigger" to trigger,
+        "hasSocketUrl" to (normalized(merged["socketUrl"] ?: merged["url"]) != null),
+        "hasUserId" to (normalized(merged["userId"]) != null),
+        "hasToken" to (normalized(merged["authToken"] ?: merged["token"]) != null),
+        "hasPrivateKey" to (normalized(merged["privateKeyPem"] ?: merged["privateKey"]) != null),
+        "hasPublicKey" to (normalized(merged["publicKeyPem"] ?: merged["publicKey"]) != null),
+      ),
+    )
+    return true
+  }
+
+  private fun ensureNativeTransport(trigger: String) {
+    val shouldConnect = synchronized(lock) {
+      val connected = state["connected"] == true
+      val currentState = normalized(state["state"])?.lowercase().orEmpty()
+      if (connected || currentState == "connecting-native-presence" || currentState == "native-socket-open") {
+        false
+      } else {
+        bootstrapConfigFromNativeSessionIfNeededLocked(trigger)
+      }
+    }
+    if (shouldConnect) {
+      connect()
+    }
+  }
+
+  private fun ensureNativeTransportAsync(trigger: String) {
+    Thread {
+      try {
+        ensureNativeTransport(trigger)
+      } catch (_: Throwable) {
+      }
+    }.apply { isDaemon = true }.start()
+  }
 
   fun configure(context: Context, payload: Map<String, Any?>): Map<String, Any?> {
     appContextRef = context.applicationContext
     ChatEngineStore.setConfig(context, payload)
-    synchronized(lock) {
+    val snapshot = synchronized(lock) {
       state["state"] = "configured"
       state["updatedAt"] = System.currentTimeMillis()
       state["configuredAt"] = state["updatedAt"]
@@ -280,8 +415,10 @@ internal object ChatEngine {
       appendJournalLocked("configure", mapOf("keys" to payload.keys.sorted()))
       val result = statusSnapshotLocked()
       emitChangeLocked("configure", null, null)
-      return result
+      result
     }
+    ensureNativeTransport("configure")
+    return snapshot
   }
 
   fun getStatus(): Map<String, Any?> =
@@ -312,6 +449,9 @@ internal object ChatEngine {
         emitChangeLocked("connectionStateChanged", null, null)
         return result
       }
+    }
+    synchronized(lock) {
+      bootstrapConfigFromNativeSessionIfNeededLocked("connect_native_presence")
     }
     val config = ChatEngineStore.getConfig(ctx)
     val socketUrl = normalized(config["socketUrl"] ?: config["url"])
@@ -439,7 +579,7 @@ internal object ChatEngine {
 
   fun bindSurface(payload: Map<String, Any?>): Map<String, Any?> {
     val surfaceId = normalized(payload["surfaceId"] ?: payload["engineSurfaceId"]) ?: return getStatus()
-    synchronized(lock) {
+    val snapshot = synchronized(lock) {
       surfaceBindings[surfaceId] = SurfaceBinding(
         surfaceId = surfaceId,
         chatId = normalized(payload["chatId"]),
@@ -450,8 +590,10 @@ internal object ChatEngine {
       appendJournalLocked("bind-surface", payload)
       val result = statusSnapshotLocked()
       emitChangeLocked("surfaceBindingChanged", surfaceBindings[surfaceId]?.chatId, null)
-      return result
+      result
     }
+    ensureNativeTransport("bind_surface")
+    return snapshot
   }
 
   fun unbindSurface(payload: Map<String, Any?>): Map<String, Any?> {
@@ -478,6 +620,8 @@ internal object ChatEngine {
       val result = statusSnapshotLocked()
       emitChangeLocked("chatChannelStateChanged", resolvedChatId, null)
       result
+    }.also {
+      ensureNativeTransport("open_chat_channel")
     }
 
   fun closeChatChannel(payload: Map<String, Any?>): Map<String, Any?> =
@@ -521,9 +665,13 @@ internal object ChatEngine {
         return@synchronized mapOf("accepted" to true, "transport" to "native", "deduped" to true, "typing" to typing)
       }
       nativeTypingStateByChatId[chatId] = typing
-      val client = phoenixClient ?: return@synchronized mapOf("accepted" to false, "reason" to "no_native_socket", "typing" to typing)
+      val client = phoenixClient ?: run {
+        ensureNativeTransportAsync("typing_no_socket")
+        return@synchronized mapOf("accepted" to false, "reason" to "no_native_socket", "typing" to typing)
+      }
       if (!nativeJoinedChatIds.contains(chatId) || state["connected"] != true) {
         joinNativeChatTopicIfNeededLocked(chatId)
+        ensureNativeTransportAsync("typing_chat_not_joined")
         return@synchronized mapOf("accepted" to false, "reason" to "chat_not_joined", "typing" to typing)
       }
       val userId = normalized(getConfigValueLocked("userId")) ?: "me"
@@ -557,9 +705,13 @@ internal object ChatEngine {
         return@synchronized mapOf("accepted" to true, "transport" to "native", "deduped" to true, "isRecording" to isRecording)
       }
       nativeRecordingStateByChatId[chatId] = isRecording
-      val client = phoenixClient ?: return@synchronized mapOf("accepted" to false, "reason" to "no_native_socket", "isRecording" to isRecording)
+      val client = phoenixClient ?: run {
+        ensureNativeTransportAsync("recording_no_socket")
+        return@synchronized mapOf("accepted" to false, "reason" to "no_native_socket", "isRecording" to isRecording)
+      }
       if (!nativeJoinedChatIds.contains(chatId) || state["connected"] != true) {
         joinNativeChatTopicIfNeededLocked(chatId)
+        ensureNativeTransportAsync("recording_chat_not_joined")
         return@synchronized mapOf("accepted" to false, "reason" to "chat_not_joined", "isRecording" to isRecording)
       }
       val userId = normalized(getConfigValueLocked("userId")) ?: "me"
@@ -617,11 +769,17 @@ internal object ChatEngine {
 
   fun sendMessage(payload: Map<String, Any?>): Map<String, Any?> {
     val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
-      ?: return mapOf("accepted" to false, "reason" to "invalid_chat")
+      ?: run {
+        Log.w("ChatEngine", "sendMessage rejected reason=invalid_chat payloadKeys=${payload.keys}")
+        return mapOf("accepted" to false, "reason" to "invalid_chat")
+      }
     val type = (normalized(payload["type"]) ?: "text").lowercase()
     val text = normalized(payload["text"]) ?: ""
     val supportedTypes = setOf("text", "image", "gif", "file", "voice", "video", "music", "location", "contact")
-    if (!supportedTypes.contains(type)) return mapOf("accepted" to false, "reason" to "unsupported_type", "type" to type)
+    if (!supportedTypes.contains(type)) {
+      Log.w("ChatEngine", "sendMessage rejected reason=unsupported_type chatId=$chatId type=$type")
+      return mapOf("accepted" to false, "reason" to "unsupported_type", "type" to type)
+    }
     val metadata = payload["metadata"] as? Map<*, *> ?: emptyMap<String, Any?>()
     fun meta(key: String, vararg aliases: String): Any? {
       payload[key]?.let { return it }
@@ -646,14 +804,25 @@ internal object ChatEngine {
     val viewOnce = meta("viewOnce", "view_once")
     val isVideoNote = meta("isVideoNote", "is_video_note")
     val waveform = meta("waveform")
-    if (type == "text" && text.isBlank()) return mapOf("accepted" to false, "reason" to "empty_text")
+    if (type == "text" && text.isBlank()) {
+      Log.w("ChatEngine", "sendMessage rejected reason=empty_text chatId=$chatId")
+      return mapOf("accepted" to false, "reason" to "empty_text")
+    }
     if (setOf("image", "gif", "file", "voice", "video", "music").contains(type)) {
-      if (mediaUrl.isNullOrBlank()) return mapOf("accepted" to false, "reason" to "missing_media_url", "type" to type)
+      if (mediaUrl.isNullOrBlank()) {
+        Log.w(
+          "ChatEngine",
+          "sendMessage rejected reason=missing_media_url chatId=$chatId type=$type",
+        )
+        return mapOf("accepted" to false, "reason" to "missing_media_url", "type" to type)
+      }
     }
     if (type == "location" && (latitude == null || longitude == null)) {
+      Log.w("ChatEngine", "sendMessage rejected reason=invalid_location chatId=$chatId")
       return mapOf("accepted" to false, "reason" to "invalid_location")
     }
     if (type == "contact" && contact == null) {
+      Log.w("ChatEngine", "sendMessage rejected reason=missing_contact chatId=$chatId")
       return mapOf("accepted" to false, "reason" to "missing_contact")
     }
     val messageId = normalized(payload["messageId"] ?: payload["message_id"]) ?: java.util.UUID.randomUUID().toString().lowercase()
@@ -664,16 +833,25 @@ internal object ChatEngine {
       normalized(payload["replyToId"] ?: payload["reply_to_id"])
         ?: normalized(metadata["replyToId"] ?: metadata["reply_to_id"])
     val peerUserIdHint = normalizedUpper(payload["peerUserId"] ?: payload["peer_user_id"])
+    Log.i(
+      "ChatEngine",
+      "sendMessage start chatId=$chatId messageId=$messageId type=$type textLen=${text.length} hasPeerHint=${peerUserIdHint != null} mediaLocal=${mediaUrl?.let { isLocalMediaUri(it) } ?: false}",
+    )
 
     return synchronized(lock) {
       val effectivePayload = LinkedHashMap(payload)
       val peerUserId = peerUserIdHint ?: chatPeerUserIdsByChatId[chatId]
       val friendPublicKey = resolveFriendPublicKeyLocked(chatId, peerUserId)
         ?: run {
+          Log.w(
+            "ChatEngine",
+            "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId",
+          )
           pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
           upsertLocalStatusLocked(chatId, messageId, "pending")
           queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
           emitChangeLocked("messageStatusChanged", chatId, messageId)
+          ensureNativeTransportAsync("send_missing_friend_key")
           return@synchronized mapOf(
             "accepted" to true,
             "queued" to true,
@@ -880,6 +1058,7 @@ internal object ChatEngine {
         upsertLocalStatusLocked(chatId, messageId, "pending")
         queueOutboundDraftLocked(chatId, messageId, effectivePayload, "no_native_socket")
         emitChangeLocked("messageStatusChanged", chatId, messageId)
+        ensureNativeTransportAsync("send_no_socket")
         return@synchronized mapOf(
           "accepted" to true,
           "queued" to true,
@@ -893,6 +1072,7 @@ internal object ChatEngine {
         upsertLocalStatusLocked(chatId, messageId, "pending")
         queueOutboundDraftLocked(chatId, messageId, effectivePayload, "chat_not_joined")
         emitChangeLocked("messageStatusChanged", chatId, messageId)
+        ensureNativeTransportAsync("send_chat_not_joined")
         return@synchronized mapOf(
           "accepted" to true,
           "queued" to true,
@@ -1094,6 +1274,283 @@ internal object ChatEngine {
 
   fun deleteMessage(payload: Map<String, Any?>): Map<String, Any?> =
     sendDeleteMessage(payload)
+
+  fun setChatMuted(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("accepted" to false, "reason" to "invalid_chat")
+    val muted = parseBooleanValue(payload["muted"])
+      ?: return mapOf("accepted" to false, "reason" to "invalid_muted")
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      val userId = normalized(payload["userId"] ?: payload["user_id"] ?: getConfigValueLocked("userId"))
+      if (apiBaseUrl.isNullOrBlank() || userId.isNullOrBlank()) {
+        null
+      } else {
+        val token = authHeaderTokenLocked()
+        appendJournalLocked(
+          "native-chat-mute-request",
+          mapOf("chatId" to chatId, "muted" to muted, "userId" to userId),
+        )
+        state["updatedAt"] = System.currentTimeMillis()
+        Triple(apiBaseUrl, token, userId)
+      }
+    } ?: return mapOf("accepted" to false, "reason" to "missing_config", "chatId" to chatId)
+
+    val body =
+      JSONObject(mapOf("userId" to preflight.third, "muted" to muted)).toString().toRequestBody(
+        "application/json".toMediaTypeOrNull(),
+      )
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/chat/$chatId/mute")
+      .post(body)
+      .header("Accept", "application/json")
+      .header("Content-Type", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+    historyHttpClient.newCall(requestBuilder.build()).enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        synchronized(lock) {
+          appendJournalLocked(
+            "native-chat-mute-error",
+            mapOf("chatId" to chatId, "muted" to muted, "error" to (e.message ?: "network_error")),
+          )
+        }
+      }
+
+      override fun onResponse(call: Call, response: Response) {
+        response.use { res ->
+          synchronized(lock) {
+            if (res.isSuccessful) {
+              appendJournalLocked(
+                "native-chat-mute-ok",
+                mapOf("chatId" to chatId, "muted" to muted, "status" to res.code),
+              )
+              emitChangeLocked("chatMuteChanged", chatId, null)
+            } else {
+              appendJournalLocked(
+                "native-chat-mute-error",
+                mapOf("chatId" to chatId, "muted" to muted, "status" to res.code),
+              )
+            }
+          }
+        }
+      }
+    })
+
+    return mapOf("accepted" to true, "queued" to true, "chatId" to chatId, "muted" to muted)
+  }
+
+  fun clearChat(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("accepted" to false, "reason" to "invalid_chat")
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        val token = authHeaderTokenLocked()
+
+        historyRowsByChat.remove(chatId)
+        historyLoadingChats.remove(chatId)
+        liveMessageRowsByChat.remove(chatId)
+        deletedMessageIdsByChat.remove(chatId)
+        receiptIndex.remove(chatId)
+        localStatusIndex.remove(chatId)
+        pendingOutboundQueueByChat.remove(chatId)
+        nativeTypingStateByChatId.remove(chatId)
+        nativeRecordingStateByChatId.remove(chatId)
+        chatPeerUserIdsByChatId.remove(chatId)
+        openChatChannels.remove(chatId)
+
+        val draftIdsToRemove = pendingOutboundDraftsByMessageId
+          .filterValues { draft ->
+            normalized(draft["chatId"] ?: draft["chat_id"]) == chatId
+          }
+          .keys
+          .toList()
+        draftIdsToRemove.forEach { pendingOutboundDraftsByMessageId.remove(it) }
+
+        if (nativeJoinedChatIds.remove(chatId)) {
+          phoenixClient?.leave(chatTopic(chatId))
+        }
+
+        appendJournalLocked("native-chat-clear-local", mapOf("chatId" to chatId))
+        state["updatedAt"] = System.currentTimeMillis()
+        emitChangeLocked("chatRowsReloaded", chatId, null)
+        emitChangeLocked("chatCleared", chatId, null)
+        Pair(apiBaseUrl, token)
+      }
+    } ?: return mapOf("accepted" to false, "reason" to "missing_config", "chatId" to chatId)
+
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/chats/$chatId")
+      .delete()
+      .header("Accept", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+    historyHttpClient.newCall(requestBuilder.build()).enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        synchronized(lock) {
+          appendJournalLocked(
+            "native-chat-clear-error",
+            mapOf("chatId" to chatId, "error" to (e.message ?: "network_error")),
+          )
+        }
+      }
+
+      override fun onResponse(call: Call, response: Response) {
+        response.use { res ->
+          synchronized(lock) {
+            if (res.isSuccessful) {
+              appendJournalLocked(
+                "native-chat-clear-ok",
+                mapOf("chatId" to chatId, "status" to res.code),
+              )
+            } else {
+              appendJournalLocked(
+                "native-chat-clear-error",
+                mapOf("chatId" to chatId, "status" to res.code),
+              )
+            }
+          }
+        }
+      }
+    })
+
+    return mapOf("accepted" to true, "queued" to true, "chatId" to chatId)
+  }
+
+  fun blockUser(payload: Map<String, Any?>): Map<String, Any?> {
+    val blockedUserId =
+      normalized(payload["blockedUserId"] ?: payload["blocked_user_id"] ?: payload["peerUserId"] ?: payload["peer_user_id"])
+        ?: return mapOf("accepted" to false, "reason" to "invalid_user")
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        val token = authHeaderTokenLocked()
+        appendJournalLocked(
+          "native-user-block-request",
+          mapOf("blockedUserId" to blockedUserId),
+        )
+        state["updatedAt"] = System.currentTimeMillis()
+        Pair(apiBaseUrl, token)
+      }
+    } ?: return mapOf("accepted" to false, "reason" to "missing_config")
+
+    val body =
+      JSONObject(mapOf("blocked_user_id" to blockedUserId)).toString().toRequestBody(
+        "application/json".toMediaTypeOrNull(),
+      )
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/user/block")
+      .post(body)
+      .header("Accept", "application/json")
+      .header("Content-Type", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+    historyHttpClient.newCall(requestBuilder.build()).enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        synchronized(lock) {
+          appendJournalLocked(
+            "native-user-block-error",
+            mapOf("blockedUserId" to blockedUserId, "error" to (e.message ?: "network_error")),
+          )
+        }
+      }
+
+      override fun onResponse(call: Call, response: Response) {
+        response.use { res ->
+          synchronized(lock) {
+            if (res.isSuccessful) {
+              appendJournalLocked(
+                "native-user-block-ok",
+                mapOf("blockedUserId" to blockedUserId, "status" to res.code),
+              )
+              emitChangeLocked("userBlocked", null, null)
+            } else {
+              appendJournalLocked(
+                "native-user-block-error",
+                mapOf("blockedUserId" to blockedUserId, "status" to res.code),
+              )
+            }
+          }
+        }
+      }
+    })
+
+    return mapOf("accepted" to true, "queued" to true, "blockedUserId" to blockedUserId)
+  }
+
+  fun getChatProfileSummary(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"]).orEmpty()
+    if (chatId.isBlank()) {
+      return mapOf(
+        "chatId" to "",
+        "historyLoaded" to false,
+        "totalMessages" to 0,
+        "mediaCount" to 0,
+        "fileCount" to 0,
+        "linkCount" to 0,
+        "recentFiles" to emptyList<String>(),
+      )
+    }
+    return synchronized(lock) {
+      val rows = historyRowsByChat[chatId].orEmpty()
+      var totalMessages = 0
+      var mediaCount = 0
+      var fileCount = 0
+      var linkCount = 0
+      val recentFiles = mutableListOf<String>()
+
+      rows.forEach { row ->
+        if (normalized(row["kind"]) != "message") return@forEach
+        val message = row["message"] as? Map<*, *> ?: return@forEach
+        totalMessages += 1
+
+        val type = normalized(message["type"])?.lowercase() ?: "text"
+        val text = normalized(message["text"]).orEmpty()
+        val caption = normalized(message["caption"]).orEmpty()
+        val mediaUrl = normalized(message["mediaUrl"]).orEmpty()
+        val fileName = normalized(message["fileName"]).orEmpty()
+
+        val isMediaType = setOf("image", "gif", "video", "voice", "music").contains(type)
+        if (isMediaType) mediaCount += 1
+
+        val isFileType = type == "file" || (!isMediaType && fileName.isNotBlank())
+        if (isFileType) {
+          fileCount += 1
+          if (fileName.isNotBlank() && recentFiles.size < 3) {
+            recentFiles.add(fileName)
+          }
+        }
+
+        if (containsLinkCandidate(text) || containsLinkCandidate(caption) || containsLinkCandidate(mediaUrl)) {
+          linkCount += 1
+        }
+      }
+
+      mapOf(
+        "chatId" to chatId,
+        "historyLoaded" to historyRowsByChat.containsKey(chatId),
+        "totalMessages" to totalMessages,
+        "mediaCount" to mediaCount,
+        "fileCount" to fileCount,
+        "linkCount" to linkCount,
+        "recentFiles" to recentFiles,
+      )
+    }
+  }
 
   fun getJournal(): List<Map<String, Any?>> {
     val ctx = appContextRef ?: return emptyList()
@@ -1446,6 +1903,20 @@ internal object ChatEngine {
       else -> null
     }
 
+  private fun parseBooleanValue(value: Any?): Boolean? =
+    when (value) {
+      is Boolean -> value
+      is Number -> value.toInt() != 0
+      is String -> {
+        when (value.trim().lowercase()) {
+          "1", "true", "yes", "on" -> true
+          "0", "false", "no", "off" -> false
+          else -> null
+        }
+      }
+      else -> null
+    }
+
   private fun parseWaveformArray(value: Any?): List<Double>? {
     val rawList: List<*> = when (value) {
       is JSONArray -> (0 until value.length()).map { value.opt(it) }
@@ -1486,6 +1957,14 @@ internal object ChatEngine {
     } catch (_: Throwable) {
       mapOf("text" to raw)
     }
+  }
+
+  private fun containsLinkCandidate(value: String?): Boolean {
+    val normalizedValue = value?.trim()?.lowercase().orEmpty()
+    if (normalizedValue.isBlank()) return false
+    return normalizedValue.contains("http://")
+      || normalizedValue.contains("https://")
+      || normalizedValue.contains("www.")
   }
 
   private fun formatMessageTimeLabel(timestampMs: Long): String {
@@ -1661,8 +2140,14 @@ internal object ChatEngine {
   private fun joinNativeChatTopicIfNeededLocked(chatId: String) {
     if (chatId.isBlank()) return
     loadChatHistoryIfNeededLocked(chatId)
-    val client = phoenixClient ?: return
-    if ((state["connected"] as? Boolean) != true) return
+    val client = phoenixClient ?: run {
+      ensureNativeTransportAsync("join_chat_no_socket")
+      return
+    }
+    if ((state["connected"] as? Boolean) != true) {
+      ensureNativeTransportAsync("join_chat_not_connected")
+      return
+    }
     if (nativeJoinedChatIds.contains(chatId)) return
     if (nativeChatJoinRefsByRef.values.contains(chatId)) return
     val ref = client.join(chatTopic(chatId), emptyMap())
@@ -2010,6 +2495,7 @@ internal object ChatEngine {
         "native-chat-history-load-ok",
         mapOf("chatId" to chatId, "rows" to rows.size, "messages" to messages.length()),
       )
+      scheduleReplayQueuedOutboundLocked(chatId, "history_loaded")
       emitChangeLocked("chatRowsReloaded", chatId, null)
     } catch (e: Throwable) {
       appendJournalLocked(

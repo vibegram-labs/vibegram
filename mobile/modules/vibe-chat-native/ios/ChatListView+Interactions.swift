@@ -159,11 +159,10 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     _ gestureRecognizer: UIGestureRecognizer,
     shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
   ) -> Bool {
-    guard
-      gestureRecognizer === swipeReplyPanGesture || otherGestureRecognizer === swipeReplyPanGesture
-    else { return false }
-    // Avoid pan competition; once swipe-reply begins we want real-time horizontal feedback.
-    return false
+    // Return true! This prevents the built-in UIScrollView pan gesture from
+    // blocking our swipe gesture while iOS tries to decide who wins.
+    // This removes the 2-second stall and enables real-time 120fps tracking.
+    return true
   }
 
   @objc private func handleSwipeReplyPan(_ gesture: UIPanGestureRecognizer) {

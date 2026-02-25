@@ -4,15 +4,13 @@ import { View, Text, TouchableOpacity, StyleSheet, Platform, Dimensions, Keyboar
 import Animated, {
     useSharedValue,
     useAnimatedStyle,
-    withSpring,
     interpolate,
     runOnJS,
     Extrapolation,
-    cancelAnimation,
     withTiming,
     Easing,
 } from 'react-native-reanimated'
-import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler'
+import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
@@ -147,8 +145,17 @@ export default function TabLayout() {
 
     // Animation Values
     const pageIndex = useSharedValue<number>(PAGES['home'])
+
+    // Fallback tab bar indicator
     const translateX = useSharedValue(-PAGES['home'] * SCREEN_WIDTH)
-    const isGesturing = useSharedValue(false)
+
+    // Lazy mount: only mount a screen once it has been visited
+    const [mountedPages, setMountedPages] = useState<Record<PageName, boolean>>({
+        contacts: false,
+        calls: false,
+        home: true,  // initial tab
+        settings: false,
+    })
 
     // Story camera reveal (behind tabs)
     const [isStoryCameraOpen, setIsStoryCameraOpen] = useState(false)
@@ -169,21 +176,14 @@ export default function TabLayout() {
     // Bottom bar always visible now unless editing
     const showBottomBar = !isHomeEditing
 
-    // Tab Press Handler (No Router, Just Animation)
+    // Tab Press Handler — instant switch with lazy mount
     const handleTabPress = useCallback((page: PageName) => {
         try {
             Keyboard.dismiss()
-            console.log('[TabsLayout] handleTabPress', page)
-            const targetIndex = PAGES[page]
+            setMountedPages(prev => prev[page] ? prev : { ...prev, [page]: true })
             setCurrentTab(page)
-
-            // Animate
-            pageIndex.value = targetIndex
-            translateX.value = withSpring(-targetIndex * SCREEN_WIDTH, {
-                damping: 24,
-                stiffness: 220,
-                mass: 0.8,
-            })
+            pageIndex.value = PAGES[page]
+            translateX.value = withTiming(-PAGES[page] * SCREEN_WIDTH, { duration: 240 })
         } catch (error) {
             console.error('[TabsLayout] handleTabPress failed', error)
         }
@@ -226,64 +226,6 @@ export default function TabLayout() {
         return () => sub.remove()
     }, [isStoryCameraOpen, closeStoryCamera])
 
-    // Gesture Handler for Swipes
-    const gesture = Gesture.Pan()
-        .enabled(!activeChatId && !isStoryCameraOpen)
-        .activeOffsetX([-15, 15])
-        .failOffsetY([-20, 20]) // Prioritize vertical scroll inside pages
-        .onStart(() => {
-            'worklet'
-            isGesturing.value = true
-            cancelAnimation(translateX)
-        })
-        .onUpdate((e) => {
-            'worklet'
-            const baseX = -pageIndex.value * SCREEN_WIDTH
-            let newX = baseX + e.translationX
-
-            // Rubber banding
-            if (newX > 0) newX = e.translationX * 0.3
-            // 4 pages (0-3), so max offset is -3 * SCREEN_WIDTH
-            if (newX < -3 * SCREEN_WIDTH) {
-                const diff = newX - (-3 * SCREEN_WIDTH)
-                newX = -3 * SCREEN_WIDTH + diff * 0.3
-            }
-            translateX.value = newX
-        })
-        .onEnd((e) => {
-            'worklet'
-            isGesturing.value = false
-            const { translationX, velocityX } = e
-            const threshold = SCREEN_WIDTH * 0.25
-            const currentPage = pageIndex.value
-
-            let nextIndex = Math.round(currentPage)
-
-            // Swipe Logic (4 pages: 0-3)
-            if (translationX < -threshold || velocityX < -500) {
-                nextIndex = Math.min(currentPage + 1, 3)
-            } else if (translationX > threshold || velocityX > 500) {
-                nextIndex = Math.max(currentPage - 1, 0)
-            }
-
-            // Sync State JS Side
-            const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings']
-            runOnJS(setCurrentTab)(pageNames[nextIndex])
-
-            // Animate
-            pageIndex.value = nextIndex
-            translateX.value = withSpring(-nextIndex * SCREEN_WIDTH, {
-                damping: 24,
-                stiffness: 220,
-                mass: 0.8,
-                velocity: velocityX
-            })
-        })
-
-    const containerStyle = useAnimatedStyle(() => ({
-        transform: [{ translateX: translateX.value }]
-    }))
-
     const tabsCardStyle = useAnimatedStyle(() => ({
         transform: [
             { translateX: interpolate(storyProgress.value, [0, 1], [0, SCREEN_WIDTH * 1.02]) },
@@ -325,110 +267,12 @@ export default function TabLayout() {
     }, [])
 
     // ────────────────────────────────────────────────────────────────────────
-    // NATIVE TABS MODE (Production / Native Module)
-    // ────────────────────────────────────────────────────────────────────────
-    if (nativeTabsAvailable) {
-        return (
-            <View style={{ flex: 1, backgroundColor: 'transparent' }}>
-                {/* Story Camera Overlay (Global) */}
-                {isStoryCameraOpen && (
-                    <AnimatedView style={[StyleSheet.absoluteFill, { zIndex: 100 }, storyUnderlayStyle]}>
-                        {shouldRenderStoryCamera ? (
-                            <StoryCamera onRequestClose={closeStoryCamera} deferCameraMountMs={180} />
-                        ) : (
-                            <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000' }]}>
-                                <BlurView intensity={30} tint="dark" style={StyleSheet.absoluteFill} />
-                                <View style={[StyleSheet.absoluteFill, { backgroundColor: 'rgba(0,0,0,0.25)' }]} />
-                                <View style={[StyleSheet.absoluteFill, { alignItems: 'center', justifyContent: 'center' }]}>
-                                    <ActivityIndicator color="#fff" />
-                                </View>
-                            </View>
-                        )}
-                    </AnimatedView>
-                )}
-
-                <View style={[styles.nativePageContainer, showBottomBar && styles.nativePageContainerWithTabs]}>
-                    {currentTab === 'contacts' && <ContactsScreen />}
-                    {currentTab === 'calls' && <CallsScreen />}
-                    {currentTab === 'home' && (
-                        <HomeScreen
-                            onChatSelect={(id) => setActiveChat(id)}
-                            onOpenStoryCamera={openStoryCamera}
-                        />
-                    )}
-                    {currentTab === 'settings' && <SettingsScreen />}
-                </View>
-
-                {showBottomBar && (
-                    <AnimatedView style={[styles.nativeBottomBarWrapper, bottomBarFadeStyle]}>
-                        <NativeTabBar
-                            currentIndex={PAGES[currentTab]}
-                            onIndexChange={(index) => {
-                                try {
-                                    const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
-                                    const page = pageNames[index];
-                                    if (!page) return;
-                                    console.log('[TabsLayout] native tab index change', index, page);
-                                    setCurrentTab(page);
-                                    pageIndex.value = index;
-                                } catch (error) {
-                                    console.error('[TabsLayout] native tab index change failed', error);
-                                }
-                            }}
-                            tabs={[
-                                {
-                                    key: 'contacts',
-                                    title: t('tabs.contacts'),
-                                    sfSymbol: 'person.2.fill',
-                                    unfocusedSfSymbol: 'person.2',
-                                },
-                                {
-                                    key: 'calls',
-                                    title: t('tabs.calls'),
-                                    sfSymbol: 'phone.fill',
-                                    unfocusedSfSymbol: 'phone',
-                                },
-                                {
-                                    key: 'home',
-                                    title: t('tabs.chats'),
-                                    sfSymbol: 'bubble.left.and.bubble.right.fill',
-                                    unfocusedSfSymbol: 'bubble.left.and.bubble.right',
-                                    badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
-                                },
-                                {
-                                    key: 'settings',
-                                    title: t('tabs.settings'),
-                                    sfSymbol: 'person.crop.circle.fill',
-                                    unfocusedSfSymbol: 'person.crop.circle',
-                                    iconSource: settingsIconSource,
-                                    unfocusedIconSource: settingsIconSource,
-                                },
-                                {
-                                    key: 'vibe',
-                                    title: 'Vibe',
-                                    iconSource: require('../../assets/logos/logotransparent.png'),
-                                    unfocusedIconSource: require('../../assets/logos/logotransparent.png'),
-                                    preventsDefault: true,
-                                },
-                            ]}
-                            activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
-                            inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
-                            isDark={isDark}
-                            onVibePress={() => safeRouterPush('/agent', 'native-vibe-tab')}
-                        />
-                    </AnimatedView>
-                )}
-            </View>
-        )
-    }
-
-    // ────────────────────────────────────────────────────────────────────────
-    // FALLBACK MODE (Expo Go / Dev) - Custom Swipe Layout
+    // MAIN LAYOUT (Supports both Native Tabs and Fallback Tabs)
     // ────────────────────────────────────────────────────────────────────────
     return (
         <GestureHandlerRootViewAny style={{ flex: 1, backgroundColor: 'transparent' }}>
             {isStoryCameraOpen && (
-                <AnimatedView style={[StyleSheet.absoluteFill, { zIndex: 1 }, storyUnderlayStyle]}>
+                <AnimatedView style={[StyleSheet.absoluteFill, { zIndex: 100 }, storyUnderlayStyle]}>
                     {shouldRenderStoryCamera ? (
                         <StoryCamera onRequestClose={closeStoryCamera} deferCameraMountMs={180} />
                     ) : (
@@ -447,210 +291,285 @@ export default function TabLayout() {
                 pointerEvents={isStoryCameraOpen ? 'none' : 'auto'}
                 style={[{ flex: 1, zIndex: 2, shadowColor: '#000' }, tabsCardStyle]}
             >
-                <GestureDetector gesture={gesture}>
-                    <AnimatedView style={[styles.swipeContainer, containerStyle]}>
-                        <View style={styles.page}><ContactsScreen /></View>
-                        <View style={styles.page}><CallsScreen /></View>
-                        <View style={styles.page}><HomeScreen onChatSelect={(id) => setActiveChat(id)} onOpenStoryCamera={openStoryCamera} /></View>
-                        <View style={styles.page}><SettingsScreen /></View>
-                    </AnimatedView>
-                </GestureDetector>
+                {/* Pages — lazy mounted, display:none when inactive */}
+                {mountedPages.contacts && (
+                    <View style={[StyleSheet.absoluteFill, currentTab !== 'contacts' && { display: 'none' }]}>
+                        <ContactsScreen />
+                    </View>
+                )}
+                {mountedPages.calls && (
+                    <View style={[StyleSheet.absoluteFill, currentTab !== 'calls' && { display: 'none' }]}>
+                        <CallsScreen />
+                    </View>
+                )}
+                {mountedPages.home && (
+                    <View style={[StyleSheet.absoluteFill, currentTab !== 'home' && { display: 'none' }]}>
+                        <HomeScreen
+                            onChatSelect={(id) => setActiveChat(id)}
+                            onOpenStoryCamera={openStoryCamera}
+                        />
+                    </View>
+                )}
+                {mountedPages.settings && (
+                    <View style={[StyleSheet.absoluteFill, currentTab !== 'settings' && { display: 'none' }]}>
+                        <SettingsScreen />
+                    </View>
+                )}
 
-                {/* Bottom Navigation (Fallback Pill) */}
+                {/* Bottom Navigation */}
                 {showBottomBar && (
-                    <AnimatedView
-                        style={[
-                            styles.bottomBarWrapper,
-                            Platform.OS === 'android' && [
-                                styles.bottomBarWrapperAndroidAttached,
-                                { bottom: 10 + Math.max(0, insets.bottom - 10) }
-                            ],
-                            bottomBarFadeStyle,
-                        ]}
-                    >
-                        {/* Main Tab Bar - Fallback mode */}
-                        {Platform.OS === 'android' ? (
-                            <AndroidBottomTabBar
-                                currentIndex={PAGES[currentTab]}
-                                onIndexChange={(index) => {
-                                    try {
-                                        const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
-                                        console.log('[TabsLayout] android tab index change', index, pageNames[index]);
-                                        handleTabPress(pageNames[index]);
-                                    } catch (error) {
-                                        console.error('[TabsLayout] android tab index change failed', error);
-                                    }
-                                }}
-                                tabs={[
-                                    {
-                                        key: 'contacts',
-                                        title: t('tabs.contacts'),
-                                        sfSymbol: 'person.2.fill',
-                                        unfocusedSfSymbol: 'person.2',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <ContactsIcon size={size} color={color} focused={focused} />
-                                        ),
-                                    },
-                                    {
-                                        key: 'calls',
-                                        title: t('tabs.calls'),
-                                        sfSymbol: 'phone.fill',
-                                        unfocusedSfSymbol: 'phone',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <CallsIcon size={size} color={color} focused={focused} />
-                                        ),
-                                    },
-                                    {
-                                        key: 'home',
-                                        title: t('tabs.chats'),
-                                        sfSymbol: 'bubble.left.and.bubble.right.fill',
-                                        unfocusedSfSymbol: 'bubble.left.and.bubble.right',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <View>
-                                                <DoubleChatIcon size={size} color={color} focused={focused} />
-                                                {totalUnread > 0 && (
-                                                    <View style={styles.badge}>
-                                                        <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
-                                                    </View>
-                                                )}
-                                            </View>
-                                        ),
-                                    },
-                                    {
-                                        key: 'settings',
-                                        title: t('tabs.settings'),
-                                        sfSymbol: 'gearshape.fill',
-                                        unfocusedSfSymbol: 'gearshape',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <SettingsIcon
-                                                size={size}
-                                                color={color}
-                                                focused={focused}
-                                                imageUri={user?.profileImage}
-                                                name={user?.name || user?.username}
-                                            />
-                                        ),
-                                    },
-                                    {
-                                        key: 'vibe',
-                                        title: 'Vibe',
-                                        preventsDefault: true,
-                                        renderIcon: ({ color, size, focused }) => (
-                                            <Image
-                                                source={require('../../assets/logos/logotransparent.png')}
-                                                style={{
-                                                    width: size + 2,
-                                                    height: size + 2,
-                                                    tintColor: focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)'),
-                                                    resizeMode: 'contain'
-                                                }}
-                                            />
-                                        ),
-                                    },
-                                ]}
-                                activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
-                                inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
-                                isDark={isDark}
-                                onVibePress={() => safeRouterPush('/agent', 'android-bottom-vibe-tab')}
-                            />
-                        ) : (
-                            <NativeTabBar
-                                currentIndex={PAGES[currentTab]}
-                                onIndexChange={(index) => {
-                                    try {
-                                        const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
-                                        console.log('[TabsLayout] fallback tab index change', index, pageNames[index]);
-                                        handleTabPress(pageNames[index]);
-                                    } catch (error) {
-                                        console.error('[TabsLayout] fallback tab index change failed', error);
-                                    }
-                                }}
-                                tabs={[
-                                    {
-                                        key: 'contacts',
-                                        title: t('tabs.contacts'),
-                                        sfSymbol: 'person.2.fill',
-                                        unfocusedSfSymbol: 'person.2',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <ContactsIcon size={size} color={color} focused={focused} />
-                                        ),
-                                    },
-                                    {
-                                        key: 'calls',
-                                        title: t('tabs.calls'),
-                                        sfSymbol: 'phone.fill',
-                                        unfocusedSfSymbol: 'phone',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <CallsIcon size={size} color={color} focused={focused} />
-                                        ),
-                                    },
-                                    {
-                                        key: 'home',
-                                        title: t('tabs.chats'),
-                                        sfSymbol: 'bubble.left.and.bubble.right.fill',
-                                        unfocusedSfSymbol: 'bubble.left.and.bubble.right',
-                                        badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <View>
-                                                <DoubleChatIcon size={size} color={color} focused={focused} />
-                                                {totalUnread > 0 && (
-                                                    <View style={styles.badge}>
-                                                        <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
-                                                    </View>
-                                                )}
-                                            </View>
-                                        ),
-                                    },
-                                    {
-                                        key: 'settings',
-                                        title: t('tabs.settings'),
-                                        sfSymbol: 'gearshape.fill',
-                                        unfocusedSfSymbol: 'gearshape',
-                                        renderIcon: ({ focused, color, size }) => (
-                                            <SettingsIcon
-                                                size={size}
-                                                color={color}
-                                                focused={focused}
-                                                imageUri={user?.profileImage}
-                                                name={user?.name || user?.username}
-                                            />
-                                        ),
-                                    },
-                                    ...(Platform.OS === 'android'
-                                        ? [{
+                    <>
+                        {nativeTabsAvailable ? (
+                            <AnimatedView style={[styles.nativeBottomBarWrapper, bottomBarFadeStyle, { zIndex: 10 }]}>
+                                <NativeTabBar
+                                    currentIndex={PAGES[currentTab]}
+                                    onIndexChange={(index) => {
+                                        try {
+                                            const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
+                                            const page = pageNames[index];
+                                            if (!page) return;
+                                            console.log('[TabsLayout] native tab index change', index, page);
+                                            handleTabPress(page);
+                                        } catch (error) {
+                                            console.error('[TabsLayout] native tab index change failed', error);
+                                        }
+                                    }}
+                                    tabs={[
+                                        {
+                                            key: 'contacts',
+                                            title: t('tabs.contacts'),
+                                            sfSymbol: 'person.2.fill',
+                                            unfocusedSfSymbol: 'person.2',
+                                        },
+                                        {
+                                            key: 'calls',
+                                            title: t('tabs.calls'),
+                                            sfSymbol: 'phone.fill',
+                                            unfocusedSfSymbol: 'phone',
+                                        },
+                                        {
+                                            key: 'home',
+                                            title: t('tabs.chats'),
+                                            sfSymbol: 'bubble.left.and.bubble.right.fill',
+                                            unfocusedSfSymbol: 'bubble.left.and.bubble.right',
+                                            badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
+                                        },
+                                        {
+                                            key: 'settings',
+                                            title: t('tabs.settings'),
+                                            sfSymbol: 'person.crop.circle.fill',
+                                            unfocusedSfSymbol: 'person.crop.circle',
+                                            iconSource: settingsIconSource,
+                                            unfocusedIconSource: settingsIconSource,
+                                        },
+                                        {
                                             key: 'vibe',
                                             title: 'Vibe',
+                                            iconSource: require('../../assets/logos/logotransparent.png'),
+                                            unfocusedIconSource: require('../../assets/logos/logotransparent.png'),
                                             preventsDefault: true,
-                                            renderIcon: ({ color, size, focused }: { color: string, size: number, focused: boolean }) => (
-                                                <Image
-                                                    source={require('../../assets/logos/logotransparent.png')}
-                                                    style={{
-                                                        width: size + 2,
-                                                        height: size + 2,
-                                                        tintColor: focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)'),
-                                                        resizeMode: 'contain'
-                                                    }}
-                                                />
-                                            ),
-                                        }]
-                                        : []),
+                                        },
+                                    ]}
+                                    activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
+                                    inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
+                                    isDark={isDark}
+                                    onVibePress={() => safeRouterPush('/agent', 'native-vibe-tab')}
+                                />
+                            </AnimatedView>
+                        ) : (
+                            <AnimatedView
+                                style={[
+                                    styles.bottomBarWrapper,
+                                    Platform.OS === 'android' && [
+                                        styles.bottomBarWrapperAndroidAttached,
+                                        { bottom: 10 + Math.max(0, insets.bottom - 10) }
+                                    ],
+                                    bottomBarFadeStyle,
                                 ]}
-                                activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
-                                inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
-                                isDark={isDark}
-                                translateX={translateX}
-                                screenWidth={SCREEN_WIDTH}
-                                fallbackTabWidth={fallbackTabWidth}
-                                onVibePress={() => safeRouterPush('/agent', 'fallback-vibe-tab')}
-                            />
+                            >
+                                {/* Main Tab Bar - Fallback mode */}
+                                {Platform.OS === 'android' ? (
+                                    <AndroidBottomTabBar
+                                        currentIndex={PAGES[currentTab]}
+                                        onIndexChange={(index) => {
+                                            try {
+                                                const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
+                                                console.log('[TabsLayout] android tab index change', index, pageNames[index]);
+                                                handleTabPress(pageNames[index]);
+                                            } catch (error) {
+                                                console.error('[TabsLayout] android tab index change failed', error);
+                                            }
+                                        }}
+                                        tabs={[
+                                            {
+                                                key: 'contacts',
+                                                title: t('tabs.contacts'),
+                                                sfSymbol: 'person.2.fill',
+                                                unfocusedSfSymbol: 'person.2',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <ContactsIcon size={size} color={color} focused={focused} />
+                                                ),
+                                            },
+                                            {
+                                                key: 'calls',
+                                                title: t('tabs.calls'),
+                                                sfSymbol: 'phone.fill',
+                                                unfocusedSfSymbol: 'phone',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <CallsIcon size={size} color={color} focused={focused} />
+                                                ),
+                                            },
+                                            {
+                                                key: 'home',
+                                                title: t('tabs.chats'),
+                                                sfSymbol: 'bubble.left.and.bubble.right.fill',
+                                                unfocusedSfSymbol: 'bubble.left.and.bubble.right',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <View>
+                                                        <DoubleChatIcon size={size} color={color} focused={focused} />
+                                                        {totalUnread > 0 && (
+                                                            <View style={styles.badge}>
+                                                                <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
+                                                            </View>
+                                                        )}
+                                                    </View>
+                                                ),
+                                            },
+                                            {
+                                                key: 'settings',
+                                                title: t('tabs.settings'),
+                                                sfSymbol: 'gearshape.fill',
+                                                unfocusedSfSymbol: 'gearshape',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <SettingsIcon
+                                                        size={size}
+                                                        color={color}
+                                                        focused={focused}
+                                                        imageUri={user?.profileImage}
+                                                        name={user?.name || user?.username}
+                                                    />
+                                                ),
+                                            },
+                                            {
+                                                key: 'vibe',
+                                                title: 'Vibe',
+                                                preventsDefault: true,
+                                                renderIcon: ({ color, size, focused }) => (
+                                                    <Image
+                                                        source={require('../../assets/logos/logotransparent.png')}
+                                                        style={{
+                                                            width: size + 2,
+                                                            height: size + 2,
+                                                            tintColor: focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)'),
+                                                            resizeMode: 'contain'
+                                                        }}
+                                                    />
+                                                ),
+                                            },
+                                        ]}
+                                        activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
+                                        inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
+                                        isDark={isDark}
+                                        onVibePress={() => safeRouterPush('/agent', 'android-bottom-vibe-tab')}
+                                    />
+                                ) : (
+                                    <NativeTabBar
+                                        currentIndex={PAGES[currentTab]}
+                                        onIndexChange={(index) => {
+                                            try {
+                                                const pageNames: PageName[] = ['contacts', 'calls', 'home', 'settings'];
+                                                console.log('[TabsLayout] fallback tab index change', index, pageNames[index]);
+                                                handleTabPress(pageNames[index]);
+                                            } catch (error) {
+                                                console.error('[TabsLayout] fallback tab index change failed', error);
+                                            }
+                                        }}
+                                        tabs={[
+                                            {
+                                                key: 'contacts',
+                                                title: t('tabs.contacts'),
+                                                sfSymbol: 'person.2.fill',
+                                                unfocusedSfSymbol: 'person.2',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <ContactsIcon size={size} color={color} focused={focused} />
+                                                ),
+                                            },
+                                            {
+                                                key: 'calls',
+                                                title: t('tabs.calls'),
+                                                sfSymbol: 'phone.fill',
+                                                unfocusedSfSymbol: 'phone',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <CallsIcon size={size} color={color} focused={focused} />
+                                                ),
+                                            },
+                                            {
+                                                key: 'home',
+                                                title: t('tabs.chats'),
+                                                sfSymbol: 'bubble.left.and.bubble.right.fill',
+                                                unfocusedSfSymbol: 'bubble.left.and.bubble.right',
+                                                badge: totalUnread > 0 ? (totalUnread > 99 ? '99+' : String(totalUnread)) : undefined,
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <View>
+                                                        <DoubleChatIcon size={size} color={color} focused={focused} />
+                                                        {totalUnread > 0 && (
+                                                            <View style={styles.badge}>
+                                                                <Text style={styles.badgeText}>{totalUnread > 99 ? '99+' : totalUnread}</Text>
+                                                            </View>
+                                                        )}
+                                                    </View>
+                                                ),
+                                            },
+                                            {
+                                                key: 'settings',
+                                                title: t('tabs.settings'),
+                                                sfSymbol: 'gearshape.fill',
+                                                unfocusedSfSymbol: 'gearshape',
+                                                renderIcon: ({ focused, color, size }) => (
+                                                    <SettingsIcon
+                                                        size={size}
+                                                        color={color}
+                                                        focused={focused}
+                                                        imageUri={user?.profileImage}
+                                                        name={user?.name || user?.username}
+                                                    />
+                                                ),
+                                            },
+                                            {
+                                                key: 'vibe',
+                                                title: 'Vibe',
+                                                preventsDefault: true,
+                                                renderIcon: ({ color, size, focused }: { color: string, size: number, focused: boolean }) => (
+                                                    <Image
+                                                        source={require('../../assets/logos/logotransparent.png')}
+                                                        style={{
+                                                            width: size + 2,
+                                                            height: size + 2,
+                                                            tintColor: focused ? (color || '#fff') : (color || 'rgba(255,255,255,0.85)'),
+                                                            resizeMode: 'contain'
+                                                        }}
+                                                    />
+                                                ),
+                                            }
+                                        ]}
+                                        activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
+                                        inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
+                                        isDark={isDark}
+                                        translateX={translateX}
+                                        screenWidth={SCREEN_WIDTH}
+                                        fallbackTabWidth={fallbackTabWidth}
+                                        onVibePress={() => safeRouterPush('/agent', 'fallback-vibe-tab')}
+                                    />
+                                )}
+                                {Platform.OS !== 'android' && (
+                                    <VibeButton
+                                        onPress={() => safeRouterPush('/agent', 'fallback-vibe-button')}
+                                        isDark={isDark}
+                                    />
+                                )}
+                            </AnimatedView>
                         )}
-                        {Platform.OS !== 'android' && (
-                            <VibeButton
-                                onPress={() => safeRouterPush('/agent', 'fallback-vibe-button')}
-                                isDark={isDark}
-                            />
-                        )}
-                    </AnimatedView>
+                    </>
                 )}
             </AnimatedView>
 

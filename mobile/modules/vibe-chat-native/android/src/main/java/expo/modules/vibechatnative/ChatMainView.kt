@@ -14,6 +14,7 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
+import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import expo.modules.kotlin.AppContext
@@ -53,6 +54,7 @@ class ChatMainView(
   private val chatVideoButton = ImageView(context)
   private val chatPhoneButton = ImageView(context)
   private val chatSearchButton = ImageView(context)
+  private val chatMenuButton = ImageView(context)
 
   private val profileHeader = FrameLayout(context)
   private val profileBackButton = TextView(context)
@@ -78,9 +80,19 @@ class ChatMainView(
   private var profileBio: String = ""
   private var avatarUri: String = ""
   private var isOnline: Boolean = false
+  private var isChatMuted: Boolean = false
+  private var engineChatId: String = ""
   private var enginePeerUserId: String = ""
   private var engineLastSeenTimestampMs: Long? = null
+  private var profileSummaryMessageCount = 0
+  private var profileSummaryMediaCount = 0
+  private var profileSummaryFileCount = 0
+  private var profileSummaryLinkCount = 0
+  private var profileSummaryRecentFiles: List<String> = emptyList()
+  private var profileSummaryHistoryLoaded = false
   private var currentPage: String = "chat"
+  private var pendingNativePageTarget: String? = null
+  private var pendingNativePageLockUntilMs: Long = 0L
   private var avatarLoadToken = 0
   private val engineListenerId = "chat-main-view-${System.identityHashCode(this)}"
 
@@ -138,7 +150,10 @@ class ChatMainView(
   }
 
   fun setEngineChatId(value: String) {
+    engineChatId = value.trim()
     chatListView.setEngineChatId(value)
+    registerChatEngineListener()
+    refreshProfileSummaryFromEngine(force = true)
   }
 
   fun setEngineMyUserId(value: String) {
@@ -170,11 +185,11 @@ class ChatMainView(
     updateProfileTexts()
   }
 
-  fun setContentPaddingTop(value: Double) {
+  fun applyContentPaddingTop(value: Double) {
     chatListView.setContentPaddingTop(value)
   }
 
-  fun setContentPaddingBottom(value: Double) {
+  fun applyContentPaddingBottom(value: Double) {
     chatListView.setContentPaddingBottom(value)
   }
 
@@ -240,8 +255,22 @@ class ChatMainView(
     refreshPresenceFromEngine(force = true)
   }
 
+  fun setIsChatMuted(value: Boolean) {
+    if (isChatMuted == value) return
+    isChatMuted = value
+  }
+
   fun setPage(value: String, animated: Boolean) {
     val next = if (value.trim().lowercase() == "profile") "profile" else "chat"
+    val now = System.currentTimeMillis()
+    val pendingTarget = pendingNativePageTarget
+    if (pendingTarget != null && now < pendingNativePageLockUntilMs && next != pendingTarget) {
+      return
+    }
+    if (pendingTarget != null && next == pendingTarget) {
+      pendingNativePageTarget = null
+      pendingNativePageLockUntilMs = 0L
+    }
     if (next == currentPage) return
     currentPage = next
     applyPageState(animated = animated, emitEvent = true)
@@ -285,12 +314,15 @@ class ChatMainView(
   }
 
   private fun registerChatEngineListener() {
-    if (!isAttachedToWindow || enginePeerUserId.isBlank()) {
+    if (!isAttachedToWindow || (enginePeerUserId.isBlank() && engineChatId.isBlank())) {
       ChatEngine.setListener(engineListenerId, null)
       return
     }
     ChatEngine.setListener(engineListenerId) { _, _, _ ->
-      post { refreshPresenceFromEngine() }
+      post {
+        refreshPresenceFromEngine()
+        refreshProfileSummaryFromEngine()
+      }
     }
   }
 
@@ -304,6 +336,60 @@ class ChatMainView(
     isOnline = nextOnline
     engineLastSeenTimestampMs = nextLastSeen
     updateHeaderTexts()
+    updateProfileTexts()
+  }
+
+  private fun refreshProfileSummaryFromEngine(force: Boolean = false) {
+    val chatId = engineChatId.trim()
+    if (chatId.isBlank()) {
+      if (
+        force
+          || profileSummaryMessageCount != 0
+          || profileSummaryMediaCount != 0
+          || profileSummaryFileCount != 0
+          || profileSummaryLinkCount != 0
+          || profileSummaryHistoryLoaded
+          || profileSummaryRecentFiles.isNotEmpty()
+      ) {
+        profileSummaryMessageCount = 0
+        profileSummaryMediaCount = 0
+        profileSummaryFileCount = 0
+        profileSummaryLinkCount = 0
+        profileSummaryRecentFiles = emptyList()
+        profileSummaryHistoryLoaded = false
+        updateProfileTexts()
+      }
+      return
+    }
+
+    val summary = ChatEngine.getChatProfileSummary(mapOf("chatId" to chatId))
+    val nextMessageCount = (summary["totalMessages"] as? Number)?.toInt() ?: 0
+    val nextMediaCount = (summary["mediaCount"] as? Number)?.toInt() ?: 0
+    val nextFileCount = (summary["fileCount"] as? Number)?.toInt() ?: 0
+    val nextLinkCount = (summary["linkCount"] as? Number)?.toInt() ?: 0
+    val nextHistoryLoaded = summary["historyLoaded"] as? Boolean ?: false
+    val nextRecentFiles =
+      (summary["recentFiles"] as? List<*>)?.mapNotNull { it?.toString()?.trim()?.takeIf(String::isNotEmpty) }
+        ?: emptyList()
+
+    if (
+      !force
+        && nextMessageCount == profileSummaryMessageCount
+        && nextMediaCount == profileSummaryMediaCount
+        && nextFileCount == profileSummaryFileCount
+        && nextLinkCount == profileSummaryLinkCount
+        && nextHistoryLoaded == profileSummaryHistoryLoaded
+        && nextRecentFiles == profileSummaryRecentFiles
+    ) {
+      return
+    }
+
+    profileSummaryMessageCount = nextMessageCount
+    profileSummaryMediaCount = nextMediaCount
+    profileSummaryFileCount = nextFileCount
+    profileSummaryLinkCount = nextLinkCount
+    profileSummaryRecentFiles = nextRecentFiles
+    profileSummaryHistoryLoaded = nextHistoryLoaded
     updateProfileTexts()
   }
 
@@ -345,6 +431,12 @@ class ChatMainView(
     chatBackButton.typeface = Typeface.DEFAULT_BOLD
     chatBackButton.setPadding(0, 0, dp(1), 0)
     chatBackButton.setOnClickListener {
+      if (currentPage == "profile") {
+        markPendingNativePageChange("chat")
+        currentPage = "chat"
+        applyPageState(animated = true, emitEvent = true)
+        return@setOnClickListener
+      }
       onNativeEvent(mapOf("type" to "headerBack"))
     }
     setTouchAlphaPress(chatBackButton)
@@ -358,8 +450,11 @@ class ChatMainView(
     chatProfileGroup.orientation = LinearLayout.HORIZONTAL
     chatProfileGroup.gravity = Gravity.CENTER_VERTICAL
     chatProfileGroup.setOnClickListener {
+      if (currentPage != "chat") return@setOnClickListener
+      markPendingNativePageChange("profile")
+      currentPage = "profile"
+      applyPageState(animated = true, emitEvent = true)
       onNativeEvent(mapOf("type" to "headerAvatarPressed"))
-      setPage("profile", true)
     }
     setTouchAlphaPress(chatProfileGroup)
     chatHeaderLeft.addView(
@@ -443,6 +538,11 @@ class ChatMainView(
       onNativeEvent(mapOf("type" to "headerSearchPressed"))
     }
 
+    styleHeaderActionButton(chatMenuButton, android.R.drawable.ic_menu_more)
+    chatMenuButton.setOnClickListener {
+      showHeaderMenu()
+    }
+
     chatHeaderRight.addView(
       chatVideoButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
@@ -453,6 +553,10 @@ class ChatMainView(
     )
     chatHeaderRight.addView(
       chatSearchButton,
+      LinearLayout.LayoutParams(dp(40), dp(40)),
+    )
+    chatHeaderRight.addView(
+      chatMenuButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
     )
 
@@ -486,7 +590,9 @@ class ChatMainView(
     profileBackButton.textSize = 30f
     profileBackButton.typeface = Typeface.DEFAULT_BOLD
     profileBackButton.setOnClickListener {
-      setPage("chat", true)
+      markPendingNativePageChange("chat")
+      currentPage = "chat"
+      applyPageState(animated = true, emitEvent = true)
     }
     profileHeader.addView(
       profileBackButton,
@@ -649,6 +755,7 @@ class ChatMainView(
     chatVideoButton.setColorFilter(textColor)
     chatPhoneButton.setColorFilter(textColor)
     chatSearchButton.setColorFilter(textColor)
+    chatMenuButton.setColorFilter(textColor)
     profileBackButton.setTextColor(textColor)
     chatTitleView.setTextColor(textColor)
     chatSubtitleView.setTextColor(if (isOnline) Color.parseColor("#53E08A") else secondaryTextColor)
@@ -689,6 +796,19 @@ class ChatMainView(
     val initial = resolvedTitle.trim().firstOrNull()?.uppercase() ?: "U"
     chatAvatarFallback.text = initial
     profileAvatarFallback.text = initial
+    profileInfoTitle.text = "Shared Content"
+    profileInfoSubtitle.text =
+      if (profileSummaryHistoryLoaded) {
+        val base =
+          "Media $profileSummaryMediaCount • Files $profileSummaryFileCount • Links $profileSummaryLinkCount\n$profileSummaryMessageCount cached messages available natively."
+        if (profileSummaryRecentFiles.isNotEmpty()) {
+          "$base\nRecent files: ${profileSummaryRecentFiles.joinToString(", ")}"
+        } else {
+          base
+        }
+      } else {
+        "Loading shared media and files from native encrypted cache..."
+      }
   }
 
   private fun resolveEnginePresenceSubtitle(): String? {
@@ -822,6 +942,24 @@ class ChatMainView(
     }
   }
 
+  private fun showHeaderMenu() {
+    if (currentPage != "chat") return
+    val popup = PopupMenu(context, chatMenuButton)
+    val muteTitle = if (isChatMuted) "Unmute" else "Mute"
+    popup.menu.add(0, 1, 0, muteTitle)
+    popup.menu.add(0, 2, 1, "Clear Chat")
+    popup.menu.add(0, 3, 2, "Block User")
+    popup.setOnMenuItemClickListener { item ->
+      when (item.itemId) {
+        1 -> onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "muteToggle"))
+        2 -> onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "clearChat"))
+        3 -> onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "blockUser"))
+      }
+      true
+    }
+    popup.show()
+  }
+
   private fun styleHeaderActionButton(view: ImageView, drawableRes: Int) {
     view.scaleType = ImageView.ScaleType.CENTER_INSIDE
     view.setImageResource(drawableRes)
@@ -837,6 +975,11 @@ class ChatMainView(
       }
       false
     }
+  }
+
+  private fun markPendingNativePageChange(page: String) {
+    pendingNativePageTarget = page
+    pendingNativePageLockUntilMs = System.currentTimeMillis() + 2000L
   }
 
   private fun colorFromAny(raw: Any?): Int? {

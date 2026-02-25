@@ -1,5 +1,5 @@
 import React, { forwardRef, useImperativeHandle, useMemo } from 'react';
-import { StyleSheet, View } from 'react-native';
+import { Platform, StyleSheet, View } from 'react-native';
 
 import { getNativeChatMainModule, isNativeChatEnabled } from './runtime';
 import type {
@@ -60,6 +60,7 @@ interface NativeChatMainSurfaceProps {
   profileBio?: string;
   avatarUri?: string;
   isOnline?: boolean;
+  isChatMuted?: boolean;
   page?: NativeChatMainPage;
   onViewportChanged?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
@@ -91,12 +92,25 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
     profileBio,
     avatarUri,
     isOnline,
+    isChatMuted,
     page,
     onViewportChanged,
     onNativeEvent,
     onNativeError,
   }, ref) => {
     const nativeMainModule = useMemo(() => getNativeChatMainModule(), []);
+    const normalizedContentPaddingTop =
+      typeof contentPaddingTop === 'number' && Number.isFinite(contentPaddingTop)
+        ? contentPaddingTop
+        : undefined;
+    const normalizedContentPaddingBottom =
+      typeof contentPaddingBottom === 'number' && Number.isFinite(contentPaddingBottom)
+        ? contentPaddingBottom
+        : undefined;
+    // Android ChatMainView currently crashes while applying this prop in some builds.
+    // Keep the list stable by skipping only this prop on Android.
+    const contentPaddingBottomProp =
+      Platform.OS === 'android' ? undefined : normalizedContentPaddingBottom;
     const reportNativeError = (error: unknown, context: string) => {
       console.error(`[NativeChatMainSurface] ${context} failed`, error);
       onNativeError?.(error, context);
@@ -172,8 +186,8 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         peerUserId={peerUserId}
         statusAuthorityEnabled={statusAuthorityEnabled}
         appearance={appearance}
-        contentPaddingTop={contentPaddingTop}
-        contentPaddingBottom={contentPaddingBottom}
+        contentPaddingTop={normalizedContentPaddingTop}
+        contentPaddingBottom={contentPaddingBottomProp}
         voicePlayback={voicePlayback}
         inputBarEnabled={inputBarEnabled}
         inputPlaceholder={inputPlaceholder}
@@ -186,6 +200,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         profileBio={profileBio}
         avatarUri={avatarUri}
         isOnline={isOnline}
+        isChatMuted={isChatMuted}
         page={page}
         onViewportChanged={(event: any) => {
           try {

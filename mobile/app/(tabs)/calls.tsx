@@ -51,12 +51,36 @@ const formatDuration = (seconds: number): string => {
     return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
 };
 
+const dedupeCallHistory = (records: CallHistoryRecord[]): CallHistoryRecord[] => {
+    const unique: CallHistoryRecord[] = [];
+    const seen = new Set<string>();
+    for (const record of records) {
+        const id = typeof record.id === 'string' ? record.id.trim() : '';
+        if (!id) {
+            unique.push(record);
+            continue;
+        }
+        if (seen.has(id)) continue;
+        seen.add(id);
+        unique.push(record);
+    }
+    return unique;
+};
+
+const callRecordKey = (record: CallHistoryRecord, index: number): string => {
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    if (id.length > 0) return `${id}_${index}`;
+    const ts = Number.isFinite(record.timestamp) ? record.timestamp : 0;
+    const remoteId = (record.remoteUser?.userId || 'unknown').trim();
+    return `call_${remoteId}_${ts}_${index}`;
+};
+
 interface CallRowProps {
     record: CallHistoryRecord;
     colors: any;
     theme: string;
     isEditing: boolean;
-    onDelete: (record: CallHistoryRecord) => void;
+    onDelete: (id: string) => void;
 }
 
 const CallRow = React.memo(({ record, colors, theme, isEditing, onDelete }: CallRowProps) => {
@@ -88,7 +112,7 @@ const CallRow = React.memo(({ record, colors, theme, isEditing, onDelete }: Call
         return (
             <RNAnimated.View style={{ width: 80, transform: [{ translateX: trans }] }}>
                 <TouchableOpacity
-                    onPress={() => onDelete(record)}
+                    onPress={() => onDelete(record.id)}
                     style={[styles.swipeAction, { backgroundColor: '#ef4444', flex: 1 }]}
                 >
                     <RNAnimated.View style={{ transform: [{ scale: iconScale }] }}>
@@ -105,7 +129,7 @@ const CallRow = React.memo(({ record, colors, theme, isEditing, onDelete }: Call
     return (
         <View style={{ marginVertical: 1 }}>
             <View style={[StyleSheet.absoluteFill, { justifyContent: 'center', paddingLeft: 16 }]}>
-                <TouchableOpacity onPress={() => onDelete(record)}>
+                <TouchableOpacity onPress={() => onDelete(record.id)}>
                     <View style={{ width: 24, height: 24, borderRadius: 12, backgroundColor: '#ef4444', alignItems: 'center', justifyContent: 'center' }}>
                         <Minus size={14} color="#fff" strokeWidth={3} />
                     </View>
@@ -160,11 +184,13 @@ export default function CallsScreen() {
 
     const scrollHandler = useAnimatedScrollHandler((e) => { scrollY.value = e.contentOffset.y; });
 
+    const stableCallHistory = useMemo(() => dedupeCallHistory(callHistory), [callHistory]);
+
     const filteredCalls = useMemo(() => {
         const q = searchQuery.toLowerCase().trim();
-        if (!q) return callHistory;
-        return callHistory.filter(c => c.remoteUser.userName.toLowerCase().includes(q));
-    }, [callHistory, searchQuery]);
+        if (!q) return stableCallHistory;
+        return stableCallHistory.filter(c => c.remoteUser.userName.toLowerCase().includes(q));
+    }, [stableCallHistory, searchQuery]);
 
     const handleSearchFocus = () => {
         setIsSearchActive(true);
@@ -206,12 +232,12 @@ export default function CallsScreen() {
             {/* Search Overlay Result List */}
             <Animated.View style={[StyleSheet.absoluteFill, { backgroundColor: colors.background, zIndex: 3000 }, searchOverlayStyle]}>
                 <View style={{ flex: 1, paddingTop: insets.top + 70 }}>
-                    {searchQuery === '' && callHistory.length > 0 && (
+                    {searchQuery === '' && stableCallHistory.length > 0 && (
                         <View style={{ paddingHorizontal: 20, marginBottom: 15 }}>
                             <Text style={{ color: colors.textSecondary, fontSize: 13, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 10 }}>Recent Calls</Text>
                             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
-                                {callHistory.slice(0, 5).map(c => (
-                                    <TouchableOpacity key={c.id} style={{ marginRight: 15, alignItems: 'center' }}>
+                                {stableCallHistory.slice(0, 5).map((c, index) => (
+                                    <TouchableOpacity key={callRecordKey(c, index)} style={{ marginRight: 15, alignItems: 'center' }}>
                                         <SafeLiquidGlass style={{ width: 50, height: 50, borderRadius: 25, overflow: 'hidden' }} blurIntensity={10} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
                                             {c.remoteUser.userImage ? <Image source={{ uri: c.remoteUser.userImage }} style={{ width: 50, height: 50 }} /> :
                                                 <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: withAlpha(colors.text, 0.05) }}><Text style={{ color: colors.text }}>{(c.remoteUser.userName || '?').substring(0, 1).toUpperCase()}</Text></View>}
@@ -224,7 +250,7 @@ export default function CallsScreen() {
                     )}
                     <FlatList
                         data={filteredCalls}
-                        keyExtractor={(item) => item.id}
+                        keyExtractor={(item, index) => callRecordKey(item, index)}
                         renderItem={({ item }) => <CallRow record={item} colors={colors} theme={effectiveTheme} isEditing={false} onDelete={deleteCallRecord} />}
                         contentContainerStyle={{ paddingBottom: 100 }}
                         keyboardShouldPersistTaps="handled"
@@ -271,9 +297,9 @@ export default function CallsScreen() {
             </Animated.View>
 
             <Animated.ScrollView onScroll={scrollHandler} scrollEventThrottle={16} contentContainerStyle={{ paddingTop: insets.top + 60, paddingBottom: 100 }} showsVerticalScrollIndicator={false}>
-                {callHistory.length > 0 ? (
+                {stableCallHistory.length > 0 ? (
                     <View style={styles.listContainer}>
-                        {callHistory.map((record) => <CallRow key={record.id} record={record} colors={colors} theme={effectiveTheme} isEditing={isEditing} onDelete={deleteCallRecord} />)}
+                        {stableCallHistory.map((record, index) => <CallRow key={callRecordKey(record, index)} record={record} colors={colors} theme={effectiveTheme} isEditing={isEditing} onDelete={deleteCallRecord} />)}
                     </View>
                 ) : (
                     <View style={styles.emptyContainer}>

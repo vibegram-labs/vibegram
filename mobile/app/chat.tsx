@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo } from 'react';
+import { Platform, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 
@@ -61,6 +61,7 @@ export default function ChatScreen() {
   const chats = useChatStore((s) => s.chats);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const setActiveChat = useChatStore((s) => s.setActiveChat);
+  const loadChats = useChatStore((s) => s.loadChats);
   const loadMessages = useChatStore((s) => s.loadMessages);
   const initSocket = useChatStore((s) => s.initSocket);
   const uploadProgress = useChatStore((s) => s.uploadProgress);
@@ -83,22 +84,14 @@ export default function ChatScreen() {
     [chats, effectiveChatId],
   );
 
-  const [nativePage, setNativePage] = useState<'chat' | 'profile'>('chat');
-  const previousChatIdRef = useRef<string | null>(null);
-
   useEffect(() => {
     initSocket();
   }, [initSocket]);
 
   useEffect(() => {
     if (!effectiveChatId) return;
-    const chatChanged = previousChatIdRef.current !== effectiveChatId;
-    previousChatIdRef.current = effectiveChatId;
     setActiveChat(effectiveChatId);
     void loadMessages(effectiveChatId);
-    if (chatChanged) {
-      setNativePage('chat');
-    }
   }, [effectiveChatId, setActiveChat, loadMessages]);
 
   const surfaceId = useMemo(
@@ -166,7 +159,13 @@ export default function ChatScreen() {
   }, [activeChat?.messages, effectiveChatId, uploadProgress, user?.userId]);
 
   const callNativeEngine = useCallback(async (
-    methodName: 'sendMessage' | 'retryOutgoingMessage' | 'deleteMessage',
+    methodName:
+      | 'sendMessage'
+      | 'retryOutgoingMessage'
+      | 'deleteMessage'
+      | 'setChatMuted'
+      | 'clearChat'
+      | 'blockUser',
     payload: Record<string, unknown>,
   ) => {
     const method = nativeEngineModule?.[methodName] as ((input: Record<string, unknown>) => unknown) | undefined;
@@ -191,8 +190,6 @@ export default function ChatScreen() {
     const type = typeof payload.type === 'string' ? payload.type : '';
 
     if (type === 'mainPageChanged') {
-      const pageRaw = payload.page;
-      setNativePage(pageRaw === 'profile' ? 'profile' : 'chat');
       return;
     }
 
@@ -202,7 +199,44 @@ export default function ChatScreen() {
     }
 
     if (type === 'headerAvatarPressed') {
-      setNativePage('profile');
+      return;
+    }
+
+    if (type === 'headerMenuAction') {
+      const action = typeof payload.action === 'string' ? payload.action : '';
+      if (!effectiveChatId) return;
+      if (action === 'muteToggle') {
+        const nextMuted = !(activeChat?.muted === true);
+        void callNativeEngine('setChatMuted', {
+          chatId: effectiveChatId,
+          userId: user?.userId || undefined,
+          muted: nextMuted,
+        }).finally(() => {
+          void loadChats();
+        });
+        return;
+      }
+      if (action === 'clearChat') {
+        void callNativeEngine('clearChat', {
+          chatId: effectiveChatId,
+          userId: user?.userId || undefined,
+        }).finally(() => {
+          void loadChats();
+          router.back();
+        });
+        return;
+      }
+      if (action === 'blockUser') {
+        void callNativeEngine('blockUser', {
+          chatId: effectiveChatId,
+          userId: user?.userId || undefined,
+          blockedUserId: activeChat?.friendId || undefined,
+        }).finally(() => {
+          void loadChats();
+          router.back();
+        });
+        return;
+      }
       return;
     }
 
@@ -215,6 +249,10 @@ export default function ChatScreen() {
     };
 
     if (type === 'sendMessage') {
+      if (Platform.OS === 'android') {
+        console.warn('[chat/native-main] ignoring JS sendMessage on Android; native send path should handle it', payload);
+        return;
+      }
       const text = typeof payload.text === 'string' ? payload.text : '';
       if (!text.trim()) return;
       const messageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
@@ -230,6 +268,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'attachmentImage') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android attachmentImage handled via JS bridge', payload);
+      }
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
       if (uri) {
         void callNativeEngine('sendMessage', {
@@ -243,6 +284,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'attachmentGif') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android attachmentGif handled via JS bridge', payload);
+      }
       const mediaUrl =
         (typeof payload.url === 'string' && payload.url.trim())
         || (typeof payload.uri === 'string' && payload.uri.trim());
@@ -263,6 +307,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'attachmentFile') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android attachmentFile handled via JS bridge', payload);
+      }
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
       if (!uri) return;
       const name = typeof payload.name === 'string' && payload.name.trim() ? payload.name : 'File';
@@ -281,6 +328,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'attachmentLocation') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android attachmentLocation handled via JS bridge', payload);
+      }
       const latitude = toNumber(payload.latitude);
       const longitude = toNumber(payload.longitude);
       if (latitude == null || longitude == null) return;
@@ -294,6 +344,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'attachmentVoice') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android attachmentVoice handled via JS bridge', payload);
+      }
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
       if (!uri) return;
       const duration = toNumber(payload.duration) ?? 0;
@@ -315,6 +368,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'attachmentVideoNote') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android attachmentVideoNote handled via JS bridge', payload);
+      }
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
       if (!uri) return;
       const duration = toNumber(payload.duration) ?? 0;
@@ -333,6 +389,9 @@ export default function ChatScreen() {
     }
 
     if (type === 'contextMenuAction') {
+      if (Platform.OS === 'android') {
+        console.log('[chat/native-main] Android contextMenuAction handled via JS bridge', payload);
+      }
       const action = typeof payload.action === 'string' ? payload.action : '';
       const messageId = typeof payload.messageId === 'string' ? payload.messageId : '';
       if (!messageId) return;
@@ -344,7 +403,15 @@ export default function ChatScreen() {
         void callNativeEngine('deleteMessage', { chatId: effectiveChatId, messageId, forEveryone: true });
       }
     }
-  }, [activeChat?.friendId, callNativeEngine, effectiveChatId, router, user?.userId]);
+  }, [
+    activeChat?.friendId,
+    activeChat?.muted,
+    callNativeEngine,
+    effectiveChatId,
+    loadChats,
+    router,
+    user?.userId,
+  ]);
 
   if (!nativeAvailable) {
     return (
@@ -367,7 +434,7 @@ export default function ChatScreen() {
   }
 
   return (
-    <View style={{ flex: 1, backgroundColor: colors.background }}>
+    <View style={{ flex: 1, backgroundColor: 'transparent' }}>
       <NativeChatMainSurface
         forceRender
         surfaceId={surfaceId}
@@ -405,7 +472,7 @@ export default function ChatScreen() {
         profileBio={activeChat?.description || ''}
         avatarUri={activeChat?.friendImage || undefined}
         isOnline={isOnline}
-        page={nativePage}
+        isChatMuted={activeChat?.muted === true}
         onNativeEvent={handleNativeEvent}
         onNativeError={(error, context) => {
           console.warn('[chat/native-main]', context, error);

@@ -96,6 +96,22 @@ class ChatEngineModule : Module() {
       ChatEngine.sendDeleteMessage(payload)
     }
 
+    Function("setChatMuted") { payload: Map<String, Any?> ->
+      ChatEngine.setChatMuted(payload)
+    }
+
+    Function("clearChat") { payload: Map<String, Any?> ->
+      ChatEngine.clearChat(payload)
+    }
+
+    Function("blockUser") { payload: Map<String, Any?> ->
+      ChatEngine.blockUser(payload)
+    }
+
+    Function("getChatProfileSummary") { payload: Map<String, Any?> ->
+      ChatEngine.getChatProfileSummary(payload)
+    }
+
     Function("getChatJournal") {
       ChatEngine.getJournal()
     }

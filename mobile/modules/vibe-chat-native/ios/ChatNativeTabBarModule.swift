@@ -10,165 +10,6 @@ private struct ChatNativeTabItem {
   let isVibe: Bool
 }
 
-private final class ChatNativeVibeButton: UIControl {
-  private let glassView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterial))
-  private let iconView = UIImageView()
-  private let glassPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
-
-  override init(frame: CGRect) {
-    super.init(frame: frame)
-    setup()
-  }
-
-  required init?(coder: NSCoder) {
-    super.init(coder: coder)
-    setup()
-  }
-
-  private func setup() {
-    backgroundColor = .clear
-    translatesAutoresizingMaskIntoConstraints = false
-
-    glassView.translatesAutoresizingMaskIntoConstraints = false
-    glassView.clipsToBounds = true
-    glassView.layer.cornerCurve = .continuous
-    glassView.isUserInteractionEnabled = false
-    addSubview(glassView)
-
-    NSLayoutConstraint.activate([
-      glassView.topAnchor.constraint(equalTo: topAnchor),
-      glassView.bottomAnchor.constraint(equalTo: bottomAnchor),
-      glassView.leadingAnchor.constraint(equalTo: leadingAnchor),
-      glassView.trailingAnchor.constraint(equalTo: trailingAnchor),
-    ])
-
-    iconView.translatesAutoresizingMaskIntoConstraints = false
-    iconView.isUserInteractionEnabled = false
-    iconView.contentMode = .scaleAspectFit
-    iconView.preferredSymbolConfiguration = UIImage.SymbolConfiguration(
-      pointSize: 24, weight: .bold)
-    glassView.contentView.addSubview(iconView)
-    NSLayoutConstraint.activate([
-      iconView.centerXAnchor.constraint(equalTo: glassView.contentView.centerXAnchor),
-      iconView.centerYAnchor.constraint(equalTo: glassView.contentView.centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: 30),
-      iconView.heightAnchor.constraint(equalToConstant: 30),
-    ])
-
-    refreshGlass()
-  }
-
-  override var isHighlighted: Bool {
-    didSet {
-      let isPressed = isHighlighted
-      let scale: CGFloat = isPressed ? 0.96 : 1.0
-      let duration: TimeInterval = isPressed ? 0.1 : 0.22
-      let damping: CGFloat = isPressed ? 1.0 : 0.72
-
-      UIView.animate(
-        withDuration: duration,
-        delay: 0,
-        usingSpringWithDamping: damping,
-        initialSpringVelocity: 0.25,
-        options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
-      ) {
-        self.iconView.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.glassView.contentView.backgroundColor =
-          isPressed ? self.glassPressedOverlayColor : .clear
-      }
-    }
-  }
-
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    glassView.layer.cornerRadius = bounds.height / 2
-  }
-
-  func apply(
-    item: ChatNativeTabItem,
-    focused: Bool,
-    activeTintColor: UIColor,
-    isDark: Bool
-  ) {
-    refreshGlass()
-
-    if let logo = resolveLogoImage(from: item) {
-      iconView.image = logo.withRenderingMode(.alwaysOriginal)
-      iconView.tintColor = nil
-      iconView.alpha = focused ? 1.0 : 0.82
-      return
-    }
-
-    let iconName = item.sfSymbol ?? "sparkles"
-    iconView.image = UIImage(systemName: iconName)
-    iconView.tintColor =
-      focused
-      ? activeTintColor
-      : (isDark ? UIColor.white.withAlphaComponent(0.86) : UIColor.black.withAlphaComponent(0.78))
-    iconView.alpha = 1.0
-  }
-
-  private func refreshGlass() {
-    if #available(iOS 26.0, *) {
-      let effect = UIGlassEffect()
-      effect.isInteractive = true
-      glassView.effect = effect
-      glassView.backgroundColor = .clear
-    } else {
-      glassView.effect = UIBlurEffect(style: .systemMaterial)
-      glassView.backgroundColor = .clear
-    }
-  }
-
-  private func resolveLogoImage(from item: ChatNativeTabItem) -> UIImage? {
-    if let iconUri = item.iconUri, let image = imageFromURI(iconUri) {
-      return image
-    }
-    if let named = UIImage(named: "logotransparent") {
-      return named
-    }
-    if let path = Bundle.main.path(forResource: "logotransparent", ofType: "png"),
-      let image = UIImage(contentsOfFile: path)
-    {
-      return image
-    }
-    return nil
-  }
-
-  private func imageFromURI(_ uriString: String) -> UIImage? {
-    guard !uriString.isEmpty else { return nil }
-
-    if let url = URL(string: uriString) {
-      if url.isFileURL {
-        let image = UIImage(contentsOfFile: url.path)
-        if image != nil { return image }
-      }
-
-      let filename = url.lastPathComponent
-      let base = (filename as NSString).deletingPathExtension
-      let ext = (filename as NSString).pathExtension
-      if !base.isEmpty,
-        let path = Bundle.main.path(forResource: base, ofType: ext.isEmpty ? nil : ext)
-      {
-        return UIImage(contentsOfFile: path)
-      }
-    }
-
-    if uriString.hasPrefix("/") {
-      let image = UIImage(contentsOfFile: uriString)
-      if image != nil { return image }
-    }
-
-    let localFilename = (uriString as NSString).lastPathComponent
-    let localBase = (localFilename as NSString).deletingPathExtension
-    if !localBase.isEmpty, let named = UIImage(named: localBase) {
-      return named
-    }
-
-    return UIImage(named: uriString)
-  }
-}
-
 public final class ChatNativeTabBarView: ExpoView {
   public var onIndexChange = EventDispatcher()
 
@@ -178,19 +19,13 @@ public final class ChatNativeTabBarView: ExpoView {
   // System segmented control — replaces custom pill + buttons
   private let segmentedControl = UISegmentedControl()
 
-  private let vibeButton = ChatNativeVibeButton()
-
   private var tabs: [ChatNativeTabItem] = []
-  private var mainTabs: [ChatNativeTabItem] = []
-  private var mainTabIndexes: [Int] = []
-  private var vibeTab: ChatNativeTabItem?
-  private var vibeTabIndex: Int?
 
   private var currentIndex = 0
   private var activeTintColor = UIColor.systemBlue
   private var inactiveTintColor = UIColor.systemGray
   private var isDark = false
-  private let tabControlSide: CGFloat = 64
+  private let tabControlSide: CGFloat = 72
   private let horizontalOuterPadding: CGFloat = 18
   private let selectionFeedback = UISelectionFeedbackGenerator()
   private var remoteIconCache: [String: UIImage] = [:]
@@ -250,20 +85,8 @@ public final class ChatNativeTabBarView: ExpoView {
         equalTo: backgroundBlur.contentView.trailingAnchor, constant: -10),
     ])
 
-    vibeButton.translatesAutoresizingMaskIntoConstraints = false
-    vibeButton.setContentHuggingPriority(.required, for: .horizontal)
-    vibeButton.setContentCompressionResistancePriority(.required, for: .horizontal)
-    NSLayoutConstraint.activate([
-      vibeButton.widthAnchor.constraint(equalToConstant: tabControlSide),
-      vibeButton.heightAnchor.constraint(equalToConstant: tabControlSide),
-    ])
-    vibeButton.addTarget(self, action: #selector(vibeTapped), for: .touchUpInside)
-    vibeButton.addTarget(self, action: #selector(vibeTapped), for: .primaryActionTriggered)
-
     containerStack.addArrangedSubview(backgroundBlur)
-    containerStack.addArrangedSubview(vibeButton)
 
-    vibeButton.isHidden = true
     selectionFeedback.prepare()
 
     applyChrome()
@@ -281,18 +104,6 @@ public final class ChatNativeTabBarView: ExpoView {
       return ChatNativeTabItem(
         key: key, title: title, sfSymbol: sfSymbol, iconUri: iconUri, badge: badge, isVibe: isVibe)
     }
-
-    if let vibeIndex = tabs.firstIndex(where: { $0.isVibe }) {
-      vibeTabIndex = vibeIndex
-      vibeTab = tabs[vibeIndex]
-    } else {
-      vibeTabIndex = nil
-      vibeTab = nil
-    }
-
-    let filtered = tabs.enumerated().filter { !$0.element.isVibe }
-    mainTabs = filtered.map(\.element)
-    mainTabIndexes = filtered.map(\.offset)
 
     rebuildSegments()
   }
@@ -323,9 +134,8 @@ public final class ChatNativeTabBarView: ExpoView {
   }
 
   @objc private func segmentChanged(_ sender: UISegmentedControl) {
-    let segmentIndex = sender.selectedSegmentIndex
-    guard segmentIndex >= 0, segmentIndex < mainTabIndexes.count else { return }
-    let tabIndex = mainTabIndexes[segmentIndex]
+    let tabIndex = sender.selectedSegmentIndex
+    guard tabIndex >= 0, tabIndex < tabs.count else { return }
     if tabIndex != currentIndex {
       selectionFeedback.selectionChanged()
       selectionFeedback.prepare()
@@ -333,63 +143,131 @@ public final class ChatNativeTabBarView: ExpoView {
     onIndexChange(["index": tabIndex])
   }
 
-  @objc private func vibeTapped() {
-    guard let vibeTabIndex else { return }
-    if vibeTabIndex != currentIndex {
-      selectionFeedback.selectionChanged()
-      selectionFeedback.prepare()
-    }
-    onIndexChange(["index": vibeTabIndex])
-  }
-
   private func rebuildSegments() {
     segmentedControl.removeAllSegments()
+    for i in 0..<tabs.count {
+      // Insert with a placeholder title; actual image is set in rebuildAndApplySegmentImages
+      segmentedControl.insertSegment(withTitle: tabs[i].title, at: i, animated: false)
+    }
+    rebuildAndApplySegmentImages()
+    applySelection()
+  }
 
-    for i in 0..<mainTabs.count {
-      let item = mainTabs[i]
-      // Try to use SF Symbol image, falling back to title only
-      if let resolvedIcon = resolvedIcon(for: item) {
-        let tinted = resolvedIcon.withRenderingMode(.alwaysTemplate)
-        segmentedControl.insertSegment(with: tinted, at: i, animated: false)
-      } else if let sfSymbol = item.sfSymbol,
-        let img = UIImage(systemName: sfSymbol)
-      {
-        segmentedControl.insertSegment(with: img, at: i, animated: false)
+  // MARK: - Segment image rendering
+
+  private var segmentNormalImages: [UIImage] = []
+  private var segmentSelectedImages: [UIImage] = []
+
+  private func rebuildAndApplySegmentImages() {
+    let normalColor: UIColor =
+      isDark
+      ? UIColor.white.withAlphaComponent(0.55)
+      : UIColor.black.withAlphaComponent(0.45)
+    let selectedColor: UIColor = isDark ? .white : .black
+    segmentNormalImages = tabs.map {
+      makeSegmentImage(
+        symbol: $0.sfSymbol ?? fallbackSymbol($0.key),
+        title: $0.title, color: normalColor, isVibe: $0.isVibe) ?? UIImage()
+    }
+    segmentSelectedImages = tabs.map {
+      makeSegmentImage(
+        symbol: $0.sfSymbol ?? fallbackSymbol($0.key),
+        title: $0.title, color: selectedColor, isVibe: $0.isVibe) ?? UIImage()
+    }
+    swapSegmentImages(selectedIndex: segmentedControl.selectedSegmentIndex)
+  }
+
+  private func swapSegmentImages(selectedIndex: Int) {
+    for i in 0..<tabs.count {
+      guard i < segmentNormalImages.count, i < segmentSelectedImages.count else { continue }
+      let img = (i == selectedIndex) ? segmentSelectedImages[i] : segmentNormalImages[i]
+      segmentedControl.setImage(img.withRenderingMode(.alwaysOriginal), forSegmentAt: i)
+    }
+  }
+
+  private func fallbackSymbol(_ key: String) -> String {
+    switch key.lowercased() {
+    case "chat", "chats", "messages": return "bubble.left.and.bubble.right"
+    case "vibe": return "sparkles"
+    case "profile", "me": return "person"
+    case "settings": return "gearshape"
+    case "explore", "discover": return "safari"
+    default: return "circle"
+    }
+  }
+
+  private func resolveLogoImage() -> UIImage? {
+    if let named = UIImage(named: "logotransparent") {
+      return named
+    }
+    if let path = Bundle.main.path(forResource: "logotransparent", ofType: "png"),
+      let image = UIImage(contentsOfFile: path)
+    {
+      return image
+    }
+    return nil
+  }
+
+  /// Renders an SF Symbol or image above a text label into one UIImage for use as a
+  /// segment image. This gives icon + label with per-state colour control
+  /// while keeping `selectedSegmentTintColor` pill rendering intact.
+  private func makeSegmentImage(symbol: String, title: String, color: UIColor, isVibe: Bool)
+    -> UIImage?
+  {
+    let fontSize: CGFloat = 11
+    let gap: CGFloat = 3
+    let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+    let textAttrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: color]
+    let textSize = (title as NSString).size(withAttributes: textAttrs)
+
+    let iconSize: CGSize
+    let iconImgToDraw: UIImage?
+
+    if isVibe, let logo = resolveLogoImage() {
+      // Use the logo image instead of a symbol
+      iconSize = CGSize(width: 22, height: 22)
+      iconImgToDraw = logo.withRenderingMode(.alwaysOriginal)
+    } else {
+      let iconPt: CGFloat = 18
+      let iconCfg = UIImage.SymbolConfiguration(pointSize: iconPt, weight: .semibold)
+      if let icon = UIImage(systemName: symbol, withConfiguration: iconCfg) {
+        iconSize = icon.size
+        iconImgToDraw = icon.withTintColor(color, renderingMode: .alwaysOriginal)
       } else {
-        segmentedControl.insertSegment(withTitle: item.title, at: i, animated: false)
+        iconSize = .zero
+        iconImgToDraw = nil
       }
     }
 
-    vibeButton.isHidden = vibeTab == nil
-    applySelection()
+    let canvasW = max(iconSize.width, textSize.width) + 20
+    let canvasH = iconSize.height + gap + ceil(textSize.height) + 2
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: canvasW, height: canvasH))
+    return renderer.image { _ in
+      let iconX = (canvasW - iconSize.width) / 2
+      if let img = iconImgToDraw {
+        var alpha: CGFloat = 1.0
+        color.getRed(nil, green: nil, blue: nil, alpha: &alpha)
+        img.draw(
+          in: CGRect(x: iconX, y: 1, width: iconSize.width, height: iconSize.height),
+          blendMode: .normal, alpha: alpha)
+      }
+      let textX = (canvasW - textSize.width) / 2
+      (title as NSString).draw(
+        at: CGPoint(x: textX, y: 1 + iconSize.height + gap),
+        withAttributes: textAttrs)
+    }
   }
 
   private func applySelection() {
     guard !tabs.isEmpty else { return }
     let normalized = max(0, min(currentIndex, tabs.count - 1))
-    if normalized != currentIndex {
-      currentIndex = normalized
-    }
+    if normalized != currentIndex { currentIndex = normalized }
 
-    // Figure out which segment corresponds to the current tab index
-    if let segIndex = mainTabIndexes.firstIndex(of: currentIndex) {
-      if segmentedControl.selectedSegmentIndex != segIndex {
-        segmentedControl.selectedSegmentIndex = segIndex
-      }
-    } else {
-      // Current tab is the vibe tab — deselect the segmented control
-      segmentedControl.selectedSegmentIndex = UISegmentedControl.noSegment
+    if segmentedControl.selectedSegmentIndex != currentIndex {
+      segmentedControl.selectedSegmentIndex = currentIndex
     }
-
-    if let vibeTab {
-      let focused = vibeTabIndex == currentIndex
-      vibeButton.apply(
-        item: vibeTab,
-        focused: focused,
-        activeTintColor: isDark ? .white : .black,
-        isDark: isDark
-      )
-    }
+    // Swap icon tint to reflect selected/unselected state
+    swapSegmentImages(selectedIndex: currentIndex)
   }
 
   private func resolvedIcon(for item: ChatNativeTabItem) -> UIImage? {
@@ -463,6 +341,21 @@ public final class ChatNativeTabBarView: ExpoView {
     return UIImage(named: uriString)
   }
 
+  // MARK: - Pill image helper
+  private func makePillImage(color: UIColor) -> UIImage {
+    let r: CGFloat = 14
+    let side = r * 2 + 1
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
+    let img = renderer.image { _ in
+      color.setFill()
+      UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: side, height: side), cornerRadius: r)
+        .fill()
+    }
+    return img.resizableImage(
+      withCapInsets: UIEdgeInsets(top: r, left: r, bottom: r, right: r),
+      resizingMode: .stretch)
+  }
+
   private func applyChrome() {
     if #available(iOS 26.0, *) {
       let effect = UIGlassEffect()
@@ -479,25 +372,33 @@ public final class ChatNativeTabBarView: ExpoView {
       ? UIColor.white.withAlphaComponent(0.08).cgColor
       : UIColor.black.withAlphaComponent(0.06).cgColor
 
-    // Style the segmented control
+    // Use custom background images to completely remove the internal gray track
+    // while keeping a pill for the selected segment.
+    // setBackgroundImage puts the control into "legacy" mode where selectedSegmentTintColor
+    // is ignored and the track is controlled entirely by the .normal background image.
     segmentedControl.backgroundColor = .clear
-    segmentedControl.selectedSegmentTintColor =
-      isDark
-      ? UIColor.white.withAlphaComponent(0.16)
-      : UIColor.black.withAlphaComponent(0.10)
+    segmentedControl.selectedSegmentTintColor = nil
 
-    let normalAttrs: [NSAttributedString.Key: Any] = [
-      .foregroundColor: isDark
-        ? UIColor.white.withAlphaComponent(0.6)
-        : UIColor.black.withAlphaComponent(0.5),
-      .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
-    ]
-    let selectedAttrs: [NSAttributedString.Key: Any] = [
-      .foregroundColor: isDark ? UIColor.white : UIColor.black,
-      .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
-    ]
-    segmentedControl.setTitleTextAttributes(normalAttrs, for: .normal)
-    segmentedControl.setTitleTextAttributes(selectedAttrs, for: .selected)
+    let clear = UIImage()
+    let pillColor =
+      isDark
+      ? UIColor.white.withAlphaComponent(0.22)
+      : UIColor.black.withAlphaComponent(0.13)
+    let pillImg = makePillImage(color: pillColor)
+    let pillImgHighlighted = makePillImage(
+      color: pillColor.withAlphaComponent(pillColor.cgColor.alpha * 0.75))
+
+    segmentedControl.setBackgroundImage(clear, for: .normal, barMetrics: .default)
+    segmentedControl.setBackgroundImage(clear, for: .highlighted, barMetrics: .default)
+    segmentedControl.setBackgroundImage(pillImg, for: .selected, barMetrics: .default)
+    segmentedControl.setBackgroundImage(
+      pillImgHighlighted, for: [.selected, .highlighted], barMetrics: .default)
+    segmentedControl.setDividerImage(
+      clear, forLeftSegmentState: .normal,
+      rightSegmentState: .normal, barMetrics: .default)
+
+    // Rebuild rendered icon+text images with the current colour scheme.
+    rebuildAndApplySegmentImages()
   }
 }
 

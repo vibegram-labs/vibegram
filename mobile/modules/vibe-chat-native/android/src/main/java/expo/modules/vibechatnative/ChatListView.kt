@@ -2301,6 +2301,7 @@ class ChatListView(
   private val onNativeEvent by EventDispatcher<Map<String, Any>>()
   internal var nativeEventListener: ((Map<String, Any>) -> Unit)? = null
   internal var viewportChangedListener: ((Map<String, Any>) -> Unit)? = null
+  private var isDispatchingViewportEvent = false
 
   private val contentFrame = FrameLayout(context)
   val recyclerView = RecyclerView(context)
@@ -2475,6 +2476,10 @@ class ChatListView(
       override fun onSendText(text: String, messageId: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
+        Log.i(
+          "ChatListView",
+          "onSendText textLen=${trimmed.length} messageId=$messageId nativeSendEnabled=$nativeSendEnabled chatId=${engineChatId.trim()} surfaceId=$engineSurfaceId",
+        )
         if (nativeSendEnabled) {
           val chatId = engineChatId.trim()
           val myUserId = engineMyUserId.trim()
@@ -2498,6 +2503,13 @@ class ChatListView(
               ),
             )
             val accepted = (result["accepted"] as? Boolean) == true
+            val queued = (result["queued"] as? Boolean) == true
+            val state = (result["state"] as? String)?.trim()?.lowercase()
+            val reason = (result["reason"] as? String)?.trim()
+            Log.i(
+              "ChatListView",
+              "native ChatEngine sendMessage result accepted=$accepted queued=$queued state=$state reason=$reason chatId=$chatId messageId=$messageId result=$result",
+            )
             if (!accepted) {
               val statusSnapshot = ChatEngine.getStatus()
               val journalTail = ChatEngine.getJournal().takeLast(6)
@@ -2508,7 +2520,6 @@ class ChatListView(
               return@execute
             }
 
-            val state = (result["state"] as? String)?.trim()?.lowercase()
             if (state == "pending" || state == "error") {
               val statusSnapshot = ChatEngine.getStatus()
               Log.i(
@@ -2519,6 +2530,10 @@ class ChatListView(
           }
           return
         }
+        Log.w(
+          "ChatListView",
+          "onSendText falling back to JS bridge nativeSendEnabled=false messageId=$messageId chatId=${engineChatId.trim()}",
+        )
         emitNativeEvent(mapOf("type" to "sendMessage", "text" to trimmed, "messageId" to messageId))
       }
 
@@ -2577,6 +2592,40 @@ class ChatListView(
       }
 
       override fun onVoiceRecorded(uri: String, durationSeconds: Double, waveform: List<Float>) {
+        if (nativeSendEnabled) {
+          val chatId = engineChatId.trim()
+          val myUserId = engineMyUserId.trim()
+          val peerUserId = enginePeerUserId.trim()
+          if (chatId.isEmpty()) {
+            Log.w(
+              "ChatListView",
+              "native voice send blocked: empty chatId uri=$uri duration=$durationSeconds",
+            )
+            return
+          }
+          diffExecutor.execute {
+            val result = ChatEngine.sendMessage(
+              mapOf(
+                "chatId" to chatId,
+                "type" to "voice",
+                "text" to "",
+                "myUserId" to myUserId,
+                "peerUserId" to peerUserId,
+                "metadata" to mapOf(
+                  "mediaUrl" to uri,
+                  "duration" to durationSeconds,
+                  "waveform" to waveform.map { it.toDouble() },
+                  "fileName" to "voice-message.m4a",
+                ),
+              ),
+            )
+            Log.i(
+              "ChatListView",
+              "native voice send result chatId=$chatId result=$result uri=$uri duration=$durationSeconds",
+            )
+          }
+          return
+        }
         emitNativeEvent(
           mapOf(
             "type" to "attachmentVoice",
@@ -2586,6 +2635,7 @@ class ChatListView(
           ),
         )
       }
+
     }
     addView(inputBar)
 
@@ -2611,13 +2661,61 @@ class ChatListView(
   }
 
   private fun emitNativeEvent(payload: Map<String, Any>) {
+    if (nativeSendEnabled) {
+      val type = (payload["type"] as? String)?.trim()?.lowercase()
+      if (type == "contextmenuaction") {
+        val action = (payload["action"] as? String)?.trim()?.lowercase()
+        val messageId = (payload["messageId"] as? String)?.trim().orEmpty()
+        val chatId = engineChatId.trim()
+        if (chatId.isNotEmpty() && messageId.isNotEmpty() && (action == "resend" || action == "delete")) {
+          diffExecutor.execute {
+            val result =
+              if (action == "resend") {
+                ChatEngine.retryOutgoingMessage(
+                  mapOf(
+                    "chatId" to chatId,
+                    "messageId" to messageId,
+                  ),
+                )
+              } else {
+                ChatEngine.deleteMessage(
+                  mapOf(
+                    "chatId" to chatId,
+                    "messageId" to messageId,
+                    "forEveryone" to true,
+                  ),
+                )
+              }
+            Log.i(
+              "ChatListView",
+              "native contextMenuAction handled action=$action chatId=$chatId messageId=$messageId result=$result",
+            )
+          }
+          return
+        }
+      }
+    }
+    val forwarded = nativeEventListener
+    if (forwarded != null) {
+      forwarded.invoke(payload)
+      return
+    }
     onNativeEvent(payload)
-    nativeEventListener?.invoke(payload)
   }
 
   private fun emitViewportChanged(payload: Map<String, Any>) {
-    onViewportChanged(payload)
-    viewportChangedListener?.invoke(payload)
+    if (isDispatchingViewportEvent) return
+    isDispatchingViewportEvent = true
+    try {
+      val forwarded = viewportChangedListener
+      if (forwarded != null) {
+        forwarded.invoke(payload)
+      } else {
+        onViewportChanged(payload)
+      }
+    } finally {
+      isDispatchingViewportEvent = false
+    }
   }
 
   override fun onAttachedToWindow() {
@@ -2647,6 +2745,7 @@ class ChatListView(
       ChatEngine.unbindSurface(mapOf("surfaceId" to engineSurfaceId))
     }
     engineSurfaceId = value.trim()
+    Log.i("ChatListView", "setEngineSurfaceId surfaceId=$engineSurfaceId")
     updateChatEngineBinding()
     registerChatEngineListener()
   }
@@ -2655,6 +2754,7 @@ class ChatListView(
     val next = value.trim()
     if (engineChatId == next) return
     engineChatId = next
+    Log.i("ChatListView", "setEngineChatId chatId=$engineChatId")
     nativeEngineRowsById.clear()
     nativeEngineOrder.clear()
     nativeDeletedMessageIds.clear()
@@ -2667,6 +2767,7 @@ class ChatListView(
     val next = value.trim()
     if (engineMyUserId == next) return
     engineMyUserId = next
+    Log.i("ChatListView", "setEngineMyUserId myUserId=$engineMyUserId")
     updateChatEngineBinding()
   }
 
@@ -2674,6 +2775,7 @@ class ChatListView(
     val next = value.trim()
     if (enginePeerUserId == next) return
     enginePeerUserId = next
+    Log.i("ChatListView", "setEnginePeerUserId peerUserId=$enginePeerUserId")
     updateChatEngineBinding()
     refreshStatusDecorations("peerUserId")
   }
@@ -2681,6 +2783,10 @@ class ChatListView(
   fun setStatusAuthorityEnabled(enabled: Boolean) {
     if (statusAuthorityEnabled == enabled) return
     statusAuthorityEnabled = enabled
+    if (enabled) {
+      registerChatEngineListener()
+      hydrateRowsFromNativeHistoryIfReady("statusAuthorityEnabled")
+    }
     refreshStatusDecorations("statusAuthorityEnabled")
   }
 
@@ -2771,6 +2877,20 @@ class ChatListView(
       }
       post { refreshStatusDecorations(reason) }
     }
+    hydrateRowsFromNativeHistoryIfReady("listenerRegistered")
+  }
+
+  private fun hydrateRowsFromNativeHistoryIfReady(trigger: String) {
+    if (!statusAuthorityEnabled) return
+    val resolvedChatId = engineChatId.trim()
+    if (resolvedChatId.isEmpty()) return
+    val historyLoaded = ChatEngine.isChatHistoryLoaded(mapOf("chatId" to resolvedChatId))
+    if (!historyLoaded) return
+    Log.i(
+      "ChatListView",
+      "hydrateRowsFromNativeHistoryIfReady trigger=$trigger chatId=$resolvedChatId sourceRows=${sourceRowsPayload.size}",
+    )
+    setRows(sourceRowsPayload)
   }
 
   private fun refreshStatusDecorations(reason: String) {
@@ -2857,6 +2977,10 @@ class ChatListView(
 
   fun setNativeSendEnabled(enabled: Boolean) {
     nativeSendEnabled = enabled
+    Log.i(
+      "ChatListView",
+      "setNativeSendEnabled enabled=$nativeSendEnabled chatId=${engineChatId.trim()} surfaceId=$engineSurfaceId",
+    )
   }
 
   fun setVoicePlayback(payload: Map<String, Any?>) {

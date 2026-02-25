@@ -61,6 +61,7 @@ public final class ChatMainView: ExpoView {
 
   private let headerContainer = UIView()
   private let headerMaskView = UIView()
+  private let headerMaskBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
   private let headerMaskOverlayView = UIView()
   private let headerMaskGradientLayer = CAGradientLayer()
   private let headerContentView = UIView()
@@ -78,6 +79,9 @@ public final class ChatMainView: ExpoView {
   private let avatarButton = UIButton(type: .system)
   private let avatarImageView = UIImageView()
   private let avatarFallbackIconView = UIImageView()
+  private let menuGlassView = UIVisualEffectView(effect: nil)
+  private let menuPressedOverlayView = UIView()
+  private let menuButton = UIButton(type: .system)
 
   private let chatHeaderStack = UIStackView()
   private let chatTitleLabel = UILabel()
@@ -116,8 +120,16 @@ public final class ChatMainView: ExpoView {
   private var profileHandleText: String = ""
   private var profileBioText: String = ""
   private var avatarUri: String = ""
+  private var isChatMuted = false
+  private var engineChatId: String = ""
   private var enginePeerUserId: String = ""
   private var engineLastSeenTimestampMs: Int64?
+  private var profileSummaryMessageCount = 0
+  private var profileSummaryMediaCount = 0
+  private var profileSummaryFileCount = 0
+  private var profileSummaryLinkCount = 0
+  private var profileSummaryRecentFiles: [String] = []
+  private var profileSummaryHistoryLoaded = false
   private var currentPage: ChatMainPage = .chat
   private var avatarLoadTask: URLSessionDataTask?
   private var registeredSurfaceId: String = ""
@@ -179,7 +191,9 @@ public final class ChatMainView: ExpoView {
   }
 
   func setEngineChatId(_ value: String) {
+    engineChatId = value.trimmingCharacters(in: .whitespacesAndNewlines)
     chatListView.setEngineChatId(value)
+    refreshProfileSummaryFromEngine(force: true)
   }
 
   func setEngineMyUserId(_ value: String) {
@@ -305,6 +319,11 @@ public final class ChatMainView: ExpoView {
     }
   }
 
+  func setIsChatMuted(_ value: Bool) {
+    if isChatMuted == value { return }
+    isChatMuted = value
+  }
+
   func setPage(_ value: String, animated: Bool) {
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     let nextPage: ChatMainPage = normalized == "profile" ? .profile : .chat
@@ -334,7 +353,7 @@ public final class ChatMainView: ExpoView {
     layer.insertSublayer(rootWallpaperLayer, at: 0)
 
     addSubview(pagesHost)
-    pagesHost.clipsToBounds = true
+    pagesHost.clipsToBounds = false
 
     pagesHost.addSubview(chatPage)
     chatPage.addSubview(chatListView)
@@ -352,22 +371,23 @@ public final class ChatMainView: ExpoView {
     headerContainer.clipsToBounds = false
     headerMaskView.isUserInteractionEnabled = false
     headerContainer.addSubview(headerMaskView)
-    headerMaskView.addSubview(headerMaskOverlayView)
+    headerMaskView.addSubview(headerMaskBlurView)
+    headerMaskBlurView.contentView.addSubview(headerMaskOverlayView)
     headerMaskGradientLayer.colors = [
-      UIColor.black.cgColor,
-      UIColor.black.cgColor,
-      UIColor.black.withAlphaComponent(0.50).cgColor,
+      UIColor.black.withAlphaComponent(0.95).cgColor,
+      UIColor.black.withAlphaComponent(0.72).cgColor,
       UIColor.clear.cgColor,
     ]
-    headerMaskGradientLayer.locations = [0.0, 0.50, 0.78, 1.0]
+    headerMaskGradientLayer.locations = [0.0, 0.58, 1.0]
     headerMaskView.layer.mask = headerMaskGradientLayer
     headerContainer.addSubview(headerContentView)
 
     headerContentView.addSubview(backButton)
+    headerContentView.addSubview(menuButton)
     headerContentView.addSubview(titleButton)
     headerContentView.addSubview(avatarButton)
 
-    [backButton, titleButton, avatarButton].forEach { button in
+    [backButton, titleButton, avatarButton, menuButton].forEach { button in
       button.backgroundColor = .clear
       button.contentHorizontalAlignment = .center
       button.contentVerticalAlignment = .center
@@ -404,22 +424,37 @@ public final class ChatMainView: ExpoView {
     avatarPressedOverlayView.alpha = 0
     avatarButton.addSubview(avatarPressedOverlayView)
 
+    menuGlassView.isUserInteractionEnabled = false
+    menuGlassView.clipsToBounds = true
+    menuButton.addSubview(menuGlassView)
+    menuButton.sendSubviewToBack(menuGlassView)
+
+    menuPressedOverlayView.isUserInteractionEnabled = false
+    menuPressedOverlayView.backgroundColor = headerPressedOverlayColor
+    menuPressedOverlayView.alpha = 0
+    menuButton.addSubview(menuPressedOverlayView)
+
     titleButton.addSubview(chatHeaderStack)
     titleButton.addSubview(profileHeaderStack)
 
     backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
     backButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
     titleButton.addTarget(self, action: #selector(handleAvatarPressed), for: .touchUpInside)
+    menuButton.setImage(UIImage(systemName: "ellipsis"), for: .normal)
+    menuButton.addTarget(self, action: #selector(handleMenuPressed), for: .touchUpInside)
 
     avatarButton.addTarget(self, action: #selector(handleAvatarPressed), for: .touchUpInside)
     avatarButton.addSubview(avatarImageView)
     avatarButton.addSubview(avatarFallbackIconView)
     avatarButton.bringSubviewToFront(avatarPressedOverlayView)
+    menuButton.bringSubviewToFront(menuPressedOverlayView)
     backButton.bringSubviewToFront(backPressedOverlayView)
     titleButton.bringSubviewToFront(titlePressedOverlayView)
 
     let backSymbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     backButton.setPreferredSymbolConfiguration(backSymbolConfig, forImageIn: .normal)
+    let menuSymbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+    menuButton.setPreferredSymbolConfiguration(menuSymbolConfig, forImageIn: .normal)
     avatarImageView.contentMode = .scaleAspectFill
     avatarImageView.isHidden = true
 
@@ -502,7 +537,22 @@ public final class ChatMainView: ExpoView {
   }
 
   @objc private func handleChatEngineDidChange(_ notification: Notification) {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.handleChatEngineDidChange(notification)
+      }
+      return
+    }
     refreshPresenceStateFromEngine()
+    guard !engineChatId.isEmpty else { return }
+    if
+      let changedChatIdRaw = notification.userInfo?["chatId"] as? String,
+      !changedChatIdRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+      changedChatIdRaw.trimmingCharacters(in: .whitespacesAndNewlines) != engineChatId
+    {
+      return
+    }
+    refreshProfileSummaryFromEngine()
   }
 
   private func refreshPresenceStateFromEngine(force: Bool = false) {
@@ -515,6 +565,51 @@ public final class ChatMainView: ExpoView {
     isOnline = nextOnline
     engineLastSeenTimestampMs = nextLastSeen
     updateHeaderTexts()
+    updateProfileTexts()
+  }
+
+  private func refreshProfileSummaryFromEngine(force: Bool = false) {
+    let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !chatId.isEmpty else {
+      if force || profileSummaryMessageCount != 0 || profileSummaryMediaCount != 0
+        || profileSummaryFileCount != 0 || profileSummaryLinkCount != 0
+        || profileSummaryHistoryLoaded || !profileSummaryRecentFiles.isEmpty
+      {
+        profileSummaryMessageCount = 0
+        profileSummaryMediaCount = 0
+        profileSummaryFileCount = 0
+        profileSummaryLinkCount = 0
+        profileSummaryRecentFiles = []
+        profileSummaryHistoryLoaded = false
+        updateProfileTexts()
+      }
+      return
+    }
+
+    let summary = ChatEngine.shared.getChatProfileSummary(["chatId": chatId])
+    let nextMessageCount = (summary["totalMessages"] as? Int) ?? 0
+    let nextMediaCount = (summary["mediaCount"] as? Int) ?? 0
+    let nextFileCount = (summary["fileCount"] as? Int) ?? 0
+    let nextLinkCount = (summary["linkCount"] as? Int) ?? 0
+    let nextRecentFiles = (summary["recentFiles"] as? [String]) ?? []
+    let nextHistoryLoaded = (summary["historyLoaded"] as? Bool) ?? false
+
+    guard
+      force
+        || nextMessageCount != profileSummaryMessageCount
+        || nextMediaCount != profileSummaryMediaCount
+        || nextFileCount != profileSummaryFileCount
+        || nextLinkCount != profileSummaryLinkCount
+        || nextHistoryLoaded != profileSummaryHistoryLoaded
+        || nextRecentFiles != profileSummaryRecentFiles
+    else { return }
+
+    profileSummaryMessageCount = nextMessageCount
+    profileSummaryMediaCount = nextMediaCount
+    profileSummaryFileCount = nextFileCount
+    profileSummaryLinkCount = nextLinkCount
+    profileSummaryRecentFiles = nextRecentFiles
+    profileSummaryHistoryLoaded = nextHistoryLoaded
     updateProfileTexts()
   }
 
@@ -531,15 +626,20 @@ public final class ChatMainView: ExpoView {
       let avatarEffect = UIGlassEffect()
       avatarEffect.isInteractive = true
       avatarGlassView.effect = avatarEffect
+
+      let menuEffect = UIGlassEffect()
+      menuEffect.isInteractive = true
+      menuGlassView.effect = menuEffect
     } else {
       backGlassView.effect = UIBlurEffect(style: .systemMaterial)
       titleGlassView.effect = UIBlurEffect(style: .systemMaterial)
       avatarGlassView.effect = UIBlurEffect(style: .systemMaterial)
+      menuGlassView.effect = UIBlurEffect(style: .systemMaterial)
     }
   }
 
   private func configureHeaderPressFeedback() {
-    let controls: [UIControl] = [backButton, titleButton, avatarButton]
+    let controls: [UIControl] = [backButton, titleButton, avatarButton, menuButton]
     controls.forEach { control in
       control.addTarget(
         self, action: #selector(handleHeaderPressDown(_:)), for: [.touchDown, .touchDragEnter])
@@ -590,16 +690,22 @@ public final class ChatMainView: ExpoView {
         self.avatarButton.transform = CGAffineTransform(scaleX: scale, y: scale)
         self.avatarGlassView.alpha = isPressed ? 0.92 : 1.0
         self.avatarPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
+      } else if control === self.menuButton {
+        let scale: CGFloat = isPressed ? 0.96 : 1.0
+        self.menuButton.transform = CGAffineTransform(scaleX: scale, y: scale)
+        self.menuGlassView.alpha = isPressed ? 0.92 : 1.0
+        self.menuPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
       }
     }
   }
 
   private func layoutChrome() {
     let safeTop = safeAreaInsets.top
-    let headerHeight = safeTop + 80.0
+    let headerHeight = safeTop + 60.0
     headerContainer.frame = CGRect(x: 0, y: 0, width: bounds.width, height: headerHeight)
     headerMaskView.frame = headerContainer.bounds
-    headerMaskOverlayView.frame = headerMaskView.bounds
+    headerMaskBlurView.frame = headerMaskView.bounds
+    headerMaskOverlayView.frame = headerMaskBlurView.bounds
     headerMaskGradientLayer.frame = headerMaskView.bounds
 
     let contentY = safeTop + 8.0
@@ -609,8 +715,10 @@ public final class ChatMainView: ExpoView {
     backButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
     avatarButton.frame = CGRect(
       x: max(0.0, headerContentView.bounds.width - 44.0), y: 0.0, width: 44.0, height: 44.0)
+    menuButton.frame = CGRect(
+      x: max(0.0, avatarButton.frame.minX - 8.0 - 44.0), y: 0.0, width: 44.0, height: 44.0)
 
-    let maxCenterWidth = max(0.0, headerContentView.bounds.width - 112.0)
+    let maxCenterWidth = max(0.0, headerContentView.bounds.width * 0.45)
     let chatReq = max(
       chatTitleLabel.intrinsicContentSize.width, chatSubtitleLabel.intrinsicContentSize.width)
     let profileReq = max(
@@ -624,12 +732,13 @@ public final class ChatMainView: ExpoView {
       height: 44.0
     )
 
-    [backButton, avatarButton, titleButton].forEach { control in
+    [backButton, avatarButton, titleButton, menuButton].forEach { control in
       control.layer.cornerRadius = control.bounds.height / 2.0
     }
     [
-      backGlassView, avatarGlassView, titleGlassView, backPressedOverlayView,
+      backGlassView, avatarGlassView, titleGlassView, menuGlassView, backPressedOverlayView,
       avatarPressedOverlayView,
+      menuPressedOverlayView,
       titlePressedOverlayView,
     ]
     .forEach { view in
@@ -663,13 +772,23 @@ public final class ChatMainView: ExpoView {
 
     let pageWidth = pagesHost.bounds.width
     let pageHeight = pagesHost.bounds.height
-    chatPage.frame = CGRect(x: 0.0, y: 0.0, width: pageWidth, height: pageHeight)
-    profilePage.frame = CGRect(x: pageWidth, y: 0.0, width: pageWidth, height: pageHeight)
+
+    // Extend chatPage upward behind the header so its wallpaper
+    // layer covers the full screen — no gap with a mismatched gradient.
+    chatPage.frame = CGRect(
+      x: 0.0, y: -headerHeight,
+      width: pageWidth, height: pageHeight + headerHeight)
+    chatListView.frame = chatPage.bounds
+
+    profilePage.frame = CGRect(
+      x: pageWidth, y: -headerHeight,
+      width: pageWidth, height: pageHeight + headerHeight)
     profileWallpaperLayer.frame = profilePage.bounds
     profileWallpaperPatternLayer.frame = profilePage.bounds
     profileWallpaperPatternMaskLayer.frame = profileWallpaperPatternLayer.bounds
-    chatListView.frame = chatPage.bounds
-    profileScrollView.frame = profilePage.bounds
+    profileScrollView.frame = CGRect(
+      x: 0.0, y: headerHeight,
+      width: pageWidth, height: pageHeight)
   }
 
   private func layoutProfileContent() {
@@ -723,18 +842,22 @@ public final class ChatMainView: ExpoView {
     let cardBg = appearance.bubbleThemColor.withAlphaComponent(0.48)
 
     backgroundColor = .clear
-    headerMaskOverlayView.backgroundColor = .clear
-    rootWallpaperLayer.colors = appearance.wallpaperGradient.map(\.cgColor)
-    rootWallpaperLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
-    rootWallpaperLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-    rootWallpaperLayer.opacity = Float(max(0.0, min(1.0, appearance.wallpaperOpacity)))
-    rootWallpaperLayer.isHidden = appearance.backgroundMode == "transparent"
+    var white: CGFloat = 0
+    if text.getWhite(&white, alpha: nil) {
+      headerMaskBlurView.effect = UIBlurEffect(style: white > 0.5 ? .dark : .light)
+    } else {
+      headerMaskBlurView.effect = UIBlurEffect(style: .regular)
+    }
+    headerMaskOverlayView.backgroundColor = background.withAlphaComponent(0.32)
+    rootWallpaperLayer.isHidden = true
     backGlassView.backgroundColor = background.withAlphaComponent(0.10)
     titleGlassView.backgroundColor = background.withAlphaComponent(0.10)
     avatarGlassView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.22)
+    menuGlassView.backgroundColor = background.withAlphaComponent(0.10)
     refreshHeaderGlass()
 
     backButton.tintColor = text
+    menuButton.tintColor = text
     chatTitleLabel.textColor = text
     profileTitleLabel.textColor = text
     chatSubtitleLabel.textColor = secondary
@@ -879,9 +1002,19 @@ public final class ChatMainView: ExpoView {
       profileBioText.isEmpty
       ? "Shared media, links, and pinned messages will appear here."
       : profileBioText
-    profileInfoTitleLabel.text = "Profile"
-    profileInfoSubtitleLabel.text =
-      "Native profile page hosted with the chat list for instant transitions."
+    profileInfoTitleLabel.text = "Shared Content"
+    if profileSummaryHistoryLoaded {
+      let base =
+        "Media \(profileSummaryMediaCount) • Files \(profileSummaryFileCount) • Links \(profileSummaryLinkCount)\n\(profileSummaryMessageCount) cached messages available natively."
+      if !profileSummaryRecentFiles.isEmpty {
+        profileInfoSubtitleLabel.text = "\(base)\nRecent files: \(profileSummaryRecentFiles.joined(separator: ", "))"
+      } else {
+        profileInfoSubtitleLabel.text = base
+      }
+    } else {
+      profileInfoSubtitleLabel.text =
+        "Loading shared media and files from native encrypted cache..."
+    }
     setNeedsLayout()
   }
 
@@ -941,6 +1074,7 @@ public final class ChatMainView: ExpoView {
     let chatAlpha: CGFloat = currentPage == .chat ? 1.0 : 0.0
     let profileAlpha: CGFloat = currentPage == .profile ? 1.0 : 0.0
     let avatarAlpha: CGFloat = currentPage == .chat ? 1.0 : 0.0
+    let menuAlpha: CGFloat = currentPage == .chat ? 1.0 : 0.0
     let chatHeaderTransform =
       currentPage == .chat
       ? CGAffineTransform.identity : CGAffineTransform(translationX: -18.0, y: 0.0)
@@ -955,6 +1089,7 @@ public final class ChatMainView: ExpoView {
       self.chatHeaderStack.transform = chatHeaderTransform
       self.profileHeaderStack.transform = profileHeaderTransform
       self.avatarButton.alpha = avatarAlpha
+      self.menuButton.alpha = menuAlpha
     }
 
     if animated {
@@ -985,9 +1120,55 @@ public final class ChatMainView: ExpoView {
 
   @objc private func handleAvatarPressed() {
     guard currentPage == .chat else { return }
-    onNativeEvent(["type": "headerAvatarPressed"])
     markPendingNativePageChange(.profile)
     currentPage = .profile
     applyPageState(animated: true, emitEvent: true)
+    onNativeEvent(["type": "headerAvatarPressed"])
+  }
+
+  @objc private func handleMenuPressed() {
+    guard currentPage == .chat else { return }
+    guard let presenter = topMostViewController() else { return }
+
+    let sheet = UIAlertController(title: nil, message: nil, preferredStyle: .actionSheet)
+    let muteTitle = isChatMuted ? "Unmute" : "Mute"
+    sheet.addAction(
+      UIAlertAction(title: muteTitle, style: .default) { [weak self] _ in
+        self?.onNativeEvent(["type": "headerMenuAction", "action": "muteToggle"])
+      })
+    sheet.addAction(
+      UIAlertAction(title: "Clear Chat", style: .destructive) { [weak self] _ in
+        self?.onNativeEvent(["type": "headerMenuAction", "action": "clearChat"])
+      })
+    sheet.addAction(
+      UIAlertAction(title: "Block User", style: .destructive) { [weak self] _ in
+        self?.onNativeEvent(["type": "headerMenuAction", "action": "blockUser"])
+      })
+    sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+
+    if let popover = sheet.popoverPresentationController {
+      popover.sourceView = menuButton
+      popover.sourceRect = menuButton.bounds
+      popover.permittedArrowDirections = [.up, .down]
+    }
+    presenter.present(sheet, animated: true)
+  }
+
+  private func topMostViewController() -> UIViewController? {
+    guard
+      let root =
+        window?.rootViewController
+        ?? UIApplication.shared.connectedScenes
+          .compactMap({ scene -> UIViewController? in
+            guard let windowScene = scene as? UIWindowScene else { return nil }
+            return windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+          })
+          .first
+    else { return nil }
+    var top = root
+    while let presented = top.presentedViewController {
+      top = presented
+    }
+    return top
   }
 }

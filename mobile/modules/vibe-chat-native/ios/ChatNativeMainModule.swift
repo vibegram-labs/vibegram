@@ -138,6 +138,10 @@ public class ChatNativeMainModule: Module {
         view.setIsOnline(value ?? false)
       }
 
+      Prop("isChatMuted") { (view: ChatMainView, value: Bool?) in
+        view.setIsChatMuted(value ?? false)
+      }
+
       Prop("page") { (view: ChatMainView, value: String?) in
         view.setPage(value ?? "chat", animated: true)
       }

@@ -146,11 +146,25 @@ internal class ChatPhoenixClient(
 
   private fun nextRef(): String = refCounter.getAndIncrement().toString()
 
-  private fun buildUrl() =
-    socketUrl.toHttpUrlOrNull()?.let { baseUrl ->
-      baseUrl.newBuilder().apply {
-      val segments = baseUrl.pathSegments
-      if (segments.isEmpty() || segments.last() != "websocket") {
+  private fun buildUrl(): okhttp3.HttpUrl? {
+    val raw = socketUrl.trim()
+    if (raw.isEmpty()) return null
+
+    val normalizedForHttpUrl = when {
+      raw.startsWith("wss://", ignoreCase = true) ->
+        "https://" + raw.substring(6)
+      raw.startsWith("ws://", ignoreCase = true) ->
+        "http://" + raw.substring(5)
+      raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true) ->
+        raw
+      else ->
+        "https://$raw"
+    }
+
+    val baseUrl = normalizedForHttpUrl.toHttpUrlOrNull() ?: return null
+    return baseUrl.newBuilder().apply {
+      val segments = baseUrl.pathSegments.filter { it.isNotBlank() }
+      if (segments.isEmpty() || !segments.last().equals("websocket", ignoreCase = true)) {
         addPathSegment("websocket")
       }
       params.forEach { (key, value) ->
@@ -163,8 +177,8 @@ internal class ChatPhoenixClient(
         removeAllQueryParameters("token")
         addQueryParameter("token", authToken)
       }
-    }.build()
-    }
+    }?.build()
+  }
 
   private fun startHeartbeat() {
     stopHeartbeat()

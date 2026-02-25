@@ -174,6 +174,10 @@ export interface NativeChatEngineModule {
   sendRecordingState?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   sendEditMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   sendDeleteMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  setChatMuted?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  clearChat?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  blockUser?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  getChatProfileSummary?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   getChatJournal?: () => Promise<Record<string, unknown>[]> | Record<string, unknown>[];
   clearChatJournal?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   // Shadow-mode bridge until native Phoenix transport is enabled.

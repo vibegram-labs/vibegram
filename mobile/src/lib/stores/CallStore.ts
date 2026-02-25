@@ -50,6 +50,15 @@ export interface CallParticipant {
     userImage?: string;
 }
 
+const prependUniqueCallHistoryRecord = (
+    history: CallHistoryRecord[],
+    record: CallHistoryRecord
+): CallHistoryRecord[] => {
+    const id = typeof record.id === 'string' ? record.id.trim() : '';
+    const withoutDuplicateId = id.length > 0 ? history.filter((entry) => entry.id !== id) : history;
+    return [record, ...withoutDuplicateId];
+};
+
 const asNonEmptyString = (value: unknown): string | null => {
     if (typeof value !== 'string') return null;
     const trimmed = value.trim();
@@ -932,7 +941,9 @@ export const useCallStore = create<CallState & CallActions>()(
                             timestamp: Date.now(),
                             duration: 0
                         };
-                        set({ callHistory: [record, ...get().callHistory] });
+                        set((state) => ({
+                            callHistory: prependUniqueCallHistoryRecord(state.callHistory, record),
+                        }));
                     }
 
                     set({ callStatus: 'ended', endReason: 'declined', incomingCallData: null, connectionPhase: 'idle' });
@@ -1063,7 +1074,9 @@ export const useCallStore = create<CallState & CallActions>()(
                             timestamp: Date.now(),
                             duration: callDuration
                         };
-                        set({ callHistory: [record, ...get().callHistory] });
+                        set((state) => ({
+                            callHistory: prependUniqueCallHistoryRecord(state.callHistory, record),
+                        }));
                     }
 
                     const terminalReason =
@@ -1122,7 +1135,9 @@ export const useCallStore = create<CallState & CallActions>()(
                             timestamp: Date.now(),
                             duration: callDuration
                         };
-                        set({ callHistory: [record, ...get().callHistory] });
+                        set((state) => ({
+                            callHistory: prependUniqueCallHistoryRecord(state.callHistory, record),
+                        }));
                     }
 
                     set({ callStatus: 'ended', endReason: 'ended', incomingCallData: null, connectionPhase: 'idle' });

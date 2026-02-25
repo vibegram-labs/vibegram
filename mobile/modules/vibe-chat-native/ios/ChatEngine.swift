@@ -1640,6 +1640,298 @@ final class ChatEngine {
     }
   }
 
+  func setChatMuted(_ payload: [String: Any]) -> [String: Any] {
+    let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
+    guard let chatId, !chatId.isEmpty else {
+      return ["accepted": false, "reason": "invalid_chat"]
+    }
+    guard let muted = parseBooleanLike(payload["muted"]) else {
+      return ["accepted": false, "reason": "invalid_muted"]
+    }
+
+    let requestContext: (URL, String, String)?
+    requestContext = syncOnQueue {
+      guard
+        let apiBase = apiBaseURLLocked(),
+        let userId = normalizedString(payload["userId"] ?? payload["user_id"] ?? getConfigValueLocked("userId"))
+      else { return nil }
+      let token = authHeaderTokenLocked() ?? ""
+      appendJournalLocked(
+        event: "native-chat-mute-request",
+        payload: ["chatId": chatId, "muted": muted, "userId": userId]
+      )
+      state["updatedAt"] = nowMs()
+      return (apiBase, token, userId)
+    }
+
+    guard let (apiBase, token, userId) = requestContext else {
+      return ["accepted": false, "reason": "missing_config", "chatId": chatId]
+    }
+
+    var request = URLRequest(
+      url: apiBase.appendingPathComponent("api").appendingPathComponent("chat")
+        .appendingPathComponent(chatId).appendingPathComponent("mute"))
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+    if !token.isEmpty {
+      request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    request.httpBody = try? JSONSerialization.data(
+      withJSONObject: ["userId": userId, "muted": muted], options: [])
+
+    let session = ChatPhoenixClient.makePinnedURLSession()
+    session.dataTask(with: request) { [weak self] _, response, error in
+      guard let self else { return }
+      self.queue.async {
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        if let error {
+          self.appendJournalLocked(
+            event: "native-chat-mute-error",
+            payload: [
+              "chatId": chatId,
+              "muted": muted,
+              "error": error.localizedDescription,
+            ])
+          return
+        }
+        let success = (200...299).contains(statusCode)
+        self.appendJournalLocked(
+          event: success ? "native-chat-mute-ok" : "native-chat-mute-error",
+          payload: [
+            "chatId": chatId,
+            "muted": muted,
+            "status": statusCode,
+          ])
+        if success {
+          self.postChangeLocked(
+            reason: "chatMuteChanged",
+            userInfo: ["chatId": chatId, "muted": muted]
+          )
+        }
+      }
+    }.resume()
+
+    return ["accepted": true, "queued": true, "chatId": chatId, "muted": muted]
+  }
+
+  func clearChat(_ payload: [String: Any]) -> [String: Any] {
+    let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
+    guard let chatId, !chatId.isEmpty else {
+      return ["accepted": false, "reason": "invalid_chat"]
+    }
+
+    let requestContext: (URL, String)?
+    requestContext = syncOnQueue {
+      guard let apiBase = apiBaseURLLocked() else { return nil }
+      let token = authHeaderTokenLocked() ?? ""
+
+      historyRowsByChat.removeValue(forKey: chatId)
+      historyLoadingChats.remove(chatId)
+      liveMessageRowsByChat.removeValue(forKey: chatId)
+      deletedMessageIdsByChat.removeValue(forKey: chatId)
+      receiptIndex.removeValue(forKey: chatId)
+      localStatusIndex.removeValue(forKey: chatId)
+      pendingOutboundQueueByChat.removeValue(forKey: chatId)
+      nativeTypingStateByChatId.removeValue(forKey: chatId)
+      nativeRecordingStateByChatId.removeValue(forKey: chatId)
+      chatPeerUserIdsByChatId.removeValue(forKey: chatId)
+      openChatChannels.removeValue(forKey: chatId)
+
+      let draftIdsToRemove = pendingOutboundDraftsByMessageId.compactMap { (messageId, draft) -> String? in
+        let draftChatId = normalizedString(draft["chatId"] ?? draft["chat_id"])
+        return draftChatId == chatId ? messageId : nil
+      }
+      draftIdsToRemove.forEach { pendingOutboundDraftsByMessageId.removeValue(forKey: $0) }
+
+      if nativeJoinedChatIds.contains(chatId) {
+        nativeJoinedChatIds.remove(chatId)
+        if let client = phoenixClient as? ChatPhoenixClient {
+          client.leave(topic: chatTopic(for: chatId))
+        }
+      }
+
+      appendJournalLocked(event: "native-chat-clear-local", payload: ["chatId": chatId])
+      state["updatedAt"] = nowMs()
+      postChangeLocked(reason: "chatRowsReloaded", userInfo: ["chatId": chatId])
+      postChangeLocked(reason: "chatCleared", userInfo: ["chatId": chatId])
+      return (apiBase, token)
+    }
+
+    guard let (apiBase, token) = requestContext else {
+      return ["accepted": false, "reason": "missing_config", "chatId": chatId]
+    }
+
+    var request = URLRequest(
+      url: apiBase.appendingPathComponent("api").appendingPathComponent("chats")
+        .appendingPathComponent(chatId))
+    request.httpMethod = "DELETE"
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+    if !token.isEmpty {
+      request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+
+    let session = ChatPhoenixClient.makePinnedURLSession()
+    session.dataTask(with: request) { [weak self] _, response, error in
+      guard let self else { return }
+      self.queue.async {
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        if let error {
+          self.appendJournalLocked(
+            event: "native-chat-clear-error",
+            payload: [
+              "chatId": chatId,
+              "error": error.localizedDescription,
+            ])
+          return
+        }
+        let success = (200...299).contains(statusCode)
+        self.appendJournalLocked(
+          event: success ? "native-chat-clear-ok" : "native-chat-clear-error",
+          payload: [
+            "chatId": chatId,
+            "status": statusCode,
+          ])
+      }
+    }.resume()
+
+    return ["accepted": true, "queued": true, "chatId": chatId]
+  }
+
+  func blockUser(_ payload: [String: Any]) -> [String: Any] {
+    let blockedUserId =
+      normalizedString(payload["blockedUserId"] ?? payload["blocked_user_id"] ?? payload["peerUserId"] ?? payload["peer_user_id"])
+    guard let blockedUserId, !blockedUserId.isEmpty else {
+      return ["accepted": false, "reason": "invalid_user"]
+    }
+
+    let requestContext: (URL, String)?
+    requestContext = syncOnQueue {
+      guard let apiBase = apiBaseURLLocked() else { return nil }
+      let token = authHeaderTokenLocked() ?? ""
+      appendJournalLocked(
+        event: "native-user-block-request",
+        payload: ["blockedUserId": blockedUserId]
+      )
+      state["updatedAt"] = nowMs()
+      return (apiBase, token)
+    }
+
+    guard let (apiBase, token) = requestContext else {
+      return ["accepted": false, "reason": "missing_config"]
+    }
+
+    var request = URLRequest(
+      url: apiBase.appendingPathComponent("api").appendingPathComponent("user")
+        .appendingPathComponent("block"))
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+    if !token.isEmpty {
+      request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+    }
+    request.httpBody = try? JSONSerialization.data(
+      withJSONObject: ["blocked_user_id": blockedUserId], options: [])
+
+    let session = ChatPhoenixClient.makePinnedURLSession()
+    session.dataTask(with: request) { [weak self] _, response, error in
+      guard let self else { return }
+      self.queue.async {
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        if let error {
+          self.appendJournalLocked(
+            event: "native-user-block-error",
+            payload: [
+              "blockedUserId": blockedUserId,
+              "error": error.localizedDescription,
+            ])
+          return
+        }
+        let success = (200...299).contains(statusCode)
+        self.appendJournalLocked(
+          event: success ? "native-user-block-ok" : "native-user-block-error",
+          payload: [
+            "blockedUserId": blockedUserId,
+            "status": statusCode,
+          ])
+        if success {
+          self.postChangeLocked(
+            reason: "userBlocked",
+            userInfo: ["blockedUserId": blockedUserId]
+          )
+        }
+      }
+    }.resume()
+
+    return ["accepted": true, "queued": true, "blockedUserId": blockedUserId]
+  }
+
+  func getChatProfileSummary(_ payload: [String: Any]) -> [String: Any] {
+    let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
+    guard let chatId, !chatId.isEmpty else {
+      return [
+        "chatId": "",
+        "historyLoaded": false,
+        "totalMessages": 0,
+        "mediaCount": 0,
+        "fileCount": 0,
+        "linkCount": 0,
+        "recentFiles": [],
+      ]
+    }
+
+    return syncOnQueue {
+      let rows = historyRowsByChat[chatId] ?? []
+      var totalMessages = 0
+      var mediaCount = 0
+      var fileCount = 0
+      var linkCount = 0
+      var recentFiles: [String] = []
+
+      for row in rows {
+        guard normalizedString(row["kind"]) == "message" else { continue }
+        guard let message = row["message"] as? [String: Any] else { continue }
+        totalMessages += 1
+
+        let type = normalizedString(message["type"])?.lowercased() ?? "text"
+        let text = normalizedString(message["text"]) ?? ""
+        let caption = normalizedString(message["caption"]) ?? ""
+        let mediaUrl = normalizedString(message["mediaUrl"])
+        let fileName = normalizedString(message["fileName"])
+
+        let isMediaType = ["image", "gif", "video", "voice", "music"].contains(type)
+        if isMediaType {
+          mediaCount += 1
+        }
+
+        let isFileType = type == "file" || (!isMediaType && fileName != nil)
+        if isFileType {
+          fileCount += 1
+          if let fileName, !fileName.isEmpty, recentFiles.count < 3 {
+            recentFiles.append(fileName)
+          }
+        }
+
+        if containsLinkCandidate(text) || containsLinkCandidate(caption) || containsLinkCandidate(mediaUrl) {
+          linkCount += 1
+        }
+      }
+
+      return [
+        "chatId": chatId,
+        "historyLoaded": historyRowsByChat[chatId] != nil,
+        "totalMessages": totalMessages,
+        "mediaCount": mediaCount,
+        "fileCount": fileCount,
+        "linkCount": linkCount,
+        "recentFiles": recentFiles,
+      ]
+    }
+  }
+
   func getJournal() -> [[String: Any]] {
     store.getJournal()
   }
@@ -3472,6 +3764,32 @@ final class ChatEngine {
       return n.stringValue
     }
     return nil
+  }
+
+  private func parseBooleanLike(_ value: Any?) -> Bool? {
+    switch value {
+    case let bool as Bool:
+      return bool
+    case let str as String:
+      let normalized = str.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      if ["1", "true", "yes", "on"].contains(normalized) {
+        return true
+      }
+      if ["0", "false", "no", "off"].contains(normalized) {
+        return false
+      }
+      return nil
+    case let num as NSNumber:
+      return num.boolValue
+    default:
+      return nil
+    }
+  }
+
+  private func containsLinkCandidate(_ value: String?) -> Bool {
+    guard let value, !value.isEmpty else { return false }
+    let lower = value.lowercased()
+    return lower.contains("http://") || lower.contains("https://") || lower.contains("www.")
   }
 
   private func normalizedUpper(_ value: Any?) -> String? {

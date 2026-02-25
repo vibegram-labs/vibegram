@@ -92,6 +92,22 @@ public final class ChatEngineModule: Module {
       ChatEngine.shared.sendDeleteMessage(payload)
     }
 
+    Function("setChatMuted") { (payload: [String: Any]) in
+      ChatEngine.shared.setChatMuted(payload)
+    }
+
+    Function("clearChat") { (payload: [String: Any]) in
+      ChatEngine.shared.clearChat(payload)
+    }
+
+    Function("blockUser") { (payload: [String: Any]) in
+      ChatEngine.shared.blockUser(payload)
+    }
+
+    Function("getChatProfileSummary") { (payload: [String: Any]) in
+      ChatEngine.shared.getChatProfileSummary(payload)
+    }
+
     Function("getChatJournal") {
       ChatEngine.shared.getJournal()
     }
