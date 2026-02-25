@@ -71,7 +71,7 @@ private struct ChatMainProfilePinnedItem: Equatable {
   let subtitle: String
 }
 
-public final class ChatMainView: ExpoView {
+public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegate {
   public var onViewportChanged = EventDispatcher() {
     didSet { syncListDispatchers() }
   }
@@ -158,11 +158,7 @@ public final class ChatMainView: ExpoView {
   private let profileTabContentContainer = UIView()
   private let profileTabPlaceholderLabel = UILabel()
 
-  private let profileAgentCard = UIView()
-  private let profileAgentTitleLabel = UILabel()
-  private let profileAgentSubtitleLabel = UILabel()
-  private let profileAgentToggle = UISwitch()
-  private let profileAgentChevron = UIImageView()
+  private let profileAgentPromptNode = ChatMainProfileAgentPromptNode()
   private var agentConfig: [String: Any]?
   private var isGroupOrChannel = false
 
@@ -569,7 +565,8 @@ public final class ChatMainView: ExpoView {
     profileContentView.addSubview(profileHandleLabel)
     profileContentView.addSubview(profileBioLabel)
     profileContentView.addSubview(profileActionsStack)
-    [profileMuteButton, profileSearchButton, profileAudioCallButton, profileVideoCallButton].forEach {
+    [profileMuteButton, profileSearchButton, profileAudioCallButton, profileVideoCallButton].forEach
+    {
       profileActionsStack.addArrangedSubview($0)
     }
     profileContentView.addSubview(profileIdentityCard)
@@ -581,11 +578,8 @@ public final class ChatMainView: ExpoView {
     profileContentView.addSubview(profileTabContentContainer)
     profileTabContentContainer.addSubview(profileTabPlaceholderLabel)
 
-    profileContentView.addSubview(profileAgentCard)
-    profileAgentCard.addSubview(profileAgentTitleLabel)
-    profileAgentCard.addSubview(profileAgentSubtitleLabel)
-    profileAgentCard.addSubview(profileAgentToggle)
-    profileAgentCard.addSubview(profileAgentChevron)
+    profileContentView.addSubview(profileAgentPromptNode)
+    profileAgentPromptNode.delegate = self
 
     profileAvatarView.clipsToBounds = true
     profileAvatarImageView.clipsToBounds = true
@@ -612,7 +606,8 @@ public final class ChatMainView: ExpoView {
     profileSearchButton.configure(title: "Search", symbol: "magnifyingglass")
     profileAudioCallButton.configure(title: "Call", symbol: "phone")
     profileVideoCallButton.configure(title: "Video", symbol: "video")
-    profileMuteButton.addTarget(self, action: #selector(handleProfileMutePressed), for: .touchUpInside)
+    profileMuteButton.addTarget(
+      self, action: #selector(handleProfileMutePressed), for: .touchUpInside)
     profileSearchButton.addTarget(
       self, action: #selector(handleProfileSearchPressed), for: .touchUpInside)
     profileAudioCallButton.addTarget(
@@ -638,17 +633,7 @@ public final class ChatMainView: ExpoView {
     profileTabPlaceholderLabel.text =
       "Loading shared media and files from native encrypted cache..."
 
-    profileAgentTitleLabel.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
-    profileAgentSubtitleLabel.font = UIFont.systemFont(ofSize: 13, weight: .regular)
-    profileAgentSubtitleLabel.numberOfLines = 2
-    profileAgentToggle.transform = CGAffineTransform(scaleX: 0.8, y: 0.8)
-    profileAgentToggle.addTarget(self, action: #selector(handleAgentToggleChanged), for: .valueChanged)
-    profileAgentChevron.image = UIImage(systemName: "chevron.right")
-    profileAgentChevron.contentMode = .scaleAspectFit
-    profileAgentCard.isHidden = true
-    let agentTap = UITapGestureRecognizer(target: self, action: #selector(handleAgentCardTapped))
-    profileAgentCard.addGestureRecognizer(agentTap)
-    profileAgentCard.isUserInteractionEnabled = true
+    profileAgentPromptNode.isHidden = true
 
     rebuildProfileTabs()
     configureHeaderPressFeedback()
@@ -679,8 +664,7 @@ public final class ChatMainView: ExpoView {
     }
     refreshPresenceStateFromEngine()
     guard !engineChatId.isEmpty else { return }
-    if
-      let changedChatIdRaw = notification.userInfo?["chatId"] as? String,
+    if let changedChatIdRaw = notification.userInfo?["chatId"] as? String,
       !changedChatIdRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
       changedChatIdRaw.trimmingCharacters(in: .whitespacesAndNewlines) != engineChatId
     {
@@ -707,7 +691,8 @@ public final class ChatMainView: ExpoView {
     guard !chatId.isEmpty else {
       if force || profileSummaryMessageCount != 0 || profileSummaryMediaCount != 0
         || profileSummaryFileCount != 0 || profileSummaryLinkCount != 0
-        || profileSummaryHistoryLoaded || !profileSummaryRecentFiles.isEmpty || !profileMediaItems.isEmpty
+        || profileSummaryHistoryLoaded || !profileSummaryRecentFiles.isEmpty
+        || !profileMediaItems.isEmpty
         || !profileMusicItems.isEmpty || !profileFileItems.isEmpty || !profileLinkItems.isEmpty
         || !profilePinnedItems.isEmpty
       {
@@ -809,7 +794,8 @@ public final class ChatMainView: ExpoView {
 
       if type == "music" || type == "file" {
         let fileName =
-          (fileNameRaw?.isEmpty == false ? fileNameRaw! : "\(type.uppercased())-\(messageId.prefix(6))")
+          (fileNameRaw?.isEmpty == false
+            ? fileNameRaw! : "\(type.uppercased())-\(messageId.prefix(6))")
         let fileItem = ChatMainProfileFileItem(
           messageId: messageId,
           type: type,
@@ -842,7 +828,8 @@ public final class ChatMainView: ExpoView {
       let isPinned = (message["isPinned"] as? Bool) == true || (message["pinned"] as? Bool) == true
       if isPinned {
         let pinnedText =
-          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? text
+          !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          ? text
           : (caption.isEmpty ? type.capitalized : caption)
         pinnedItems.append(
           ChatMainProfilePinnedItem(
@@ -1024,9 +1011,11 @@ public final class ChatMainView: ExpoView {
     profileTabPlaceholderLabel.textColor = subtitleColor
 
     if !profileSummaryHistoryLoaded {
-      profileTabPlaceholderLabel.text = "Loading shared media and files from native encrypted cache..."
+      profileTabPlaceholderLabel.text =
+        "Loading shared media and files from native encrypted cache..."
       profileTabPlaceholderLabel.isHidden = false
-      profileTabPlaceholderLabel.frame = CGRect(x: 0.0, y: 0.0, width: normalizedWidth, height: 48.0)
+      profileTabPlaceholderLabel.frame = CGRect(
+        x: 0.0, y: 0.0, width: normalizedWidth, height: 48.0)
       profileTabContentContainer.frame = CGRect(
         x: profileTabContentContainer.frame.minX,
         y: profileTabContentContainer.frame.minY,
@@ -1039,7 +1028,8 @@ public final class ChatMainView: ExpoView {
     guard !profileVisibleTabs.isEmpty else {
       profileTabPlaceholderLabel.text = "No shared content yet."
       profileTabPlaceholderLabel.isHidden = false
-      profileTabPlaceholderLabel.frame = CGRect(x: 0.0, y: 0.0, width: normalizedWidth, height: 40.0)
+      profileTabPlaceholderLabel.frame = CGRect(
+        x: 0.0, y: 0.0, width: normalizedWidth, height: 40.0)
       profileTabContentContainer.frame = CGRect(
         x: profileTabContentContainer.frame.minX,
         y: profileTabContentContainer.frame.minY,
@@ -1055,7 +1045,8 @@ public final class ChatMainView: ExpoView {
       guard !items.isEmpty else {
         profileTabPlaceholderLabel.text = "No media yet."
         profileTabPlaceholderLabel.isHidden = false
-        profileTabPlaceholderLabel.frame = CGRect(x: 0.0, y: 0.0, width: normalizedWidth, height: 40.0)
+        profileTabPlaceholderLabel.frame = CGRect(
+          x: 0.0, y: 0.0, width: normalizedWidth, height: 40.0)
         profileTabContentContainer.frame = CGRect(
           x: profileTabContentContainer.frame.minX,
           y: profileTabContentContainer.frame.minY,
@@ -1084,7 +1075,8 @@ public final class ChatMainView: ExpoView {
           placeholderTintColor: appearance.timeColorThem.withAlphaComponent(0.72),
           placeholderBackgroundColor: appearance.textColorThem.withAlphaComponent(0.06)
         )
-        cell.addTarget(self, action: #selector(handleProfileMediaCellPressed(_:)), for: .touchUpInside)
+        cell.addTarget(
+          self, action: #selector(handleProfileMediaCellPressed(_:)), for: .touchUpInside)
         profileTabContentContainer.addSubview(cell)
       }
       let rows = ceil(CGFloat(items.count) / columns)
@@ -1153,7 +1145,8 @@ public final class ChatMainView: ExpoView {
       guard !rows.isEmpty else {
         profileTabPlaceholderLabel.text = "No content yet."
         profileTabPlaceholderLabel.isHidden = false
-        profileTabPlaceholderLabel.frame = CGRect(x: 0.0, y: 0.0, width: normalizedWidth, height: 40.0)
+        profileTabPlaceholderLabel.frame = CGRect(
+          x: 0.0, y: 0.0, width: normalizedWidth, height: 40.0)
         card.removeFromSuperview()
         profileTabContentContainer.frame = CGRect(
           x: profileTabContentContainer.frame.minX,
@@ -1465,12 +1458,15 @@ public final class ChatMainView: ExpoView {
     profileOnlineDotView.layer.borderWidth = 3.0
 
     profileNameLabel.frame = CGRect(
-      x: textInset, y: profileAvatarView.frame.maxY + 16.0, width: width - (textInset * 2), height: 38.0
+      x: textInset, y: profileAvatarView.frame.maxY + 16.0, width: width - (textInset * 2),
+      height: 38.0
     )
     profileHandleLabel.frame = CGRect(
-      x: textInset, y: profileNameLabel.frame.maxY + 2.0, width: width - (textInset * 2), height: 24.0)
+      x: textInset, y: profileNameLabel.frame.maxY + 2.0, width: width - (textInset * 2),
+      height: 24.0)
 
-    let bioSize = profileBioLabel.sizeThatFits(CGSize(width: width - (textInset * 2), height: 200.0))
+    let bioSize = profileBioLabel.sizeThatFits(
+      CGSize(width: width - (textInset * 2), height: 200.0))
     let bioHeight = profileBioLabel.isHidden ? 0.0 : max(0.0, min(120.0, bioSize.height))
     profileBioLabel.frame = CGRect(
       x: textInset, y: profileHandleLabel.frame.maxY + 10.0, width: width - (textInset * 2),
@@ -1497,7 +1493,8 @@ public final class ChatMainView: ExpoView {
     if hasBioRow {
       profileBioRow.isHidden = false
       profileBioRow.frame = CGRect(
-        x: 0.0, y: profileUsernameRow.frame.maxY, width: profileIdentityCard.bounds.width, height: 62.0)
+        x: 0.0, y: profileUsernameRow.frame.maxY, width: profileIdentityCard.bounds.width,
+        height: 62.0)
       profileIdentityCard.frame.size.height = 124.0
     } else {
       profileBioRow.isHidden = true
@@ -1526,13 +1523,16 @@ public final class ChatMainView: ExpoView {
       for tab in profileVisibleTabs {
         guard let button = profileTabButtons[tab] else { continue }
         let title = "\(profileTabLabel(tab)) \(profileTabCount(tab))"
-        let widthGuess = (title as NSString).size(withAttributes: [.font: UIFont.systemFont(ofSize: 16, weight: .medium)]).width
+        let widthGuess = (title as NSString).size(withAttributes: [
+          .font: UIFont.systemFont(ofSize: 16, weight: .medium)
+        ]).width
         let buttonWidth = max(72.0, widthGuess + 32.0)
         button.frame = CGRect(x: tabCursorX, y: 0.0, width: buttonWidth, height: tabHeight)
         tabCursorX += buttonWidth + 6.0
       }
       profileTabsStack.frame = CGRect(
-        x: 0.0, y: 0.0, width: max(profileTabsScrollView.bounds.width, tabCursorX), height: tabHeight)
+        x: 0.0, y: 0.0, width: max(profileTabsScrollView.bounds.width, tabCursorX),
+        height: tabHeight)
       profileTabsScrollView.contentSize = CGSize(
         width: max(profileTabsScrollView.bounds.width, tabCursorX), height: tabHeight)
 
@@ -1542,7 +1542,8 @@ public final class ChatMainView: ExpoView {
         width: width - 32.0,
         height: 0.0
       )
-      let tabContentHeight = reloadProfileTabContentIfNeeded(contentWidth: profileTabContentContainer.bounds.width)
+      let tabContentHeight = reloadProfileTabContentIfNeeded(
+        contentWidth: profileTabContentContainer.bounds.width)
       profileTabContentContainer.frame.size.height = tabContentHeight
       bottomAnchor = profileTabContentContainer.frame.maxY
     } else {
@@ -1550,38 +1551,22 @@ public final class ChatMainView: ExpoView {
       profileTabContentContainer.isHidden = true
     }
 
-    if !profileAgentCard.isHidden {
-      let agentCardHeight: CGFloat = 78.0
-      profileAgentCard.frame = CGRect(
-        x: sideInset,
-        y: bottomAnchor + 12.0,
-        width: width - 32.0,
-        height: agentCardHeight
-      )
-      profileAgentCard.layer.cornerRadius = 22.0
+    let hPad: CGFloat = 16.0
+    let sectionPad: CGFloat = 18.0
+    let contentWidth = width
 
-      let toggleSize = profileAgentToggle.intrinsicContentSize
-      profileAgentToggle.frame = CGRect(
-        x: profileAgentCard.bounds.width - toggleSize.width * 0.8 - 16.0,
-        y: (agentCardHeight - toggleSize.height * 0.8) * 0.5,
-        width: toggleSize.width * 0.8,
-        height: toggleSize.height * 0.8
+    if !profileAgentPromptNode.isHidden {
+      let promptNodeWidth = contentWidth - (hPad * 2)
+      let promptNodeHeight = profileAgentPromptNode.preferredHeight(for: promptNodeWidth)
+      profileAgentPromptNode.frame = CGRect(
+        x: hPad,
+        y: bottomAnchor + sectionPad,
+        width: promptNodeWidth,
+        height: promptNodeHeight
       )
-      profileAgentChevron.frame = CGRect(
-        x: profileAgentToggle.frame.minX - 28.0,
-        y: (agentCardHeight - 16.0) * 0.5,
-        width: 12.0,
-        height: 16.0
-      )
-      let labelRight = profileAgentChevron.frame.minX - 8.0
-      profileAgentTitleLabel.frame = CGRect(
-        x: 16.0, y: 16.0, width: labelRight - 16.0, height: 22.0)
-      profileAgentSubtitleLabel.frame = CGRect(
-        x: 16.0, y: profileAgentTitleLabel.frame.maxY + 4.0,
-        width: labelRight - 16.0, height: 28.0)
-      bottomAnchor = profileAgentCard.frame.maxY
+      bottomAnchor = profileAgentPromptNode.frame.maxY
     } else {
-      profileAgentCard.frame = .zero
+      profileAgentPromptNode.frame = .zero
     }
 
     let totalHeight = bottomAnchor + 36.0
@@ -1662,12 +1647,14 @@ public final class ChatMainView: ExpoView {
     applyProfileTabTheme()
     profileTabContentNeedsReload = true
 
-    profileAgentCard.backgroundColor = cardBg
-    profileAgentTitleLabel.textColor = text
-    profileAgentSubtitleLabel.textColor = secondary
-    profileAgentChevron.tintColor = secondary
-    profileAgentToggle.onTintColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
-  }
+    let accentColor =
+      appearance.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    profileAgentPromptNode.applyTheme(
+      textColor: primaryText,
+      secondaryTextColor: secondaryText,
+      surfaceColor: cardBg,
+      accentColor: accentColor
+    )
 
   private func applyProfileWallpaperAppearance() {
     profileWallpaperLayer.colors = appearance.wallpaperGradient.map(\.cgColor)
@@ -1786,7 +1773,8 @@ public final class ChatMainView: ExpoView {
     profileHandleLabel.text =
       profileHandleText.isEmpty ? fallbackHandle : profileHandleText
     profileBioLabel.text = profileBioText
-    profileBioLabel.isHidden = profileBioText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    profileBioLabel.isHidden =
+      profileBioText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     profileMuteButton.setTitle(isChatMuted ? "Unmute" : "Mute")
 
     let usernameRowSubtitle: String
@@ -2009,72 +1997,50 @@ public final class ChatMainView: ExpoView {
   func setAgentConfig(_ config: [String: Any]?) {
     agentConfig = config
     refreshAgentCardVisibility()
-    updateAgentCardTexts()
+    profileAgentPromptNode.configure(chatId: engineChatId, config: config)
   }
 
   private func refreshAgentCardVisibility() {
     let shouldShow = isGroupOrChannel
-    if profileAgentCard.isHidden == !shouldShow { return }
-    profileAgentCard.isHidden = !shouldShow
+    if profileAgentPromptNode.isHidden == !shouldShow { return }
+    profileAgentPromptNode.isHidden = !shouldShow
     setNeedsLayout()
   }
 
-  private func updateAgentCardTexts() {
-    if let config = agentConfig {
-      let name = (config["name"] as? String) ?? "Vibe AI"
-      let enabled = (config["enabled"] as? Bool) ?? true
-      let prompt = (config["system_prompt"] as? String) ?? ""
-      profileAgentTitleLabel.text = "✦ \(name)"
-      let preview = prompt.isEmpty ? "No prompt configured" : prompt.prefix(60) + (prompt.count > 60 ? "..." : "")
-      profileAgentSubtitleLabel.text = enabled ? String(preview) : "Agent disabled"
-      profileAgentToggle.isOn = enabled
-    } else {
-      profileAgentTitleLabel.text = "✦ AI Agent"
-      profileAgentSubtitleLabel.text = "Add an AI assistant to this chat"
-      profileAgentToggle.isOn = false
-    }
-  }
-
-  @objc private func handleAgentToggleChanged() {
-    let newEnabled = profileAgentToggle.isOn
+  func agentPromptNode(_ node: ChatMainProfileAgentPromptNode, didUpdateConfig config: [String: Any]) {
+    agentConfig = config
     onNativeEvent([
-      "type": "agentToggle",
+      "type": "agentConfigSaved",
       "chatId": engineChatId,
-      "enabled": newEnabled,
+      "config": config,
     ])
+    setNeedsLayout()
   }
 
-  @objc private func handleAgentCardTapped() {
-    guard let presenter = topMostViewController() else { return }
-    let configVC = ChatAgentConfigViewController()
-    configVC.chatId = engineChatId
-    configVC.agentConfig = agentConfig
-    configVC.onSave = { [weak self] updatedConfig in
-      self?.agentConfig = updatedConfig
-      self?.updateAgentCardTexts()
-      self?.setNeedsLayout()
-      self?.onNativeEvent([
-        "type": "agentConfigSaved",
-        "chatId": self?.engineChatId ?? "",
-        "config": updatedConfig,
-      ])
-    }
-    configVC.onDelete = { [weak self] in
-      self?.agentConfig = nil
-      self?.updateAgentCardTexts()
-      self?.setNeedsLayout()
-      self?.onNativeEvent([
+  func agentPromptNodeDidRequestDelete(_ node: ChatMainProfileAgentPromptNode) {
+    let alert = UIAlertController(
+      title: "Remove AI Agent",
+      message: "This will remove the agent and clear its memory. This action cannot be undone.",
+      preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+    alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+      guard let self else { return }
+      self.agentConfig = nil
+      self.profileAgentPromptNode.configure(chatId: self.engineChatId, config: nil)
+      self.setNeedsLayout()
+      self.onNativeEvent([
         "type": "agentConfigDeleted",
-        "chatId": self?.engineChatId ?? "",
+        "chatId": self.engineChatId,
       ])
+    })
+    
+    if let presenter = topMostViewController() {
+      presenter.present(alert, animated: true)
     }
-    let nav = UINavigationController(rootViewController: configVC)
-    nav.modalPresentationStyle = .pageSheet
-    if let sheet = nav.sheetPresentationController {
-      sheet.detents = [.medium(), .large()]
-      sheet.prefersGrabberHandle = true
-    }
-    presenter.present(nav, animated: true)
+  }
+
+  func agentPromptNodeDidRequestFullEditor(_ node: ChatMainProfileAgentPromptNode) {
+    // Intentionally left blank as the inline editor covers all functionality.
   }
 
   private func topMostViewController() -> UIViewController? {
@@ -2082,11 +2048,11 @@ public final class ChatMainView: ExpoView {
       let root =
         window?.rootViewController
         ?? UIApplication.shared.connectedScenes
-          .compactMap({ scene -> UIViewController? in
-            guard let windowScene = scene as? UIWindowScene else { return nil }
-            return windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
-          })
-          .first
+        .compactMap({ scene -> UIViewController? in
+          guard let windowScene = scene as? UIWindowScene else { return nil }
+          return windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        })
+        .first
     else { return nil }
     var top = root
     while let presented = top.presentedViewController {
