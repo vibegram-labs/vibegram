@@ -305,6 +305,8 @@ struct ChatMessageBubbleLayoutMetrics {
   let contentWidth: CGFloat
   let mediaHeight: CGFloat
   let isMediaLayout: Bool
+  let inlineAttachmentHeight: CGFloat
+  let hasInlineAttachment: Bool
 }
 
 private struct ChatBubbleMetaWidths {
@@ -353,6 +355,23 @@ private func bubbleMetaWidths(for row: ChatListRow) -> ChatBubbleMetaWidths {
   )
 }
 
+private let inlineAttachmentHeight: CGFloat = 48.0
+private let inlineAttachmentSpacing: CGFloat = 8.0
+
+private func hasInlineFileAttachment(_ row: ChatListRow) -> Bool {
+  row.isAgentMessage && row.messageType == "file" && (row.mediaUrl?.isEmpty == false)
+}
+
+private func bubbleDisplayText(for row: ChatListRow) -> String {
+  if row.isAgentMessage {
+    return row.plainContent ?? row.text
+  }
+  if row.isAgentMention {
+    return row.textWithoutMention
+  }
+  return row.text
+}
+
 func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   -> ChatMessageBubbleLayoutMetrics
 {
@@ -395,18 +414,25 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
       metaWidth: meta.total,
       contentWidth: contentWidth,
       mediaHeight: mediaHeight,
-      isMediaLayout: true
+      isMediaLayout: true,
+      inlineAttachmentHeight: 0.0,
+      hasInlineAttachment: false
     )
 
   case .text:
     break
   }
 
-  let textMaxWidth = max(1.0, maxContentWidth - meta.total - bubbleMetaInlineSpacing)
+  let hasInlineAttachment = hasInlineFileAttachment(row)
+  let textMaxWidth =
+    hasInlineAttachment
+    ? maxContentWidth
+    : max(1.0, maxContentWidth - meta.total - bubbleMetaInlineSpacing)
+  let displayText = bubbleDisplayText(for: row)
   let font =
     row.messageType == "typing"
     ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
-  let textRect = (row.text as NSString).boundingRect(
+  let textRect = (displayText as NSString).boundingRect(
     with: CGSize(width: textMaxWidth, height: .greatestFiniteMagnitude),
     options: [.usesLineFragmentOrigin, .usesFontLeading],
     attributes: [.font: font],
@@ -414,10 +440,32 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   )
   let textWidth = min(textMaxWidth, ceil(textRect.width))
   let textHeight = ceil(textRect.height)
-  let desiredContentWidth = textWidth + bubbleMetaInlineSpacing + meta.total
+  let attachmentBodyHeight: CGFloat = hasInlineAttachment ? inlineAttachmentHeight : 0.0
+  let desiredContentWidth: CGFloat
+  if hasInlineAttachment {
+    let attachmentTitle = row.fileName?.isEmpty == false ? row.fileName! : "Document"
+    let attachmentWidth =
+      min(
+        maxContentWidth,
+        max(
+          168.0,
+          measuredTextWidth(attachmentTitle, font: UIFont.systemFont(ofSize: 13, weight: .semibold))
+            + 62.0)
+      )
+    desiredContentWidth = max(textWidth, attachmentWidth)
+  } else {
+    desiredContentWidth = textWidth + bubbleMetaInlineSpacing + meta.total
+  }
   let contentWidth = max(meta.total, min(maxContentWidth, desiredContentWidth))
-  let messageWidth = max(1.0, contentWidth - meta.total - bubbleMetaInlineSpacing)
-  let bodyHeight = max(textHeight, bubbleMetaHeight)
+  let messageWidth =
+    hasInlineAttachment
+    ? contentWidth
+    : max(1.0, contentWidth - meta.total - bubbleMetaInlineSpacing)
+  let bodyHeight =
+    hasInlineAttachment
+    ? max(textHeight, 0.0) + inlineAttachmentSpacing + attachmentBodyHeight + bubbleMetaTopSpacing
+      + bubbleMetaHeight
+    : max(textHeight, bubbleMetaHeight)
   let bubbleWidth = max(bubbleMinWidth, contentWidth + (bubbleHorizontalPadding * 2.0))
   let bubbleHeight = max(36.0, bodyHeight + bubbleTopPadding + bubbleBottomPadding)
   return ChatMessageBubbleLayoutMetrics(
@@ -429,7 +477,9 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     metaWidth: meta.total,
     contentWidth: contentWidth,
     mediaHeight: 0.0,
-    isMediaLayout: false
+    isMediaLayout: false,
+    inlineAttachmentHeight: attachmentBodyHeight,
+    hasInlineAttachment: hasInlineAttachment
   )
 }
 
@@ -1077,6 +1127,10 @@ final class ChatListCell: UICollectionViewCell {
   private let mediaProgressOverlayView = UIView()
   private let mediaProgressRingView = BubbleUploadProgressView()
   private let mediaProgressSpinner = UIActivityIndicatorView(style: .medium)
+  private let inlineAttachmentView = UIView()
+  private let inlineAttachmentIconView = UIImageView()
+  private let inlineAttachmentTitleLabel = UILabel()
+  private let inlineAttachmentSubtitleLabel = UILabel()
   let metaContainerView = UIView()
   private let editedLabel = UILabel()
   private let pinnedLabel = UILabel()
@@ -1096,6 +1150,7 @@ final class ChatListCell: UICollectionViewCell {
   private var externalVoiceProgress: CGFloat = 0.0
   var resolveDisplayStatus: ((ChatListRow) -> String?)?
   var onVoiceBubbleTap: ((ChatListRow) -> Void)?
+  var onInlineAttachmentTap: ((ChatListRow) -> Void)?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -1117,6 +1172,10 @@ final class ChatListCell: UICollectionViewCell {
     mediaContainerView.addSubview(mediaProgressOverlayView)
     mediaProgressOverlayView.addSubview(mediaProgressRingView)
     mediaProgressOverlayView.addSubview(mediaProgressSpinner)
+    inlineAttachmentView.addSubview(inlineAttachmentIconView)
+    inlineAttachmentView.addSubview(inlineAttachmentTitleLabel)
+    inlineAttachmentView.addSubview(inlineAttachmentSubtitleLabel)
+    contentView.addSubview(inlineAttachmentView)
     contentView.addSubview(metaContainerView)
     metaContainerView.addSubview(editedLabel)
     metaContainerView.addSubview(pinnedLabel)
@@ -1176,6 +1235,26 @@ final class ChatListCell: UICollectionViewCell {
     mediaProgressSpinner.color = UIColor(white: 1.0, alpha: 0.85)
     mediaProgressSpinner.hidesWhenStopped = true
 
+    inlineAttachmentView.layer.cornerCurve = .continuous
+    inlineAttachmentView.layer.cornerRadius = 12.0
+    inlineAttachmentView.clipsToBounds = true
+    inlineAttachmentView.isUserInteractionEnabled = true
+    let attachmentTap = UITapGestureRecognizer(
+      target: self, action: #selector(handleInlineAttachmentTap))
+    inlineAttachmentView.addGestureRecognizer(attachmentTap)
+
+    inlineAttachmentIconView.contentMode = .scaleAspectFit
+    inlineAttachmentIconView.tintColor = .white
+    inlineAttachmentIconView.image = UIImage(systemName: "doc.text.fill")
+
+    inlineAttachmentTitleLabel.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
+    inlineAttachmentTitleLabel.textColor = .white
+    inlineAttachmentTitleLabel.numberOfLines = 1
+
+    inlineAttachmentSubtitleLabel.font = UIFont.systemFont(ofSize: 11, weight: .regular)
+    inlineAttachmentSubtitleLabel.textColor = UIColor(white: 1.0, alpha: 0.72)
+    inlineAttachmentSubtitleLabel.numberOfLines = 1
+
     editedLabel.font = bubbleMetaFont
     pinnedLabel.font = bubbleMetaFont
     timestampLabel.font = bubbleMetaFont
@@ -1209,6 +1288,7 @@ final class ChatListCell: UICollectionViewCell {
     mediaWaveformView.isHidden = true
     mediaDurationBadge.isHidden = true
     mediaProgressOverlayView.isHidden = true
+    inlineAttachmentView.isHidden = true
     metaContainerView.isHidden = true
     editedLabel.isHidden = true
     pinnedLabel.isHidden = true
@@ -1253,6 +1333,7 @@ final class ChatListCell: UICollectionViewCell {
       tailView.isHidden = true
       messageLabel.isHidden = true
       mediaContainerView.isHidden = true
+      inlineAttachmentView.isHidden = true
       metaContainerView.isHidden = true
       reactionPillView.isHidden = true
       mediaProgressSpinner.stopAnimating()
@@ -1272,6 +1353,7 @@ final class ChatListCell: UICollectionViewCell {
         messageLabel.font = bubbleMessageFont
       }
       mediaContainerView.isHidden = isGhostHidden || row.visualKind == .text
+      inlineAttachmentView.isHidden = isGhostHidden || !hasInlineFileAttachment(row)
       metaContainerView.isHidden = isGhostHidden
 
       // Agent/Mention labeling
@@ -1347,6 +1429,14 @@ final class ChatListCell: UICollectionViewCell {
       pinnedLabel.textColor = metaColor
       timestampLabel.textColor = metaColor
       configureMediaPresentation(for: row, textColor: textColor, metaColor: metaColor)
+      if !inlineAttachmentView.isHidden {
+        inlineAttachmentView.backgroundColor = UIColor(white: 0.0, alpha: 0.20)
+        inlineAttachmentTitleLabel.text = row.fileName?.isEmpty == false ? row.fileName : "Document"
+        inlineAttachmentSubtitleLabel.text = "Tap to open"
+      } else {
+        inlineAttachmentTitleLabel.text = nil
+        inlineAttachmentSubtitleLabel.text = nil
+      }
       configureStatus(for: row, baseColor: metaColor)
       if row.visualKind == .voice {
         VoiceBubblePlaybackCoordinator.shared.bind(
@@ -1372,6 +1462,7 @@ final class ChatListCell: UICollectionViewCell {
     bubbleView.clearAgentStyle()
     tailView.clearAgentTailStyle()
     onVoiceBubbleTap = nil
+    onInlineAttachmentTap = nil
     row = nil
     isGhostHidden = false
     mediaProgressSpinner.stopAnimating()
@@ -1513,23 +1604,65 @@ final class ChatListCell: UICollectionViewCell {
         ))
       mediaProgressOverlayView.frame = mediaContainerView.bounds
       layoutMediaSubviews(for: row, in: mediaContainerView.bounds)
+      inlineAttachmentView.frame = .zero
     } else {
       mediaContainerView.frame = .zero
-      messageLabel.frame = pixelAlignedRect(
-        CGRect(
-          x: bubbleFrame.minX + bubbleHorizontalPadding,
-          y: bubbleFrame.minY + bubbleTopPadding
-            + max(0.0, metrics.bodyHeight - metrics.textHeight),
-          width: metrics.messageWidth,
-          height: metrics.textHeight
-        ))
-      metaContainerView.frame = pixelAlignedRect(
-        CGRect(
-          x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
-          y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
-          width: metrics.metaWidth,
-          height: bubbleMetaHeight
-        ))
+      if metrics.hasInlineAttachment {
+        messageLabel.frame = pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.minX + bubbleHorizontalPadding,
+            y: bubbleFrame.minY + bubbleTopPadding,
+            width: metrics.messageWidth,
+            height: metrics.textHeight
+          ))
+        inlineAttachmentView.frame = pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.minX + bubbleHorizontalPadding,
+            y: messageLabel.frame.maxY + inlineAttachmentSpacing,
+            width: metrics.contentWidth,
+            height: metrics.inlineAttachmentHeight
+          ))
+        metaContainerView.frame = pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
+            y: inlineAttachmentView.frame.maxY + bubbleMetaTopSpacing,
+            width: metrics.metaWidth,
+            height: bubbleMetaHeight
+          ))
+
+        let iconSize: CGFloat = 18.0
+        inlineAttachmentIconView.frame = CGRect(x: 12.0, y: 15.0, width: iconSize, height: iconSize)
+        inlineAttachmentTitleLabel.frame = CGRect(
+          x: inlineAttachmentIconView.frame.maxX + 10.0,
+          y: 8.0,
+          width: max(
+            1.0, inlineAttachmentView.bounds.width - inlineAttachmentIconView.frame.maxX - 22.0),
+          height: 18.0
+        )
+        inlineAttachmentSubtitleLabel.frame = CGRect(
+          x: inlineAttachmentTitleLabel.frame.minX,
+          y: inlineAttachmentTitleLabel.frame.maxY + 1.0,
+          width: inlineAttachmentTitleLabel.frame.width,
+          height: 15.0
+        )
+      } else {
+        inlineAttachmentView.frame = .zero
+        messageLabel.frame = pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.minX + bubbleHorizontalPadding,
+            y: bubbleFrame.minY + bubbleTopPadding
+              + max(0.0, metrics.bodyHeight - metrics.textHeight),
+            width: metrics.messageWidth,
+            height: metrics.textHeight
+          ))
+        metaContainerView.frame = pixelAlignedRect(
+          CGRect(
+            x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
+            y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
+            width: metrics.metaWidth,
+            height: bubbleMetaHeight
+          ))
+      }
     }
 
     layoutMetaLabels(for: row)
@@ -1814,6 +1947,17 @@ final class ChatListCell: UICollectionViewCell {
     )
   }
 
+  @objc private func handleInlineAttachmentTap() {
+    guard let row, hasInlineFileAttachment(row) else { return }
+    onInlineAttachmentTap?(row)
+  }
+
+  func hitTestInlineAttachment(at pointInCell: CGPoint) -> Bool {
+    guard let row, hasInlineFileAttachment(row), !inlineAttachmentView.isHidden else { return false }
+    let local = contentView.convert(pointInCell, from: self)
+    return inlineAttachmentView.frame.contains(local)
+  }
+
   fileprivate func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat) {
     if let row, row.shouldShowUploadOverlay {
       let uploadProgress: CGFloat?
@@ -1965,18 +2109,46 @@ final class ChatListCell: UICollectionViewCell {
   }
 
   private func applyContextMenuHoldIfNeeded(animated: Bool) {
-    let scale: CGFloat = isContextMenuHeld ? 0.95 : 1.0
-    let target = CGAffineTransform(scaleX: scale, y: scale)
+    let target: CGAffineTransform
+    if isContextMenuHeld {
+      let scale: CGFloat = 0.95
+      let cx = contentView.bounds.midX
+      let cy = contentView.bounds.midY
+      let px = bubbleView.center.x
+      let py = bubbleView.center.y
+      // Counteract the shift caused by scaling around the contentView's center
+      let tx = (px - cx) * (1.0 - scale)
+      let ty = (py - cy) * (1.0 - scale)
+      target = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
+    } else {
+      target = .identity
+    }
+
     let apply = {
       self.contentView.transform = target
     }
+
     if animated {
-      UIView.animate(
-        withDuration: isContextMenuHeld ? 0.15 : 0.25,
-        delay: 0.0,
-        options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction]
-      ) {
-        apply()
+      if isContextMenuHeld {
+        UIView.animate(
+          withDuration: 0.35,
+          delay: 0.0,
+          usingSpringWithDamping: 1.0,
+          initialSpringVelocity: 0.0,
+          options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+        ) {
+          apply()
+        }
+      } else {
+        UIView.animate(
+          withDuration: 0.55,
+          delay: 0.0,
+          usingSpringWithDamping: 0.72,
+          initialSpringVelocity: 0.0,
+          options: [.curveEaseOut, .beginFromCurrentState, .allowUserInteraction]
+        ) {
+          apply()
+        }
       }
     } else {
       apply()
@@ -2006,10 +2178,9 @@ final class ChatListCell: UICollectionViewCell {
   }
 
   func bubbleSnapshotView(in view: UIView) -> UIView? {
-    guard let row, row.kind == .message else {
+    guard let row = row, row.kind == .message else {
       return nil
     }
-    contentView.layoutIfNeeded()
 
     var captureRect = bubbleView.convert(bubbleView.bounds, to: contentView)
     if !tailView.isHidden {
@@ -2036,7 +2207,12 @@ final class ChatListCell: UICollectionViewCell {
       return nil
     }
 
+    // compute frame in window coordinates without the temporary hold scale
+    let currentTransform = contentView.transform
+    contentView.transform = .identity
     snapshot.frame = contentView.convert(captureRect, to: view)
+    contentView.transform = currentTransform
+
     snapshot.clipsToBounds = false
     return snapshot
   }

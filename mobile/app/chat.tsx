@@ -269,6 +269,16 @@ export default function ChatScreen() {
       return;
     }
 
+    if (type === 'openFile') {
+      const url = typeof payload.url === 'string' ? payload.url.trim() : '';
+      if (url) {
+        Linking.openURL(url).catch((error) => {
+          console.warn('[chat/native-main] failed to open file url', { url, error });
+        });
+      }
+      return;
+    }
+
     if (type === 'profileUsernamePressed') {
       const handle = typeof payload.handle === 'string' ? payload.handle.trim() : '';
       if (handle) {

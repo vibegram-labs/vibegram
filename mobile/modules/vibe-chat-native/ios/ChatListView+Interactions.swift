@@ -436,7 +436,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
   public func contextMenuDidDismiss(overlay: ChatContextMenuOverlay) {
     if let cell = contextMenuHostCell as? ChatListCell {
       cell.setContextMenuExtracted(false)
-      cell.setContextMenuHeld(false, animated: true)
+      cell.setContextMenuHeld(false, animated: false)
       cell.transform = contextMenuHostCellOriginalTransform
     }
     contextMenuHostCell = nil
@@ -501,7 +501,7 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
       self?.customContextMenuOverlay = nil
       if let hostCell = self?.contextMenuHostCell as? ChatListCell {
         hostCell.setContextMenuExtracted(false)
-        hostCell.setContextMenuHeld(false, animated: true)
+        hostCell.setContextMenuHeld(false, animated: false)
         hostCell.transform = self?.contextMenuHostCellOriginalTransform ?? .identity
         self?.contextMenuHostCell = nil
         self?.contextMenuHostCellOriginalTransform = .identity

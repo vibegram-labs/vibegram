@@ -1,6 +1,7 @@
 package expo.modules.vibechatnative
 
 import android.content.Context
+import android.content.Intent
 import android.content.SharedPreferences
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -95,6 +96,7 @@ private data class NativeRowItem(
   val shape: NativeBubbleShape,
   val messageType: String,
   val mediaUrl: String?,
+  val fileName: String?,
   val duration: Double?,
   val waveform: List<Float>?,
   val isAgentMessage: Boolean = false,
@@ -120,6 +122,9 @@ private class NativeRowViewHolder(
   val bubbleContainer: FrameLayout,
   val tailView: BubbleTailView,
   val textView: TextView,
+  val inlineAttachmentView: FrameLayout,
+  val inlineAttachmentTitleView: TextView,
+  val inlineAttachmentSubtitleView: TextView,
   val voiceContainer: FrameLayout,
   val voiceButton: TextView,
   val voiceWaveView: VoiceWaveformView,
@@ -872,6 +877,63 @@ private class NativeRowsAdapter(
       maxWidth = (context.resources.displayMetrics.widthPixels * 0.85f).toInt()
     }
 
+    val inlineAttachment = FrameLayout(context).apply {
+      visibility = View.GONE
+      background = GradientDrawable().apply {
+        cornerRadius = dpF(12f)
+        setColor(Color.argb(52, 0, 0, 0))
+      }
+      setPadding(dp(12), dp(8), dp(12), dp(8))
+      minimumWidth = dp(170)
+      isClickable = true
+      isFocusable = true
+    }
+    val inlineAttachmentIcon = TextView(context).apply {
+      text = "\uD83D\uDCC4"
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
+      includeFontPadding = false
+    }
+    val inlineAttachmentTitle = TextView(context).apply {
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
+      setTypeface(Typeface.DEFAULT_BOLD)
+      includeFontPadding = false
+      maxLines = 1
+    }
+    val inlineAttachmentSubtitle = TextView(context).apply {
+      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
+      includeFontPadding = false
+      text = "Tap to open"
+      maxLines = 1
+    }
+    inlineAttachment.addView(
+      inlineAttachmentIcon,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.START or Gravity.CENTER_VERTICAL,
+      ),
+    )
+    inlineAttachment.addView(
+      inlineAttachmentTitle,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.START or Gravity.TOP,
+      ).apply {
+        leftMargin = dp(24)
+      },
+    )
+    inlineAttachment.addView(
+      inlineAttachmentSubtitle,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.START or Gravity.BOTTOM,
+      ).apply {
+        leftMargin = dp(24)
+      },
+    )
+
     val voiceContainer = FrameLayout(context).apply {
       visibility = View.GONE
       alpha = 1f
@@ -931,6 +993,15 @@ private class NativeRowsAdapter(
         FrameLayout.LayoutParams.WRAP_CONTENT,
       ),
     )
+    bubble.addView(
+      inlineAttachment,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        dp(48),
+      ).apply {
+        gravity = Gravity.START or Gravity.TOP
+      },
+    )
     voiceContainer.addView(
       voiceButton,
       FrameLayout.LayoutParams(dp(30), dp(30)).apply {
@@ -988,7 +1059,23 @@ private class NativeRowsAdapter(
       ),
     )
 
-    return NativeRowViewHolder(root, bubble, tail, text, voiceContainer, voiceButton, voiceWave, voiceDuration, time, status, day, agentSender)
+    return NativeRowViewHolder(
+      root,
+      bubble,
+      tail,
+      text,
+      inlineAttachment,
+      inlineAttachmentTitle,
+      inlineAttachmentSubtitle,
+      voiceContainer,
+      voiceButton,
+      voiceWave,
+      voiceDuration,
+      time,
+      status,
+      day,
+      agentSender,
+    )
   }
 
   override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
@@ -1037,6 +1124,8 @@ private class NativeRowsAdapter(
     super.onViewRecycled(holder)
     if (holder is NativeRowViewHolder) {
       holder.container.setOnLongClickListener(null)
+      holder.inlineAttachmentView.setOnClickListener(null)
+      holder.inlineAttachmentView.visibility = View.GONE
       voicePlayback.detach(holder)
       holder.voiceWaveView.updatePlayback(0f, 0f, false)
       holder.voiceWaveView.setWaveform(null)
@@ -1061,6 +1150,37 @@ private class NativeRowsAdapter(
     }
   }
 
+  private fun resolveFileName(fileName: String?, mediaUrl: String?): String {
+    if (!fileName.isNullOrBlank()) return fileName
+    val parsed = mediaUrl?.trim().orEmpty()
+    if (parsed.isEmpty()) return "Document"
+    val clean = parsed.substringBefore('?').substringBefore('#')
+    val candidate = clean.substringAfterLast('/', "").trim()
+    return if (candidate.isNotEmpty()) candidate else "Document"
+  }
+
+  private fun openDocumentInApp(rawUrl: String) {
+    val trimmed = rawUrl.trim()
+    if (trimmed.isEmpty()) return
+    val uri = Uri.parse(trimmed)
+    try {
+      val intent = Intent(Intent.ACTION_VIEW).apply {
+        setData(uri)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+      context.startActivity(intent)
+    } catch (error: Throwable) {
+      Log.w("ChatListView", "openDocumentInApp failed url=${trimmed.take(120)} error=${error.message}")
+      emitNativeEvent(
+        mapOf(
+          "type" to "fileOpenFailed",
+          "url" to trimmed,
+        ),
+      )
+    }
+  }
+
   private fun NativeRowViewHolder.bind(item: NativeRowItem, hidden: Boolean) {
     if (item.kind == "day") {
       voicePlayback.detach(this)
@@ -1076,6 +1196,7 @@ private class NativeRowsAdapter(
       tailView.visibility = View.GONE
       statusView.visibility = View.GONE
       agentSenderLabel.visibility = View.GONE
+      inlineAttachmentView.visibility = View.GONE
       voiceWaveView.setWaveform(null)
       container.setOnLongClickListener(null)
       return
@@ -1086,6 +1207,10 @@ private class NativeRowsAdapter(
     bubbleContainer.alpha = if (hidden) 0f else 1f
 
     val isVoice = item.messageType == "voice" || item.messageType == "music"
+    val hasInlineAttachment =
+      item.isAgentMessage &&
+        item.messageType == "file" &&
+        !item.mediaUrl.isNullOrBlank()
 
     // Agent message rendering
     if (item.isAgentMessage) {
@@ -1100,6 +1225,8 @@ private class NativeRowsAdapter(
     // Agent messages use "them" styling (not isMe)
     val effectiveIsMe = if (item.isAgentMessage) false else item.isMe
     textView.setTextColor(if (effectiveIsMe) appearance.textColorMe else appearance.textColorThem)
+    inlineAttachmentTitleView.setTextColor(if (effectiveIsMe) appearance.textColorMe else appearance.textColorThem)
+    inlineAttachmentSubtitleView.setTextColor(if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.76f) else withAlpha(appearance.textColorThem, 0.70f))
     timeView.setTextColor(if (effectiveIsMe) appearance.timeColorMe else appearance.timeColorThem)
     voiceDurationView.text = formatDuration(item.duration)
     voiceWaveView.setWaveform(item.waveform)
@@ -1164,6 +1291,8 @@ private class NativeRowsAdapter(
     if (isVoice) {
       bubbleContainer.setPadding(dp(10), dp(7), dp(10), dp(17))
       textView.visibility = View.GONE
+      inlineAttachmentView.visibility = View.GONE
+      inlineAttachmentView.setOnClickListener(null)
       voiceContainer.visibility = View.VISIBLE
       bubbleContainer.minimumWidth = dp(220)
       val voiceAccent = if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.20f) else withAlpha(appearance.textColorThem, 0.13f)
@@ -1193,7 +1322,7 @@ private class NativeRowsAdapter(
         voicePlayback.bind(this, item)
       }
     } else {
-      bubbleContainer.setPadding(dp(10), dp(7), dp(10), dp(7))
+      bubbleContainer.setPadding(dp(10), dp(7), dp(10), if (hasInlineAttachment) dp(7) else dp(7))
       textView.visibility = View.VISIBLE
       voiceContainer.visibility = View.GONE
       bubbleContainer.minimumWidth = dp(26)
@@ -1209,9 +1338,28 @@ private class NativeRowsAdapter(
       textView.maxWidth = (maxBubbleWidth - dp(20) - metaReserve).coerceAtLeast(dp(24))
       val textLp = textView.layoutParams as FrameLayout.LayoutParams
       textLp.gravity = Gravity.START or Gravity.TOP
-      textLp.rightMargin = metaReserve
-      textLp.bottomMargin = 0
+      textLp.rightMargin = if (hasInlineAttachment) 0 else metaReserve
+      textLp.bottomMargin = if (hasInlineAttachment) dp(48 + 8 + 17) else 0
       textView.layoutParams = textLp
+
+      if (hasInlineAttachment) {
+        inlineAttachmentView.visibility = View.VISIBLE
+        inlineAttachmentTitleView.text = resolveFileName(item.fileName, item.mediaUrl)
+        val attachmentLp = inlineAttachmentView.layoutParams as FrameLayout.LayoutParams
+        attachmentLp.gravity = Gravity.START or Gravity.BOTTOM
+        attachmentLp.topMargin = 0
+        attachmentLp.rightMargin = 0
+        attachmentLp.leftMargin = 0
+        attachmentLp.bottomMargin = dp(17)
+        inlineAttachmentView.layoutParams = attachmentLp
+        inlineAttachmentView.setOnClickListener {
+          val url = item.mediaUrl ?: return@setOnClickListener
+          openDocumentInApp(url)
+        }
+      } else {
+        inlineAttachmentView.visibility = View.GONE
+        inlineAttachmentView.setOnClickListener(null)
+      }
     }
 
     container.setOnLongClickListener {
@@ -3320,6 +3468,7 @@ class ChatListView(
             shape = NativeBubbleShape(showTail = false, topLeft = 18f, topRight = 18f, bottomRight = 18f, bottomLeft = 18f),
             messageType = "text",
             mediaUrl = null,
+            fileName = null,
             duration = null,
             waveform = null,
           ),
@@ -3363,6 +3512,11 @@ class ChatListView(
             !candidate.isNullOrBlank()
           }
         }
+      val fileName =
+        (message["fileName"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+          ?: (message["file_name"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+          ?: (metadata?.get("fileName") as? String)?.trim()?.takeIf { it.isNotEmpty() }
+          ?: (metadata?.get("file_name") as? String)?.trim()?.takeIf { it.isNotEmpty() }
       val duration =
         parseDouble(message["duration"])
           ?: parseDouble(metadata?.get("duration"))
@@ -3394,6 +3548,7 @@ class ChatListView(
           shape = shape,
           messageType = messageType,
           mediaUrl = mediaUrl,
+          fileName = fileName,
           duration = duration,
           waveform = waveform,
           isAgentMessage = rawIsAgentMessage,
@@ -3426,6 +3581,7 @@ class ChatListView(
           shape = NativeBubbleShape(false, 18f, 18f, 18f, 4f),
           messageType = "typing",
           mediaUrl = null,
+          fileName = null,
           duration = null,
           waveform = null,
         )

@@ -122,8 +122,10 @@ struct ChatListRow {
       return .voice
     case "video":
       return .video
-    case "image", "gif", "sticker", "file":
+    case "image", "gif", "sticker":
       return .media
+    case "file":
+      return isAgentMessage ? .text : .media
     default:
       return .text
     }

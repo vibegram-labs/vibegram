@@ -1,5 +1,23 @@
 import ExpoModulesCore
+import QuickLook
+import SafariServices
 import UIKit
+
+private final class ChatListDocumentPreviewDataSource: NSObject, QLPreviewControllerDataSource {
+  private let previewURL: URL
+
+  init(previewURL: URL) {
+    self.previewURL = previewURL
+  }
+
+  func numberOfPreviewItems(in controller: QLPreviewController) -> Int {
+    1
+  }
+
+  func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+    previewURL as NSURL
+  }
+}
 
 private let chatListSendVerticalTiming = CAMediaTimingFunction(
   controlPoints: Float(0.19919472913616398),
@@ -65,6 +83,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       atBottom: Bool
     )?
   private let viewportEmitMinInterval: CFTimeInterval = 1.0 / 30.0
+  private var documentPreviewDataSource: ChatListDocumentPreviewDataSource?
 
   private var hiddenMessageId: String?
   private var pendingSendTransition: SendTransitionPayload?
@@ -993,6 +1012,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       self?.resolvedDisplayStatus(for: row)
     }
     cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
+    cell.onInlineAttachmentTap = { [weak self] row in
+      guard let self else { return }
+      guard let mediaURL = row.mediaUrl, !mediaURL.isEmpty else { return }
+      self.openDocumentInApp(urlString: mediaURL)
+    }
     // Removed onVoiceBubbleTap so iOS uses Native Audio playback for Voice bubbles (like Android)
     cell.setExternalVoicePlayback(
       messageId: activeVoicePlaybackMessageId,
@@ -1008,6 +1032,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     cell.layer.removeAnimation(forKey: "opacity")
     cell.contentView.layer.removeAnimation(forKey: "opacity")
     return cell
+  }
+
+  public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+    guard indexPath.item < rows.count else { return }
+    let row = rows[indexPath.item]
+    guard row.isAgentMessage, row.messageType == "file" else { return }
+    guard let mediaURL = row.mediaUrl, !mediaURL.isEmpty else { return }
+    openDocumentInApp(urlString: mediaURL)
   }
 
   @objc private func handleChatEngineChanged(_ note: Notification) {
@@ -2435,6 +2467,69 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       NSLog("[ChatListView] handleNativeSend onNativeEvent dispatched")
     }
     NSLog("[ChatListView] handleNativeSend END")
+  }
+
+  private func topPresentingViewController() -> UIViewController? {
+    var responder: UIResponder? = self
+    while let current = responder {
+      if let vc = current as? UIViewController {
+        var top = vc
+        while let presented = top.presentedViewController {
+          top = presented
+        }
+        return top
+      }
+      responder = current.next
+    }
+    return window?.rootViewController
+  }
+
+  private func openDocumentInApp(urlString: String) {
+    let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return }
+    guard let presenter = topPresentingViewController() else {
+      onNativeEvent([
+        "type": "openFile",
+        "url": trimmed,
+      ])
+      return
+    }
+
+    if let remoteURL = URL(string: trimmed), let scheme = remoteURL.scheme?.lowercased(),
+      scheme == "http" || scheme == "https"
+    {
+      let safari = SFSafariViewController(url: remoteURL)
+      safari.dismissButtonStyle = .close
+      presenter.present(safari, animated: true)
+      return
+    }
+
+    let resolvedLocalURL: URL? = {
+      if let parsed = URL(string: trimmed), parsed.isFileURL {
+        return parsed
+      }
+      if trimmed.hasPrefix("/") {
+        return URL(fileURLWithPath: trimmed)
+      }
+      if let decoded = trimmed.removingPercentEncoding, decoded.hasPrefix("/") {
+        return URL(fileURLWithPath: decoded)
+      }
+      return nil
+    }()
+
+    if let localURL = resolvedLocalURL {
+      let preview = QLPreviewController()
+      let dataSource = ChatListDocumentPreviewDataSource(previewURL: localURL)
+      documentPreviewDataSource = dataSource
+      preview.dataSource = dataSource
+      presenter.present(preview, animated: true)
+      return
+    }
+
+    onNativeEvent([
+      "type": "openFile",
+      "url": trimmed,
+    ])
   }
 }
 
