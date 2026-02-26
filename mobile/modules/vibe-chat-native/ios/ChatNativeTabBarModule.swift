@@ -341,21 +341,6 @@ public final class ChatNativeTabBarView: ExpoView {
     return UIImage(named: uriString)
   }
 
-  // MARK: - Pill image helper
-  private func makePillImage(color: UIColor) -> UIImage {
-    let r: CGFloat = 14
-    let side = r * 2 + 1
-    let renderer = UIGraphicsImageRenderer(size: CGSize(width: side, height: side))
-    let img = renderer.image { _ in
-      color.setFill()
-      UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: side, height: side), cornerRadius: r)
-        .fill()
-    }
-    return img.resizableImage(
-      withCapInsets: UIEdgeInsets(top: r, left: r, bottom: r, right: r),
-      resizingMode: .stretch)
-  }
-
   private func applyChrome() {
     if #available(iOS 26.0, *) {
       let effect = UIGlassEffect()
@@ -372,30 +357,11 @@ public final class ChatNativeTabBarView: ExpoView {
       ? UIColor.white.withAlphaComponent(0.08).cgColor
       : UIColor.black.withAlphaComponent(0.06).cgColor
 
-    // Use custom background images to completely remove the internal gray track
-    // while keeping a pill for the selected segment.
-    // setBackgroundImage puts the control into "legacy" mode where selectedSegmentTintColor
-    // is ignored and the track is controlled entirely by the .normal background image.
     segmentedControl.backgroundColor = .clear
-    segmentedControl.selectedSegmentTintColor = nil
-
-    let clear = UIImage()
-    let pillColor =
+    segmentedControl.selectedSegmentTintColor =
       isDark
       ? UIColor.white.withAlphaComponent(0.22)
       : UIColor.black.withAlphaComponent(0.13)
-    let pillImg = makePillImage(color: pillColor)
-    let pillImgHighlighted = makePillImage(
-      color: pillColor.withAlphaComponent(pillColor.cgColor.alpha * 0.75))
-
-    segmentedControl.setBackgroundImage(clear, for: .normal, barMetrics: .default)
-    segmentedControl.setBackgroundImage(clear, for: .highlighted, barMetrics: .default)
-    segmentedControl.setBackgroundImage(pillImg, for: .selected, barMetrics: .default)
-    segmentedControl.setBackgroundImage(
-      pillImgHighlighted, for: [.selected, .highlighted], barMetrics: .default)
-    segmentedControl.setDividerImage(
-      clear, forLeftSegmentState: .normal,
-      rightSegmentState: .normal, barMetrics: .default)
 
     // Rebuild rendered icon+text images with the current colour scheme.
     rebuildAndApplySegmentImages()

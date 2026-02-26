@@ -41,6 +41,12 @@ export interface Message {
 export type ChatType = 'dm' | 'group' | 'channel';
 export type ChatRole = 'owner' | 'admin' | 'member' | 'subscriber';
 
+export interface ChatMember {
+    userId: string;
+    name?: string;
+    role?: ChatRole;
+}
+
 export interface Chat {
     chatId: string;
     type?: ChatType;
@@ -50,6 +56,7 @@ export interface Chat {
     creatorId?: string;
     memberCount?: number;
     role?: ChatRole;
+    members?: ChatMember[];
     friendId: string;
     friendName: string;
     messages: Message[];

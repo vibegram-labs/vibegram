@@ -731,6 +731,19 @@ final class ChatInputBar: UIView {
     }
   }
   var activeReplyToMessageId: String?
+
+  // Mention suggestion banner (inside pill, above text row — like reply banner)
+  private let mentionBanner = UIView()
+  private let mentionIconContainer = UIView()
+  private let mentionIconLabel = UILabel()
+  private let mentionNameLabel = UILabel()
+  private let mentionDescLabel = UILabel()
+  private var mentionBannerVisible = false
+  private let mentionBannerContentH: CGFloat = 40
+  private let mentionBannerGap: CGFloat = 4
+  private var mentionActive = false  // true when @vibe is confirmed in text
+  private let mentionBorderGlowLayer = CALayer()
+
   private(set) var barHeight: CGFloat = 0
   var bottomSafeAreaInset: CGFloat = 0 {
     didSet { if abs(oldValue - bottomSafeAreaInset) > 0.5 { setNeedsLayout() } }
@@ -1004,6 +1017,37 @@ final class ChatInputBar: UIView {
     replyDismissButton.addTarget(self, action: #selector(replyDismissTapped), for: .touchUpInside)
     replyBanner.addSubview(replyDismissButton)
 
+    // ── Mention suggestion banner (INSIDE pill, above text row — like reply banner) ──
+    mentionBanner.backgroundColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 0.10)
+    mentionBanner.clipsToBounds = true
+    mentionBanner.isHidden = true
+    mentionBanner.alpha = 0
+
+    let mentionTap = UITapGestureRecognizer(target: self, action: #selector(mentionBannerTapped))
+    mentionBanner.addGestureRecognizer(mentionTap)
+    pillContainer.addSubview(mentionBanner)
+
+    mentionIconContainer.backgroundColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 0.18)
+    mentionIconContainer.layer.cornerRadius = 8
+    mentionIconContainer.layer.cornerCurve = .continuous
+    mentionBanner.addSubview(mentionIconContainer)
+
+    mentionIconLabel.text = "\u{2726}"
+    mentionIconLabel.font = UIFont.systemFont(ofSize: 14, weight: .bold)
+    mentionIconLabel.textColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    mentionIconLabel.textAlignment = .center
+    mentionIconContainer.addSubview(mentionIconLabel)
+
+    mentionNameLabel.text = "@vibe"
+    mentionNameLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+    mentionNameLabel.textColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    mentionBanner.addSubview(mentionNameLabel)
+
+    mentionDescLabel.text = "Ask AI"
+    mentionDescLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
+    mentionDescLabel.textColor = UIColor(white: 0.7, alpha: 1.0)
+    mentionBanner.addSubview(mentionDescLabel)
+
     // send button
     sendButton.backgroundColor = .clear
     sendButton.clipsToBounds = true
@@ -1119,6 +1163,19 @@ final class ChatInputBar: UIView {
     let baseColor = a.wallpaperGradient.first ?? UIColor.black
     backgroundOverlayView.backgroundColor = baseColor.withAlphaComponent(0.88)
 
+    // Mention suggestion banner (inside pill)
+    mentionBanner.backgroundColor =
+      (a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0))
+      .withAlphaComponent(0.10)
+    mentionDescLabel.textColor = a.textColorThem.withAlphaComponent(0.5)
+    mentionNameLabel.textColor =
+      a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    mentionIconLabel.textColor =
+      a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    mentionIconContainer.backgroundColor =
+      (a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0))
+      .withAlphaComponent(0.18)
+
     refreshGlass()
     CATransaction.commit()
   }
@@ -1127,6 +1184,7 @@ final class ChatInputBar: UIView {
 
   func clearText() {
     textView.text = ""
+    setMentionBannerVisible(false, animated: false)
     updateButtonStates(animated: true)
     applyPlaceholder()
     // Animate pill shrinking back to single-line height
@@ -1331,7 +1389,10 @@ final class ChatInputBar: UIView {
     let textW = max(1, pillW - textInsetH * 2 - sendActionReserve - gifTextReserve)
     let textH = textView.sizeThatFits(CGSize(width: textW, height: .greatestFiniteMagnitude)).height
     let clampedTextH = max(minPillH - textInsetV * 2, min(maxPillH - textInsetV * 2, textH))
-    let bannerExtra: CGFloat = replyBannerVisible ? (replyBannerContentH + replyBannerGap) : 0
+    let replyBannerExtra: CGFloat = replyBannerVisible ? (replyBannerContentH + replyBannerGap) : 0
+    let mentionBannerExtra: CGFloat =
+      mentionBannerVisible ? (mentionBannerContentH + mentionBannerGap) : 0
+    let bannerExtra: CGFloat = replyBannerExtra + mentionBannerExtra
     let pillH = clampedTextH + textInsetV * 2 + bannerExtra
     let gifPanelH = gifPanelVisible ? preferredGifPanelHeight() : 0
 
@@ -1389,11 +1450,20 @@ final class ChatInputBar: UIView {
     sendButton.center = CGPoint(x: sendCenterX, y: sendCenterY)
     sendButton.layer.cornerRadius = 16
 
-    // ── Reply banner layout (inside pill, top section) ──
+    // ── Mention banner layout (inside pill, top section) ──
+    if mentionBannerVisible {
+      let mBannerY: CGFloat = 6
+      let mBannerW = max(1, actualPillW - 16)
+      mentionBanner.frame = CGRect(
+        x: 8, y: mBannerY, width: mBannerW, height: mentionBannerContentH)
+      layoutMentionBannerContents()
+    }
+
+    // ── Reply banner layout (inside pill, below mention if present) ──
     if replyBannerVisible {
-      let bannerY: CGFloat = 6
+      let replyBannerY: CGFloat = 6 + mentionBannerExtra
       let bannerW = max(1, actualPillW - 16)
-      replyBanner.frame = CGRect(x: 8, y: bannerY, width: bannerW, height: replyBannerContentH)
+      replyBanner.frame = CGRect(x: 8, y: replyBannerY, width: bannerW, height: replyBannerContentH)
       layoutReplyBannerContents()
     }
 
@@ -1475,6 +1545,11 @@ final class ChatInputBar: UIView {
       gifPanel.alpha = 0
     }
     gifPanel.isHidden = !gifPanelVisible
+
+    // ── Mention banner is now inside the pill — no floating layout needed ──
+
+    // ── Pill border glow when @vibe mention is active ──
+    updateMentionBorderGlow(pillFrame: pillContainer.frame)
 
     // ── Layer-only updates (no implicit animation wanted) ──
     CATransaction.begin()
@@ -1838,13 +1913,126 @@ final class ChatInputBar: UIView {
     let lowered = t.lowercased()
     if lowered.contains("@vibe") {
       // Strip the @vibe prefix from the agent text to get the actual query
-      let agentText = t
+      let agentText =
+        t
         .replacingOccurrences(of: "@vibe", with: "", options: .caseInsensitive)
         .trimmingCharacters(in: .whitespacesAndNewlines)
-      let finalAgentText = agentText.isEmpty ? t : agentText
-      delegate?.inputBarDidSendWithAgentMention(text: t, agentText: finalAgentText)
+      // Don't auto-send if only @vibe is typed with no actual message
+      guard !agentText.isEmpty else {
+        // Keep focus in the text view so user can type their message
+        textView.becomeFirstResponder()
+        return
+      }
+      setMentionBannerVisible(false, animated: false)
+      delegate?.inputBarDidSendWithAgentMention(text: t, agentText: agentText)
     } else {
+      setMentionBannerVisible(false, animated: false)
       delegate?.inputBarDidSend(text: t)
+    }
+  }
+
+  @objc private func mentionBannerTapped() {
+    // Find the last @ in the current text and replace @partial with @vibe
+    let text = textView.text ?? ""
+    if let lastAtRange = text.range(of: "@", options: .backwards) {
+      let beforeAt = text[text.startIndex..<lastAtRange.lowerBound]
+      textView.text = beforeAt + "@vibe "
+    } else {
+      textView.text = (text.isEmpty ? "" : text + " ") + "@vibe "
+    }
+    setMentionBannerVisible(false, animated: true)
+    setMentionActive(true)
+    // Trigger text change processing
+    textViewDidChange(textView)
+    // Keep focus so user can type their question
+    textView.becomeFirstResponder()
+  }
+
+  private func setMentionBannerVisible(_ visible: Bool, animated: Bool) {
+    guard mentionBannerVisible != visible else { return }
+    mentionBannerVisible = visible
+
+    if visible {
+      mentionBanner.isHidden = false
+      mentionBanner.alpha = 0
+
+      if animated {
+        UIView.animate(
+          withDuration: 0.28, delay: 0,
+          usingSpringWithDamping: 0.82, initialSpringVelocity: 0.5,
+          options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+        ) {
+          self.mentionBanner.alpha = 1
+          self.setNeedsLayout()
+          self.layoutIfNeeded()
+          self.superview?.setNeedsLayout()
+          self.superview?.layoutIfNeeded()
+        }
+      } else {
+        mentionBanner.alpha = 1
+        setNeedsLayout()
+        layoutIfNeeded()
+      }
+    } else {
+      if animated {
+        UIView.animate(
+          withDuration: 0.2, delay: 0,
+          options: [.curveEaseIn, .allowUserInteraction, .beginFromCurrentState]
+        ) {
+          self.mentionBanner.alpha = 0
+          self.setNeedsLayout()
+          self.layoutIfNeeded()
+          self.superview?.setNeedsLayout()
+          self.superview?.layoutIfNeeded()
+        } completion: { _ in
+          if !self.mentionBannerVisible {
+            self.mentionBanner.isHidden = true
+          }
+        }
+      } else {
+        mentionBanner.alpha = 0
+        mentionBanner.isHidden = true
+        setNeedsLayout()
+        layoutIfNeeded()
+      }
+    }
+  }
+
+  private func layoutMentionBannerContents() {
+    let b = mentionBanner.bounds
+    guard b.width > 0, b.height > 0 else { return }
+    let pad: CGFloat = 10
+    let iconSize: CGFloat = 26
+    mentionIconContainer.frame = CGRect(
+      x: pad, y: (b.height - iconSize) / 2, width: iconSize, height: iconSize)
+    mentionIconLabel.frame = mentionIconContainer.bounds
+    let textX = mentionIconContainer.frame.maxX + 8
+    mentionNameLabel.frame = CGRect(x: textX, y: (b.height - 16) / 2, width: 46, height: 16)
+    mentionDescLabel.frame = CGRect(
+      x: mentionNameLabel.frame.maxX + 6, y: (b.height - 14) / 2, width: 50, height: 14)
+  }
+
+  private func setMentionActive(_ active: Bool) {
+    guard mentionActive != active else { return }
+    mentionActive = active
+    let agentColor =
+      appearance.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+      if active {
+        self.pillContainer.layer.borderColor = agentColor.withAlphaComponent(0.55).cgColor
+        self.pillContainer.layer.borderWidth = 1.2
+      } else {
+        self.pillContainer.layer.borderColor = UIColor(white: 1.0, alpha: 0.12).cgColor
+        self.pillContainer.layer.borderWidth = 0.6
+      }
+    }
+  }
+
+  private func updateMentionBorderGlow(pillFrame: CGRect) {
+    let textString = (textView.text ?? "").lowercased()
+    let hasVibeMention = textString.contains("@vibe")
+    if hasVibeMention != mentionActive {
+      setMentionActive(hasVibeMention)
     }
   }
 
@@ -2566,7 +2754,51 @@ extension ChatInputBar: UITextViewDelegate {
   func textViewDidChange(_ tv: UITextView) {
     applyPlaceholder()
     updateButtonStates(animated: true)
-    delegate?.inputBarTextDidChange(text: tv.text ?? "")
+
+    let textString = tv.text ?? ""
+    delegate?.inputBarTextDidChange(text: textString)
+
+    // Detect @ typing for mention suggestion banner
+    let shouldShowMention: Bool = {
+      guard !textString.isEmpty else { return false }
+      guard let lastAtIndex = textString.lastIndex(of: "@") else { return false }
+      let afterAt = textString[textString.index(after: lastAtIndex)...].lowercased()
+      // Must be at start or preceded by space
+      let isAtStart = lastAtIndex == textString.startIndex
+      let isPrecededBySpace = !isAtStart && textString[textString.index(before: lastAtIndex)] == " "
+      guard isAtStart || isPrecededBySpace else { return false }
+      // No space in the partial match
+      guard !afterAt.contains(" ") else { return false }
+      // "vibe" must start with what's typed after @
+      return "vibe".hasPrefix(afterAt) || afterAt.isEmpty
+    }()
+    setMentionBannerVisible(shouldShowMention, animated: true)
+
+    // Highlight @vibe in real-time
+    if let textStorage = tv.textStorage as NSTextStorage? {
+      let fullRange = NSRange(location: 0, length: textStorage.length)
+      let selectedRange = tv.selectedRange
+
+      textStorage.beginEditing()
+      textStorage.removeAttribute(.foregroundColor, range: fullRange)
+      textStorage.removeAttribute(.font, range: fullRange)
+      textStorage.addAttribute(.foregroundColor, value: appearance.textColorThem, range: fullRange)
+      textStorage.addAttribute(.font, value: UIFont.systemFont(ofSize: 16), range: fullRange)
+
+      if let regex = try? NSRegularExpression(pattern: "@vibe", options: .caseInsensitive) {
+        let matches = regex.matches(in: textString, options: [], range: fullRange)
+        let highlightColor =
+          appearance.bubbleMeGradient.last
+          ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+        for match in matches {
+          textStorage.addAttribute(.foregroundColor, value: highlightColor, range: match.range)
+        }
+      }
+      textStorage.endEditing()
+
+      // Restore cursor position seamlessly
+      tv.selectedRange = selectedRange
+    }
 
     let newHeight = tv.contentSize.height
     if abs(newHeight - lastMeasuredTextHeight) > 1.0 {
@@ -2589,8 +2821,7 @@ extension ChatInputBar: UITextViewDelegate {
     -> Bool
   {
     if text == "\n" {
-      let t = currentText
-      if !t.isEmpty { delegate?.inputBarDidSend(text: t) }
+      sendTapped()
       return false
     }
     return true

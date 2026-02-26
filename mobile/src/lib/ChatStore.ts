@@ -14,6 +14,7 @@ import SoundManager from './SoundManager';
 import { uploadMedia } from './api-client';
 import { useEncryptedMediaStore } from './stores/encrypted-media-store';
 import { manipulateAsync, SaveFormat } from 'expo-image-manipulator';
+import { fetchHomeChatsNativeFirst } from '../native/home/api';
 
 const CHATSTORE_DEBUG = false;
 const chatStoreLog = (...args: any[]) => {
@@ -1668,9 +1669,12 @@ export const useChatStore = create<ChatState>()(
                 set({ isLoading: true, lastChatsLoad: Date.now() });
 
                 try {
-                    // Fetch chats via API
-                    const { apiClient } = require('./api-client');
-                    const data = await apiClient.getChats(auth.userId);
+                    // Fetch chats via native-first path (fallbacks to JS API client).
+                    const data = await fetchHomeChatsNativeFirst({
+                        userId: auth.userId,
+                        apiBaseUrl: ProxyManager.getInstance().getBestUrl(),
+                        authToken: auth.loginToken || (auth as any)?.token || '',
+                    });
 
                     // Process chats
                     // Process chats with merge logic - PRESERVE local plaintext!
@@ -1748,6 +1752,27 @@ export const useChatStore = create<ChatState>()(
                             creatorId: c.creatorId || null,
                             memberCount: c.memberCount || null,
                             role: c.role || 'member',
+                            members: Array.isArray(c.members)
+                                ? c.members
+                                    .map((member: any) => {
+                                        const userId = String(member?.userId || member?.id || '').trim().toUpperCase();
+                                        if (!userId) return null;
+                                        const name =
+                                            typeof member?.name === 'string' && member.name.trim().length > 0
+                                                ? member.name.trim()
+                                                : undefined;
+                                        const rawRole =
+                                            typeof member?.role === 'string'
+                                                ? member.role.trim().toLowerCase()
+                                                : '';
+                                        const role =
+                                            rawRole === 'owner' || rawRole === 'admin' || rawRole === 'member' || rawRole === 'subscriber'
+                                                ? rawRole
+                                                : undefined;
+                                        return { userId, name, role };
+                                    })
+                                    .filter(Boolean)
+                                : undefined,
                             friendId: c.friendId,
                             friendName: c.friendName || c.name || c.friendId,
                             friendImage: c.friendImage || c.avatarUrl || null,

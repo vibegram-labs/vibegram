@@ -71,7 +71,9 @@ private struct ChatMainProfilePinnedItem: Equatable {
   let subtitle: String
 }
 
-public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegate {
+public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegate,
+  UIGestureRecognizerDelegate
+{
   public var onViewportChanged = EventDispatcher() {
     didSet { syncListDispatchers() }
   }
@@ -117,6 +119,19 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   private let menuGlassView = UIVisualEffectView(effect: nil)
   private let menuPressedOverlayView = UIView()
   private let menuButton = UIButton(type: .system)
+
+  private let profileHeaderContainer = UIView()
+  private let profileHeaderMaskView = UIView()
+  private let profileHeaderBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+  private let profileHeaderOverlayView = UIView()
+  private let profileHeaderMaskGradientLayer = CAGradientLayer()
+  private let profileHeaderContentView = UIView()
+  private let profileBackGlassView = UIVisualEffectView(effect: nil)
+  private let profileBackPressedOverlayView = UIView()
+  private let profileBackButton = UIButton(type: .system)
+  private let profileMenuGlassView = UIVisualEffectView(effect: nil)
+  private let profileMenuPressedOverlayView = UIView()
+  private let profileMenuButton = UIButton(type: .system)
 
   private let chatHeaderStack = UIStackView()
   private let chatTitleLabel = UILabel()
@@ -164,6 +179,7 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
 
   private var appearance = ChatListAppearance.fallback
   private var isOnline = false
+  private var surfacePresenceOnline: Bool?
   private var chatTitleText: String = "Chat"
   private var chatSubtitleText: String = ""
   private var profileNameText: String = "User"
@@ -199,6 +215,16 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   private var registeredSurfaceId: String = ""
   private var pendingNativePageTarget: ChatMainPage?
   private var pendingNativePageLockUntil: CFTimeInterval = 0.0
+  private var profileSwipeStartProgress: CGFloat = 0.0
+  private var chatHeaderCenterMinWidth: CGFloat = 0.0
+
+  private lazy var profileSwipeBackGesture: UIScreenEdgePanGestureRecognizer = {
+    let gesture = UIScreenEdgePanGestureRecognizer(
+      target: self, action: #selector(handleProfileSwipeBack(_:)))
+    gesture.edges = .left
+    gesture.delegate = self
+    return gesture
+  }()
 
   private static var wallpaperMaskImageCache: [String: CGImage] = [:]
   private static let lastSeenDateFormatter: DateFormatter = {
@@ -213,12 +239,25 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     formatter.timeStyle = .short
     return formatter
   }()
+  private static let lastSeenWeekdayFormatter: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateFormat = "EEEE"
+    return formatter
+  }()
   private static let profileListDateFormatter: DateFormatter = {
     let formatter = DateFormatter()
     formatter.dateStyle = .medium
     formatter.timeStyle = .none
     return formatter
   }()
+
+  private static let themeDarkBg = UIColor(
+    red: 18.0 / 255.0, green: 18.0 / 255.0, blue: 18.0 / 255.0, alpha: 1.0)
+  private static let themeLightBg = UIColor(
+    red: 245.0 / 255.0, green: 244.0 / 255.0, blue: 241.0 / 255.0, alpha: 1.0)
+  private static let themeDarkCard = UIColor(
+    red: 36.0 / 255.0, green: 36.0 / 255.0, blue: 36.0 / 255.0, alpha: 1.0)
+  private static let themeLightCard = UIColor.white
 
   required init(appContext: AppContext? = nil) {
     chatListView = ChatListView(appContext: appContext)
@@ -265,6 +304,7 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     chatListView.setEngineChatId(value)
     refreshTypingStateFromEngine(force: true)
     refreshProfileSummaryFromEngine(force: true)
+    fetchAgentConfigForCurrentChat()
   }
 
   func setEngineMyUserId(_ value: String) {
@@ -273,6 +313,7 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
 
   func setEnginePeerUserId(_ value: String) {
     enginePeerUserId = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    surfacePresenceOnline = nil
     chatListView.setEnginePeerUserId(value)
     if enginePeerUserId.isEmpty {
       engineLastSeenTimestampMs = nil
@@ -418,9 +459,13 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   }
 
   func setIsOnline(_ value: Bool) {
+    surfacePresenceOnline = value
     if enginePeerUserId.isEmpty {
       isOnline = value
-      engineLastSeenTimestampMs = nil
+      if value {
+        engineLastSeenTimestampMs = nil
+      }
+      applyTheme()
       updateHeaderTexts()
       updateProfileTexts()
       return
@@ -481,6 +526,27 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     profilePage.layer.insertSublayer(profileWallpaperLayer, at: 0)
     profilePage.layer.insertSublayer(profileWallpaperPatternLayer, above: profileWallpaperLayer)
 
+    profilePage.addSubview(profileHeaderContainer)
+    profileHeaderContainer.clipsToBounds = false
+    profileHeaderMaskView.isUserInteractionEnabled = false
+    profileHeaderContainer.addSubview(profileHeaderMaskView)
+    profileHeaderMaskView.addSubview(profileHeaderBlurView)
+    profileHeaderBlurView.contentView.addSubview(profileHeaderOverlayView)
+    profileHeaderMaskGradientLayer.colors = [
+      UIColor.black.withAlphaComponent(0.95).cgColor,
+      UIColor.black.withAlphaComponent(0.72).cgColor,
+      UIColor.clear.cgColor,
+    ]
+    profileHeaderMaskGradientLayer.locations = [0.0, 0.58, 1.0]
+    profileHeaderMaskView.layer.mask = profileHeaderMaskGradientLayer
+    profileHeaderContainer.addSubview(profileHeaderContentView)
+    profileHeaderContainer.alpha = 0.0
+    profileHeaderContainer.isHidden = true
+
+    profileHeaderContentView.addSubview(profileBackButton)
+    profileHeaderContentView.addSubview(profileMenuButton)
+    profileHeaderContentView.addSubview(profileHeaderStack)
+
     addSubview(headerContainer)
     headerContainer.clipsToBounds = false
     headerMaskView.isUserInteractionEnabled = false
@@ -502,6 +568,13 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     headerContentView.addSubview(avatarButton)
 
     [backButton, titleButton, avatarButton, menuButton].forEach { button in
+      button.backgroundColor = .clear
+      button.contentHorizontalAlignment = .center
+      button.contentVerticalAlignment = .center
+      button.clipsToBounds = true
+    }
+
+    [profileBackButton, profileMenuButton].forEach { button in
       button.backgroundColor = .clear
       button.contentHorizontalAlignment = .center
       button.contentVerticalAlignment = .center
@@ -549,13 +622,38 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     menuButton.addSubview(menuPressedOverlayView)
 
     titleButton.addSubview(chatHeaderStack)
-    titleButton.addSubview(profileHeaderStack)
+
+    profileBackGlassView.isUserInteractionEnabled = false
+    profileBackGlassView.clipsToBounds = true
+    profileBackButton.addSubview(profileBackGlassView)
+    profileBackButton.sendSubviewToBack(profileBackGlassView)
+
+    profileBackPressedOverlayView.isUserInteractionEnabled = false
+    profileBackPressedOverlayView.backgroundColor = headerPressedOverlayColor
+    profileBackPressedOverlayView.alpha = 0
+    profileBackButton.addSubview(profileBackPressedOverlayView)
+
+    profileMenuGlassView.isUserInteractionEnabled = false
+    profileMenuGlassView.clipsToBounds = true
+    profileMenuButton.addSubview(profileMenuGlassView)
+    profileMenuButton.sendSubviewToBack(profileMenuGlassView)
+
+    profileMenuPressedOverlayView.isUserInteractionEnabled = false
+    profileMenuPressedOverlayView.backgroundColor = headerPressedOverlayColor
+    profileMenuPressedOverlayView.alpha = 0
+    profileMenuButton.addSubview(profileMenuPressedOverlayView)
 
     backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
     backButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
     titleButton.addTarget(self, action: #selector(handleAvatarPressed), for: .touchUpInside)
     menuButton.setImage(UIImage(systemName: "ellipsis"), for: .normal)
     menuButton.addTarget(self, action: #selector(handleMenuPressed), for: .touchUpInside)
+    menuButton.isHidden = true
+
+    profileBackButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
+    profileBackButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
+    profileMenuButton.setImage(UIImage(systemName: "ellipsis"), for: .normal)
+    profileMenuButton.addTarget(self, action: #selector(handleMenuPressed), for: .touchUpInside)
 
     avatarButton.addTarget(self, action: #selector(handleAvatarPressed), for: .touchUpInside)
     avatarButton.addSubview(avatarImageView)
@@ -564,11 +662,15 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     menuButton.bringSubviewToFront(menuPressedOverlayView)
     backButton.bringSubviewToFront(backPressedOverlayView)
     titleButton.bringSubviewToFront(titlePressedOverlayView)
+    profileBackButton.bringSubviewToFront(profileBackPressedOverlayView)
+    profileMenuButton.bringSubviewToFront(profileMenuPressedOverlayView)
 
     let backSymbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     backButton.setPreferredSymbolConfiguration(backSymbolConfig, forImageIn: .normal)
     let menuSymbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     menuButton.setPreferredSymbolConfiguration(menuSymbolConfig, forImageIn: .normal)
+    profileBackButton.setPreferredSymbolConfiguration(backSymbolConfig, forImageIn: .normal)
+    profileMenuButton.setPreferredSymbolConfiguration(menuSymbolConfig, forImageIn: .normal)
     avatarImageView.contentMode = .scaleAspectFill
     avatarImageView.isHidden = true
 
@@ -598,9 +700,11 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     chatHeaderStack.addArrangedSubview(chatSubtitleLabel)
     profileHeaderStack.addArrangedSubview(profileTitleLabel)
     profileHeaderStack.addArrangedSubview(profileSubtitleLabel)
+    profileHeaderStack.isUserInteractionEnabled = false
 
     profileScrollView.showsVerticalScrollIndicator = false
     profileScrollView.alwaysBounceVertical = true
+    profilePage.addGestureRecognizer(profileSwipeBackGesture)
 
     profileContentView.addSubview(profileAvatarView)
     profileAvatarView.addSubview(profileAvatarImageView)
@@ -721,13 +825,18 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
 
   private func refreshPresenceStateFromEngine(force: Bool = false) {
     guard !enginePeerUserId.isEmpty else { return }
-    let nextOnline = ChatEngine.shared.isUserOnline(userId: enginePeerUserId)
-    let nextLastSeen = ChatEngine.shared.lastSeenTimestampMs(userId: enginePeerUserId)
+    let engineOnline = ChatEngine.shared.isUserOnline(userId: enginePeerUserId)
+    let nextOnline = engineOnline || (surfacePresenceOnline == true)
+    let nextLastSeen =
+      nextOnline
+      ? nil
+      : ChatEngine.shared.lastSeenTimestampMs(userId: enginePeerUserId)
     guard
       force || nextOnline != isOnline || nextLastSeen != engineLastSeenTimestampMs
     else { return }
     isOnline = nextOnline
     engineLastSeenTimestampMs = nextLastSeen
+    applyTheme()
     updateHeaderTexts()
     updateProfileTexts()
   }
@@ -1063,7 +1172,7 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     profileTabContentNeedsReload = false
     profileLastTabContentWidth = normalizedWidth
 
-    let cardBg = appearance.bubbleThemColor.withAlphaComponent(0.58)
+    let cardBg = appearance.isDark ? Self.themeDarkCard : Self.themeLightCard
     let textColor = appearance.textColorThem
     let subtitleColor = appearance.timeColorThem.withAlphaComponent(0.9)
     let separatorColor = appearance.timeColorThem.withAlphaComponent(0.18)
@@ -1342,16 +1451,26 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
       let menuEffect = UIGlassEffect()
       menuEffect.isInteractive = true
       menuGlassView.effect = menuEffect
+      let profileBackEffect = UIGlassEffect()
+      profileBackEffect.isInteractive = true
+      profileBackGlassView.effect = profileBackEffect
+      let profileMenuEffect = UIGlassEffect()
+      profileMenuEffect.isInteractive = true
+      profileMenuGlassView.effect = profileMenuEffect
     } else {
       backGlassView.effect = UIBlurEffect(style: .systemMaterial)
       titleGlassView.effect = UIBlurEffect(style: .systemMaterial)
       avatarGlassView.effect = UIBlurEffect(style: .systemMaterial)
       menuGlassView.effect = UIBlurEffect(style: .systemMaterial)
+      profileBackGlassView.effect = UIBlurEffect(style: .systemMaterial)
+      profileMenuGlassView.effect = UIBlurEffect(style: .systemMaterial)
     }
   }
 
   private func configureHeaderPressFeedback() {
-    let controls: [UIControl] = [backButton, titleButton, avatarButton, menuButton]
+    let controls: [UIControl] = [
+      backButton, titleButton, avatarButton, menuButton, profileBackButton, profileMenuButton,
+    ]
     controls.forEach { control in
       control.addTarget(
         self, action: #selector(handleHeaderPressDown(_:)), for: [.touchDown, .touchDragEnter])
@@ -1407,6 +1526,16 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
         self.menuButton.transform = CGAffineTransform(scaleX: scale, y: scale)
         self.menuGlassView.alpha = isPressed ? 0.92 : 1.0
         self.menuPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
+      } else if control === self.profileBackButton {
+        let scale: CGFloat = isPressed ? 0.9 : 1.0
+        self.profileBackButton.imageView?.transform = CGAffineTransform(scaleX: scale, y: scale)
+        self.profileBackGlassView.alpha = isPressed ? 0.92 : 1.0
+        self.profileBackPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
+      } else if control === self.profileMenuButton {
+        let scale: CGFloat = isPressed ? 0.96 : 1.0
+        self.profileMenuButton.transform = CGAffineTransform(scaleX: scale, y: scale)
+        self.profileMenuGlassView.alpha = isPressed ? 0.92 : 1.0
+        self.profileMenuPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
       }
     }
   }
@@ -1427,16 +1556,14 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     backButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
     avatarButton.frame = CGRect(
       x: max(0.0, headerContentView.bounds.width - 44.0), y: 0.0, width: 44.0, height: 44.0)
-    menuButton.frame = CGRect(
-      x: max(0.0, avatarButton.frame.minX - 8.0 - 44.0), y: 0.0, width: 44.0, height: 44.0)
+    menuButton.frame = .zero
 
-    let maxCenterWidth = max(0.0, headerContentView.bounds.width * 0.45)
+    let maxCenterWidth = max(0.0, headerContentView.bounds.width * 0.65)
     let chatReq = max(
       chatTitleLabel.intrinsicContentSize.width, chatSubtitleLabel.intrinsicContentSize.width)
-    let profileReq = max(
-      profileTitleLabel.intrinsicContentSize.width, profileSubtitleLabel.intrinsicContentSize.width)
-    let maxContentReq = max(chatReq, profileReq) + 36.0  // 18 tracking padding on each side
-    let centerWidth = min(maxCenterWidth, max(60.0, maxContentReq))
+    let computedCenterWidth = min(maxCenterWidth, max(160.0, chatReq + 36.0))
+    chatHeaderCenterMinWidth = max(chatHeaderCenterMinWidth, computedCenterWidth)
+    let centerWidth = min(maxCenterWidth, max(chatHeaderCenterMinWidth, computedCenterWidth))
     titleButton.frame = CGRect(
       x: (headerContentView.bounds.width - centerWidth) * 0.5,
       y: 0.0,
@@ -1469,7 +1596,48 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
 
     let titleBounds = titleButton.bounds.insetBy(dx: 12.0, dy: 4.0)
     chatHeaderStack.frame = titleBounds
-    profileHeaderStack.frame = titleBounds
+
+    profileHeaderContainer.frame = CGRect(x: 0.0, y: 0.0, width: bounds.width, height: headerHeight)
+    profileHeaderMaskView.frame = profileHeaderContainer.bounds
+    profileHeaderBlurView.frame = profileHeaderMaskView.bounds
+    profileHeaderOverlayView.frame = profileHeaderBlurView.bounds
+    profileHeaderMaskGradientLayer.frame = profileHeaderMaskView.bounds
+    profileHeaderContentView.frame = CGRect(
+      x: 12.0, y: contentY, width: max(0.0, bounds.width - 24.0), height: 44.0)
+
+    profileBackButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
+    profileMenuButton.frame = CGRect(
+      x: max(0.0, profileHeaderContentView.bounds.width - 44.0), y: 0.0, width: 44.0, height: 44.0)
+
+    let profileReq = max(
+      profileTitleLabel.intrinsicContentSize.width, profileSubtitleLabel.intrinsicContentSize.width)
+    let profileCenterWidth = min(maxCenterWidth, max(160.0, profileReq + 36.0))
+    let profileCenterFrame = CGRect(
+      x: (profileHeaderContentView.bounds.width - profileCenterWidth) * 0.5,
+      y: 0.0,
+      width: profileCenterWidth,
+      height: 44.0
+    )
+    profileHeaderStack.frame = profileCenterFrame.insetBy(dx: 12.0, dy: 4.0)
+
+    [profileBackButton, profileMenuButton].forEach { control in
+      control.layer.cornerRadius = control.bounds.height / 2.0
+    }
+    [
+      profileBackGlassView, profileMenuGlassView, profileBackPressedOverlayView,
+      profileMenuPressedOverlayView,
+    ].forEach { view in
+      view.frame = view.superview?.bounds ?? .zero
+      view.layer.cornerRadius = (view.superview?.bounds.height ?? 0) / 2.0
+    }
+    if let imageView = profileBackButton.imageView {
+      profileBackButton.bringSubviewToFront(imageView)
+    }
+    profileBackButton.bringSubviewToFront(profileBackPressedOverlayView)
+    if let imageView = profileMenuButton.imageView {
+      profileMenuButton.bringSubviewToFront(imageView)
+    }
+    profileMenuButton.bringSubviewToFront(profileMenuPressedOverlayView)
   }
 
   private func layoutPages() {
@@ -1647,8 +1815,17 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   private func applyTheme() {
     let text = appearance.textColorThem
     let secondary = appearance.timeColorThem.withAlphaComponent(0.85)
-    let background = appearance.wallpaperGradient.first ?? UIColor.black
-    let cardBg = appearance.bubbleThemColor.withAlphaComponent(0.48)
+    let chatBackground = appearance.wallpaperGradient.first ?? UIColor.black
+    let isDarkTheme = appearance.isDark
+    let profileBackground = isDarkTheme ? Self.themeDarkBg : Self.themeLightBg
+    let profileCardBg = isDarkTheme ? Self.themeDarkCard : Self.themeLightCard
+    let actionBg = profileCardBg
+    let rowSeparatorColor =
+      isDarkTheme
+      ? UIColor(white: 1.0, alpha: 0.16) : UIColor(white: 0.0, alpha: 0.08)
+    let rowHighlightColor =
+      isDarkTheme
+      ? UIColor(white: 1.0, alpha: 0.06) : UIColor(white: 0.0, alpha: 0.04)
 
     backgroundColor = .clear
     var white: CGFloat = 0
@@ -1657,33 +1834,43 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     } else {
       headerMaskBlurView.effect = UIBlurEffect(style: .regular)
     }
-    headerMaskOverlayView.backgroundColor = background.withAlphaComponent(0.32)
+    headerMaskOverlayView.backgroundColor = chatBackground.withAlphaComponent(0.88)
     rootWallpaperLayer.isHidden = true
-    backGlassView.backgroundColor = background.withAlphaComponent(0.10)
-    titleGlassView.backgroundColor = background.withAlphaComponent(0.10)
+    backGlassView.backgroundColor = chatBackground.withAlphaComponent(0.10)
+    titleGlassView.backgroundColor = chatBackground.withAlphaComponent(0.10)
     avatarGlassView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.22)
-    menuGlassView.backgroundColor = background.withAlphaComponent(0.10)
+    menuGlassView.backgroundColor = chatBackground.withAlphaComponent(0.10)
     refreshHeaderGlass()
+
+    profileHeaderContainer.backgroundColor = .clear
+    profileHeaderBlurView.effect =
+      UIBlurEffect(style: isDarkTheme ? .systemThinMaterialDark : .systemThinMaterialLight)
+    profileHeaderOverlayView.backgroundColor =
+      profileBackground.withAlphaComponent(isDarkTheme ? 0.42 : 0.72)
+    profileBackGlassView.backgroundColor = profileCardBg.withAlphaComponent(0.68)
+    profileMenuGlassView.backgroundColor = profileCardBg.withAlphaComponent(0.68)
 
     backButton.tintColor = text
     menuButton.tintColor = text
+    profileBackButton.tintColor = text
+    profileMenuButton.tintColor = text
     chatTitleLabel.textColor = text
     profileTitleLabel.textColor = text
     chatSubtitleLabel.textColor = secondary
     profileSubtitleLabel.textColor = secondary
     avatarFallbackIconView.tintColor = text
 
-    profilePage.backgroundColor = .clear
-    profileScrollView.backgroundColor = .clear
-    profileContentView.backgroundColor = .clear
+    profilePage.backgroundColor = profileBackground
+    profileScrollView.backgroundColor = profileBackground
+    profileContentView.backgroundColor = profileBackground
     applyProfileWallpaperAppearance()
-    profileAvatarView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.35)
+    profileAvatarView.backgroundColor = profileCardBg
     profileAvatarFallbackIconView.tintColor = text
     profileOnlineDotView.backgroundColor =
       isOnline
       ? UIColor(red: 83.0 / 255.0, green: 224.0 / 255.0, blue: 138.0 / 255.0, alpha: 1.0)
       : appearance.timeColorThem.withAlphaComponent(0.32)
-    profileOnlineDotView.layer.borderColor = (appearance.wallpaperGradient.first ?? .black).cgColor
+    profileOnlineDotView.layer.borderColor = profileBackground.cgColor
     profileNameLabel.textColor = text
     profileHandleLabel.textColor =
       isOnline
@@ -1691,28 +1878,26 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
       : secondary
     profileBioLabel.textColor = secondary
 
-    let actionBg =
-      appearance.bubbleThemColor.withAlphaComponent(0.44)
     profileMuteButton.applyTheme(foreground: text, background: actionBg)
     profileSearchButton.applyTheme(foreground: text, background: actionBg)
     profileAudioCallButton.applyTheme(foreground: text, background: actionBg)
     profileVideoCallButton.applyTheme(foreground: text, background: actionBg)
 
-    profileIdentityCard.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.58)
+    profileIdentityCard.backgroundColor = profileCardBg
     profileUsernameRow.applyTheme(
       titleColor: text,
       subtitleColor: secondary,
-      separatorColor: appearance.timeColorThem.withAlphaComponent(0.18),
-      highlightedColor: appearance.textColorThem.withAlphaComponent(0.06)
+      separatorColor: rowSeparatorColor,
+      highlightedColor: rowHighlightColor
     )
     profileBioRow.applyTheme(
       titleColor: text,
       subtitleColor: secondary,
-      separatorColor: appearance.timeColorThem.withAlphaComponent(0.18),
-      highlightedColor: appearance.textColorThem.withAlphaComponent(0.0)
+      separatorColor: rowSeparatorColor,
+      highlightedColor: UIColor.clear
     )
 
-    profileTabsCard.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.58)
+    profileTabsCard.backgroundColor = profileCardBg
     profileTabPlaceholderLabel.textColor = secondary
     applyProfileTabTheme()
     profileTabContentNeedsReload = true
@@ -1722,46 +1907,22 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     profileAgentPromptNode.applyTheme(
       textColor: text,
       secondaryTextColor: secondary,
-      surfaceColor: cardBg,
+      surfaceColor: profileCardBg,
       accentColor: accentColor
     )
   }
 
   private func applyProfileWallpaperAppearance() {
-    profileWallpaperLayer.colors = appearance.wallpaperGradient.map(\.cgColor)
-    profileWallpaperLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
-    profileWallpaperLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-    profileWallpaperLayer.opacity = Float(max(0.0, min(1.0, appearance.wallpaperOpacity)))
-    profileWallpaperLayer.isHidden = appearance.backgroundMode == "transparent"
+    profileWallpaperLayer.colors = nil
+    profileWallpaperLayer.locations = nil
+    profileWallpaperLayer.opacity = 0.0
+    profileWallpaperLayer.isHidden = true
 
-    let canShowPattern =
-      appearance.backgroundMode != "transparent"
-      && appearance.wallpaperPatternGradient.count >= 2
-      && appearance.wallpaperPatternOpacity > 0.001
-      && (appearance.wallpaperMaskKey?.isEmpty == false)
-
-    guard
-      canShowPattern,
-      let maskKey = appearance.wallpaperMaskKey,
-      let maskImage = resolvedWallpaperMaskImage(for: maskKey)
-    else {
-      profileWallpaperPatternLayer.isHidden = true
-      profileWallpaperPatternLayer.colors = nil
-      profileWallpaperPatternLayer.locations = nil
-      profileWallpaperPatternLayer.opacity = 0.0
-      profileWallpaperPatternMaskLayer.contents = nil
-      return
-    }
-
-    profileWallpaperPatternLayer.colors = appearance.wallpaperPatternGradient.map(\.cgColor)
-    profileWallpaperPatternLayer.locations = appearance.wallpaperPatternLocations
-    profileWallpaperPatternLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
-    profileWallpaperPatternLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
-    profileWallpaperPatternLayer.opacity = Float(
-      max(0.0, min(1.0, appearance.wallpaperPatternOpacity)))
-    profileWallpaperPatternMaskLayer.contents = maskImage
-    profileWallpaperPatternMaskLayer.frame = profileWallpaperPatternLayer.bounds
-    profileWallpaperPatternLayer.isHidden = false
+    profileWallpaperPatternLayer.isHidden = true
+    profileWallpaperPatternLayer.colors = nil
+    profileWallpaperPatternLayer.locations = nil
+    profileWallpaperPatternLayer.opacity = 0.0
+    profileWallpaperPatternMaskLayer.contents = nil
   }
 
   private func resolvedWallpaperMaskImage(for key: String) -> CGImage? {
@@ -1814,12 +1975,15 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   private func updateHeaderTexts() {
     let resolvedTitle = chatTitleText.isEmpty ? "Chat" : chatTitleText
     let groupTypingSubtitle = resolvedGroupTypingSubtitle()
+    let connectionSubtitle = resolvedEngineConnectionSubtitle()
     let engineSubtitle = resolvedEnginePresenceSubtitle()
     let trimmedSubtitle = chatSubtitleText.trimmingCharacters(in: .whitespacesAndNewlines)
     let subtitleLower = trimmedSubtitle.lowercased()
     let resolvedSubtitle: String
     if let groupTypingSubtitle {
       resolvedSubtitle = groupTypingSubtitle
+    } else if let connectionSubtitle {
+      resolvedSubtitle = connectionSubtitle
     } else if let engineSubtitle {
       resolvedSubtitle = engineSubtitle
     } else if isOnline
@@ -1835,9 +1999,15 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     profileTitleLabel.text = profileNameText.isEmpty ? resolvedTitle : profileNameText
     profileSubtitleLabel.text = isGroupOrChannel ? "Group Profile" : "Profile"
     chatSubtitleLabel.textColor =
-      (groupTypingSubtitle != nil || isOnline)
-      ? UIColor(red: 83.0 / 255.0, green: 224.0 / 255.0, blue: 138.0 / 255.0, alpha: 1.0)
-      : appearance.timeColorThem.withAlphaComponent(0.85)
+      {
+        if groupTypingSubtitle != nil || (connectionSubtitle == nil && isOnline) {
+          return UIColor(red: 83.0 / 255.0, green: 224.0 / 255.0, blue: 138.0 / 255.0, alpha: 1.0)
+        }
+        if connectionSubtitle != nil {
+          return appearance.textColorThem.withAlphaComponent(0.9)
+        }
+        return appearance.timeColorThem.withAlphaComponent(0.85)
+      }()
   }
 
   private func updateProfileTexts() {
@@ -1876,7 +2046,8 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     } else {
       let usernameRowSubtitle: String
       if profileHandleText.isEmpty {
-        usernameRowSubtitle = "@\(resolvedTitle.replacingOccurrences(of: " ", with: "").lowercased())"
+        usernameRowSubtitle =
+          "@\(resolvedTitle.replacingOccurrences(of: " ", with: "").lowercased())"
       } else if profileHandleText.lowercased().hasPrefix("id:") {
         usernameRowSubtitle = profileHandleText
       } else if profileHandleText.hasPrefix("@") {
@@ -1910,6 +2081,11 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   }
 
   private func resolvedGroupMemberDisplayName(_ normalizedUserId: String) -> String {
+    if normalizedUserId.starts(with: "00000000-0000-0000-0000-000000000001")
+      || normalizedUserId == "SYSTEM"
+    {
+      return (agentConfig?["name"] as? String) ?? "Vibe "
+    }
     if let explicit = groupMemberDisplayNameByUserId[normalizedUserId],
       !explicit.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     {
@@ -1964,14 +2140,69 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     return formatLastSeenSubtitle(lastSeen)
   }
 
+  private func resolvedEngineConnectionSubtitle() -> String? {
+    guard !enginePeerUserId.isEmpty else { return nil }
+    if isOnline { return nil }
+
+    let status = ChatEngine.shared.getStatus()
+    let connected = (status["connected"] as? Bool) == true
+    if connected { return nil }
+
+    let stateValue =
+      (status["state"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased() ?? ""
+
+    if stateValue == "native-socket-open" || stateValue == "connected-shadow" {
+      return nil
+    }
+
+    switch stateValue {
+    case "connecting-native-presence":
+      return "connecting..."
+    case "configured", "configured-native-bootstrap", "native-config-missing":
+      return "updating..."
+    case "native-socket-closed", "disconnected":
+      return "connection issue"
+    default:
+      if stateValue.contains("connect") { return "connecting..." }
+      if stateValue.contains("config") || stateValue.contains("bootstrap")
+        || stateValue.contains("update")
+      {
+        return "updating..."
+      }
+      return "connection issue"
+    }
+  }
+
   private func formatLastSeenSubtitle(_ timestampMs: Int64) -> String {
     let date = Date(timeIntervalSince1970: TimeInterval(timestampMs) / 1000.0)
+    let calendar = Calendar.current
+    let now = Date()
     let timePart = Self.lastSeenTimeFormatter.string(from: date)
-    if Calendar.current.isDateInToday(date) {
-      return "last seen today at \(timePart)"
+    if calendar.isDateInToday(date) {
+      return "last seen at \(timePart)"
     }
+    if calendar.isDateInYesterday(date) {
+      return "last seen yesterday at \(timePart)"
+    }
+
+    let startOfLastSeenDay = calendar.startOfDay(for: date)
+    let startOfToday = calendar.startOfDay(for: now)
+    let daysAgo =
+      calendar.dateComponents([.day], from: startOfLastSeenDay, to: startOfToday).day
+      ?? Int.max
+
+    if daysAgo < 7 {
+      let weekday = Self.lastSeenWeekdayFormatter.string(from: date).lowercased()
+      return "last seen \(weekday) at \(timePart)"
+    }
+    if daysAgo < 14 {
+      return "last seen last week"
+    }
+
     let dayPart = Self.lastSeenDateFormatter.string(from: date)
-    return "last seen \(dayPart) \(timePart)"
+    return "last seen \(dayPart) at \(timePart)"
   }
 
   private func updateAvatarViews() {
@@ -2011,58 +2242,122 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     let width = pagesHost.bounds.width
     let profileOffscreen = CGAffineTransform(translationX: width, y: 0.0)
     let profileOnscreen = CGAffineTransform.identity
-    let chatAlpha: CGFloat = currentPage == .chat ? 1.0 : 0.0
-    let profileAlpha: CGFloat = currentPage == .profile ? 1.0 : 0.0
+    let chatHeaderAlpha: CGFloat = currentPage == .chat ? 1.0 : 0.0
+    let profileHeaderAlpha: CGFloat = currentPage == .profile ? 1.0 : 0.0
     let avatarAlpha: CGFloat = currentPage == .chat ? 1.0 : 0.0
-    let menuAlpha: CGFloat = currentPage == .profile ? 1.0 : 0.0
     let chatHeaderTransform =
       currentPage == .chat
-      ? CGAffineTransform.identity : CGAffineTransform(translationX: -18.0, y: 0.0)
+      ? CGAffineTransform.identity : CGAffineTransform(translationX: -14.0, y: 0.0)
     let profileHeaderTransform =
       currentPage == .profile
-      ? CGAffineTransform.identity : CGAffineTransform(translationX: 18.0, y: 0.0)
+      ? CGAffineTransform.identity : CGAffineTransform(translationX: 14.0, y: 0.0)
 
     let openingProfile = currentPage == .profile
     if openingProfile && profilePage.isHidden {
       profilePage.transform = profileOffscreen
       profilePage.alpha = 1.0
       profilePage.isHidden = false
+      profileHeaderContainer.isHidden = false
     }
+    headerContainer.isUserInteractionEnabled = !openingProfile
+    profileHeaderContainer.isUserInteractionEnabled = openingProfile
 
     let apply = {
       self.profilePage.transform = openingProfile ? profileOnscreen : profileOffscreen
-      self.chatHeaderStack.alpha = chatAlpha
-      self.profileHeaderStack.alpha = profileAlpha
+      self.headerContainer.alpha = chatHeaderAlpha
+      self.profileHeaderContainer.alpha = profileHeaderAlpha
+      self.chatHeaderStack.alpha = 1.0
+      self.profileHeaderStack.alpha = 1.0
       self.chatHeaderStack.transform = chatHeaderTransform
       self.profileHeaderStack.transform = profileHeaderTransform
       self.avatarButton.alpha = avatarAlpha
-      self.menuButton.alpha = menuAlpha
+      self.menuButton.alpha = 0.0
     }
 
     if animated {
       UIView.animate(
-        withDuration: 0.28,
+        withDuration: 0.34,
         delay: 0.0,
+        usingSpringWithDamping: 0.9,
+        initialSpringVelocity: 0.32,
         options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
         animations: apply
       ) { _ in
         if !openingProfile {
           self.profilePage.isHidden = true
           self.profilePage.alpha = 0
+          self.profileHeaderContainer.isHidden = true
         } else {
           self.profilePage.isHidden = false
           self.profilePage.alpha = 1.0
+          self.profileHeaderContainer.isHidden = false
         }
       }
     } else {
       apply()
       profilePage.isHidden = !openingProfile
       profilePage.alpha = openingProfile ? 1.0 : 0.0
+      profileHeaderContainer.isHidden = !openingProfile
     }
 
     if emitEvent {
       onNativeEvent(["type": "mainPageChanged", "page": currentPage.rawValue])
     }
+  }
+
+  @objc private func handleProfileSwipeBack(_ gesture: UIScreenEdgePanGestureRecognizer) {
+    guard currentPage == .profile || gesture.state == .changed else { return }
+    let width = max(1.0, pagesHost.bounds.width)
+    let translationX = gesture.translation(in: self).x
+
+    switch gesture.state {
+    case .began:
+      profileSwipeStartProgress = max(0.0, min(1.0, profilePage.transform.tx / width))
+      applyInteractiveProfileSwipe(progress: profileSwipeStartProgress)
+    case .changed:
+      let progress = max(0.0, min(1.0, profileSwipeStartProgress + (translationX / width)))
+      applyInteractiveProfileSwipe(progress: progress)
+    case .ended, .cancelled, .failed:
+      let progress = max(0.0, min(1.0, profilePage.transform.tx / width))
+      let velocityX = gesture.velocity(in: self).x
+      let shouldClose = progress > 0.33 || velocityX > 640.0
+      profileSwipeStartProgress = 0.0
+      if shouldClose {
+        markPendingNativePageChange(.chat)
+        currentPage = .chat
+        applyPageState(animated: true, emitEvent: true)
+      } else {
+        currentPage = .profile
+        applyPageState(animated: true, emitEvent: false)
+      }
+    default:
+      break
+    }
+  }
+
+  private func applyInteractiveProfileSwipe(progress: CGFloat) {
+    let clamped = max(0.0, min(1.0, progress))
+    let width = max(1.0, pagesHost.bounds.width)
+    profilePage.isHidden = false
+    profileHeaderContainer.isHidden = false
+    profilePage.transform = CGAffineTransform(translationX: width * clamped, y: 0.0)
+    headerContainer.alpha = clamped
+    profileHeaderContainer.alpha = 1.0 - clamped
+    chatHeaderStack.transform = CGAffineTransform(translationX: -14.0 * (1.0 - clamped), y: 0.0)
+    profileHeaderStack.transform = CGAffineTransform(translationX: 14.0 * clamped, y: 0.0)
+    avatarButton.alpha = clamped
+    menuButton.alpha = 0.0
+    headerContainer.isUserInteractionEnabled = false
+    profileHeaderContainer.isUserInteractionEnabled = false
+  }
+
+  override public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer)
+    -> Bool
+  {
+    if gestureRecognizer === profileSwipeBackGesture {
+      return currentPage == .profile
+    }
+    return true
   }
 
   @objc private func handleBackPressed() {
@@ -2108,8 +2403,9 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     sheet.addAction(UIAlertAction(title: "Cancel", style: .cancel))
 
     if let popover = sheet.popoverPresentationController {
-      popover.sourceView = menuButton
-      popover.sourceRect = menuButton.bounds
+      let sourceButton = profileHeaderContainer.isHidden ? menuButton : profileMenuButton
+      popover.sourceView = sourceButton
+      popover.sourceRect = sourceButton.bounds
       popover.permittedArrowDirections = [.up, .down]
     }
     presenter.present(sheet, animated: true)
@@ -2149,9 +2445,10 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
   }
 
   func setAgentConfig(_ config: [String: Any]?) {
-    agentConfig = config
+    let normalized = normalizedAgentConfig(config, fallbackChatId: engineChatId)
+    agentConfig = normalized
     refreshAgentCardVisibility()
-    profileAgentPromptNode.configure(chatId: engineChatId, config: config)
+    profileAgentPromptNode.configure(chatId: engineChatId, config: normalized)
   }
 
   private func refreshAgentCardVisibility() {
@@ -2161,14 +2458,10 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
     setNeedsLayout()
   }
 
-  func agentPromptNode(_ node: ChatMainProfileAgentPromptNode, didUpdateConfig config: [String: Any]) {
-    agentConfig = config
-    onNativeEvent([
-      "type": "agentConfigSaved",
-      "chatId": engineChatId,
-      "config": config,
-    ])
-    setNeedsLayout()
+  func agentPromptNode(
+    _ node: ChatMainProfileAgentPromptNode, didUpdateConfig config: [String: Any]
+  ) {
+    applyAgentConfigUpdate(config)
   }
 
   func agentPromptNodeDidRequestDelete(_ node: ChatMainProfileAgentPromptNode) {
@@ -2177,24 +2470,188 @@ public final class ChatMainView: ExpoView, ChatMainProfileAgentPromptNodeDelegat
       message: "This will remove the agent and clear its memory. This action cannot be undone.",
       preferredStyle: .alert)
     alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-    alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
-      guard let self else { return }
-      self.agentConfig = nil
-      self.profileAgentPromptNode.configure(chatId: self.engineChatId, config: nil)
-      self.setNeedsLayout()
-      self.onNativeEvent([
-        "type": "agentConfigDeleted",
-        "chatId": self.engineChatId,
-      ])
-    })
-    
+    alert.addAction(
+      UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+        guard let self else { return }
+        self.applyAgentConfigDeletion()
+      })
+
     if let presenter = topMostViewController() {
       presenter.present(alert, animated: true)
     }
   }
 
   func agentPromptNodeDidRequestFullEditor(_ node: ChatMainProfileAgentPromptNode) {
-    // Intentionally left blank as the inline editor covers all functionality.
+    guard !engineChatId.isEmpty, let presenter = topMostViewController() else { return }
+
+    let editor = ChatAgentConfigViewController()
+    editor.chatId = engineChatId
+    editor.agentConfig = agentConfig
+    editor.onSave = { [weak self] config in
+      self?.applyAgentConfigUpdate(config)
+    }
+    editor.onDelete = { [weak self] in
+      self?.applyAgentConfigDeletion()
+    }
+
+    let navigation = UINavigationController(rootViewController: editor)
+    navigation.modalPresentationStyle = .pageSheet
+    if let sheet = navigation.sheetPresentationController {
+      if #available(iOS 16.0, *) {
+        let custom = UISheetPresentationController.Detent.custom(identifier: .init("agent-config"))
+        {
+          context in context.maximumDetentValue * 0.94
+        }
+        sheet.detents = [custom]
+      } else {
+        sheet.detents = [.large()]
+      }
+      sheet.prefersGrabberVisible = true
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = false
+      sheet.preferredCornerRadius = 30.0
+    }
+    presenter.present(navigation, animated: true)
+  }
+
+  private func fetchAgentConfigForCurrentChat() {
+    let currentId = engineChatId
+    guard !currentId.isEmpty else { return }
+    ChatEngine.shared.fetchAgentConfig(chatId: currentId) { [weak self] config in
+      guard let self = self, self.engineChatId == currentId else { return }
+      let normalized = self.normalizedAgentConfig(config, fallbackChatId: currentId)
+      self.agentConfig = normalized
+      self.profileAgentPromptNode.configure(chatId: self.engineChatId, config: normalized)
+      self.setNeedsLayout()
+    }
+  }
+
+  private func applyAgentConfigUpdate(_ config: [String: Any]) {
+    guard let normalized = normalizedAgentConfig(config, fallbackChatId: engineChatId) else {
+      return
+    }
+    let currentId = engineChatId
+    ChatEngine.shared.saveAgentConfig(chatId: currentId, config: normalized) {
+      [weak self] success in
+      guard let self = self, self.engineChatId == currentId else { return }
+      if success {
+        self.agentConfig = normalized
+        self.profileAgentPromptNode.configure(chatId: self.engineChatId, config: normalized)
+        self.setNeedsLayout()
+        self.fetchAgentConfigForCurrentChat()
+      } else {
+        print("[ChatMainView] Failed to save agent config natively")
+      }
+    }
+  }
+
+  private func applyAgentConfigDeletion() {
+    let currentId = engineChatId
+    ChatEngine.shared.deleteAgentConfig(chatId: currentId) { [weak self] success in
+      guard let self = self, self.engineChatId == currentId else { return }
+      if success {
+        self.agentConfig = nil
+        self.profileAgentPromptNode.configure(chatId: self.engineChatId, config: nil)
+        self.setNeedsLayout()
+      } else {
+        print("[ChatMainView] Failed to delete agent config natively")
+      }
+    }
+  }
+
+  private func normalizedAgentConfig(_ config: [String: Any]?, fallbackChatId: String)
+    -> [String: Any]?
+  {
+    guard let config else { return nil }
+    var normalized: [String: Any] = [:]
+
+    let resolvedChatId =
+      normalizedAgentString(config["chat_id"]) ?? normalizedAgentString(config["chatId"])
+      ?? fallbackChatId
+    normalized["chat_id"] = resolvedChatId
+
+    if let resolvedName = normalizedAgentString(config["name"]) {
+      normalized["name"] = resolvedName
+    } else {
+      normalized["name"] = "Vibe AI"
+    }
+
+    let resolvedPrompt =
+      normalizedAgentString(config["system_prompt"]) ?? normalizedAgentString(
+        config["systemPrompt"])
+      ?? ""
+    normalized["system_prompt"] = resolvedPrompt
+
+    normalized["enabled"] = normalizedAgentEnabledValue(config["enabled"], defaultValue: true)
+    let enabledTools =
+      normalizedAgentToolList(config["enabled_tools"])
+      ?? normalizedAgentToolList(config["enabledTools"])
+    if let enabledTools, !enabledTools.isEmpty {
+      normalized["enabled_tools"] = enabledTools
+    }
+
+    if let existingId = normalizedAgentString(config["id"]), !existingId.isEmpty {
+      normalized["id"] = existingId
+    } else if let existingId = config["id"] {
+      normalized["id"] = existingId
+    }
+
+    if let avatar = normalizedAgentString(config["avatar_url"])
+      ?? normalizedAgentString(config["avatarUrl"])
+    {
+      normalized["avatar_url"] = avatar
+    }
+    if let createdBy = normalizedAgentString(config["created_by"])
+      ?? normalizedAgentString(config["createdBy"])
+    {
+      normalized["created_by"] = createdBy
+    }
+
+    return normalized
+  }
+
+  private func normalizedAgentString(_ rawValue: Any?) -> String? {
+    if let string = rawValue as? String {
+      let trimmed = string.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    if let number = rawValue as? NSNumber {
+      return number.stringValue
+    }
+    return nil
+  }
+
+  private func normalizedAgentEnabledValue(_ rawValue: Any?, defaultValue: Bool) -> Bool {
+    guard let rawValue else { return defaultValue }
+    if let boolValue = rawValue as? Bool { return boolValue }
+    if let numberValue = rawValue as? NSNumber { return numberValue.boolValue }
+    if let stringValue = rawValue as? String {
+      switch stringValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+      case "true", "1", "yes", "on":
+        return true
+      case "false", "0", "no", "off":
+        return false
+      default:
+        break
+      }
+    }
+    return defaultValue
+  }
+
+  private func normalizedAgentToolList(_ rawValue: Any?) -> [String]? {
+    guard let rawArray = rawValue as? [Any] else { return nil }
+    let normalized =
+      rawArray
+      .compactMap { value -> String? in
+        if let text = value as? String {
+          let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+          return trimmed.isEmpty ? nil : trimmed
+        }
+        if let number = value as? NSNumber {
+          return number.stringValue
+        }
+        return nil
+      }
+    return normalized
   }
 
   private func topMostViewController() -> UIViewController? {

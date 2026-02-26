@@ -440,13 +440,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // Determine animation mode from appearance (0=none, 1=slideUpNew, 2=telegramOffset, 3=springBatch)
     let animMode = appearance.insertionAnimationMode
 
-    // Animate insertions for small incremental appends near the bottom.
+    // Animate insertions and deletions for small incremental appends near the bottom.
     // During a send transition, we still animate EXISTING cells shifting
     // (so the list moves smoothly) but skip fade-in on the new cell
     // (the overlay handles that).
-    let shouldAnimateInsertions =
-      !insertions.isEmpty
-      && insertions.count <= 5
+    let isSmallUpdate =
+      (insertions.count + deletions.count) > 0 && (insertions.count + deletions.count) <= 5
+    let shouldAnimateUpdate =
+      isSmallUpdate
       && wasNearBottom
       && animMode > 0  // mode 0 = no animation
 
@@ -456,8 +457,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // overlay "chases" the scrolling cell and appears at the wrong spot).
     let hasPendingSend = pendingSendTransition != nil || activeSendTransition != nil
     let shouldAnimateScroll =
-      !insertions.isEmpty
-      && insertions.count <= 5
+      isSmallUpdate
       && wasNearBottom
       && !hasPendingSend
 
@@ -466,7 +466,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // animations account for any scroll change finalize introduces.
     var preUpdateScreenY: [String: CGFloat] = [:]
     var preUpdateOffset: CGFloat = 0
-    if shouldAnimateInsertions && animMode == 2 {
+    if shouldAnimateUpdate && animMode == 2 {
       preUpdateOffset = collectionView.contentOffset.y
       for cell in collectionView.visibleCells {
         guard let ip = collectionView.indexPath(for: cell), ip.item < previousRows.count else {
@@ -485,7 +485,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // ===================================================================
     // MODE 3: Spring Batch — UIView.animate wraps entire performBatchUpdates
     // ===================================================================
-    if shouldAnimateInsertions && animMode == 3 {
+    if shouldAnimateUpdate && animMode == 3 {
       UIView.animate(
         withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0.0,
         options: [.allowUserInteraction, .beginFromCurrentState],
@@ -579,7 +579,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       cell.contentView.layer.opacity = 1.0
     }
 
-    if shouldAnimateInsertions {
+    if shouldAnimateUpdate {
       // Telegram timing: 0.3s spring (matches kCAMediaTimingFunctionSpring).
       // NOT a custom cubic bezier — a real spring with 0.3s settling time.
       let animDuration: CFTimeInterval = 0.3
@@ -1189,7 +1189,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private func estimateMessageHeight(_ row: ChatListRow, rowWidth: CGFloat) -> CGFloat {
-    measureMessageBubbleLayout(row: row, rowWidth: rowWidth).bubbleHeight
+    let bubbleHeight = measureMessageBubbleLayout(row: row, rowWidth: rowWidth).bubbleHeight
+    // Agent messages/mentions have a sender label above the bubble
+    if row.isAgentMessage || row.isAgentMention {
+      return bubbleHeight + 20.0  // 18pt label + 2pt gap
+    }
+    return bubbleHeight
   }
 
   private func currentDistanceFromBottom() -> CGFloat {
@@ -2242,7 +2247,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
   // MARK: - Native Send (synchronous, no bridge delay)
 
-  private func handleNativeSend(text: String, agentMention: Bool = false, agentText: String? = nil) {
+  private func handleNativeSend(text: String, agentMention: Bool = false, agentText: String? = nil)
+  {
     let messageId = UUID().uuidString.lowercased()
     let now = Date()
     let timestampMs = now.timeIntervalSince1970 * 1000
@@ -2420,6 +2426,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       ]
       if let replyToMessageId {
         sendPayload["replyToMessageId"] = replyToMessageId
+      }
+      if agentMention, let agentText {
+        sendPayload["agentMention"] = true
+        sendPayload["agentText"] = agentText
       }
       onNativeEvent(sendPayload)
       NSLog("[ChatListView] handleNativeSend onNativeEvent dispatched")

@@ -3,6 +3,7 @@ package expo.modules.vibechatnative
 import android.content.Context
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.graphics.PorterDuff
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
@@ -14,7 +15,6 @@ import android.view.ViewGroup
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.PopupMenu
 import android.widget.ScrollView
 import android.widget.TextView
 import expo.modules.kotlin.AppContext
@@ -53,8 +53,6 @@ class ChatMainView(
   private val chatAvatarFallback = TextView(context)
   private val chatVideoButton = ImageView(context)
   private val chatPhoneButton = ImageView(context)
-  private val chatSearchButton = ImageView(context)
-  private val chatMenuButton = ImageView(context)
 
   private val profileHeader = FrameLayout(context)
   private val profileBackButton = TextView(context)
@@ -68,6 +66,11 @@ class ChatMainView(
   private val profileNameView = TextView(context)
   private val profileHandleView = TextView(context)
   private val profileBioView = TextView(context)
+  private val profileActionsRow = LinearLayout(context)
+  private val profileMuteAction = ChatMainProfileActionNode(context)
+  private val profileSearchAction = ChatMainProfileActionNode(context)
+  private val profileAudioAction = ChatMainProfileActionNode(context)
+  private val profileVideoAction = ChatMainProfileActionNode(context)
   private val profileInfoCard = LinearLayout(context)
   private val profileInfoTitle = TextView(context)
   private val profileInfoSubtitle = TextView(context)
@@ -306,6 +309,7 @@ class ChatMainView(
   fun setIsChatMuted(value: Boolean) {
     if (isChatMuted == value) return
     isChatMuted = value
+    updateProfileActionState()
   }
 
   fun setPage(value: String, animated: Boolean) {
@@ -605,30 +609,12 @@ class ChatMainView(
       onNativeEvent(mapOf("type" to "headerAudioCallPressed"))
     }
 
-    styleHeaderActionButton(chatSearchButton, android.R.drawable.ic_menu_search)
-    chatSearchButton.setOnClickListener {
-      onNativeEvent(mapOf("type" to "headerSearchPressed"))
-    }
-
-    styleHeaderActionButton(chatMenuButton, android.R.drawable.ic_menu_more)
-    chatMenuButton.setOnClickListener {
-      showHeaderMenu()
-    }
-
     chatHeaderRight.addView(
       chatVideoButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
     )
     chatHeaderRight.addView(
       chatPhoneButton,
-      LinearLayout.LayoutParams(dp(40), dp(40)),
-    )
-    chatHeaderRight.addView(
-      chatSearchButton,
-      LinearLayout.LayoutParams(dp(40), dp(40)),
-    )
-    chatHeaderRight.addView(
-      chatMenuButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
     )
 
@@ -767,14 +753,79 @@ class ChatMainView(
       ),
     )
 
+    profileActionsRow.orientation = LinearLayout.HORIZONTAL
+    profileActionsRow.gravity = Gravity.CENTER
+    profileActionsRow.setPadding(0, dp(18), 0, 0)
+    profileContent.addView(
+      profileActionsRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    profileMuteAction.configure(
+      title = "Mute",
+      iconRes = android.R.drawable.ic_lock_silent_mode,
+    )
+    profileMuteAction.setOnClickListener {
+      onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "muteToggle"))
+    }
+    profileActionsRow.addView(
+      profileMuteAction,
+      LinearLayout.LayoutParams(0, dp(64), 1f).apply { marginEnd = dp(6) },
+    )
+
+    profileSearchAction.configure(
+      title = "Search",
+      iconRes = android.R.drawable.ic_menu_search,
+    )
+    profileSearchAction.setOnClickListener {
+      onNativeEvent(mapOf("type" to "headerSearchPressed"))
+    }
+    profileActionsRow.addView(
+      profileSearchAction,
+      LinearLayout.LayoutParams(0, dp(64), 1f).apply {
+        marginStart = dp(2)
+        marginEnd = dp(2)
+      },
+    )
+
+    profileAudioAction.configure(
+      title = "Call",
+      iconRes = R.drawable.ic_call_accept,
+    )
+    profileAudioAction.setOnClickListener {
+      onNativeEvent(mapOf("type" to "headerAudioCallPressed"))
+    }
+    profileActionsRow.addView(
+      profileAudioAction,
+      LinearLayout.LayoutParams(0, dp(64), 1f).apply {
+        marginStart = dp(2)
+        marginEnd = dp(2)
+      },
+    )
+
+    profileVideoAction.configure(
+      title = "Video",
+      iconRes = R.drawable.ic_video,
+    )
+    profileVideoAction.setOnClickListener {
+      onNativeEvent(mapOf("type" to "headerVideoCallPressed"))
+    }
+    profileActionsRow.addView(
+      profileVideoAction,
+      LinearLayout.LayoutParams(0, dp(64), 1f).apply { marginStart = dp(6) },
+    )
+
     profileInfoCard.orientation = LinearLayout.VERTICAL
-    profileInfoCard.background = roundedShape(surfaceColor, dp(20))
-    profileInfoCard.setPadding(dp(16), dp(14), dp(16), dp(14))
+    profileInfoCard.background = roundedShape(surfaceColor, dp(24))
+    profileInfoCard.setPadding(dp(18), dp(14), dp(18), dp(14))
     val cardParams = LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.MATCH_PARENT,
       LinearLayout.LayoutParams.WRAP_CONTENT,
     )
-    cardParams.topMargin = dp(22)
+    cardParams.topMargin = dp(18)
     profileContent.addView(profileInfoCard, cardParams)
 
     profileInfoTitle.setTypeface(Typeface.DEFAULT_BOLD)
@@ -818,19 +869,21 @@ class ChatMainView(
   private fun applyTheme() {
     val hasGroupTyping = isGroupOrChannel && groupTypingUserIds.isNotEmpty()
     val shouldHighlightStatus = hasGroupTyping || isOnline
+    val headerActionColor = contrastForegroundFor(headerBackgroundColor)
     chatHeader.setBackgroundColor(withAlpha(headerBackgroundColor, 0.95f))
     profileHeader.background = roundedShape(withAlpha(surfaceColor, 0.84f), dp(20))
     profilePage.setBackgroundColor(profileBackgroundColor)
-    profileInfoCard.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(20))
+    profileInfoCard.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(24))
     profileHeroAvatar.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(59))
     chatAvatarButton.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(19))
+    listOf(profileMuteAction, profileSearchAction, profileAudioAction, profileVideoAction).forEach { action ->
+      action.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(16))
+    }
 
-    chatBackButton.setTextColor(textColor)
-    chatVideoButton.setColorFilter(textColor)
-    chatPhoneButton.setColorFilter(textColor)
-    chatSearchButton.setColorFilter(textColor)
-    chatMenuButton.setColorFilter(textColor)
-    profileBackButton.setTextColor(textColor)
+    chatBackButton.setTextColor(headerActionColor)
+    chatVideoButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
+    chatPhoneButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
+    profileBackButton.setTextColor(headerActionColor)
     chatTitleView.setTextColor(textColor)
     chatSubtitleView.setTextColor(if (shouldHighlightStatus) Color.parseColor("#53E08A") else secondaryTextColor)
     profileHeaderTitle.setTextColor(textColor)
@@ -843,6 +896,13 @@ class ChatMainView(
     profileBioView.setTextColor(secondaryTextColor)
     profileInfoTitle.setTextColor(textColor)
     profileInfoSubtitle.setTextColor(secondaryTextColor)
+    listOf(profileMuteAction, profileSearchAction, profileAudioAction, profileVideoAction).forEach { action ->
+      action.applyTheme(
+        foreground = textColor,
+        background = withAlpha(surfaceColor, 0.92f),
+      )
+    }
+    updateProfileActionState()
   }
 
   private fun updateHeaderTexts() {
@@ -882,8 +942,9 @@ class ChatMainView(
       val fallbackHandle = resolveEnginePresenceSubtitle() ?: if (isOnline) "online" else "offline"
       profileHandleView.text = if (profileHandle.isBlank()) fallbackHandle else profileHandle
     }
-    profileBioView.text =
-      if (profileBio.isBlank()) "Shared media, links and pinned messages will appear here." else profileBio
+    profileBioView.text = profileBio
+      .takeIf { it.isNotBlank() }
+      ?: "Shared media, links and pinned messages will appear here."
     val initial = resolvedTitle.trim().firstOrNull()?.uppercase() ?: "U"
     chatAvatarFallback.text = initial
     profileAvatarFallback.text = initial
@@ -907,6 +968,7 @@ class ChatMainView(
           "Loading shared media and files from native encrypted cache..."
         }
     }
+    updateProfileActionState()
   }
 
   private fun resolvedGroupMemberCount(): Int {
@@ -1101,29 +1163,21 @@ class ChatMainView(
     }
   }
 
-  private fun showHeaderMenu() {
-    if (currentPage != "chat") return
-    val popup = PopupMenu(context, chatMenuButton)
-    val muteTitle = if (isChatMuted) "Unmute" else "Mute"
-    popup.menu.add(0, 1, 0, muteTitle)
-    popup.menu.add(0, 2, 1, "Clear Chat")
-    popup.menu.add(0, 3, 2, "Block User")
-    popup.setOnMenuItemClickListener { item ->
-      when (item.itemId) {
-        1 -> onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "muteToggle"))
-        2 -> onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "clearChat"))
-        3 -> onNativeEvent(mapOf("type" to "headerMenuAction", "action" to "blockUser"))
-      }
-      true
-    }
-    popup.show()
-  }
-
   private fun styleHeaderActionButton(view: ImageView, drawableRes: Int) {
     view.scaleType = ImageView.ScaleType.CENTER_INSIDE
     view.setImageResource(drawableRes)
     view.setPadding(dp(9), dp(9), dp(9), dp(9))
     setTouchAlphaPress(view)
+  }
+
+  private fun updateProfileActionState() {
+    if (isChatMuted) {
+      profileMuteAction.setIcon(android.R.drawable.ic_lock_silent_mode_off)
+      profileMuteAction.setTitle("Unmute")
+    } else {
+      profileMuteAction.setIcon(android.R.drawable.ic_lock_silent_mode)
+      profileMuteAction.setTitle("Mute")
+    }
   }
 
   private fun setTouchAlphaPress(view: View) {
@@ -1156,6 +1210,12 @@ class ChatMainView(
       }
       else -> null
     }
+  }
+
+  private fun contrastForegroundFor(background: Int): Int {
+    val luminance =
+      (0.299 * Color.red(background) + 0.587 * Color.green(background) + 0.114 * Color.blue(background)) / 255.0
+    return if (luminance > 0.62) Color.BLACK else Color.WHITE
   }
 
   private fun withAlpha(color: Int, alpha: Float): Int {

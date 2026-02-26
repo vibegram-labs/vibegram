@@ -143,7 +143,11 @@ public class ChatNativeMainModule: Module {
       }
 
       Prop("page") { (view: ChatMainView, value: String?) in
-        view.setPage(value ?? "chat", animated: true)
+        guard
+          let value,
+          !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        else { return }
+        view.setPage(value, animated: true)
       }
 
       Prop("isGroupOrChannel") { (view: ChatMainView, value: Bool?) in

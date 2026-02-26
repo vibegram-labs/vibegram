@@ -7,7 +7,7 @@ defmodule Vibe.AI.GroupAgent do
 
   require Logger
 
-  alias Vibe.Chat.{GroupAgent, GroupAgentMemory}
+  alias Vibe.Chat.{GroupAgent, GroupAgentMemory, GroupAgentDocument}
   alias Vibe.Repo
 
   @claude_api "https://api.anthropic.com/v1/messages"
@@ -70,7 +70,7 @@ defmodule Vibe.AI.GroupAgent do
     %{
       name: "create_document",
       description:
-        "Create a formatted document OR editable spreadsheet file from user instructions. For spreadsheet requests, use format csv (Excel/Google Sheets compatible) and include columns/rows.",
+        "Create or edit a formatted document OR editable spreadsheet file scoped to this group. For spreadsheet requests, use format csv (Excel/Google Sheets compatible).",
       input_schema: %{
         type: "object",
         properties: %{
@@ -111,6 +111,12 @@ defmodule Vibe.AI.GroupAgent do
             },
             description:
               "For spreadsheet output: row data. Can be arrays aligned to columns, or objects keyed by column name."
+          },
+          operation: %{
+            type: "string",
+            enum: ["create_new", "edit_current", "append_rows", "replace_rows", "revert_last"],
+            description:
+              "Spreadsheet edit operation. Use edit_current/append_rows for ongoing updates; use create_new only when user explicitly asks for a new file."
           }
         },
         required: ["title", "body"]
@@ -208,17 +214,25 @@ defmodule Vibe.AI.GroupAgent do
     {:ok, memory} = GroupAgentMemory.get_or_create(chat_id)
     Logger.info("[GroupAgent] Memory loaded for #{chat_id}: #{length(memory.messages)} messages, summary=#{if memory.summary, do: "yes", else: "no"}")
 
-    # 2. Build system prompt with memory context
-    system_prompt = build_system_prompt(agent_config, memory, enabled_tools)
+    # 2. Build system prompt with memory + current group document context
+    group_document_context = build_group_document_context(chat_id)
+    system_prompt = build_system_prompt(agent_config, memory, enabled_tools, group_document_context)
 
     # 3. Build message history from memory + current message
     messages = build_messages(memory, user_message, metadata)
     Logger.info("[GroupAgent] Calling Claude for #{chat_id}: #{length(messages)} messages, system_prompt_len=#{String.length(system_prompt)}")
 
     # 4. Call Claude
-    case call_claude(messages, system_prompt, user_id, enabled_tools) do
+    case call_claude(messages, system_prompt, user_id, enabled_tools, chat_id) do
       {:ok, response_text} ->
-        response = maybe_attach_spreadsheet_fallback(user_message, response_text, enabled_tools)
+        response =
+          maybe_attach_spreadsheet_fallback(
+            chat_id,
+            user_message,
+            response_text,
+            enabled_tools,
+            user_id
+          )
 
         # 5. Store in memory
         attachment_summary = summarize_attachments_for_memory(metadata)
@@ -254,7 +268,7 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp build_system_prompt(agent_config, memory, enabled_tools) do
+  defp build_system_prompt(agent_config, memory, enabled_tools, group_document_context) do
     base_system_prompt =
       (agent_config.system_prompt || @default_system_prompt)
       |> to_string()
@@ -273,15 +287,25 @@ defmodule Vibe.AI.GroupAgent do
     - You are #{agent_config.name}, an AI assistant in this group chat.
     - Keep responses concise and relevant — this is mobile chat.
     - When using tools, call them IMMEDIATELY without intro text.
+    - Spreadsheet behavior is stateful per group chat.
+    - Default behavior is to edit the current spreadsheet for this chat.
+    - Use operation=create_new only when user explicitly asks for a NEW file/from-scratch sheet.
+    - For adding data, prefer operation=append_rows.
+    - For corrections, prefer operation=edit_current or replace_rows.
+    - If user asks to undo/revert, use operation=revert_last.
     - If user asks for Excel/sheet/spreadsheet/table with rows/columns, call create_document with format csv.
-    - When a tool returns file_url, include that URL in your final message.
+    - When a tool creates/updates a file, respond naturally and state that the file is attached (do not paste raw URLs).
     - You can reference previous conversations from your memory.
     - Address users naturally, referring to the group context.
     - Only use tools that are enabled for this group.
     - If attachments are provided in the current message context, use them.
+    - Never claim you cannot create/edit spreadsheet files when create_document is enabled.
 
     ENABLED TOOLS:
     #{if tool_descriptions == "", do: "- none", else: tool_descriptions}
+
+    CURRENT GROUP DOCUMENT CONTEXT:
+    #{group_document_context}
     """
 
     case memory.summary do
@@ -289,6 +313,42 @@ defmodule Vibe.AI.GroupAgent do
       "" -> base_prompt
       summary ->
         base_prompt <> "\n\nConversation Memory (summary of earlier interactions):\n#{summary}\n"
+    end
+  end
+
+  defp build_group_document_context(chat_id) do
+    case GroupAgentDocument.get_current(chat_id) do
+      nil ->
+        "No active spreadsheet file for this group yet."
+
+      current ->
+        columns =
+          current.columns
+          |> List.wrap()
+          |> Enum.join(", ")
+          |> default_if_blank("(none)")
+
+        recent_versions =
+          chat_id
+          |> GroupAgentDocument.list_recent(3)
+          |> Enum.map_join("\n", fn doc ->
+            "- v#{doc.version} (#{doc.change_type}) #{doc.title} => #{doc.relative_url}"
+          end)
+          |> default_if_blank("- none")
+
+        """
+        Current file:
+        - version: #{current.version}
+        - title: #{current.title}
+        - format: #{current.format}
+        - rows: #{current.row_count}
+        - columns: #{columns}
+        - file_url: #{current.file_url}
+
+        Recent versions:
+        #{recent_versions}
+        """
+        |> String.trim()
     end
   end
 
@@ -324,7 +384,7 @@ defmodule Vibe.AI.GroupAgent do
     recent_messages ++ [%{role: "user", content: current_content}]
   end
 
-  defp call_claude(messages, system_prompt, user_id, enabled_tools) do
+  defp call_claude(messages, system_prompt, user_id, enabled_tools, chat_id) do
     api_key = System.get_env("ANTHROPIC_API_KEY") || System.get_env("CLAUDE_API_KEY")
     Logger.info("[GroupAgent] API key configured: #{if api_key, do: "yes (#{String.length(api_key)} chars)", else: "NO - MISSING"}")
 
@@ -335,7 +395,16 @@ defmodule Vibe.AI.GroupAgent do
         @tools
         |> Enum.filter(&(&1.name in enabled_tools))
 
-      call_claude_with_tools(messages, system_prompt, api_key, 0, user_id, enabled_tools, enabled_tool_definitions)
+      call_claude_with_tools(
+        messages,
+        system_prompt,
+        api_key,
+        0,
+        user_id,
+        enabled_tools,
+        enabled_tool_definitions,
+        chat_id
+      )
     end
   end
 
@@ -346,7 +415,8 @@ defmodule Vibe.AI.GroupAgent do
          depth,
          user_id,
          enabled_tools,
-         enabled_tool_definitions
+         enabled_tool_definitions,
+         chat_id
        ) do
     if depth > 3 do
       {:error, "Max tool depth reached"}
@@ -383,7 +453,8 @@ defmodule Vibe.AI.GroupAgent do
                   depth,
                   user_id,
                   enabled_tools,
-                  enabled_tool_definitions
+                  enabled_tool_definitions,
+                  chat_id
                 )
               else
                 # Extract text from response
@@ -420,7 +491,8 @@ defmodule Vibe.AI.GroupAgent do
          depth,
          user_id,
          enabled_tools,
-         enabled_tool_definitions
+         enabled_tool_definitions,
+         chat_id
        ) do
     # Extract tool calls from content
     tool_calls = Enum.filter(content, fn
@@ -430,7 +502,7 @@ defmodule Vibe.AI.GroupAgent do
 
     # Execute tools
     tool_results = Enum.map(tool_calls, fn tool ->
-      result = execute_tool(tool["name"], tool["input"], user_id, enabled_tools)
+      result = execute_tool(tool["name"], tool["input"], user_id, enabled_tools, chat_id)
       %{
         "type" => "tool_result",
         "tool_use_id" => tool["id"],
@@ -459,11 +531,12 @@ defmodule Vibe.AI.GroupAgent do
       depth + 1,
       user_id,
       enabled_tools,
-      enabled_tool_definitions
+      enabled_tool_definitions,
+      chat_id
     )
   end
 
-  defp execute_tool(name, input, _user_id, enabled_tools) do
+  defp execute_tool(name, input, user_id, enabled_tools, chat_id) do
     if name in enabled_tools do
       start_time = System.monotonic_time(:millisecond)
 
@@ -472,7 +545,7 @@ defmodule Vibe.AI.GroupAgent do
           "search_google" -> Vibe.AI.Tools.Search.google(input)
           "analyze_image" -> Vibe.AI.Tools.Vision.analyze(input)
           "analyze_document" -> Vibe.AI.Tools.Document.analyze(input)
-          "create_document" -> create_document_tool(input)
+          "create_document" -> create_document_tool(chat_id, input, user_id)
           _ -> %{error: "Unknown tool: #{name}"}
         end
 
@@ -485,7 +558,7 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp create_document_tool(input) do
+  defp create_document_tool(chat_id, input, user_id) do
     title =
       input
       |> tool_input_value("title")
@@ -521,7 +594,7 @@ defmodule Vibe.AI.GroupAgent do
 
     case format do
       "csv" ->
-        build_spreadsheet_document(input, title, body, sections)
+        build_spreadsheet_document(chat_id, input, title, body, sections, user_id)
 
       _ ->
         content =
@@ -553,37 +626,52 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp build_spreadsheet_document(input, title, body, sections) do
-    columns = spreadsheet_columns(input, sections)
-    rows = spreadsheet_rows(input, columns, body)
-    csv_content = csv_from_rows(columns, rows)
+  defp build_spreadsheet_document(chat_id, input, title, body, sections, user_id) do
+    current_document = GroupAgentDocument.get_current(chat_id)
+    operation = resolve_spreadsheet_operation(input, current_document)
 
-    case write_agent_document_file(title, csv_content, "csv") do
-      {:ok, %{relative_url: relative_url, file_url: file_url}} ->
-        %{
-          ok: true,
-          title: title,
-          format: "csv",
-          columns: columns,
-          rows: rows,
-          row_count: length(rows),
-          content: csv_content,
-          download_path: relative_url,
-          file_url: file_url,
-          note:
-            "Spreadsheet file generated. This CSV is editable and opens in Excel or Google Sheets."
-        }
+    case operation do
+      :create_new ->
+        create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id)
 
-      {:error, reason} ->
-        Logger.error("[GroupAgent] Failed to write spreadsheet document: #{inspect(reason)}")
+      :append_rows ->
+        edit_current_spreadsheet_document(
+          chat_id,
+          input,
+          title,
+          body,
+          sections,
+          user_id,
+          current_document,
+          :append_rows
+        )
 
-        %{
-          ok: false,
-          error: "Failed to generate spreadsheet file",
-          reason: inspect(reason),
-          format: "csv",
-          title: title
-        }
+      :replace_rows ->
+        edit_current_spreadsheet_document(
+          chat_id,
+          input,
+          title,
+          body,
+          sections,
+          user_id,
+          current_document,
+          :replace_rows
+        )
+
+      :revert_last ->
+        revert_spreadsheet_document(chat_id, title, body, user_id, current_document)
+
+      :edit_current ->
+        edit_current_spreadsheet_document(
+          chat_id,
+          input,
+          title,
+          body,
+          sections,
+          user_id,
+          current_document,
+          :edit_current
+        )
     end
   end
 
@@ -607,7 +695,307 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp spreadsheet_columns(input, sections) do
+  defp resolve_spreadsheet_operation(input, current_document) do
+    raw_operation =
+      input
+      |> tool_input_value("operation")
+      |> String.downcase()
+
+    hint_text =
+      [
+        tool_input_value(input, "body"),
+        tool_input_value(input, "title")
+      ]
+      |> Enum.join(" ")
+      |> String.downcase()
+
+    case raw_operation do
+      op when op in ["create_new", "new"] ->
+        if current_document && not explicit_new_request_in_input?(input) do
+          :edit_current
+        else
+          :create_new
+        end
+
+      "append_rows" -> :append_rows
+      "append" -> :append_rows
+      "replace_rows" -> :replace_rows
+      "edit_current" -> :edit_current
+      "edit" -> :edit_current
+      "update" -> :edit_current
+      "revert_last" -> :revert_last
+      "undo" -> :revert_last
+      "rollback" -> :revert_last
+      _ ->
+        cond do
+          undo_intent?(hint_text) ->
+            :revert_last
+
+          current_document && new_file_request?(hint_text) ->
+            :create_new
+
+          current_document && append_request?(hint_text) ->
+            :append_rows
+
+          current_document ->
+            :edit_current
+
+          true ->
+            :create_new
+        end
+    end
+  end
+
+  defp explicit_new_request_in_input?(input) do
+    hint =
+      [
+        tool_input_value(input, "body"),
+        tool_input_value(input, "title")
+      ]
+      |> Enum.join(" ")
+      |> String.downcase()
+
+    new_file_request?(hint)
+  end
+
+  defp create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id) do
+    columns = spreadsheet_columns(input, sections, [])
+    rows = spreadsheet_rows(input, columns, body, [])
+    csv_content = csv_from_rows(columns, rows)
+
+    with {:ok, %{relative_url: relative_url, file_url: file_url}} <-
+           write_agent_document_file(title, csv_content, "csv"),
+         {:ok, doc} <-
+           persist_document_version(
+             chat_id,
+             title,
+             "csv",
+             relative_url,
+             file_url,
+             columns,
+             length(rows),
+             build_spreadsheet_metadata("create_new", nil, body),
+             "create",
+             user_id
+           ) do
+      spreadsheet_tool_response(
+        doc,
+        columns,
+        rows,
+        csv_content,
+        "Spreadsheet created. Future edits in this group update this file unless user asks for a new one."
+      )
+    else
+      {:error, reason} ->
+        Logger.error("[GroupAgent] Failed to create spreadsheet: #{inspect(reason)}")
+        spreadsheet_error_response(title, reason)
+    end
+  end
+
+  defp edit_current_spreadsheet_document(
+         chat_id,
+         input,
+         title,
+         body,
+         sections,
+         user_id,
+         current_document,
+         operation
+       ) do
+    if is_nil(current_document) do
+      create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id)
+    else
+      with {:ok, existing_csv} <- read_agent_document_file(current_document.relative_url) do
+        {existing_columns, existing_rows} = parse_csv_content(existing_csv)
+        columns = spreadsheet_columns(input, sections, existing_columns)
+        existing_rows_aligned = align_rows_to_column_count(existing_rows, length(columns))
+
+        explicit_rows =
+          input
+          |> tool_input_raw("rows")
+          |> normalize_spreadsheet_rows(columns)
+
+        inferred_rows =
+          maybe_infer_rows_from_body(body, columns, operation, explicit_rows)
+
+        incoming_rows = if explicit_rows == [], do: inferred_rows, else: explicit_rows
+
+        final_rows =
+          case operation do
+            :append_rows ->
+              existing_rows_aligned ++ incoming_rows
+
+            :replace_rows ->
+              if incoming_rows == [], do: existing_rows_aligned, else: incoming_rows
+
+            :edit_current ->
+              if incoming_rows == [], do: existing_rows_aligned, else: incoming_rows
+          end
+          |> ensure_non_empty_rows(columns, body)
+
+        csv_content = csv_from_rows(columns, final_rows)
+
+        with {:ok, %{relative_url: relative_url, file_url: file_url}} <-
+               write_agent_document_file(title, csv_content, "csv"),
+             {:ok, doc} <-
+               persist_document_version(
+                 chat_id,
+                 title,
+                 "csv",
+                 relative_url,
+                 file_url,
+                 columns,
+                 length(final_rows),
+                 build_spreadsheet_metadata(to_string(operation), current_document.version, body),
+                 "edit",
+                 user_id
+               ) do
+          spreadsheet_tool_response(
+            doc,
+            columns,
+            final_rows,
+            csv_content,
+            "Spreadsheet updated from current group context (version #{current_document.version} -> #{doc.version})."
+          )
+        else
+          {:error, reason} ->
+            Logger.error("[GroupAgent] Failed to edit spreadsheet: #{inspect(reason)}")
+            spreadsheet_error_response(title, reason)
+        end
+      else
+        {:error, reason} ->
+          Logger.error("[GroupAgent] Failed to read current spreadsheet: #{inspect(reason)}")
+          spreadsheet_error_response(title, reason)
+      end
+    end
+  end
+
+  defp revert_spreadsheet_document(chat_id, title, body, user_id, current_document) do
+    if is_nil(current_document) do
+      %{
+        ok: false,
+        format: "csv",
+        title: title,
+        error: "No active spreadsheet to revert in this group."
+      }
+    else
+      previous_document = find_previous_document(chat_id, current_document)
+
+      if is_nil(previous_document) do
+        %{
+          ok: false,
+          format: "csv",
+          title: title,
+          error: "No previous spreadsheet version available to revert."
+        }
+      else
+        with {:ok, csv_content} <- read_agent_document_file(previous_document.relative_url),
+             {columns, rows} <- parse_csv_content(csv_content),
+             {:ok, %{relative_url: relative_url, file_url: file_url}} <-
+               write_agent_document_file(previous_document.title, csv_content, "csv"),
+             {:ok, doc} <-
+               persist_document_version(
+                 chat_id,
+                 previous_document.title,
+                 "csv",
+                 relative_url,
+                 file_url,
+                 columns,
+                 length(rows),
+                 build_spreadsheet_metadata("revert_last", current_document.version, body),
+                 "revert",
+                 user_id
+               ) do
+          spreadsheet_tool_response(
+            doc,
+            columns,
+            rows,
+            csv_content,
+            "Reverted spreadsheet to previous content safely. A new version snapshot was created."
+          )
+        else
+          {:error, reason} ->
+            Logger.error("[GroupAgent] Failed to revert spreadsheet: #{inspect(reason)}")
+            spreadsheet_error_response(title, reason)
+        end
+      end
+    end
+  end
+
+  defp find_previous_document(chat_id, %GroupAgentDocument{} = current_document) do
+    case current_document.previous_document_id do
+      prev_id when is_binary(prev_id) ->
+        case GroupAgentDocument.get_by_id(prev_id) do
+          %GroupAgentDocument{chat_id: ^chat_id} = previous -> previous
+          _ -> GroupAgentDocument.get_previous(chat_id, current_document.version)
+        end
+
+      _ ->
+        GroupAgentDocument.get_previous(chat_id, current_document.version)
+    end
+  end
+
+  defp persist_document_version(
+         chat_id,
+         title,
+         format,
+         relative_url,
+         file_url,
+         columns,
+         row_count,
+         metadata,
+         change_type,
+         user_id
+       ) do
+    GroupAgentDocument.create_new_version(chat_id, %{
+      title: default_if_blank(title, "Spreadsheet"),
+      format: default_if_blank(format, "csv"),
+      relative_url: relative_url,
+      file_url: file_url,
+      columns: normalize_string_list(columns),
+      row_count: max(row_count || 0, 0),
+      metadata: if(is_map(metadata), do: metadata, else: %{}),
+      change_type: change_type,
+      created_by_user_id: user_id
+    })
+  end
+
+  defp spreadsheet_tool_response(doc, columns, rows, csv_content, note) do
+    %{
+      ok: true,
+      title: doc.title,
+      format: "csv",
+      columns: columns,
+      rows: rows,
+      row_count: length(rows),
+      content: csv_content,
+      download_path: doc.relative_url,
+      file_url: doc.file_url,
+      version: doc.version,
+      change_type: doc.change_type,
+      note: note
+    }
+  end
+
+  defp spreadsheet_error_response(title, reason) do
+    %{
+      ok: false,
+      error: "Failed to handle spreadsheet file",
+      reason: inspect(reason),
+      format: "csv",
+      title: title
+    }
+  end
+
+  defp build_spreadsheet_metadata(operation, source_version, body) do
+    %{
+      "operation" => operation,
+      "source_version" => source_version,
+      "request_hint" => body |> to_string() |> String.slice(0, 300)
+    }
+  end
+
+  defp spreadsheet_columns(input, sections, fallback_columns \\ []) do
     columns =
       input
       |> tool_input_raw("columns")
@@ -620,21 +1008,29 @@ defmodule Vibe.AI.GroupAgent do
       sections != [] ->
         sections
 
+      fallback_columns != [] ->
+        fallback_columns
+
       true ->
         ["Item", "Value"]
     end
   end
 
-  defp spreadsheet_rows(input, columns, body) do
+  defp spreadsheet_rows(input, columns, body, fallback_rows \\ []) do
     normalized_rows =
       input
       |> tool_input_raw("rows")
       |> normalize_spreadsheet_rows(columns)
 
-    if normalized_rows == [] do
-      [default_spreadsheet_row(columns, body)]
-    else
-      normalized_rows
+    cond do
+      normalized_rows != [] ->
+        normalized_rows
+
+      fallback_rows != [] ->
+        align_rows_to_column_count(fallback_rows, length(columns))
+
+      true ->
+        [default_spreadsheet_row(columns, body)]
     end
   end
 
@@ -681,6 +1077,20 @@ defmodule Vibe.AI.GroupAgent do
     trimmed ++ List.duplicate("", padding_count)
   end
 
+  defp align_rows_to_column_count(rows, column_count) when is_list(rows) do
+    Enum.map(rows, &fit_row_to_column_count(&1, column_count))
+  end
+
+  defp align_rows_to_column_count(_, _), do: []
+
+  defp ensure_non_empty_rows(rows, columns, body) do
+    if rows == [] do
+      [default_spreadsheet_row(columns, body)]
+    else
+      rows
+    end
+  end
+
   defp default_spreadsheet_row(columns, body) do
     first_cell =
       body
@@ -694,6 +1104,128 @@ defmodule Vibe.AI.GroupAgent do
     |> fit_row_to_column_count(length(columns))
   end
 
+  defp maybe_infer_rows_from_body(body, columns, operation, existing_rows) do
+    if existing_rows == [] and operation == :append_rows and body_has_data_hint?(body) do
+      [default_spreadsheet_row(columns, body)]
+    else
+      []
+    end
+  end
+
+  defp body_has_data_hint?(body) do
+    text = body |> to_string() |> String.trim() |> String.downcase()
+    text != "" and text != "draft content" and text != "document"
+  end
+
+  defp read_agent_document_file(relative_url) do
+    with {:ok, full_path} <- resolve_agent_document_path(relative_url),
+         {:ok, content} <- File.read(full_path) do
+      {:ok, content}
+    else
+      {:error, reason} -> {:error, reason}
+      other -> {:error, other}
+    end
+  end
+
+  defp resolve_agent_document_path(relative_url) do
+    normalized = relative_url |> to_string() |> String.trim()
+
+    relative_path =
+      cond do
+        String.starts_with?(normalized, "/uploads/#{@agent_docs_dir}/") ->
+          String.trim_leading(normalized, "/uploads/")
+
+        String.starts_with?(normalized, "#{@agent_docs_dir}/") ->
+          normalized
+
+        true ->
+          nil
+      end
+
+    if is_nil(relative_path) or relative_path == "" or String.contains?(relative_path, "..") do
+      {:error, :invalid_document_path}
+    else
+      full_path = Path.expand(Path.join(@uploads_dir, relative_path))
+      uploads_root = Path.expand(@uploads_dir)
+
+      if String.starts_with?(full_path, uploads_root <> "/") do
+        {:ok, full_path}
+      else
+        {:error, :invalid_document_path}
+      end
+    end
+  end
+
+  defp parse_csv_content(content) do
+    rows =
+      content
+      |> to_string()
+      |> String.split(~r/\r?\n/, trim: true)
+      |> Enum.map(&parse_csv_line/1)
+      |> Enum.reject(&(&1 == []))
+
+    case rows do
+      [] ->
+        {["Item", "Value"], []}
+
+      [header | body_rows] ->
+        columns =
+          header
+          |> sanitize_csv_columns()
+
+        {columns, align_rows_to_column_count(body_rows, length(columns))}
+    end
+  end
+
+  defp sanitize_csv_columns(columns) when is_list(columns) do
+    normalized =
+      columns
+      |> Enum.with_index(1)
+      |> Enum.map(fn {column, idx} ->
+        column
+        |> to_string()
+        |> String.trim()
+        |> default_if_blank("Column #{idx}")
+      end)
+
+    if normalized == [], do: ["Item", "Value"], else: normalized
+  end
+
+  defp parse_csv_line(line) when is_binary(line) do
+    line
+    |> do_parse_csv_line([], "", false)
+    |> Enum.reverse()
+    |> Enum.map(&String.trim/1)
+  end
+
+  defp parse_csv_line(_), do: []
+
+  defp do_parse_csv_line(<<>>, cells, cell, _in_quotes), do: [cell | cells]
+
+  defp do_parse_csv_line(<<?", ?", rest::binary>>, cells, cell, true) do
+    do_parse_csv_line(rest, cells, cell <> "\"", true)
+  end
+
+  defp do_parse_csv_line(<<?", rest::binary>>, cells, cell, true) do
+    do_parse_csv_line(rest, cells, cell, false)
+  end
+
+  defp do_parse_csv_line(<<?", rest::binary>>, cells, cell, false) do
+    do_parse_csv_line(rest, cells, cell, true)
+  end
+
+  defp do_parse_csv_line(<<?,, rest::binary>>, cells, cell, false) do
+    do_parse_csv_line(rest, [cell | cells], "", false)
+  end
+
+  defp do_parse_csv_line(<<?\r, rest::binary>>, cells, cell, in_quotes) do
+    do_parse_csv_line(rest, cells, cell, in_quotes)
+  end
+
+  defp do_parse_csv_line(<<char::utf8, rest::binary>>, cells, cell, in_quotes) do
+    do_parse_csv_line(rest, cells, cell <> <<char::utf8>>, in_quotes)
+  end
+
   defp csv_from_rows(columns, rows) do
     lines = [
       Enum.map_join(columns, ",", &csv_escape_cell/1)
@@ -704,7 +1236,11 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp csv_escape_cell(value) do
-    text = to_string(value || "")
+    text =
+      value
+      |> to_string()
+      |> String.replace(~r/\r\n?|\n/, " ")
+
     escaped = String.replace(text, "\"", "\"\"")
 
     if String.contains?(escaped, ",") or String.contains?(escaped, "\"") or
@@ -845,18 +1381,20 @@ defmodule Vibe.AI.GroupAgent do
     if trimmed == "", do: fallback, else: trimmed
   end
 
-  defp maybe_attach_spreadsheet_fallback(user_message, response, enabled_tools) do
-    if should_auto_generate_spreadsheet?(user_message, response, enabled_tools) do
+  defp maybe_attach_spreadsheet_fallback(chat_id, user_message, response, enabled_tools, user_id) do
+    if should_auto_generate_spreadsheet?(chat_id, user_message, response, enabled_tools) do
       title = infer_spreadsheet_title(user_message)
+      operation = infer_fallback_spreadsheet_operation(user_message, chat_id)
 
-      case create_document_tool(%{
+      case create_document_tool(chat_id, %{
              "title" => title,
              "body" => user_message,
-             "format" => "csv"
-           }) do
+             "format" => "csv",
+             "operation" => operation
+           }, user_id) do
         %{ok: true, file_url: file_url, row_count: row_count} = result ->
           Logger.info(
-            "[GroupAgent] Auto-generated spreadsheet fallback title=#{title} rows=#{row_count}"
+            "[GroupAgent] Auto-generated spreadsheet fallback title=#{title} rows=#{row_count} operation=#{operation}"
           )
 
           fallback_message = spreadsheet_fallback_message(file_url, row_count, result[:columns] || [])
@@ -875,9 +1413,59 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp should_auto_generate_spreadsheet?(user_message, response, enabled_tools) do
-    "create_document" in enabled_tools and spreadsheet_intent?(user_message) and
-      not response_contains_download_link?(response)
+  defp should_auto_generate_spreadsheet?(chat_id, user_message, response, enabled_tools) do
+    has_current = not is_nil(GroupAgentDocument.get_current(chat_id))
+    trigger = spreadsheet_intent?(user_message) or (has_current and undo_intent?(user_message))
+
+    "create_document" in enabled_tools and trigger and not response_contains_download_link?(response)
+  end
+
+  defp undo_intent?(message) do
+    down = message |> to_string() |> String.downcase()
+    String.contains?(down, "undo") or String.contains?(down, "revert")
+  end
+
+  defp infer_fallback_spreadsheet_operation(user_message, chat_id) do
+    message = user_message |> to_string() |> String.downcase()
+    has_current = not is_nil(GroupAgentDocument.get_current(chat_id))
+
+    cond do
+      String.contains?(message, "revert") or String.contains?(message, "undo") ->
+        "revert_last"
+
+      has_current and new_file_request?(message) ->
+        "create_new"
+
+      has_current and append_request?(message) ->
+        "append_rows"
+
+      has_current ->
+        "edit_current"
+
+      true ->
+        "create_new"
+    end
+  end
+
+  defp new_file_request?(message) do
+    Enum.any?(
+      [
+        "new file",
+        "new sheet",
+        "new spreadsheet",
+        "from scratch",
+        "start over",
+        "another file"
+      ],
+      &String.contains?(message, &1)
+    )
+  end
+
+  defp append_request?(message) do
+    Enum.any?(
+      ["add row", "append", "add this row", "insert row", "add rows"],
+      &String.contains?(message, &1)
+    )
   end
 
   defp spreadsheet_intent?(message) do
@@ -894,7 +1482,20 @@ defmodule Vibe.AI.GroupAgent do
       "columns"
     ]
 
-    action_terms = ["create", "make", "generate", "build", "export", "prepare"]
+    action_terms = [
+      "create",
+      "make",
+      "generate",
+      "build",
+      "export",
+      "prepare",
+      "edit",
+      "update",
+      "add",
+      "append",
+      "revert",
+      "undo"
+    ]
 
     Enum.any?(spreadsheet_terms, &String.contains?(down, &1)) and
       Enum.any?(action_terms, &String.contains?(down, &1))
@@ -934,10 +1535,10 @@ defmodule Vibe.AI.GroupAgent do
     "Spreadsheet - " <> default_if_blank(summary, "Data")
   end
 
-  defp spreadsheet_fallback_message(file_url, row_count, columns) do
+  defp spreadsheet_fallback_message(_file_url, row_count, columns) do
     col_count = length(columns)
 
-    "Created editable spreadsheet file (CSV): #{file_url}\nColumns: #{col_count}, Rows: #{row_count}\nYou can open this in Excel or Google Sheets."
+    "Created editable spreadsheet file (CSV) and attached it.\nColumns: #{col_count}, Rows: #{row_count}\nYou can open it in Excel or Google Sheets."
   end
 
   defp extract_text(content) when is_list(content) do
@@ -1075,20 +1676,34 @@ defmodule Vibe.AI.GroupAgent do
     message_id = Ecto.UUID.generate()
     timestamp = :os.system_time(:millisecond)
     reply_to_id = Map.get(metadata, "reply_to_id")
+    attachment = extract_agent_document_attachment(chat_id, text)
+    plain_text = sanitize_agent_plain_text(text, attachment)
+    message_type = if attachment, do: "file", else: "text"
 
-    payload = %{
+    payload_base = %{
       "id" => message_id,
       "fromId" => @agent_user_id,
       "chatId" => chat_id,
       "encryptedContent" => "",
-      "plainContent" => text,
-      "type" => "text",
+      "plainContent" => plain_text,
+      "type" => message_type,
       "timestamp" => timestamp,
       "status" => "sent",
       "isAgentMessage" => true,
       "agentName" => agent_config.name,
       "replyToId" => reply_to_id
     }
+
+    payload =
+      case attachment do
+        %{url: url, file_name: file_name} ->
+          payload_base
+          |> Map.put("mediaUrl", url)
+          |> Map.put("fileName", file_name)
+
+        _ ->
+          payload_base
+      end
 
     # Broadcast to the chat channel
     VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "message", payload)
@@ -1097,15 +1712,21 @@ defmodule Vibe.AI.GroupAgent do
     Task.start(fn ->
       case ensure_agent_user_record() do
         :ok ->
-          message_attrs = %{
+          message_attrs_base = %{
             id: message_id,
             chat_id: chat_id,
             from_id: @agent_user_id,
-            encrypted_content: text,
-            type: "text",
+            encrypted_content: plain_text,
+            type: message_type,
             timestamp: timestamp,
             reply_to_id: reply_to_id
           }
+
+          message_attrs =
+            case attachment do
+              %{url: url} -> Map.put(message_attrs_base, :media_url, url)
+              _ -> message_attrs_base
+            end
 
           case Vibe.Chat.add_message(message_attrs) do
             {:ok, _msg} ->
@@ -1138,12 +1759,13 @@ defmodule Vibe.AI.GroupAgent do
 
   defp ensure_agent_user_record do
     now = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+    agent_user_id = Ecto.UUID.dump!(@agent_user_id)
 
     Repo.insert_all(
       "users",
       [
         %{
-          id: @agent_user_id,
+          id: agent_user_id,
           username: @agent_username,
           password_hash: "agent",
           public_key: "agent",
@@ -1159,6 +1781,113 @@ defmodule Vibe.AI.GroupAgent do
     :ok
   rescue
     error -> {:error, error}
+  end
+
+  defp extract_agent_document_attachment(chat_id, text) do
+    with {:ok, url} <- extract_agent_document_url(text, chat_id),
+         file_name <- derive_file_name_from_url(url),
+         true <- not is_nil(file_name) do
+      %{url: url, file_name: file_name}
+    else
+      _ -> nil
+    end
+  end
+
+  defp extract_agent_document_url(text, chat_id) do
+    normalized_text = text |> to_string()
+
+    absolute =
+      Regex.scan(~r/https?:\/\/[^\s)]+/i, normalized_text)
+      |> List.flatten()
+      |> Enum.find(&String.contains?(&1, "/uploads/#{@agent_docs_dir}/"))
+
+    relative =
+      Regex.scan(~r/\/uploads\/agent-docs\/[^\s)]+/i, normalized_text)
+      |> List.flatten()
+      |> List.first()
+
+    cond do
+      is_binary(absolute) and absolute != "" ->
+        {:ok, absolute}
+
+      is_binary(relative) and relative != "" ->
+        {:ok, public_upload_url(relative)}
+
+      true ->
+        if document_intent_in_response?(normalized_text) do
+          case GroupAgentDocument.get_current(chat_id) do
+            %GroupAgentDocument{file_url: file_url} when is_binary(file_url) and file_url != "" ->
+              {:ok, file_url}
+
+            _ ->
+              {:error, :not_found}
+          end
+        else
+          {:error, :not_found}
+        end
+    end
+  end
+
+  defp derive_file_name_from_url(url) when is_binary(url) do
+    url
+    |> String.split("?")
+    |> List.first()
+    |> to_string()
+    |> Path.basename()
+    |> case do
+      "" -> nil
+      name -> name
+    end
+  end
+
+  defp derive_file_name_from_url(_), do: nil
+
+  defp sanitize_agent_plain_text(text, attachment) do
+    normalized = text |> to_string()
+
+    stripped =
+      normalized
+      |> strip_upload_links()
+      |> maybe_strip_remaining_links(attachment)
+      |> String.replace(~r/\n{3,}/, "\n\n")
+      |> String.trim()
+
+    cond do
+      stripped != "" ->
+        stripped
+
+      attachment && is_map(attachment) ->
+        "Document attached."
+
+      true ->
+        "Agent response"
+    end
+  end
+
+  defp strip_upload_links(text) do
+    text
+    |> String.replace(~r/https?:\/\/[^\s)]*\/uploads\/agent-docs\/[^\s)]+/i, "")
+    |> String.replace(~r/\/uploads\/agent-docs\/[^\s)]+/i, "")
+    |> String.replace(~r/\[([^\]]+)\]\(\s*\)/, "\\1")
+    |> String.trim()
+  end
+
+  defp maybe_strip_remaining_links(text, attachment) when is_map(attachment) do
+    text
+    |> String.replace(~r/https?:\/\/[^\s)]+/i, "")
+    |> String.replace(~r/\[([^\]]+)\]\(\s*\)/, "\\1")
+    |> String.trim()
+  end
+
+  defp maybe_strip_remaining_links(text, _attachment), do: text
+
+  defp document_intent_in_response?(text) do
+    down = text |> to_string() |> String.downcase()
+
+    Enum.any?(
+      ["spreadsheet", "excel", "csv", "document", "file", "attached", "download"],
+      &String.contains?(down, &1)
+    )
   end
 
   # ── Memory Compaction ──

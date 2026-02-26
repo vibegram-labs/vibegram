@@ -120,6 +120,26 @@ class ChatEngineModule : Module() {
       ChatEngine.clearJournal()
     }
 
+    Function("isTyping") { payload: Map<String, Any?> ->
+      ChatEngine.isTyping(payload)
+    }
+
+    AsyncFunction("fetchAgentConfig") { payload: Map<String, Any?> ->
+      ChatEngine.fetchAgentConfig(payload)
+    }
+
+    AsyncFunction("saveAgentConfig") { payload: Map<String, Any?> ->
+      ChatEngine.saveAgentConfig(payload)
+    }
+
+    AsyncFunction("deleteAgentConfig") { payload: Map<String, Any?> ->
+      ChatEngine.deleteAgentConfig(payload)
+    }
+
+    AsyncFunction("generateAgentPrompt") { payload: Map<String, Any?> ->
+      ChatEngine.generateAgentPrompt(payload)
+    }
+
     // Shadow-mode bridge until native Phoenix transport is implemented.
     Function("setPresenceSnapshot") { payload: Map<String, Any?> ->
       val list = (payload["userIds"] as? List<*>)?.mapNotNull { it?.toString() } ?: emptyList()

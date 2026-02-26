@@ -145,11 +145,15 @@ export interface NativeChatAgentConfig {
   system_prompt?: string;
   enabled?: boolean;
   avatar_url?: string;
+  enabled_tools?: string[];
+  enabledTools?: string[];
+  canManage?: boolean;
 }
 
 export interface NativeChatGroupMember {
   userId: string;
   name?: string;
+  role?: 'owner' | 'admin' | 'member' | 'subscriber';
 }
 
 export interface NativeChatMainModule {
@@ -197,6 +201,7 @@ export interface NativeChatEngineModule {
   getChatProfileSummary?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   getChatJournal?: () => Promise<Record<string, unknown>[]> | Record<string, unknown>[];
   clearChatJournal?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
+  isTyping?: (payload: Record<string, unknown>) => Promise<boolean> | boolean;
   // Shadow-mode bridge until native Phoenix transport is enabled.
   setPresenceSnapshot?: (payload: { userIds: string[] }) => Promise<Record<string, unknown>> | Record<string, unknown>;
 }

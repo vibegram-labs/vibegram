@@ -133,6 +133,7 @@ defmodule VibeWeb.GroupAgentController do
               {:ok, _} ->
                 # Also clear the agent's memory
                 Vibe.Chat.GroupAgentMemory.delete_by_chat(chat_id)
+                Vibe.Chat.GroupAgentDocument.clear_by_chat(chat_id)
                 json(conn, %{success: true})
 
               {:error, _} ->

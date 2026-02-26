@@ -159,9 +159,16 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     _ gestureRecognizer: UIGestureRecognizer,
     shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
   ) -> Bool {
-    // Return true! This prevents the built-in UIScrollView pan gesture from
-    // blocking our swipe gesture while iOS tries to decide who wins.
-    // This removes the 2-second stall and enables real-time 120fps tracking.
+    // Don't allow our swipe-reply pan to run simultaneously with the long-press
+    // context menu gesture — this prevents unwanted X movement during hold.
+    if (gestureRecognizer === swipeReplyPanGesture
+      && otherGestureRecognizer is UILongPressGestureRecognizer)
+      || (gestureRecognizer is UILongPressGestureRecognizer
+        && otherGestureRecognizer === swipeReplyPanGesture)
+    {
+      return false
+    }
+    // Allow simultaneous with scrollView's built-in pan so swiping tracks at 120fps.
     return true
   }
 
@@ -388,10 +395,18 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
   @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
     guard gesture.state == .began else { return }
     guard customContextMenuOverlay == nil else { return }
+
+    // Cancel any in-progress swipe reply immediately to avoid residual X offset.
+    resetSwipeReplyTransform(animated: false)
+    clearSwipeReplyState()
+
     let point = gesture.location(in: collectionView)
     guard let indexPath = collectionView.indexPathForItem(at: point),
       let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell
     else { return }
+
+    // Reset any stale contentView transform the pan may have left behind.
+    cell.contentView.transform = .identity
 
     // Immediate visual hold feedback on the real bubble (before extraction/menu animation).
     cell.setContextMenuHeld(true, animated: true)
@@ -461,18 +476,19 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     customContextMenuOverlay?.animateOut(completion: nil)
 
     guard let overlay = customContextMenuOverlay else { return }
+    let mid = overlay.messageId
 
     onNativeEvent([
       "type": "contextMenuAction",
       "action": actionId,
-      "messageId": overlay.messageId,
+      "messageId": mid,
     ])
 
-    // Show reply banner when "reply" action is selected
-    if actionId == "reply" {
-      let mid = overlay.messageId
-      if let row = rows.first(where: { $0.messageId == mid }) {
+    if let row = rows.first(where: { $0.messageId == mid }) {
+      if actionId == "reply" {
         inputBar?.showReplyBanner(messageId: mid, text: row.text, isMe: row.isMe)
+      } else if actionId == "copy" {
+        UIPasteboard.general.string = row.text
       }
     }
   }

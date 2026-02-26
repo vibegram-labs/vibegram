@@ -269,6 +269,7 @@ internal object ChatEngine {
   // for history HTTP requests as the WebSocket connection uses.
   private val historyHttpClient by lazy { ChatPhoenixClient.buildPinnedHttpClient() }
   private const val fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+  private const val AGENT_USER_ID = "00000000-0000-0000-0000-000000000001"
 
   private fun hasNativeSocketConfigLocked(): Boolean {
     val ctx = appContextRef ?: return false
@@ -414,6 +415,7 @@ internal object ChatEngine {
       state["note"] = "ChatEngine configured (native Phoenix presence enabled, shadow fallback active)"
       state["presenceSource"] = if (nativePresenceActive) "native" else "shadow"
       appendJournalLocked("configure", mapOf("keys" to payload.keys.sorted()))
+      openChatChannels.keys.forEach { joinNativeChatTopicIfNeededLocked(it) }
       val result = statusSnapshotLocked()
       emitChangeLocked("configure", null, null)
       result
@@ -1497,6 +1499,209 @@ internal object ChatEngine {
     return mapOf("accepted" to true, "queued" to true, "blockedUserId" to blockedUserId)
   }
 
+  // MARK: - Agent Config (Native HTTP)
+
+  fun fetchAgentConfig(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("success" to false, "reason" to "invalid_chat")
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config")
+
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/group/$chatId/agent")
+      .get()
+      .header("Accept", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    return try {
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        val body = res.body?.string().orEmpty()
+        if (!res.isSuccessful) {
+          mapOf("success" to false, "status" to res.code, "reason" to "http_${res.code}")
+        } else {
+          val parsed = parseJsonToMap(body)
+          mapOf("success" to true, "status" to res.code, "config" to parsed)
+        }
+      }
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+      )
+    }
+  }
+
+  fun saveAgentConfig(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("success" to false, "reason" to "invalid_chat")
+    val config = payload["config"] as? Map<*, *>
+      ?: return mapOf("success" to false, "reason" to "invalid_config")
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config")
+
+    val hasPersistedId =
+      normalized(config["id"])
+        ?.trim()
+        ?.isNotEmpty() == true
+    val initialMethod = if (hasPersistedId) "PUT" else "POST"
+    val bodyJson = JSONObject(config).toString().toRequestBody("application/json".toMediaTypeOrNull())
+
+    fun execute(method: String): Pair<Int, Map<String, Any?>> {
+      val requestBuilder = Request.Builder()
+        .url("${preflight.first}/api/group/$chatId/agent")
+        .header("Accept", "application/json")
+        .header("Content-Type", "application/json")
+        .header("ngrok-skip-browser-warning", "true")
+      preflight.second?.takeIf { it.isNotBlank() }?.let {
+        requestBuilder.header("Authorization", "Bearer $it")
+      }
+      when (method) {
+        "PUT" -> requestBuilder.put(bodyJson)
+        else -> requestBuilder.post(bodyJson)
+      }
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        val responseBody = res.body?.string().orEmpty()
+        return Pair(res.code, parseJsonToMap(responseBody))
+      }
+    }
+
+    return try {
+      val (initialStatus, initialPayload) = execute(initialMethod)
+      if (initialMethod == "POST" && initialStatus == 409) {
+        val (retryStatus, retryPayload) = execute("PUT")
+        return mapOf(
+          "success" to (retryStatus in 200..299),
+          "status" to retryStatus,
+          "payload" to retryPayload,
+        )
+      }
+
+      mapOf(
+        "success" to (initialStatus in 200..299),
+        "status" to initialStatus,
+        "payload" to initialPayload,
+      )
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+      )
+    }
+  }
+
+  fun deleteAgentConfig(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("success" to false, "reason" to "invalid_chat")
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config")
+
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/group/$chatId/agent")
+      .delete()
+      .header("Accept", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    return try {
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        mapOf("success" to res.isSuccessful, "status" to res.code)
+      }
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+      )
+    }
+  }
+
+  fun generateAgentPrompt(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("success" to false, "reason" to "invalid_chat")
+    val input = normalized(payload["input"] ?: payload["description"] ?: payload["prompt"]).orEmpty().trim()
+    if (input.isBlank()) {
+      return mapOf("success" to false, "reason" to "empty_input")
+    }
+
+    val enabledTools =
+      (payload["enabledTools"] as? List<*>
+        ?: payload["enabled_tools"] as? List<*>)
+        ?.mapNotNull { normalized(it)?.trim()?.takeIf { value -> value.isNotEmpty() } }
+        ?: emptyList()
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config")
+
+    val requestBody = JSONObject(
+      mapOf(
+        "input" to input,
+        "enabled_tools" to enabledTools,
+      ),
+    ).toString().toRequestBody("application/json".toMediaTypeOrNull())
+
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/group/$chatId/agent/generate_prompt")
+      .post(requestBody)
+      .header("Accept", "application/json")
+      .header("Content-Type", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    return try {
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        val body = res.body?.string().orEmpty()
+        val parsed = parseJsonToMap(body)
+        mapOf(
+          "success" to res.isSuccessful,
+          "status" to res.code,
+          "payload" to parsed,
+        )
+      }
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+      )
+    }
+  }
+
   fun getChatProfileSummary(payload: Map<String, Any?>): Map<String, Any?> {
     val chatId = normalized(payload["chatId"] ?: payload["chat_id"]).orEmpty()
     if (chatId.isBlank()) {
@@ -1971,6 +2176,43 @@ internal object ChatEngine {
     }
   }
 
+  private fun parseJsonToMap(raw: String): Map<String, Any?> {
+    val trimmed = raw.trim()
+    if (trimmed.isEmpty()) return emptyMap()
+    return try {
+      jsonObjectToMap(JSONObject(trimmed))
+    } catch (_: Throwable) {
+      emptyMap()
+    }
+  }
+
+  private fun jsonObjectToMap(json: JSONObject): Map<String, Any?> {
+    val out = linkedMapOf<String, Any?>()
+    val iterator = json.keys()
+    while (iterator.hasNext()) {
+      val key = iterator.next()
+      out[key] = jsonValueToKotlin(json.opt(key))
+    }
+    return out
+  }
+
+  private fun jsonArrayToList(array: JSONArray): List<Any?> {
+    val out = mutableListOf<Any?>()
+    for (index in 0 until array.length()) {
+      out.add(jsonValueToKotlin(array.opt(index)))
+    }
+    return out
+  }
+
+  private fun jsonValueToKotlin(value: Any?): Any? {
+    return when (value) {
+      null, JSONObject.NULL -> null
+      is JSONObject -> jsonObjectToMap(value)
+      is JSONArray -> jsonArrayToList(value)
+      else -> value
+    }
+  }
+
   private fun containsLinkCandidate(value: String?): Boolean {
     val normalizedValue = value?.trim()?.lowercase().orEmpty()
     if (normalizedValue.isBlank()) return false
@@ -2108,13 +2350,22 @@ internal object ChatEngine {
     val timestampMs = parseLongValue(payload["timestamp"]) ?: System.currentTimeMillis()
     val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
 
+    // Detect agent messages by fromId or explicit flag
+    val isAgentMessage = (payload["isAgentMessage"] as? Boolean == true)
+      || (normalized(fromId)?.lowercase() == AGENT_USER_ID)
+    val plainContent = normalized(payload["plainContent"] ?: payload["plain_content"])
+    val agentName = normalized(payload["agentName"] ?: payload["agent_name"])
+
     val hadEncryptedContent = !encryptedContent.isNullOrBlank()
-    val decryptedText = if (hadEncryptedContent) {
+    val decryptedText = if (isAgentMessage && !plainContent.isNullOrBlank()) {
+      // Agent messages use plainContent instead of encryption
+      plainContent
+    } else if (hadEncryptedContent) {
       decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
     } else {
       ""
     }
-    val decryptionFailed = hadEncryptedContent && decryptedText.isEmpty()
+    val decryptionFailed = !isAgentMessage && hadEncryptedContent && decryptedText.isEmpty()
     val decryptedFields = parseDecryptedMessagePayload(decryptedText)
     var row = buildLiveRowPayloadLocked(
       chatId = chatId,
@@ -2125,6 +2376,18 @@ internal object ChatEngine {
       encryptedContent = encryptedContent,
       decryptedFields = decryptedFields,
     )
+    // Inject agent-specific fields into the message payload for the UI layer
+    if (isAgentMessage) {
+      val message = ((row["message"] as? MutableMap<String, Any?>) ?: mutableMapOf())
+      message["isAgentMessage"] = true
+      message["isMe"] = false
+      if (!agentName.isNullOrBlank()) message["agentName"] = agentName
+      if (!plainContent.isNullOrBlank()) {
+        message["plainContent"] = plainContent
+        message["text"] = plainContent
+      }
+      (row as? MutableMap<String, Any?>)?.put("message", message)
+    }
     // Signal decryption failure to the UI layer so it can show an appropriate indicator
     // instead of a blank bubble.
     if (decryptionFailed) {
@@ -2538,27 +2801,62 @@ internal object ChatEngine {
       val serverStatus = normalized(raw.opt("status"))?.lowercase()
       val isEdited = raw.opt("isEdited") as? Boolean ?: false
       val editedAt = raw.opt("editedAt") ?: raw.opt("edited_at")
+      val rawMediaUrl = normalized(raw.opt("mediaUrl") ?: raw.opt("media_url"))
+      val rawFileName = normalized(raw.opt("fileName") ?: raw.opt("file_name"))
+      val derivedFileName =
+        rawMediaUrl
+          ?.substringBefore('?')
+          ?.substringAfterLast('/')
+          ?.trim()
+          ?.takeIf { it.isNotEmpty() }
       val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
+      val historyIsAgent = (raw.opt("isAgentMessage") as? Boolean == true)
+        || (normalized(fromId)?.lowercase() == AGENT_USER_ID)
+      val agentPlainContent = normalized(raw.opt("plainContent") ?: raw.opt("plain_content"))
+        ?: normalized(encryptedContent)
 
       val hadEncryptedContent = !encryptedContent.isNullOrBlank()
       var historyDecryptionFailed = false
-      val decryptedFields = if (hadEncryptedContent) {
+      val decryptedFields = if (historyIsAgent) {
+        if (!agentPlainContent.isNullOrBlank()) {
+          mapOf("text" to agentPlainContent)
+        } else {
+          emptyMap()
+        }
+      } else if (hadEncryptedContent) {
         val privateKey = decryptPrivateKeyLocked()
         val decrypted = privateKey?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
-        val parsed = parseDecryptedMessagePayload(decrypted)
-        if (parsed.isEmpty() && plaintextFallback.isNotBlank()) {
+        if (decrypted.trim().isEmpty() && plaintextFallback.isNotBlank()) {
           historyDecryptionFailed = true
           mapOf("text" to plaintextFallback)
-        } else if (parsed.isEmpty()) {
+        } else if (decrypted.trim().isEmpty()) {
           historyDecryptionFailed = true
           emptyMap()
         } else {
-          parsed
+          val parsed = parseDecryptedMessagePayload(decrypted)
+          if (parsed.isEmpty() && plaintextFallback.isNotBlank()) {
+            historyDecryptionFailed = true
+            mapOf("text" to plaintextFallback)
+          } else if (parsed.isEmpty()) {
+            historyDecryptionFailed = true
+            emptyMap()
+          } else {
+            parsed
+          }
         }
       } else if (plaintextFallback.isNotBlank()) {
         mapOf("text" to plaintextFallback)
       } else {
         emptyMap()
+      }
+
+      val enrichedFields = LinkedHashMap<String, Any?>(decryptedFields)
+      if (!rawMediaUrl.isNullOrBlank() && normalized(enrichedFields["mediaUrl"]).isNullOrBlank()) {
+        enrichedFields["mediaUrl"] = rawMediaUrl
+      }
+      val fileNameForRow = rawFileName ?: if (type.equals("file", ignoreCase = true)) derivedFileName else null
+      if (!fileNameForRow.isNullOrBlank() && normalized(enrichedFields["fileName"]).isNullOrBlank()) {
+        enrichedFields["fileName"] = fileNameForRow
       }
 
       val row = (buildLiveRowPayloadLocked(
@@ -2568,15 +2866,25 @@ internal object ChatEngine {
         type = type,
         timestampMs = timestampMs,
         encryptedContent = encryptedContent,
-        decryptedFields = decryptedFields,
+        decryptedFields = enrichedFields,
         forceEdited = isEdited,
         forceEditedAt = editedAt,
       ).toMutableMap())
       val message = (row["message"] as? Map<String, Any?>)?.toMutableMap() ?: mutableMapOf()
+      if (historyIsAgent) {
+        message["isAgentMessage"] = true
+        message["isMe"] = false
+        val name = normalized(raw.opt("agentName") ?: raw.opt("agent_name"))
+        if (!name.isNullOrBlank()) message["agentName"] = name
+        if (!agentPlainContent.isNullOrBlank() && agentPlainContent.isNotBlank()) {
+          message["plainContent"] = agentPlainContent
+          message["text"] = agentPlainContent
+        }
+      }
       if (!serverStatus.isNullOrBlank()) message["status"] = serverStatus
       val reactionEmoji = normalized(raw.opt("reactionEmoji") ?: raw.opt("reaction_emoji"))
       if (!reactionEmoji.isNullOrBlank()) message["reactionEmoji"] = reactionEmoji
-      if (hadEncryptedContent && historyDecryptionFailed) {
+      if (!historyIsAgent && hadEncryptedContent && historyDecryptionFailed) {
         message["decryptionFailed"] = true
       }
       row["message"] = message
@@ -2764,6 +3072,10 @@ internal object ChatEngine {
         if (event == "message") {
           val insertedMessageId = applyNativeIncomingMessageEventLocked(chatId, payload)
           if (!insertedMessageId.isNullOrBlank()) {
+            if (peerTypingUserIdsByChatId[chatId] != null) {
+              peerTypingUserIdsByChatId.remove(chatId)
+              emitChangeLocked("peerTyping", chatId, "false")
+            }
             emitChangeLocked("chatMessageInserted", chatId, insertedMessageId)
             return
           }

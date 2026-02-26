@@ -38,6 +38,8 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   private let authToken: String?
   private let callbacks: Callbacks
   private let queue = DispatchQueue(label: "vibe.chat.phoenix.client")
+  private let connectRequestTimeout: TimeInterval = 12.0
+  private let heartbeatInterval: TimeInterval = 15.0
   private var session: URLSession?
   private var task: URLSessionWebSocketTask?
   private var heartbeatTimer: DispatchSourceTimer?
@@ -62,11 +64,12 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
       }
       self.isClosing = false
       let config = URLSessionConfiguration.default
-      config.timeoutIntervalForRequest = 30
+      config.timeoutIntervalForRequest = self.connectRequestTimeout
       config.tlsMinimumSupportedProtocolVersion = .TLSv12
       let session = URLSession(configuration: config, delegate: self, delegateQueue: nil)
 
       var request = URLRequest(url: url)
+      request.timeoutInterval = self.connectRequestTimeout
       // Also send as Authorization header for any reverse-proxy / middleware
       // that may inspect it (the primary auth is the ?token= query param).
       if let token = self.authToken, !token.isEmpty {
@@ -250,7 +253,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   private func startHeartbeatLocked() {
     stopHeartbeatLocked()
     let timer = DispatchSource.makeTimerSource(queue: queue)
-    timer.schedule(deadline: .now() + 25, repeating: 25)
+    timer.schedule(deadline: .now() + heartbeatInterval, repeating: heartbeatInterval)
     timer.setEventHandler { [weak self] in
       guard let self else { return }
       self.sendFrame(

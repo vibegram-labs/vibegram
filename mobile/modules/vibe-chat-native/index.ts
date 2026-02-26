@@ -11,6 +11,18 @@ export type ChatNativeGifModule = {
 
 export const ChatNativeGif = requireOptionalNativeModule<ChatNativeGifModule>('ChatNativeGif');
 
+export type ChatNativeHomeModule = {
+  isSupported?: () => boolean;
+  supportsNativeHome?: () => boolean;
+  fetchChats?: (payload: {
+    userId: string;
+    apiBaseUrl?: string;
+    authToken?: string;
+  }) => Promise<{ chats: Record<string, unknown>[] }>;
+};
+
+export const ChatNativeHome = requireOptionalNativeModule<ChatNativeHomeModule>('ChatNativeHome');
+
 export const isNativeGifPanelAvailable = (): boolean => {
   return !!ChatNativeGif?.isSupported?.() && !!ChatNativeGif?.supportsNativeGifPanel?.();
 };

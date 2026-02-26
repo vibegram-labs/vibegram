@@ -120,6 +120,35 @@ public final class ChatEngineModule: Module {
       ChatEngine.shared.isTyping(payload)
     }
 
+    AsyncFunction("fetchAgentConfig") { (chatId: String, promise: Promise) in
+      ChatEngine.shared.fetchAgentConfig(chatId: chatId) { config in
+        promise.resolve(config ?? [:])
+      }
+    }
+
+    AsyncFunction("saveAgentConfig") { (chatId: String, config: [String: Any], promise: Promise) in
+      ChatEngine.shared.saveAgentConfig(chatId: chatId, config: config) { success in
+        promise.resolve(["success": success])
+      }
+    }
+
+    AsyncFunction("deleteAgentConfig") { (chatId: String, promise: Promise) in
+      ChatEngine.shared.deleteAgentConfig(chatId: chatId) { success in
+        promise.resolve(["success": success])
+      }
+    }
+
+    AsyncFunction("generateAgentPrompt") {
+      (chatId: String, input: String, enabledTools: [String], promise: Promise) in
+      ChatEngine.shared.generateAgentPrompt(
+        chatId: chatId,
+        input: input,
+        enabledTools: enabledTools
+      ) { payload in
+        promise.resolve(payload ?? [:])
+      }
+    }
+
     // Shadow-mode bridge until native Phoenix transport is enabled.
     Function("setPresenceSnapshot") { (payload: [String: Any]) in
       let userIds = (payload["userIds"] as? [String]) ?? []

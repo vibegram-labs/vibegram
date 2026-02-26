@@ -12,7 +12,9 @@
       "ChatNativeGifModule",
       "VibeNativeCallModule",
       "LiquidGlassModule",
-      "ChatNativeTabBarModule"
+      "ChatNativeTabBarModule",
+      "ChatNativeHomeModule",
+      "ChatNativeHomeListModule"
     ],
     "podspecPath": "ChatNative.podspec"
   },
@@ -25,7 +27,9 @@
       "expo.modules.vibechatnative.ChatNativeGifModule",
       "expo.modules.vibechatnative.VibeNativeCallModule",
       "expo.modules.vibechatnative.LiquidGlassModule",
-      "expo.modules.vibechatnative.ChatNativeTabBarModule"
+      "expo.modules.vibechatnative.ChatNativeTabBarModule",
+      "expo.modules.vibechatnative.ChatNativeHomeModule",
+      "expo.modules.vibechatnative.ChatNativeHomeListModule"
     ]
   }
 }

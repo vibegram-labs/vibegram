@@ -98,6 +98,18 @@ struct ChatListRow {
   let agentName: String?
   let plainContent: String?
 
+  var isAgentMention: Bool {
+    return isMe && text.lowercased().contains("@vibe")
+  }
+
+  var textWithoutMention: String {
+    if isAgentMention {
+      return text.replacingOccurrences(of: "@vibe", with: "", options: .caseInsensitive)
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    return text
+  }
+
   var visualKind: MessageVisualKind {
     guard kind == .message else {
       return .text

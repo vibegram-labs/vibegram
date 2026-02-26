@@ -66,6 +66,7 @@ interface NativeChatMainSurfaceProps {
   isGroupOrChannel?: boolean;
   groupMembers?: NativeChatGroupMember[];
   groupMemberCount?: number;
+  canManageAgentConfig?: boolean;
   agentConfig?: NativeChatAgentConfig | null;
   page?: NativeChatMainPage;
   onViewportChanged?: (event: { nativeEvent: Record<string, unknown> }) => void;
@@ -102,6 +103,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
     isGroupOrChannel,
     groupMembers,
     groupMemberCount,
+    canManageAgentConfig,
     agentConfig,
     page,
     onViewportChanged,
@@ -214,6 +216,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         isGroupOrChannel={isGroupOrChannel}
         groupMembers={groupMembers}
         groupMemberCount={groupMemberCount}
+        canManageAgentConfig={canManageAgentConfig}
         agentConfig={agentConfig}
         page={page}
         onViewportChanged={(event: any) => {

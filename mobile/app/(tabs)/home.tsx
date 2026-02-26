@@ -1,8 +1,9 @@
 
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
-import { View, Text, FlatList, TouchableOpacity, StyleSheet, Platform, Pressable, Image, ActivityIndicator, TextInput, RefreshControl, AppState, AppStateStatus, ScrollView } from 'react-native'
+import { View, Text, FlatList, TouchableOpacity, StyleSheet, Platform, Pressable, Image, ActivityIndicator, TextInput, RefreshControl, AppState, AppStateStatus, ScrollView, LayoutChangeEvent } from 'react-native'
 import { useAuthStore } from '../../src/lib/stores/auth-store'
 import { useThemeStore } from '../../src/lib/stores/theme-store'
+import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wallpaper-store'
 import { useChatStore } from '../../src/lib/ChatStore'
 import { useCallStore } from '../../src/lib/stores/CallStore'
 import { useUIStore } from '../../src/lib/stores/ui-store'
@@ -26,6 +27,9 @@ import MainMenuModal from '../../src/components/chat/MainMenuModal'
 import ConnectionModal, { ConnectionModalRef } from '../../src/components/settings/ConnectionModal'
 import ChatPreviewModal from '../../src/components/chat/ChatPreviewModal'
 import { useSavedMessagesStore } from '../../src/lib/stores/saved-messages-store'
+import NativeHomeListSurface, { isNativeHomeListAvailable, type NativeHomeListRow } from '../../src/native/home/NativeHomeListSurface'
+import { mapMessagesToNativeRows, type RuntimeChatMessage } from '../../src/native/chat/mapper'
+import { theme } from '../../src/lib/theme'
 
 
 // Helper to add alpha to hex color
@@ -99,8 +103,24 @@ const getMessageText = (msg: any): string => {
         }
     }
 
+    // Check file messages first so previews don't show raw link/text blobs.
+    if (msg.type === 'file') {
+        const rawFileName = msg.fileName || msg.file_name
+        if (typeof rawFileName === 'string' && rawFileName.trim().length > 0) {
+            return rawFileName.trim()
+        }
+        const rawUrl = msg.mediaUrl || msg.media_url
+        if (typeof rawUrl === 'string' && rawUrl.trim().length > 0) {
+            const normalized = rawUrl.split('?')[0]
+            const fromPath = normalized.split('/').pop()
+            if (fromPath && fromPath.trim().length > 0) return fromPath.trim()
+        }
+        return 'Document'
+    }
+
     // If we have text and it's not a JSON blob (or was successfully parsed above)
     if (text && typeof text === 'string' && text.length > 0) {
+        if (text.includes('/uploads/agent-docs/')) return 'Document attached'
         return text
     }
 
@@ -138,6 +158,24 @@ const getChatSortTimestamp = (chat: any): number => {
     }
 
     return 0
+}
+
+const toTimestampMs = (value: unknown): number => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string' || value instanceof Date) {
+        const parsed = new Date(value).getTime()
+        return Number.isNaN(parsed) ? Date.now() : parsed
+    }
+    return Date.now()
+}
+
+const toFiniteNumber = (value: unknown): number | undefined => {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    if (typeof value === 'string') {
+        const parsed = Number(value)
+        return Number.isFinite(parsed) ? parsed : undefined
+    }
+    return undefined
 }
 
 const normalizeChatType = (value: unknown): 'dm' | 'group' | 'channel' => {
@@ -479,6 +517,7 @@ const PulseBar = ({ delay }: { delay: number }) => {
 export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScreenProps) {
     const { user } = useAuthStore()
     const { colors, effectiveTheme } = useThemeStore()
+    const activeWallpaperTheme = useWallpaperStore((s) => s.activeTheme)
     const { setActiveChat, chats, isLoading, loadChats, deleteChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected } = useChatStore()
     const { savedMessages } = useSavedMessagesStore()
     const { callStatus, remoteUser, callDuration, callType } = useCallStore()
@@ -551,6 +590,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const [searchQuery, setSearchQuery] = useState('');
     const searchInputRef = useRef<TextInput>(null);
     const [isPullRefreshing, setIsPullRefreshing] = useState(false)
+    const hasStories = feed.length > 0 || myStories.length > 0
+    const estimatedNativeHeaderHeight = useMemo(
+        () => SEARCH_BAR_BLOCK_HEIGHT + (hasStories ? 108 : 0),
+        [hasStories]
+    )
 
 
 
@@ -593,6 +637,120 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 getMessageText(chat.lastMessage).toLowerCase().includes(q)
         })
     }, [allChats, searchQuery])
+
+    const chatsById = useMemo(() => {
+        const index = new Map<string, any>()
+        allChats.forEach((chat: any) => {
+            if (chat?.chatId) index.set(chat.chatId, chat)
+        })
+        return index
+    }, [allChats])
+
+    const resolvedWallpaperTheme = useMemo(() => {
+        const resolved = resolveThemeVariant(activeWallpaperTheme, effectiveTheme === 'dark')
+        const bg = Array.isArray(resolved.backgroundGradient) ? resolved.backgroundGradient : []
+        return {
+            ...resolved,
+            backgroundGradient: bg.length >= 2 ? bg : [colors.background, colors.background],
+        }
+    }, [activeWallpaperTheme, colors.background, effectiveTheme])
+
+    const nativePreviewAppearance = useMemo(() => ({
+        backgroundMode: 'gradient' as const,
+        nativeThemeId: `chat-${effectiveTheme}`,
+        nativeThemeIsDark: effectiveTheme === 'dark',
+        avatarBackgroundColorDark: theme.dark.bg.input,
+        avatarBackgroundColorLight: theme.light.bg.input,
+        wallpaperGradient: resolvedWallpaperTheme.backgroundGradient,
+        wallpaperOpacity: 1,
+        wallpaperPatternGradient: resolvedWallpaperTheme.patternGradientColors || [],
+        wallpaperPatternLocations: resolvedWallpaperTheme.patternGradientLocations || undefined,
+        wallpaperPatternOpacity: resolvedWallpaperTheme.patternOpacity || 0,
+        wallpaperMaskKey: resolvedWallpaperTheme.maskedImage || resolvedWallpaperTheme.patternType || undefined,
+        bubbleMeGradient: resolvedWallpaperTheme.bubbleMeGradient || [resolvedWallpaperTheme.bubbleMe, resolvedWallpaperTheme.bubbleMe],
+        bubbleThemColor: resolvedWallpaperTheme.bubbleThem || colors.card,
+        textColorMe: resolvedWallpaperTheme.textColorMe || colors.text,
+        textColorThem: resolvedWallpaperTheme.textColorThem || colors.text,
+        timeColorThem: colors.textSecondary,
+    }), [colors.card, colors.text, colors.textSecondary, effectiveTheme, resolvedWallpaperTheme])
+
+    const nativeHomeRows = useMemo<NativeHomeListRow[]>(() => {
+        return filteredChats.map((chat: any) => {
+            const friendId = (chat.friendId || '').toUpperCase()
+            const title = chat.chatId === 'saved_messages'
+                ? 'Saved Messages'
+                : (chat.name || chat.friendName || chat.friendId || 'Unknown')
+            const isTyping = typingUsers.has(friendId)
+            const preview = isTyping ? 'typing...' : getMessageText(chat.lastMessage)
+            const lastMsgTime = chat.lastMessage ? timeAgo(chat.lastMessage.timestamp || chat.updatedAt) : ''
+            const sourceMessages: any[] = Array.isArray(chat?.messages) ? chat.messages : []
+            const myUserIdUpper = (user?.userId || '').trim().toUpperCase()
+            const runtimeMessages: RuntimeChatMessage[] = sourceMessages
+                .map((message: any) => {
+                    const messageId = typeof message?.id === 'string'
+                        ? message.id
+                        : (typeof message?.id === 'number' ? String(message.id) : '')
+                    if (!messageId) return null
+                    const fromId = typeof message?.fromId === 'string' ? message.fromId : undefined
+                    const timestampMs = toTimestampMs(
+                        message?.timestampMs ?? message?.timestamp ?? message?.createdAt ?? message?.created_at
+                    )
+                    const inferredIsMe = !!fromId && !!myUserIdUpper && fromId.trim().toUpperCase() === myUserIdUpper
+                    return {
+                        id: messageId,
+                        chatId: chat.chatId,
+                        fromId,
+                        timestamp: typeof message?.timestamp === 'string' ? message.timestamp : undefined,
+                        text: getMessageText(message),
+                        type: typeof message?.type === 'string' ? message.type : 'text',
+                        status: typeof message?.status === 'string' ? message.status : undefined,
+                        mediaUrl: (
+                            typeof message?.mediaUrl === 'string' ? message.mediaUrl :
+                                (typeof message?.media_url === 'string' ? message.media_url :
+                                    (typeof message?.uri === 'string' ? message.uri : undefined))
+                        ),
+                        fileName: (
+                            typeof message?.fileName === 'string' ? message.fileName :
+                                (typeof message?.file_name === 'string' ? message.file_name : undefined)
+                        ),
+                        duration: toFiniteNumber(message?.duration),
+                        waveform: Array.isArray(message?.waveform)
+                            ? message.waveform.filter((n: any) => typeof n === 'number' && Number.isFinite(n))
+                            : undefined,
+                        isVideoNote: message?.isVideoNote === true,
+                        uploadProgress: toFiniteNumber(message?.uploadProgress ?? message?.upload_progress),
+                        isMe: typeof message?.isMe === 'boolean' ? message.isMe : inferredIsMe,
+                        timestampMs,
+                        isEdited: message?.isEdited === true,
+                        isPinned: message?.isPinned === true,
+                        editedAt: toFiniteNumber(message?.editedAt ?? message?.edited_at),
+                        replyToId: typeof message?.replyToId === 'string' ? message.replyToId : undefined,
+                        reactionEmoji: typeof message?.reactionEmoji === 'string' ? message.reactionEmoji : undefined,
+                        encryptedContent: typeof message?.encryptedContent === 'string' ? message.encryptedContent : undefined,
+                    }
+                })
+                .filter((value): value is RuntimeChatMessage => value !== null)
+                .sort((a, b) => a.timestampMs - b.timestampMs)
+            const previewRows = runtimeMessages.length > 0 ? mapMessagesToNativeRows(runtimeMessages) : undefined
+
+            return {
+                chatId: chat.chatId,
+                name: title,
+                preview,
+                friendId: chat.friendId || undefined,
+                avatarUri: chat.avatarUrl || undefined,
+                timeLabel: lastMsgTime,
+                unreadCount: chat.unreadCount ?? 0,
+                markedUnread: !!chat.markedUnread,
+                muted: !!chat.muted,
+                pinned: !!chat.pinned,
+                isTyping,
+                isOnline: onlineUsers.has(friendId),
+                avatarFallback: title.substring(0, 1).toUpperCase(),
+                previewRows,
+            }
+        })
+    }, [filteredChats, typingUsers, onlineUsers, user?.userId])
 
     const handleSearchFocus = () => {
         setIsSearchActive(true);
@@ -663,17 +821,53 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
 
     const searchBarStyle = useAnimatedStyle(() => {
-        // Collapse the full block (including vertical padding) so list items slide up cleanly.
-        const focusHeight = interpolate(searchFocusProgress.value, [0, 1], [SEARCH_BAR_BLOCK_HEIGHT, 0], Extrapolate.CLAMP);
-        const focusScaleY = interpolate(searchFocusProgress.value, [0, 1], [1, 0], Extrapolate.CLAMP);
+        // Search bar collapse from scroll
+        const scrollCollapse = interpolate(
+            Math.max(0, scrollY.value),
+            [0, SEARCH_BAR_BLOCK_HEIGHT],
+            [0, SEARCH_BAR_BLOCK_HEIGHT],
+            Extrapolate.CLAMP
+        );
+        // Search bar collapse from focus gesture
+        const focusCollapse = interpolate(
+            searchFocusProgress.value,
+            [0, 1],
+            [0, SEARCH_BAR_BLOCK_HEIGHT],
+            Extrapolate.CLAMP
+        );
+        // Whichever is greater shrinks the bar
+        const totalCollapse = Math.min(SEARCH_BAR_BLOCK_HEIGHT, Math.max(scrollCollapse, focusCollapse));
+        const currentHeight = Math.max(0, SEARCH_BAR_BLOCK_HEIGHT - totalCollapse);
+        const currentScaleY = currentHeight / SEARCH_BAR_BLOCK_HEIGHT;
+        const currentPadStr = interpolate(currentHeight, [0, SEARCH_BAR_BLOCK_HEIGHT], [0, SEARCH_BAR_VERTICAL_PADDING], Extrapolate.CLAMP);
 
         return {
-            height: focusHeight,
-            paddingTop: interpolate(searchFocusProgress.value, [0, 1], [SEARCH_BAR_VERTICAL_PADDING, 0], Extrapolate.CLAMP),
-            paddingBottom: interpolate(searchFocusProgress.value, [0, 1], [SEARCH_BAR_VERTICAL_PADDING, 0], Extrapolate.CLAMP),
-            transform: [{ scaleY: focusScaleY }],
+            height: currentHeight,
+            paddingTop: currentPadStr,
+            paddingBottom: currentPadStr,
+            transform: [{ scaleY: currentScaleY }],
             opacity: 1,
             overflow: 'hidden',
+        };
+    });
+
+    const searchInnerStyle = useAnimatedStyle(() => {
+        const scrollCollapse = interpolate(
+            Math.max(0, scrollY.value),
+            [0, SEARCH_BAR_BLOCK_HEIGHT],
+            [0, SEARCH_BAR_BLOCK_HEIGHT],
+            Extrapolate.CLAMP
+        );
+        const focusCollapse = interpolate(
+            searchFocusProgress.value,
+            [0, 1],
+            [0, SEARCH_BAR_BLOCK_HEIGHT],
+            Extrapolate.CLAMP
+        );
+        const totalCollapse = Math.min(SEARCH_BAR_BLOCK_HEIGHT, Math.max(scrollCollapse, focusCollapse));
+
+        return {
+            opacity: interpolate(totalCollapse, [0, SEARCH_BAR_BLOCK_HEIGHT * 0.6], [1, 0], Extrapolate.CLAMP),
         };
     });
 
@@ -710,6 +904,18 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         transform: [{ scale: interpolate(searchFocusProgress.value, [0.7, 1], [0, 1], Extrapolate.CLAMP) }],
         width: interpolate(searchFocusProgress.value, [0.7, 1], [0, 32], Extrapolate.CLAMP),
     }));
+
+    const nativeHeaderScrollStyle = useAnimatedStyle(() => {
+        // Only translate the header out of view AFTER the search bar has fully collapsed.
+        const headerCollapseOffset = Math.max(0, scrollY.value - SEARCH_BAR_BLOCK_HEIGHT);
+        // Max translation shouldn't exceed the StoryBar height (which is nativeHeaderHeight - SEARCH_BAR_BLOCK_HEIGHT)
+        const maxTranslation = Math.max(0, estimatedNativeHeaderHeight - SEARCH_BAR_BLOCK_HEIGHT);
+        const translateShift = Math.min(headerCollapseOffset, maxTranslation);
+
+        return {
+            transform: [{ translateY: -translateShift }],
+        }
+    }, [estimatedNativeHeaderHeight])
 
     const showEditButton = true
 
@@ -839,6 +1045,47 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         }
     }, [isPullRefreshing, loadChats])
 
+    const handleNativeHomeEvent = useCallback((event: any) => {
+        const payload = event?.nativeEvent ?? event ?? {}
+        const type = String(payload?.type || '')
+        const chatId = String(payload?.chatId || payload?.chat_id || '')
+
+        if (type === 'scroll') {
+            const nextOffset = Number(payload?.offsetY ?? 0)
+            scrollY.value = Number.isFinite(nextOffset) ? nextOffset : 0
+            return
+        }
+
+        if (type === 'refresh') {
+            void handlePullRefresh()
+            return
+        }
+
+        if (!chatId) return
+        const chat = chatsById.get(chatId) || filteredChats.find((entry: any) => entry.chatId === chatId)
+        if (!chat) return
+
+        if (type === 'press') {
+            handleChatPress(chat)
+            return
+        }
+
+        if (type === 'swipePin') {
+            pinChat(chat.chatId)
+            return
+        }
+
+        if (type === 'swipeMute') {
+            toggleMuteChat(chat.chatId)
+            return
+        }
+
+        if (type === 'longPress') {
+            // Native preview is rendered on the native side for native-home list.
+            return
+        }
+    }, [chatsById, filteredChats, handleChatPress, handlePullRefresh, pinChat, toggleMuteChat, scrollY])
+
     const containerAnimatedStyle = useAnimatedStyle(() => ({
         transform: [
             { scale: parentScale.value }
@@ -847,6 +1094,71 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         opacity: 1,
         overflow: 'hidden',
     }))
+
+    const shouldUseNativeHomeList = useMemo(() => {
+        return (Platform.OS === 'ios' || Platform.OS === 'android') && isNativeHomeListAvailable() && !isEditing
+    }, [isEditing])
+
+    const renderHomeListHeader = () => (
+        <View>
+            {(feed.length > 0 || myStories.length > 0) && (
+                <View style={{ paddingBottom: 4, paddingLeft: 10 }}>
+                    <StoryBar
+                        size="medium"
+                        onViewerOpen={handleOpenStoryViewer}
+                        onAddStoryPress={handleOpenStoryCamera}
+                        isMoving={false}
+                    />
+                </View>
+            )}
+            <Animated.View style={searchBarStyle} pointerEvents={isSearchActive ? 'none' : 'auto'}>
+                <Animated.View style={searchInnerStyle}>
+                    <View
+                        style={{
+                            flexDirection: 'row',
+                            alignItems: 'center',
+                            backgroundColor: colors.input || colors.card,
+                            borderRadius: 22,
+                            height: SEARCH_BAR_HEIGHT,
+                            paddingHorizontal: 14,
+                            marginHorizontal: 16
+                        }}
+                    >
+                        <Pressable
+                            onPress={handleSearchFocus}
+                            style={{ flexDirection: 'row', alignItems: 'center', flex: 1, height: '100%' }}
+                        >
+                            <Search size={18} color={withAlpha(colors.text, 0.5)} strokeWidth={1.5} />
+                            <Text style={{ marginLeft: 8, color: withAlpha(colors.text, 0.4), fontSize: 16 }}>Search</Text>
+                        </Pressable>
+                    </View>
+                </Animated.View>
+            </Animated.View>
+        </View>
+    )
+
+    const renderHomeEmptyState = () => (
+        <Animated.View entering={FadeIn.duration(400)} style={styles.emptyStateContainer}>
+            <View style={{ width: 250, height: 250, marginBottom: 10, alignSelf: 'center', position: 'relative' }}>
+                <View style={{ position: 'absolute', top: '10%', left: -25, width: 300, height: 300 }}>
+                    <LottieView
+                        source={require('../../src/lottie/Cat playing animation.json')}
+                        autoPlay
+                        loop
+                        style={{ width: '100%', height: '100%' }}
+                    />
+                </View>
+            </View>
+            <Text style={[styles.emptyDescription, { color: withAlpha(colors.text, 0.6), marginTop: 20, marginBottom: 30 }]}>
+                Waiting for a friend?
+            </Text>
+            <TouchableOpacity onPress={() => safePress('openMainMenuSearch', () => setShowMainMenu(true))} activeOpacity={0.8}>
+                <View style={[styles.actionButton, { backgroundColor: colors.button?.background || colors.primary }]}>
+                    <Text style={{ color: colors.button?.text || '#ffffff', fontSize: 14, fontWeight: '500' }}>Start Vibing</Text>
+                </View>
+            </TouchableOpacity>
+        </Animated.View>
+    )
 
     return (
         <View style={[styles.container, { backgroundColor: 'transparent' }]}>
@@ -979,78 +1291,59 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                     </View>
 
                     {/* Chat List */}
-                    <Animated.FlatList
-                        data={filteredChats}
-                        renderItem={renderItem}
-                        extraData={[typingUsers, onlineUsers, selectedConversations, isEditing, chats.length]}
-                        keyExtractor={item => item.chatId}
-                        contentContainerStyle={[styles.listContent, { paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }]}
-                        showsVerticalScrollIndicator={false}
-                        onScroll={onScroll}
-                        scrollEventThrottle={16}
-                        refreshControl={
-                            <RefreshControl refreshing={isPullRefreshing} onRefresh={handlePullRefresh} tintColor={colors.text} />
-                        }
-                        ListHeaderComponent={
-                            <View>
-                                {(feed.length > 0 || myStories.length > 0) && (
-                                    <View style={{ paddingBottom: 4, paddingLeft: 10 }}>
-                                        <StoryBar
-                                            size="medium"
-                                            onViewerOpen={handleOpenStoryViewer}
-                                            onAddStoryPress={handleOpenStoryCamera}
-                                            isMoving={false}
-                                        />
+                    {shouldUseNativeHomeList ? (
+                        <View style={{ flex: 1, paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }}>
+                            <View style={{ flex: 1 }}>
+                                <NativeHomeListSurface
+                                    rows={nativeHomeRows}
+                                    refreshing={isPullRefreshing}
+                                    isDark={effectiveTheme === 'dark'}
+                                    previewAppearance={nativePreviewAppearance}
+                                    contentTopInset={estimatedNativeHeaderHeight}
+                                    contentBottomInset={100 + (Platform.OS === 'android' ? insets.bottom : 0)}
+                                    onNativeEvent={handleNativeHomeEvent}
+                                />
+                                <Animated.View
+                                    pointerEvents={isSearchActive ? 'none' : 'auto'}
+                                    style={[
+                                        {
+                                            position: 'absolute',
+                                            top: 0,
+                                            left: 0,
+                                            right: 0,
+                                            zIndex: 10,
+                                            elevation: 10,
+                                        },
+                                        nativeHeaderScrollStyle,
+                                    ]}
+                                >
+                                    {renderHomeListHeader()}
+                                </Animated.View>
+                                {filteredChats.length === 0 && (
+                                    <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
+                                        {renderHomeEmptyState()}
                                     </View>
                                 )}
-                                {/* Search Bar (Natural version in ScrollView) */}
-                                <Animated.View style={searchBarStyle} pointerEvents={isSearchActive ? 'none' : 'auto'}>
-                                    <View
-                                        style={{
-                                            flexDirection: 'row',
-                                            alignItems: 'center',
-                                            backgroundColor: colors.input || colors.card,
-                                            borderRadius: 22,
-                                            height: SEARCH_BAR_HEIGHT,
-                                            paddingHorizontal: 14,
-                                            marginHorizontal: 16
-                                        }}
-                                    >
-                                        <Pressable
-                                            onPress={handleSearchFocus}
-                                            style={{ flexDirection: 'row', alignItems: 'center', flex: 1, height: '100%' }}
-                                        >
-                                            <Search size={18} color={withAlpha(colors.text, 0.5)} strokeWidth={1.5} />
-                                            <Text style={{ marginLeft: 8, color: withAlpha(colors.text, 0.4), fontSize: 16 }}>Search</Text>
-                                        </Pressable>
-                                    </View>
-                                </Animated.View>
                             </View>
-                        }
-                        ListFooterComponent={<View style={{ height: 100 + (Platform.OS === 'android' ? insets.bottom : 0) }} />}
-                        ListEmptyComponent={
-                            <Animated.View entering={FadeIn.duration(400)} style={styles.emptyStateContainer}>
-                                <View style={{ width: 250, height: 250, marginBottom: 10, alignSelf: 'center', position: 'relative' }}>
-                                    <View style={{ position: 'absolute', top: '10%', left: -25, width: 300, height: 300 }}>
-                                        <LottieView
-                                            source={require('../../src/lottie/Cat playing animation.json')}
-                                            autoPlay
-                                            loop
-                                            style={{ width: '100%', height: '100%' }}
-                                        />
-                                    </View>
-                                </View>
-                                <Text style={[styles.emptyDescription, { color: withAlpha(colors.text, 0.6), marginTop: 20, marginBottom: 30 }]}>
-                                    Waiting for a friend?
-                                </Text>
-                                <TouchableOpacity onPress={() => safePress('openMainMenuSearch', () => setShowMainMenu(true))} activeOpacity={0.8}>
-                                    <View style={[styles.actionButton, { backgroundColor: colors.button?.background || colors.primary }]}>
-                                        <Text style={{ color: colors.button?.text || '#ffffff', fontSize: 14, fontWeight: '500' }}>Start Vibing</Text>
-                                    </View>
-                                </TouchableOpacity>
-                            </Animated.View>
-                        }
-                    />
+                        </View>
+                    ) : (
+                        <Animated.FlatList
+                            data={filteredChats}
+                            renderItem={renderItem}
+                            extraData={[typingUsers, onlineUsers, selectedConversations, isEditing, chats.length]}
+                            keyExtractor={item => item.chatId}
+                            contentContainerStyle={[styles.listContent, { paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }]}
+                            showsVerticalScrollIndicator={false}
+                            onScroll={onScroll}
+                            scrollEventThrottle={16}
+                            refreshControl={
+                                <RefreshControl refreshing={isPullRefreshing} onRefresh={handlePullRefresh} tintColor={colors.text} />
+                            }
+                            ListHeaderComponent={renderHomeListHeader}
+                            ListFooterComponent={<View style={{ height: 100 + (Platform.OS === 'android' ? insets.bottom : 0) }} />}
+                            ListEmptyComponent={renderHomeEmptyState}
+                        />
+                    )}
 
                     {/* Chat Preview Modal */}
                     <ChatPreviewModal

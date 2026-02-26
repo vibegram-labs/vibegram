@@ -47,6 +47,7 @@ final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
 }
 
 final class BubbleBackgroundView: UIView {
+  private let agentBorderLayer = CAShapeLayer()
   private let blurView = UIVisualEffectView(
     effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
   private let gradientLayer = CAGradientLayer()
@@ -117,6 +118,63 @@ final class BubbleBackgroundView: UIView {
     setNeedsLayout()
   }
 
+  func applyAgentStyle(appearance: ChatListAppearance, isMe: Bool) {
+    // Agent bubble: subtle purple tint with border
+    let agentColor =
+      appearance.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+
+    // For agent messages (!isMe), we make the fill translucent them-color
+    if !isMe {
+      gradientLayer.isHidden = false
+      gradientLayer.colors = [
+        agentColor.withAlphaComponent(0.22).cgColor,
+        agentColor.withAlphaComponent(0.08).cgColor,
+      ]
+      gradientLayer.opacity = 1.0
+      fillLayer.fillColor = appearance.bubbleThemColor.cgColor
+      blurView.alpha = 0.45
+    } else {
+      // For my agent mentions, just add the glowing border and a slight tint
+      gradientLayer.isHidden = false
+      gradientLayer.colors = appearance.bubbleMeGradient.map { $0.cgColor }
+      gradientLayer.opacity = 0.9
+      blurView.alpha = 0.0
+    }
+
+    // Agent border
+    if agentBorderLayer.superlayer == nil {
+      layer.addSublayer(agentBorderLayer)
+    }
+    agentBorderLayer.fillColor = UIColor.clear.cgColor
+    agentBorderLayer.strokeColor = agentColor.withAlphaComponent(isMe ? 0.6 : 0.28).cgColor
+    agentBorderLayer.lineWidth = 1.5
+    applyAgentBorderPath()
+    CATransaction.commit()
+  }
+
+  func clearAgentStyle() {
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    agentBorderLayer.path = nil
+    agentBorderLayer.strokeColor = UIColor.clear.cgColor
+    CATransaction.commit()
+  }
+
+  private func applyAgentBorderPath() {
+    guard bounds.width > 0, bounds.height > 0 else { return }
+    let path = bubblePath(
+      rect: bounds,
+      topLeft: shape.borderTopLeftRadius,
+      topRight: shape.borderTopRightRadius,
+      bottomRight: shape.borderBottomRightRadius,
+      bottomLeft: shape.borderBottomLeftRadius
+    )
+    agentBorderLayer.frame = bounds
+    agentBorderLayer.path = path.cgPath
+  }
+
   private func applyShapePath() {
     let path = bubblePath(
       rect: bounds,
@@ -144,6 +202,7 @@ final class BubbleBackgroundView: UIView {
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     applyShapePath()
+    applyAgentBorderPath()
     CATransaction.commit()
   }
 
@@ -344,10 +403,13 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   }
 
   let textMaxWidth = max(1.0, maxContentWidth - meta.total - bubbleMetaInlineSpacing)
+  let font =
+    row.messageType == "typing"
+    ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
   let textRect = (row.text as NSString).boundingRect(
     with: CGSize(width: textMaxWidth, height: .greatestFiniteMagnitude),
     options: [.usesLineFragmentOrigin, .usesFontLeading],
-    attributes: [.font: bubbleMessageFont],
+    attributes: [.font: font],
     context: nil
   )
   let textWidth = min(textMaxWidth, ceil(textRect.width))
@@ -1204,17 +1266,25 @@ final class ChatListCell: UICollectionViewCell {
       messageLabel.isHidden = isGhostHidden || row.visualKind != .text
       if row.messageType == "typing" {
         startTypingShimmer()
+        messageLabel.font = UIFont.systemFont(ofSize: 13, weight: .regular)
       } else {
         stopTypingShimmer()
+        messageLabel.font = bubbleMessageFont
       }
       mediaContainerView.isHidden = isGhostHidden || row.visualKind == .text
       metaContainerView.isHidden = isGhostHidden
 
-      // Agent message: show sender label, use plainContent for text
+      // Agent/Mention labeling
       if row.isAgentMessage {
         agentSenderLabel.text = "✦ \(row.agentName ?? "Vibe AI")"
+        agentSenderLabel.textAlignment = .left
         agentSenderLabel.isHidden = isGhostHidden
         messageLabel.text = row.plainContent ?? row.text
+      } else if row.isAgentMention {
+        agentSenderLabel.text = "✦ Vibe AI"
+        agentSenderLabel.textAlignment = .right
+        agentSenderLabel.isHidden = isGhostHidden
+        messageLabel.text = row.textWithoutMention
       } else {
         agentSenderLabel.isHidden = true
         messageLabel.text = row.text
@@ -1236,21 +1306,41 @@ final class ChatListCell: UICollectionViewCell {
         // Agent messages use "them" styling (not isMe) with a subtle tint
         bubbleView.configure(
           isMe: false, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
+        bubbleView.applyAgentStyle(appearance: appearance, isMe: false)
         tailView.configure(
           isMe: false,
           visible: !isGhostHidden && row.shape.showTail,
           appearance: appearance
         )
-      } else {
+        tailView.applyAgentTailStyle(appearance: appearance, isMe: false)
+      } else if row.isAgentMention {
+        // Agent mention by ME uses "me" styling with glow
         bubbleView.configure(
-          isMe: row.isMe, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
+          isMe: true, shape: row.shape, hidden: isGhostHidden, appearance: appearance)
+        bubbleView.applyAgentStyle(appearance: appearance, isMe: true)
         tailView.configure(
-          isMe: row.isMe,
+          isMe: true,
           visible: !isGhostHidden && row.shape.showTail,
           appearance: appearance
         )
+        tailView.applyAgentTailStyle(appearance: appearance, isMe: true)
+      } else {
+        bubbleView.clearAgentStyle()
+        tailView.clearAgentTailStyle()
+        let hideBubbleForTyping = row.messageType == "typing"
+        bubbleView.configure(
+          isMe: row.isMe, shape: row.shape, hidden: isGhostHidden || hideBubbleForTyping,
+          appearance: appearance)
+        tailView.configure(
+          isMe: row.isMe,
+          visible: !isGhostHidden && row.shape.showTail && !hideBubbleForTyping,
+          appearance: appearance
+        )
       }
-      let textColor = row.isMe ? appearance.textColorMe : (row.isAgentMessage ? appearance.textColorThem : appearance.textColorThem)
+      let textColor =
+        row.isMe
+        ? appearance.textColorMe
+        : (row.isAgentMessage ? appearance.textColorThem : appearance.textColorThem)
       let metaColor = resolvedMetaColor(for: textColor)
       messageLabel.textColor = textColor
       editedLabel.textColor = metaColor
@@ -1279,6 +1369,8 @@ final class ChatListCell: UICollectionViewCell {
   override func prepareForReuse() {
     super.prepareForReuse()
     VoiceBubblePlaybackCoordinator.shared.unbind(cell: self)
+    bubbleView.clearAgentStyle()
+    tailView.clearAgentTailStyle()
     onVoiceBubbleTap = nil
     row = nil
     isGhostHidden = false
@@ -1361,7 +1453,7 @@ final class ChatListCell: UICollectionViewCell {
     let metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
     let bubbleWidth = metrics.bubbleWidth
     let bubbleHeight = metrics.bubbleHeight
-    let agentLabelHeight: CGFloat = row.isAgentMessage ? 18.0 : 0.0
+    let agentLabelHeight: CGFloat = (row.isAgentMessage || row.isAgentMention) ? 18.0 : 0.0
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
     let bubbleFrame = pixelAlignedRect(
@@ -1373,12 +1465,12 @@ final class ChatListCell: UICollectionViewCell {
       ))
 
     // Agent sender label positioned above the bubble
-    if row.isAgentMessage && !agentSenderLabel.isHidden {
+    if (row.isAgentMessage || row.isAgentMention) && !agentSenderLabel.isHidden {
       agentSenderLabel.frame = pixelAlignedRect(
         CGRect(
-          x: bubbleFrame.minX + bubbleHorizontalPadding,
+          x: bubbleFrame.minX,
           y: bubbleFrame.minY - agentLabelHeight - 2,
-          width: bubbleWidth - (bubbleHorizontalPadding * 2),
+          width: bubbleFrame.width,
           height: agentLabelHeight
         ))
     } else {
@@ -1440,30 +1532,16 @@ final class ChatListCell: UICollectionViewCell {
         ))
     }
 
-    if row.messageType == "typing" {
-      if let mask = messageLabel.layer.mask as? CAGradientLayer {
-        mask.frame = CGRect(
-          x: -messageLabel.bounds.width, y: 0, width: messageLabel.bounds.width * 3,
-          height: messageLabel.bounds.height)
-        let animation = CABasicAnimation(keyPath: "transform.translation.x")
-        animation.fromValue = -messageLabel.bounds.width
-        animation.toValue = messageLabel.bounds.width
-        animation.duration = 1.5
-        animation.repeatCount = .infinity
-        animation.isRemovedOnCompletion = false
-        mask.add(animation, forKey: "shimmerTranslation")
-      }
-    }
     layoutMetaLabels(for: row)
 
     if row.messageType == "typing" {
       if let mask = messageLabel.layer.mask as? CAGradientLayer {
         mask.frame = CGRect(
-          x: -messageLabel.bounds.width, y: 0, width: messageLabel.bounds.width * 3,
+          x: -messageLabel.bounds.width * 2, y: 0, width: messageLabel.bounds.width * 5,
           height: messageLabel.bounds.height)
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
-        animation.fromValue = -messageLabel.bounds.width
-        animation.toValue = messageLabel.bounds.width
+        animation.fromValue = -messageLabel.bounds.width * 2
+        animation.toValue = messageLabel.bounds.width * 2
         animation.duration = 1.5
         animation.repeatCount = .infinity
         animation.isRemovedOnCompletion = false
@@ -2115,6 +2193,33 @@ final class BubbleTailView: UIView {
     transform = flip.concatenating(rotate)
     CATransaction.commit()
     setNeedsLayout()
+  }
+
+  func applyAgentTailStyle(appearance: ChatListAppearance, isMe: Bool) {
+    let agentColor =
+      appearance.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+
+    if !isMe {
+      gradientLayer.isHidden = false
+      gradientLayer.colors = [
+        agentColor.withAlphaComponent(0.22).cgColor,
+        agentColor.withAlphaComponent(0.08).cgColor,
+      ]
+      gradientLayer.opacity = 1.0
+      blurView.alpha = 0.45
+    } else {
+      gradientLayer.isHidden = false
+      gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
+      gradientLayer.opacity = 0.9
+      blurView.alpha = 0.0
+    }
+    CATransaction.commit()
+  }
+
+  func clearAgentTailStyle() {
+    // No-op: regular configure resets everything
   }
 
   override func layoutSubviews() {

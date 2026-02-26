@@ -3900,7 +3900,8 @@ private class ShimmerTextView(context: Context) : androidx.appcompat.widget.AppC
 
   init {
     setTextColor(Color.parseColor("#99FFFFFF")) // Darker base color
-    textSize = 13f
+    textSize = 12f
+    setPadding(0, 0, (context.resources.displayMetrics.density * 40).toInt(), 0)
   }
 
   override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
@@ -3909,7 +3910,7 @@ private class ShimmerTextView(context: Context) : androidx.appcompat.widget.AppC
       val baseColor = currentTextColor
       val highlightColor = Color.WHITE
       shimmerGradient = LinearGradient(
-        0f, 0f, w.toFloat() * 0.5f, 0f, // Gradient is half the width
+        0f, 0f, w.toFloat() * 0.8f, 0f, // Wider gradient for smooth shimmer
         intArrayOf(baseColor, highlightColor, baseColor),
         floatArrayOf(0f, 0.5f, 1f),
         Shader.TileMode.CLAMP
@@ -3920,8 +3921,8 @@ private class ShimmerTextView(context: Context) : androidx.appcompat.widget.AppC
 
   override fun onDraw(canvas: Canvas) {
     if (shimmerAnimator?.isRunning == true && shimmerGradient != null) {
-      // Move gradient from left (-width) to right (2*width) to ensure full sweep
-      gradientMatrix.setTranslate(shimmerFraction * width * 2f - width / 2f, 0f)
+      // Move gradient from deep left to deep right
+      gradientMatrix.setTranslate(shimmerFraction * width * 3f - width, 0f)
       shimmerGradient?.setLocalMatrix(gradientMatrix)
     } else {
       paint.shader = null

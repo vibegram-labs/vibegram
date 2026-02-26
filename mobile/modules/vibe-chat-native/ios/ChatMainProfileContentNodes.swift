@@ -319,67 +319,34 @@ protocol ChatMainProfileAgentPromptNodeDelegate: AnyObject {
   func agentPromptNodeDidRequestFullEditor(_ node: ChatMainProfileAgentPromptNode)
 }
 
-final class ChatMainProfileAgentPromptNode: UIView, UITextViewDelegate {
+final class ChatMainProfileAgentPromptNode: UIView {
 
   weak var delegate: ChatMainProfileAgentPromptNodeDelegate?
-
-  // MARK: - Header
 
   private let headerBar = UIView()
   private let headerIcon = UIImageView()
   private let headerTitleLabel = UILabel()
+  private let headerSubtitleLabel = UILabel()
   private let headerToggle = UISwitch()
-  private let expandButton = UIButton(type: .system)
 
-  // MARK: - Prompt Section
+  private let promptPreviewCard = UIView()
+  private let promptPreviewTitleLabel = UILabel()
+  private let promptPreviewLabel = UILabel()
 
-  private let promptSectionLabel = UILabel()
-  private let promptTextView = UITextView()
-  private let promptCharCountLabel = UILabel()
-  private let promptPlaceholderLabel = UILabel()
-
-  // MARK: - Agent Name
-
-  private let nameSectionLabel = UILabel()
-  private let nameField = UITextField()
-
-  // MARK: - Model Section
-
-  private let modelSectionLabel = UILabel()
-  private let modelSelector = UISegmentedControl(items: ["GPT-4o", "GPT-4o-mini", "Claude 3.5"])
-
-  // MARK: - Temperature
-
-  private let temperatureSectionLabel = UILabel()
-  private let temperatureSlider = UISlider()
-  private let temperatureValueLabel = UILabel()
-
-  // MARK: - Response Length
-
-  private let responseLengthLabel = UILabel()
-  private let responseLengthSelector = UISegmentedControl(items: ["Concise", "Normal", "Detailed"])
-
-  // MARK: - Memory
-
-  private let memorySectionLabel = UILabel()
-  private let memoryToggle = UISwitch()
-  private let memoryDescriptionLabel = UILabel()
-
-  // MARK: - Actions
-
+  private let buttonStack = UIStackView()
+  private let editButton = UIButton(type: .system)
   private let deleteButton = UIButton(type: .system)
-
-  // MARK: - State
 
   private var chatId: String = ""
   private var currentConfig: [String: Any] = [:]
-  private var isExpanded = false
+  private var hasPersistedConfig = false
 
-  private let purpleAccent = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+  private let defaultAccent = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
   private var textColor: UIColor = .white
   private var secondaryTextColor: UIColor = UIColor(white: 1.0, alpha: 0.58)
   private var surfaceColor: UIColor = UIColor(white: 1.0, alpha: 0.06)
   private var fieldBgColor: UIColor = UIColor(white: 1.0, alpha: 0.04)
+  private var accentColor: UIColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -396,196 +363,96 @@ final class ChatMainProfileAgentPromptNode: UIView, UITextViewDelegate {
     layer.cornerCurve = .continuous
     layer.cornerRadius = 22.0
 
-    // ─── Header ───
     headerBar.clipsToBounds = true
-    headerBar.layer.cornerCurve = .continuous
     addSubview(headerBar)
 
-    let cfg = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
-    headerIcon.image = UIImage(systemName: "sparkles", withConfiguration: cfg)
-    headerIcon.tintColor = purpleAccent
+    let iconConfig = UIImage.SymbolConfiguration(pointSize: 16, weight: .semibold)
+    headerIcon.image = UIImage(systemName: "sparkles", withConfiguration: iconConfig)
     headerIcon.contentMode = .scaleAspectFit
+    headerIcon.tintColor = defaultAccent
     headerBar.addSubview(headerIcon)
 
     headerTitleLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
     headerTitleLabel.text = "✦ AI Agent"
     headerBar.addSubview(headerTitleLabel)
 
-    headerToggle.transform = CGAffineTransform(scaleX: 0.76, y: 0.76)
-    headerToggle.onTintColor = purpleAccent
-    headerToggle.addTarget(self, action: #selector(handleToggle), for: .valueChanged)
+    headerSubtitleLabel.font = UIFont.systemFont(ofSize: 12, weight: .medium)
+    headerSubtitleLabel.text = "Single native model backend"
+    headerBar.addSubview(headerSubtitleLabel)
+
+    headerToggle.transform = CGAffineTransform(scaleX: 0.82, y: 0.82)
+    headerToggle.onTintColor = defaultAccent
+    headerToggle.addTarget(self, action: #selector(handleToggleChanged), for: .valueChanged)
     headerBar.addSubview(headerToggle)
 
-    expandButton.setImage(
-      UIImage(
-        systemName: "chevron.down",
-        withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)),
-      for: .normal
-    )
-    expandButton.tintColor = secondaryTextColor
-    expandButton.addTarget(self, action: #selector(handleExpandTapped), for: .touchUpInside)
-    headerBar.addSubview(expandButton)
+    promptPreviewCard.layer.cornerRadius = 14.0
+    promptPreviewCard.layer.cornerCurve = .continuous
+    promptPreviewCard.clipsToBounds = true
+    addSubview(promptPreviewCard)
 
-    let headerTap = UITapGestureRecognizer(target: self, action: #selector(handleExpandTapped))
-    headerBar.addGestureRecognizer(headerTap)
-    headerBar.isUserInteractionEnabled = true
+    promptPreviewTitleLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+    promptPreviewTitleLabel.text = "PROMPT PREVIEW"
+    promptPreviewCard.addSubview(promptPreviewTitleLabel)
 
-    // ─── Agent Name ───
-    nameSectionLabel.text = "AGENT NAME"
-    nameSectionLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-    addSubview(nameSectionLabel)
+    promptPreviewLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+    promptPreviewLabel.numberOfLines = 4
+    promptPreviewCard.addSubview(promptPreviewLabel)
 
-    nameField.font = UIFont.systemFont(ofSize: 15, weight: .medium)
-    nameField.placeholder = "Vibe AI"
-    nameField.borderStyle = .none
-    nameField.layer.cornerRadius = 10
-    nameField.layer.cornerCurve = .continuous
-    nameField.clipsToBounds = true
-    nameField.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 12, height: 1))
-    nameField.leftViewMode = .always
-    nameField.addTarget(self, action: #selector(handleFieldChanged), for: .editingChanged)
-    addSubview(nameField)
+    buttonStack.axis = .horizontal
+    buttonStack.spacing = 10.0
+    buttonStack.distribution = .fillEqually
+    addSubview(buttonStack)
 
-    // ─── Prompt Section ───
-    promptSectionLabel.text = "SYSTEM PROMPT"
-    promptSectionLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-    addSubview(promptSectionLabel)
+    editButton.setTitle("Edit Agent", for: .normal)
+    editButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+    editButton.layer.cornerRadius = 14.0
+    editButton.layer.cornerCurve = .continuous
+    editButton.clipsToBounds = true
+    editButton.addTarget(self, action: #selector(handleEditTapped), for: .touchUpInside)
+    buttonStack.addArrangedSubview(editButton)
 
-    promptTextView.font = UIFont.systemFont(ofSize: 14, weight: .regular)
-    promptTextView.layer.cornerRadius = 12
-    promptTextView.layer.cornerCurve = .continuous
-    promptTextView.textContainerInset = UIEdgeInsets(top: 10, left: 8, bottom: 10, right: 8)
-    promptTextView.isScrollEnabled = true
-    promptTextView.delegate = self
-    addSubview(promptTextView)
-
-    promptPlaceholderLabel.text =
-      "Describe the agent's personality, knowledge, and how it should respond..."
-    promptPlaceholderLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
-    promptPlaceholderLabel.numberOfLines = 0
-    promptPlaceholderLabel.isUserInteractionEnabled = false
-    promptTextView.addSubview(promptPlaceholderLabel)
-
-    promptCharCountLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
-    promptCharCountLabel.textAlignment = .right
-    addSubview(promptCharCountLabel)
-
-    // ─── Model ───
-    modelSectionLabel.text = "MODEL"
-    modelSectionLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-    addSubview(modelSectionLabel)
-
-    modelSelector.selectedSegmentIndex = 0
-    modelSelector.addTarget(self, action: #selector(handleFieldChanged), for: .valueChanged)
-    addSubview(modelSelector)
-
-    // ─── Temperature ───
-    temperatureSectionLabel.text = "CREATIVITY (TEMPERATURE)"
-    temperatureSectionLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-    addSubview(temperatureSectionLabel)
-
-    temperatureSlider.minimumValue = 0.0
-    temperatureSlider.maximumValue = 2.0
-    temperatureSlider.value = 0.7
-    temperatureSlider.minimumTrackTintColor = purpleAccent
-    temperatureSlider.addTarget(
-      self, action: #selector(handleTemperatureChanged), for: .valueChanged)
-    addSubview(temperatureSlider)
-
-    temperatureValueLabel.font = UIFont.monospacedDigitSystemFont(ofSize: 13, weight: .semibold)
-    temperatureValueLabel.textAlignment = .right
-    addSubview(temperatureValueLabel)
-
-    // ─── Response Length ───
-    responseLengthLabel.text = "RESPONSE LENGTH"
-    responseLengthLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
-    addSubview(responseLengthLabel)
-
-    responseLengthSelector.selectedSegmentIndex = 1
-    responseLengthSelector.addTarget(
-      self, action: #selector(handleFieldChanged), for: .valueChanged)
-    addSubview(responseLengthSelector)
-
-    // ─── Memory ───
-    memorySectionLabel.text = "Conversation Memory"
-    memorySectionLabel.font = UIFont.systemFont(ofSize: 14, weight: .medium)
-    addSubview(memorySectionLabel)
-
-    memoryToggle.onTintColor = purpleAccent
-    memoryToggle.isOn = true
-    memoryToggle.addTarget(self, action: #selector(handleFieldChanged), for: .valueChanged)
-    addSubview(memoryToggle)
-
-    memoryDescriptionLabel.text =
-      "Agent remembers previous messages in this conversation for context."
-    memoryDescriptionLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
-    memoryDescriptionLabel.numberOfLines = 0
-    addSubview(memoryDescriptionLabel)
-
-    // ─── Delete ───
     deleteButton.setTitle("Remove Agent", for: .normal)
-    deleteButton.setTitleColor(.systemRed, for: .normal)
-    deleteButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+    deleteButton.titleLabel?.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+    deleteButton.layer.cornerRadius = 14.0
+    deleteButton.layer.cornerCurve = .continuous
+    deleteButton.layer.borderWidth = 1.0 / UIScreen.main.scale
+    deleteButton.clipsToBounds = true
     deleteButton.addTarget(self, action: #selector(handleDeleteTapped), for: .touchUpInside)
-    addSubview(deleteButton)
+    buttonStack.addArrangedSubview(deleteButton)
 
-    updateTemperatureLabel()
-    updatePromptPlaceholder()
-    applyExpandedState(animated: false)
+    applyTheme(
+      textColor: textColor,
+      secondaryTextColor: secondaryTextColor,
+      surfaceColor: surfaceColor,
+      accentColor: accentColor
+    )
+    refreshViewState()
   }
-
-  // MARK: - Public API
 
   func configure(chatId: String, config: [String: Any]?) {
     self.chatId = chatId
+    hasPersistedConfig = config != nil
+
     if let config {
-      currentConfig = config
-      let name = (config["name"] as? String) ?? ""
-      let prompt = (config["system_prompt"] as? String) ?? ""
-      let enabled = (config["enabled"] as? Bool) ?? true
-      let model = (config["model"] as? String) ?? "gpt-4o"
-      let temperature = (config["temperature"] as? Double) ?? 0.7
-      let memory = (config["memory_enabled"] as? Bool) ?? true
-      let responseLength = (config["response_length"] as? String) ?? "normal"
-
-      nameField.text = name
-      promptTextView.text = prompt
-      headerToggle.isOn = enabled
-
-      switch model.lowercased() {
-      case "gpt-4o": modelSelector.selectedSegmentIndex = 0
-      case "gpt-4o-mini": modelSelector.selectedSegmentIndex = 1
-      case "claude-3.5-sonnet", "claude-3-5-sonnet": modelSelector.selectedSegmentIndex = 2
-      default: modelSelector.selectedSegmentIndex = 0
+      var nextConfig: [String: Any] = [:]
+      nextConfig["chat_id"] = chatId
+      nextConfig["name"] = normalizedName(from: config)
+      nextConfig["system_prompt"] = normalizedPrompt(from: config)
+      nextConfig["enabled"] = normalizedEnabled(from: config, defaultValue: true)
+      if let existingId = config["id"] {
+        nextConfig["id"] = existingId
       }
-
-      temperatureSlider.value = Float(temperature)
-      memoryToggle.isOn = memory
-
-      switch responseLength.lowercased() {
-      case "concise": responseLengthSelector.selectedSegmentIndex = 0
-      case "normal": responseLengthSelector.selectedSegmentIndex = 1
-      case "detailed": responseLengthSelector.selectedSegmentIndex = 2
-      default: responseLengthSelector.selectedSegmentIndex = 1
-      }
-
-      headerTitleLabel.text = "✦ \(name.isEmpty ? "AI Agent" : name)"
-      deleteButton.isHidden = false
+      currentConfig = nextConfig
     } else {
-      currentConfig = [:]
-      nameField.text = ""
-      promptTextView.text = ""
-      headerToggle.isOn = false
-      modelSelector.selectedSegmentIndex = 0
-      temperatureSlider.value = 0.7
-      memoryToggle.isOn = true
-      responseLengthSelector.selectedSegmentIndex = 1
-      headerTitleLabel.text = "✦ AI Agent"
-      deleteButton.isHidden = true
+      currentConfig = [
+        "chat_id": chatId,
+        "name": "Vibe AI",
+        "system_prompt": "",
+        "enabled": false,
+      ]
     }
-    updateTemperatureLabel()
-    updatePromptPlaceholder()
-    updatePromptCharCount()
+
+    refreshViewState()
     setNeedsLayout()
   }
 
@@ -598,266 +465,176 @@ final class ChatMainProfileAgentPromptNode: UIView, UITextViewDelegate {
     self.textColor = textColor
     self.secondaryTextColor = secondaryTextColor
     self.surfaceColor = surfaceColor
-    self.fieldBgColor = surfaceColor.withAlphaComponent(0.5)
+    self.accentColor = accentColor
+    self.fieldBgColor = surfaceColor.withAlphaComponent(0.58)
 
     backgroundColor = surfaceColor
-
     headerTitleLabel.textColor = textColor
+    headerSubtitleLabel.textColor = secondaryTextColor
     headerIcon.tintColor = accentColor
-
-    nameSectionLabel.textColor = secondaryTextColor
-    nameField.textColor = textColor
-    nameField.backgroundColor = fieldBgColor
-    nameField.attributedPlaceholder = NSAttributedString(
-      string: "Vibe AI",
-      attributes: [.foregroundColor: secondaryTextColor.withAlphaComponent(0.5)]
-    )
-
-    promptSectionLabel.textColor = secondaryTextColor
-    promptTextView.textColor = textColor
-    promptTextView.backgroundColor = fieldBgColor
-    promptPlaceholderLabel.textColor = secondaryTextColor.withAlphaComponent(0.5)
-    promptCharCountLabel.textColor = secondaryTextColor
-
-    modelSectionLabel.textColor = secondaryTextColor
-    temperatureSectionLabel.textColor = secondaryTextColor
-    temperatureValueLabel.textColor = textColor
-    temperatureSlider.minimumTrackTintColor = accentColor
-
-    responseLengthLabel.textColor = secondaryTextColor
-    memorySectionLabel.textColor = textColor
-    memoryDescriptionLabel.textColor = secondaryTextColor.withAlphaComponent(0.7)
-
-    expandButton.tintColor = secondaryTextColor
-
     headerToggle.onTintColor = accentColor
-    memoryToggle.onTintColor = accentColor
 
-    setNeedsLayout()
+    promptPreviewCard.backgroundColor = fieldBgColor
+    promptPreviewTitleLabel.textColor = secondaryTextColor
+    promptPreviewLabel.textColor = textColor
+
+    editButton.backgroundColor = accentColor
+    editButton.setTitleColor(.white, for: .normal)
+
+    deleteButton.backgroundColor = fieldBgColor
+    deleteButton.setTitleColor(.systemRed, for: .normal)
+    deleteButton.layer.borderColor = secondaryTextColor.withAlphaComponent(0.35).cgColor
   }
-
-  // MARK: - Preferred Height
 
   func preferredHeight(for width: CGFloat) -> CGFloat {
-    let headerH: CGFloat = 52.0
-    if !isExpanded { return headerH }
-
+    let headerHeight: CGFloat = 58.0
     let pad: CGFloat = 16.0
-    var h = headerH + 12.0  // gap after header
+    let buttonHeight: CGFloat = 44.0
+    var total = headerHeight + 10.0
 
-    // Agent name
-    h += 18.0 + 4.0 + 38.0 + 16.0
-
-    // Prompt section
-    h += 18.0 + 4.0 + 120.0 + 4.0 + 14.0 + 16.0
-
-    // Model
-    h += 18.0 + 4.0 + 32.0 + 16.0
-
-    // Temperature
-    h += 18.0 + 4.0 + 32.0 + 16.0
-
-    // Response length
-    h += 18.0 + 4.0 + 32.0 + 16.0
-
-    // Memory
-    h += 20.0 + 4.0 + 36.0 + 16.0
-
-    // Delete button
-    if !deleteButton.isHidden {
-      h += 36.0 + 12.0
+    if shouldShowPromptPreview {
+      total += promptCardHeight(for: width) + 10.0
     }
 
-    return h + pad
+    total += buttonHeight + pad
+    return total
   }
-
-  // MARK: - Layout
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    let w = bounds.width
+    let width = bounds.width
     let pad: CGFloat = 16.0
+    let headerHeight: CGFloat = 58.0
 
-    let headerH: CGFloat = 52.0
-    headerBar.frame = CGRect(x: 0, y: 0, width: w, height: headerH)
-    headerIcon.frame = CGRect(x: pad, y: (headerH - 20) * 0.5, width: 20, height: 20)
-    headerTitleLabel.frame = CGRect(x: pad + 28, y: 0, width: w - pad * 2 - 120, height: headerH)
+    headerBar.frame = CGRect(x: 0.0, y: 0.0, width: width, height: headerHeight)
+    headerIcon.frame = CGRect(x: pad, y: 12.0, width: 20.0, height: 20.0)
+    headerTitleLabel.frame = CGRect(x: pad + 28.0, y: 8.0, width: width - 140.0, height: 22.0)
+    headerSubtitleLabel.frame = CGRect(
+      x: pad + 28.0, y: headerTitleLabel.frame.maxY - 1.0, width: width - 140.0, height: 18.0)
 
     let toggleSize = headerToggle.intrinsicContentSize
+    let scaledToggleWidth = toggleSize.width * 0.82
+    let scaledToggleHeight = toggleSize.height * 0.82
     headerToggle.frame = CGRect(
-      x: w - pad - toggleSize.width * 0.76 - 32,
-      y: (headerH - toggleSize.height * 0.76) * 0.5,
+      x: width - pad - scaledToggleWidth,
+      y: (headerHeight - scaledToggleHeight) * 0.5,
       width: toggleSize.width,
       height: toggleSize.height
     )
 
-    expandButton.frame = CGRect(x: w - pad - 24, y: (headerH - 24) * 0.5, width: 24, height: 24)
-
-    guard isExpanded else { return }
-
-    var y: CGFloat = headerH + 12.0
-    let fieldW = w - pad * 2
-
-    // Name
-    nameSectionLabel.frame = CGRect(x: pad, y: y, width: fieldW, height: 16)
-    y += 18.0
-    nameField.frame = CGRect(x: pad, y: y, width: fieldW, height: 38)
-    y += 42.0 + 12.0
-
-    // Prompt
-    promptSectionLabel.frame = CGRect(x: pad, y: y, width: fieldW, height: 16)
-    y += 18.0
-    promptTextView.frame = CGRect(x: pad, y: y, width: fieldW, height: 120)
-    promptPlaceholderLabel.frame = CGRect(x: 12, y: 10, width: fieldW - 24, height: 60)
-    y += 122.0
-    promptCharCountLabel.frame = CGRect(x: pad, y: y, width: fieldW, height: 14)
-    y += 18.0 + 12.0
-
-    // Model
-    modelSectionLabel.frame = CGRect(x: pad, y: y, width: fieldW, height: 16)
-    y += 20.0
-    modelSelector.frame = CGRect(x: pad, y: y, width: fieldW, height: 32)
-    y += 36.0 + 12.0
-
-    // Temperature
-    temperatureSectionLabel.frame = CGRect(x: pad, y: y, width: fieldW - 48, height: 16)
-    temperatureValueLabel.frame = CGRect(x: w - pad - 44, y: y, width: 44, height: 16)
-    y += 20.0
-    temperatureSlider.frame = CGRect(x: pad, y: y, width: fieldW, height: 28)
-    y += 32.0 + 12.0
-
-    // Response length
-    responseLengthLabel.frame = CGRect(x: pad, y: y, width: fieldW, height: 16)
-    y += 20.0
-    responseLengthSelector.frame = CGRect(x: pad, y: y, width: fieldW, height: 32)
-    y += 36.0 + 12.0
-
-    // Memory
-    memorySectionLabel.frame = CGRect(x: pad, y: y, width: fieldW - 60, height: 20)
-    let memToggleSize = memoryToggle.intrinsicContentSize
-    memoryToggle.frame = CGRect(
-      x: w - pad - memToggleSize.width,
-      y: y + (20 - memToggleSize.height) * 0.5,
-      width: memToggleSize.width,
-      height: memToggleSize.height
-    )
-    y += 24.0
-    memoryDescriptionLabel.frame = CGRect(x: pad, y: y, width: fieldW, height: 36)
-    y += 40.0 + 12.0
-
-    // Delete
-    if !deleteButton.isHidden {
-      deleteButton.frame = CGRect(x: pad, y: y, width: fieldW, height: 36)
+    var y = headerBar.frame.maxY + 6.0
+    if shouldShowPromptPreview {
+      let promptCardHeight = promptCardHeight(for: width)
+      promptPreviewCard.frame = CGRect(
+        x: pad,
+        y: y,
+        width: width - (pad * 2.0),
+        height: promptCardHeight
+      )
+      promptPreviewTitleLabel.frame = CGRect(
+        x: 12.0, y: 10.0, width: promptPreviewCard.bounds.width - 24.0, height: 14.0)
+      promptPreviewLabel.frame = CGRect(
+        x: 12.0, y: 28.0, width: promptPreviewCard.bounds.width - 24.0, height: promptCardHeight - 40.0)
+      y = promptPreviewCard.frame.maxY + 10.0
+    } else {
+      promptPreviewCard.frame = .zero
+      promptPreviewTitleLabel.frame = .zero
+      promptPreviewLabel.frame = .zero
     }
+
+    buttonStack.frame = CGRect(
+      x: pad, y: y, width: width - (pad * 2.0), height: 44.0)
   }
 
-  // MARK: - UITextViewDelegate
-
-  func textViewDidChange(_ textView: UITextView) {
-    updatePromptPlaceholder()
-    updatePromptCharCount()
-    emitConfigUpdate()
+  @objc private func handleToggleChanged() {
+    let prompt = normalizedPrompt(from: currentConfig)
+    if headerToggle.isOn && prompt.isEmpty {
+      headerToggle.setOn(false, animated: true)
+      delegate?.agentPromptNodeDidRequestFullEditor(self)
+      return
+    }
+    emitConfigUpdate(enabled: headerToggle.isOn)
   }
 
-  // MARK: - Actions
-
-  @objc private func handleToggle() {
-    emitConfigUpdate()
-  }
-
-  @objc private func handleExpandTapped() {
-    isExpanded.toggle()
-    applyExpandedState(animated: true)
-    // Notify parent for re-layout
-    emitConfigUpdate()
-  }
-
-  @objc private func handleFieldChanged() {
-    emitConfigUpdate()
-  }
-
-  @objc private func handleTemperatureChanged() {
-    updateTemperatureLabel()
-    emitConfigUpdate()
+  @objc private func handleEditTapped() {
+    delegate?.agentPromptNodeDidRequestFullEditor(self)
   }
 
   @objc private func handleDeleteTapped() {
     delegate?.agentPromptNodeDidRequestDelete(self)
   }
 
-  // MARK: - Internal
+  private var shouldShowPromptPreview: Bool {
+    guard normalizedEnabled(from: currentConfig, defaultValue: false) else { return false }
+    return !normalizedPrompt(from: currentConfig).isEmpty
+  }
 
-  private func applyExpandedState(animated: Bool) {
-    let hidden = !isExpanded
-    let iconName = isExpanded ? "chevron.up" : "chevron.down"
-    expandButton.setImage(
-      UIImage(
-        systemName: iconName,
-        withConfiguration: UIImage.SymbolConfiguration(pointSize: 12, weight: .semibold)),
-      for: .normal
-    )
+  private func refreshViewState() {
+    let name = normalizedName(from: currentConfig)
+    let prompt = normalizedPrompt(from: currentConfig)
+    let isEnabled = normalizedEnabled(from: currentConfig, defaultValue: false)
 
-    let views: [UIView] = [
-      nameSectionLabel, nameField,
-      promptSectionLabel, promptTextView, promptCharCountLabel,
-      modelSectionLabel, modelSelector,
-      temperatureSectionLabel, temperatureSlider, temperatureValueLabel,
-      responseLengthLabel, responseLengthSelector,
-      memorySectionLabel, memoryToggle, memoryDescriptionLabel,
-      deleteButton,
-    ]
+    headerToggle.isOn = isEnabled
+    headerTitleLabel.text = "✦ \(name)"
+    headerSubtitleLabel.text = isEnabled ? "Single native model backend" : "Agent is paused"
 
-    if animated {
-      UIView.animate(
-        withDuration: 0.28, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0.3,
-        options: [.curveEaseInOut, .allowUserInteraction]
-      ) {
-        for v in views { v.alpha = hidden ? 0.0 : 1.0 }
+    promptPreviewLabel.text = prompt
+    promptPreviewCard.isHidden = !shouldShowPromptPreview
+    deleteButton.isHidden = !hasPersistedConfig
+    setNeedsLayout()
+  }
+
+  private func normalizedName(from config: [String: Any]) -> String {
+    let raw = (config["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return raw.isEmpty ? "Vibe AI" : raw
+  }
+
+  private func normalizedPrompt(from config: [String: Any]) -> String {
+    let snake =
+      (config["system_prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !snake.isEmpty { return snake }
+    return
+      (config["systemPrompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  private func normalizedEnabled(from config: [String: Any], defaultValue: Bool) -> Bool {
+    guard let raw = config["enabled"] else { return defaultValue }
+    if let bool = raw as? Bool { return bool }
+    if let number = raw as? NSNumber { return number.boolValue }
+    if let string = raw as? String {
+      switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+      case "true", "1", "yes", "on":
+        return true
+      case "false", "0", "no", "off":
+        return false
+      default:
+        break
       }
-    } else {
-      for v in views { v.alpha = hidden ? 0.0 : 1.0 }
     }
-
-    for v in views { v.isHidden = hidden }
+    return defaultValue
   }
 
-  private func updateTemperatureLabel() {
-    temperatureValueLabel.text = String(format: "%.1f", temperatureSlider.value)
+  private func promptCardHeight(for width: CGFloat) -> CGFloat {
+    let availableWidth = max(10.0, width - 56.0)
+    let promptText = normalizedPrompt(from: currentConfig)
+    let bounding = (promptText as NSString).boundingRect(
+      with: CGSize(width: availableWidth, height: 140.0),
+      options: [.usesLineFragmentOrigin, .usesFontLeading],
+      attributes: [.font: UIFont.systemFont(ofSize: 14.0, weight: .regular)],
+      context: nil
+    )
+    let textHeight = min(96.0, ceil(bounding.height))
+    return max(68.0, 28.0 + textHeight + 12.0)
   }
 
-  private func updatePromptPlaceholder() {
-    promptPlaceholderLabel.isHidden = !(promptTextView.text ?? "").isEmpty
-  }
-
-  private func updatePromptCharCount() {
-    let count = (promptTextView.text ?? "").count
-    promptCharCountLabel.text = "\(count) / 4000"
-  }
-
-  private func emitConfigUpdate() {
-    let modelOptions = ["gpt-4o", "gpt-4o-mini", "claude-3.5-sonnet"]
-    let responseLengthOptions = ["concise", "normal", "detailed"]
-
-    let config: [String: Any] = [
-      "chat_id": chatId,
-      "name": (nameField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-      "system_prompt": (promptTextView.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines),
-      "enabled": headerToggle.isOn,
-      "model": modelOptions[safe: modelSelector.selectedSegmentIndex] ?? "gpt-4o",
-      "temperature": Double(temperatureSlider.value),
-      "memory_enabled": memoryToggle.isOn,
-      "response_length": responseLengthOptions[safe: responseLengthSelector.selectedSegmentIndex]
-        ?? "normal",
-    ]
+  private func emitConfigUpdate(enabled: Bool) {
+    var config = currentConfig
+    config["chat_id"] = chatId
+    config["name"] = normalizedName(from: config)
+    config["system_prompt"] = normalizedPrompt(from: config)
+    config["enabled"] = enabled
     currentConfig = config
-    let displayName = (nameField.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    headerTitleLabel.text = "✦ \(displayName.isEmpty ? "AI Agent" : displayName)"
+    refreshViewState()
     delegate?.agentPromptNode(self, didUpdateConfig: config)
-  }
-}
-
-extension Array {
-  fileprivate subscript(safe index: Int) -> Element? {
-    indices.contains(index) ? self[index] : nil
   }
 }

@@ -9,129 +9,317 @@ final class ChatAgentConfigViewController: UIViewController {
   private let scrollView = UIScrollView()
   private let contentView = UIView()
 
-  private let nameField = UITextField()
-  private let promptTextView = UITextView()
-  private let enabledToggle = UISwitch()
-  private let enabledLabel = UILabel()
-  private let saveButton = UIButton(type: .system)
-  private let deleteButton = UIButton(type: .system)
+  private let titleLabel = UILabel()
+  private let subtitleLabel = UILabel()
+  private let modelCard = UIView()
+  private let modelLabel = UILabel()
 
   private let nameLabel = UILabel()
+  private let nameField = UITextField()
   private let promptLabel = UILabel()
+  private let generatePromptButton = UIButton(type: .system)
+  private let generateInputLabel = UILabel()
+  private let generateInputField = UITextField()
+  private let promptTextView = UITextView()
+  private let promptHintLabel = UILabel()
+  private let toolsLabel = UILabel()
+  private let toolsCard = UIView()
+  private let enabledLabel = UILabel()
+  private let enabledToggle = UISwitch()
 
-  private let purpleAccent = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+  private let deleteButton = UIButton(type: .system)
+
+  private let accentColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+  private let toolOptions: [(id: String, title: String, subtitle: String)] = [
+    ("search_google", "Web Search", "Search Google for up-to-date results"),
+    ("analyze_image", "Image Analysis", "Understand images and OCR text"),
+    ("analyze_document", "Document Analysis", "Read and summarize document files"),
+    ("create_document", "Create Document", "Generate formatted document drafts"),
+  ]
+  private var toolRows: [UIView] = []
+  private var toolTitleLabels: [UILabel] = []
+  private var toolSubtitleLabels: [UILabel] = []
+  private var toolToggles: [UISwitch] = []
+  private var toolTogglesById: [String: UISwitch] = [:]
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    title = agentConfig != nil ? "Edit AI Agent" : "Add AI Agent"
-    view.backgroundColor = UIColor.systemBackground
+    configureNavigation()
+    configureViews()
+  }
 
-    navigationItem.leftBarButtonItem = UIBarButtonItem(
-      barButtonSystemItem: .cancel, target: self, action: #selector(handleCancel))
-
-    view.addSubview(scrollView)
-    scrollView.addSubview(contentView)
-    scrollView.keyboardDismissMode = .interactive
-
-    // Name
-    nameLabel.text = "Agent Name"
-    nameLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-    nameLabel.textColor = .secondaryLabel
-    contentView.addSubview(nameLabel)
-
-    nameField.placeholder = "Vibe AI"
-    nameField.font = UIFont.systemFont(ofSize: 16, weight: .medium)
-    nameField.borderStyle = .roundedRect
-    nameField.backgroundColor = UIColor.secondarySystemBackground
-    nameField.text = (agentConfig?["name"] as? String) ?? ""
-    contentView.addSubview(nameField)
-
-    // System Prompt
-    promptLabel.text = "System Prompt"
-    promptLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-    promptLabel.textColor = .secondaryLabel
-    contentView.addSubview(promptLabel)
-
-    promptTextView.font = UIFont.systemFont(ofSize: 15, weight: .regular)
-    promptTextView.backgroundColor = UIColor.secondarySystemBackground
-    promptTextView.layer.cornerRadius = 10.0
-    promptTextView.textContainerInset = UIEdgeInsets(top: 12, left: 8, bottom: 12, right: 8)
-    promptTextView.text = (agentConfig?["system_prompt"] as? String) ?? ""
-    contentView.addSubview(promptTextView)
-
-    // Enabled
-    enabledLabel.text = "Enabled"
-    enabledLabel.font = UIFont.systemFont(ofSize: 16, weight: .medium)
-    contentView.addSubview(enabledLabel)
-
-    enabledToggle.isOn = (agentConfig?["enabled"] as? Bool) ?? true
-    enabledToggle.onTintColor = purpleAccent
-    contentView.addSubview(enabledToggle)
-
-    // Save
-    saveButton.setTitle(agentConfig != nil ? "Save Changes" : "Create Agent", for: .normal)
-    saveButton.titleLabel?.font = UIFont.systemFont(ofSize: 17, weight: .semibold)
-    saveButton.backgroundColor = purpleAccent
-    saveButton.setTitleColor(.white, for: .normal)
-    saveButton.layer.cornerRadius = 14.0
-    saveButton.addTarget(self, action: #selector(handleSave), for: .touchUpInside)
-    contentView.addSubview(saveButton)
-
-    // Delete
-    if agentConfig != nil {
-      deleteButton.setTitle("Remove Agent", for: .normal)
-      deleteButton.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .medium)
-      deleteButton.setTitleColor(.systemRed, for: .normal)
-      deleteButton.addTarget(self, action: #selector(handleDelete), for: .touchUpInside)
-      contentView.addSubview(deleteButton)
-    }
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    configureSheetIfNeeded()
   }
 
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
-    let safeArea = view.safeAreaInsets
+
+    let safe = view.safeAreaInsets
     scrollView.frame = CGRect(
-      x: 0, y: safeArea.top,
+      x: 0.0,
+      y: safe.top,
       width: view.bounds.width,
-      height: view.bounds.height - safeArea.top
+      height: view.bounds.height - safe.top
     )
+
     let width = scrollView.bounds.width
-    let padding: CGFloat = 20.0
+    let sideInset: CGFloat = 20.0
+    var y: CGFloat = 14.0
+    let contentWidth = width - (sideInset * 2.0)
 
-    contentView.frame = CGRect(x: 0, y: 0, width: width, height: 1)
+    titleLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 30.0)
+    y = titleLabel.frame.maxY + 2.0
+    subtitleLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 22.0)
+    y = subtitleLabel.frame.maxY + 16.0
 
-    var y: CGFloat = 20.0
+    modelCard.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 48.0)
+    modelLabel.frame = modelCard.bounds.insetBy(dx: 14.0, dy: 0.0)
+    y = modelCard.frame.maxY + 20.0
 
-    nameLabel.frame = CGRect(x: padding, y: y, width: width - padding * 2, height: 20)
-    y += 24.0
-    nameField.frame = CGRect(x: padding, y: y, width: width - padding * 2, height: 44)
-    y += 56.0
+    nameLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 20.0)
+    y = nameLabel.frame.maxY + 8.0
+    nameField.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 48.0)
+    y = nameField.frame.maxY + 18.0
 
-    promptLabel.frame = CGRect(x: padding, y: y, width: width - padding * 2, height: 20)
-    y += 24.0
-    promptTextView.frame = CGRect(x: padding, y: y, width: width - padding * 2, height: 160)
-    y += 172.0
+    promptLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 20.0)
+    let generateWidth: CGFloat = 94.0
+    generatePromptButton.frame = CGRect(
+      x: width - sideInset - generateWidth,
+      y: y - 4.0,
+      width: generateWidth,
+      height: 28.0
+    )
+    promptLabel.frame.size.width = max(80.0, contentWidth - generateWidth - 8.0)
+    y = promptLabel.frame.maxY + 8.0
+    generateInputLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 18.0)
+    y = generateInputLabel.frame.maxY + 6.0
+    generateInputField.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 42.0)
+    y = generateInputField.frame.maxY + 12.0
+    promptTextView.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 180.0)
+    promptHintLabel.frame = CGRect(
+      x: sideInset + 12.0,
+      y: y + 12.0,
+      width: contentWidth - 24.0,
+      height: 42.0
+    )
+    y = promptTextView.frame.maxY + 16.0
 
-    enabledLabel.frame = CGRect(x: padding, y: y, width: 120, height: 32)
+    toolsLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 20.0)
+    y = toolsLabel.frame.maxY + 8.0
+    let rowHeight: CGFloat = 54.0
+    let toolsCardHeight = CGFloat(toolRows.count) * rowHeight
+    toolsCard.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: toolsCardHeight)
+    for index in toolRows.indices {
+      let rowY = CGFloat(index) * rowHeight
+      let row = toolRows[index]
+      row.frame = CGRect(x: 0.0, y: rowY, width: contentWidth, height: rowHeight)
+      let toggle = toolToggles[index]
+      let toggleSize = toggle.intrinsicContentSize
+      toggle.frame = CGRect(
+        x: contentWidth - 16.0 - toggleSize.width,
+        y: (rowHeight - toggleSize.height) * 0.5,
+        width: toggleSize.width,
+        height: toggleSize.height
+      )
+      let textWidth = max(120.0, toggle.frame.minX - 24.0)
+      toolTitleLabels[index].frame = CGRect(x: 12.0, y: 8.0, width: textWidth, height: 20.0)
+      toolSubtitleLabels[index].frame = CGRect(x: 12.0, y: 28.0, width: textWidth, height: 18.0)
+    }
+    y = toolsCard.frame.maxY + 14.0
+
+    enabledLabel.frame = CGRect(x: sideInset, y: y, width: contentWidth - 80.0, height: 30.0)
     let toggleSize = enabledToggle.intrinsicContentSize
     enabledToggle.frame = CGRect(
-      x: width - padding - toggleSize.width,
-      y: y + (32 - toggleSize.height) * 0.5,
+      x: width - sideInset - toggleSize.width,
+      y: y + (30.0 - toggleSize.height) * 0.5,
       width: toggleSize.width,
       height: toggleSize.height
     )
-    y += 50.0
-
-    saveButton.frame = CGRect(x: padding, y: y, width: width - padding * 2, height: 50)
-    y += 62.0
+    y += 42.0
 
     if agentConfig != nil {
-      deleteButton.frame = CGRect(x: padding, y: y, width: width - padding * 2, height: 44)
-      y += 56.0
+      deleteButton.frame = CGRect(x: sideInset, y: y, width: contentWidth, height: 46.0)
+      deleteButton.isHidden = false
+      y = deleteButton.frame.maxY + 18.0
+    } else {
+      deleteButton.isHidden = true
+      deleteButton.frame = .zero
+      y += 10.0
     }
 
-    contentView.frame = CGRect(x: 0, y: 0, width: width, height: y + 20)
-    scrollView.contentSize = CGSize(width: width, height: y + 20)
+    contentView.frame = CGRect(x: 0.0, y: 0.0, width: width, height: y)
+    scrollView.contentSize = CGSize(width: width, height: y + max(20.0, safe.bottom))
+  }
+
+  private func configureNavigation() {
+    navigationItem.title = agentConfig == nil ? "Add AI Agent" : "Edit AI Agent"
+    navigationItem.leftBarButtonItem = UIBarButtonItem(
+      barButtonSystemItem: .cancel, target: self, action: #selector(handleCancel))
+    let saveTitle = agentConfig == nil ? "Create" : "Save"
+    let saveItem = UIBarButtonItem(
+      title: saveTitle, style: .done, target: self, action: #selector(handleSave))
+    navigationItem.rightBarButtonItem = saveItem
+  }
+
+  private func configureViews() {
+    view.backgroundColor = .systemBackground
+
+    scrollView.keyboardDismissMode = .interactive
+    view.addSubview(scrollView)
+    scrollView.addSubview(contentView)
+
+    titleLabel.font = UIFont.systemFont(ofSize: 30.0, weight: .bold)
+    titleLabel.textColor = .label
+    titleLabel.text = "Agent Settings"
+    contentView.addSubview(titleLabel)
+
+    subtitleLabel.font = UIFont.systemFont(ofSize: 14.0, weight: .medium)
+    subtitleLabel.textColor = .secondaryLabel
+    subtitleLabel.text = "Single native model backend"
+    contentView.addSubview(subtitleLabel)
+
+    modelCard.backgroundColor = .secondarySystemGroupedBackground
+    modelCard.layer.cornerRadius = 14.0
+    modelCard.layer.cornerCurve = .continuous
+    contentView.addSubview(modelCard)
+
+    modelLabel.font = UIFont.systemFont(ofSize: 14.0, weight: .semibold)
+    modelLabel.textColor = .label
+    modelLabel.text = "Model: Native default"
+    modelCard.addSubview(modelLabel)
+
+    let initialEnabledTools = Set(currentEnabledTools())
+
+    nameLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+    nameLabel.textColor = .secondaryLabel
+    nameLabel.text = "AGENT NAME"
+    contentView.addSubview(nameLabel)
+
+    nameField.font = UIFont.systemFont(ofSize: 16.0, weight: .medium)
+    nameField.layer.cornerRadius = 12.0
+    nameField.layer.cornerCurve = .continuous
+    nameField.backgroundColor = .secondarySystemGroupedBackground
+    nameField.leftView = UIView(frame: CGRect(x: 0.0, y: 0.0, width: 12.0, height: 1.0))
+    nameField.leftViewMode = .always
+    nameField.placeholder = "Vibe AI"
+    nameField.text = (agentConfig?["name"] as? String) ?? ""
+    contentView.addSubview(nameField)
+
+    promptLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+    promptLabel.textColor = .secondaryLabel
+    promptLabel.text = "SYSTEM PROMPT"
+    contentView.addSubview(promptLabel)
+
+    generatePromptButton.setTitle("Generate", for: .normal)
+    generatePromptButton.titleLabel?.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+    generatePromptButton.tintColor = accentColor
+    generatePromptButton.addTarget(
+      self, action: #selector(handleGeneratePromptTapped), for: .touchUpInside)
+    contentView.addSubview(generatePromptButton)
+
+    generateInputLabel.font = UIFont.systemFont(ofSize: 12.0, weight: .semibold)
+    generateInputLabel.textColor = .secondaryLabel
+    generateInputLabel.text = "GENERATE FROM INPUT"
+    contentView.addSubview(generateInputLabel)
+
+    generateInputField.font = UIFont.systemFont(ofSize: 14.0, weight: .regular)
+    generateInputField.layer.cornerRadius = 12.0
+    generateInputField.layer.cornerCurve = .continuous
+    generateInputField.backgroundColor = .secondarySystemGroupedBackground
+    generateInputField.leftView = UIView(frame: CGRect(x: 0.0, y: 0.0, width: 12.0, height: 1.0))
+    generateInputField.leftViewMode = .always
+    generateInputField.placeholder = "e.g. Helpful PM assistant for sprint planning"
+    generateInputField.autocapitalizationType = .sentences
+    contentView.addSubview(generateInputField)
+
+    promptTextView.font = UIFont.systemFont(ofSize: 15.0, weight: .regular)
+    promptTextView.layer.cornerRadius = 12.0
+    promptTextView.layer.cornerCurve = .continuous
+    promptTextView.backgroundColor = .secondarySystemGroupedBackground
+    promptTextView.textContainerInset = UIEdgeInsets(top: 12.0, left: 8.0, bottom: 12.0, right: 8.0)
+    promptTextView.text = normalizedPrompt(from: agentConfig)
+    promptTextView.delegate = self
+    contentView.addSubview(promptTextView)
+
+    promptHintLabel.font = UIFont.systemFont(ofSize: 14.0, weight: .regular)
+    promptHintLabel.textColor = UIColor.secondaryLabel.withAlphaComponent(0.75)
+    promptHintLabel.numberOfLines = 0
+    promptHintLabel.text = "Describe how this agent should behave in the group."
+    promptTextView.addSubview(promptHintLabel)
+    refreshPromptHintVisibility()
+
+    toolsLabel.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
+    toolsLabel.textColor = .secondaryLabel
+    toolsLabel.text = "ENABLED TOOLS"
+    contentView.addSubview(toolsLabel)
+
+    toolsCard.backgroundColor = .secondarySystemGroupedBackground
+    toolsCard.layer.cornerRadius = 12.0
+    toolsCard.layer.cornerCurve = .continuous
+    contentView.addSubview(toolsCard)
+    for option in toolOptions {
+      let row = UIView()
+      row.backgroundColor = .clear
+
+      let title = UILabel()
+      title.font = UIFont.systemFont(ofSize: 14.0, weight: .semibold)
+      title.textColor = .label
+      title.text = option.title
+      row.addSubview(title)
+
+      let subtitle = UILabel()
+      subtitle.font = UIFont.systemFont(ofSize: 12.0, weight: .regular)
+      subtitle.textColor = .secondaryLabel
+      subtitle.text = option.subtitle
+      row.addSubview(subtitle)
+
+      let toggle = UISwitch()
+      toggle.onTintColor = accentColor
+      toggle.isOn = initialEnabledTools.contains(option.id)
+      row.addSubview(toggle)
+
+      toolsCard.addSubview(row)
+      toolRows.append(row)
+      toolTitleLabels.append(title)
+      toolSubtitleLabels.append(subtitle)
+      toolToggles.append(toggle)
+      toolTogglesById[option.id] = toggle
+    }
+
+    enabledLabel.font = UIFont.systemFont(ofSize: 16.0, weight: .medium)
+    enabledLabel.textColor = .label
+    enabledLabel.text = "Enabled"
+    contentView.addSubview(enabledLabel)
+
+    enabledToggle.onTintColor = accentColor
+    enabledToggle.isOn = normalizedEnabled(from: agentConfig, defaultValue: true)
+    contentView.addSubview(enabledToggle)
+
+    deleteButton.setTitle("Remove Agent", for: .normal)
+    deleteButton.titleLabel?.font = UIFont.systemFont(ofSize: 16.0, weight: .semibold)
+    deleteButton.setTitleColor(.systemRed, for: .normal)
+    deleteButton.layer.cornerRadius = 14.0
+    deleteButton.layer.cornerCurve = .continuous
+    deleteButton.backgroundColor = .secondarySystemGroupedBackground
+    deleteButton.addTarget(self, action: #selector(handleDelete), for: .touchUpInside)
+    contentView.addSubview(deleteButton)
+  }
+
+  private func configureSheetIfNeeded() {
+    guard let sheet = navigationController?.sheetPresentationController else { return }
+    if #available(iOS 16.0, *) {
+      let custom = UISheetPresentationController.Detent.custom(identifier: .init("agent-config")) {
+        context in context.maximumDetentValue * 0.94
+      }
+      sheet.detents = [custom]
+    } else {
+      sheet.detents = [.large()]
+    }
+    sheet.prefersGrabberVisible = true
+    sheet.prefersScrollingExpandsWhenScrolledToEdge = false
+    sheet.preferredCornerRadius = 30.0
   }
 
   @objc private func handleCancel() {
@@ -145,22 +333,31 @@ final class ChatAgentConfigViewController: UIViewController {
     guard !prompt.isEmpty else {
       let alert = UIAlertController(
         title: "System Prompt Required",
-        message: "Please enter a system prompt to define the agent's behavior.",
-        preferredStyle: .alert)
+        message: "Please enter a system prompt before saving this agent.",
+        preferredStyle: .alert
+      )
       alert.addAction(UIAlertAction(title: "OK", style: .default))
       present(alert, animated: true)
       return
     }
+    let selectedTools = selectedEnabledTools()
+    guard !selectedTools.isEmpty else {
+      presentSimpleAlert(
+        title: "Enable At Least One Tool",
+        message: "Select at least one tool for this agent.")
+      return
+    }
 
     var config: [String: Any] = [
+      "chat_id": chatId,
       "name": name.isEmpty ? "Vibe AI" : name,
       "system_prompt": prompt,
       "enabled": enabledToggle.isOn,
+      "enabled_tools": selectedTools,
     ]
     if let existingId = agentConfig?["id"] {
       config["id"] = existingId
     }
-    config["chat_id"] = chatId
 
     onSave?(config)
     dismiss(animated: true)
@@ -170,12 +367,130 @@ final class ChatAgentConfigViewController: UIViewController {
     let alert = UIAlertController(
       title: "Remove AI Agent",
       message: "This will remove the agent and clear its memory. This action cannot be undone.",
-      preferredStyle: .alert)
+      preferredStyle: .alert
+    )
     alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
-    alert.addAction(UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
-      self?.onDelete?()
-      self?.dismiss(animated: true)
-    })
+    alert.addAction(
+      UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
+        self?.onDelete?()
+        self?.dismiss(animated: true)
+      })
     present(alert, animated: true)
+  }
+
+  private func refreshPromptHintVisibility() {
+    promptHintLabel.isHidden = !(promptTextView.text ?? "").isEmpty
+  }
+
+  private func normalizedPrompt(from config: [String: Any]?) -> String {
+    guard let config else { return "" }
+    let snake =
+      (config["system_prompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !snake.isEmpty { return snake }
+    return
+      (config["systemPrompt"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+  }
+
+  private func normalizedEnabled(from config: [String: Any]?, defaultValue: Bool) -> Bool {
+    guard let raw = config?["enabled"] else { return defaultValue }
+    if let bool = raw as? Bool { return bool }
+    if let number = raw as? NSNumber { return number.boolValue }
+    if let string = raw as? String {
+      switch string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+      case "true", "1", "yes", "on":
+        return true
+      case "false", "0", "no", "off":
+        return false
+      default:
+        break
+      }
+    }
+    return defaultValue
+  }
+
+  private func currentEnabledTools() -> [String] {
+    if let explicit = normalizedToolList(agentConfig?["enabled_tools"]), !explicit.isEmpty {
+      return explicit
+    }
+    if let explicit = normalizedToolList(agentConfig?["enabledTools"]), !explicit.isEmpty {
+      return explicit
+    }
+    return ["search_google", "analyze_image", "analyze_document", "create_document"]
+  }
+
+  @objc private func handleGeneratePromptTapped() {
+    let input = generateInputField.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !input.isEmpty else {
+      generateInputField.becomeFirstResponder()
+      return
+    }
+    let selectedTools = selectedEnabledTools()
+    guard !selectedTools.isEmpty else {
+      presentSimpleAlert(
+        title: "Enable At Least One Tool",
+        message: "Select at least one tool before generating.")
+      return
+    }
+    generatePromptButton.isEnabled = false
+    generatePromptButton.setTitle("Generating...", for: .normal)
+    ChatEngine.shared.generateAgentPrompt(
+      chatId: chatId,
+      input: input,
+      enabledTools: selectedTools
+    ) { [weak self] payload in
+      guard let self else { return }
+      self.generatePromptButton.isEnabled = true
+      self.generatePromptButton.setTitle("Generate", for: .normal)
+      let generated =
+        (payload?["systemPrompt"] as? String)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      guard !generated.isEmpty else {
+        self.presentSimpleAlert(
+          title: "Generation Failed",
+          message: "Could not generate a prompt. Try adjusting your input.")
+        return
+      }
+      self.promptTextView.text = generated
+      self.refreshPromptHintVisibility()
+    }
+  }
+
+  private func selectedEnabledTools() -> [String] {
+    var out: [String] = []
+    for option in toolOptions {
+      if toolTogglesById[option.id]?.isOn == true {
+        out.append(option.id)
+      }
+    }
+    return out
+  }
+
+  private func normalizedToolList(_ raw: Any?) -> [String]? {
+    guard let rawList = raw as? [Any] else { return nil }
+    let normalized =
+      rawList
+      .compactMap { item -> String? in
+        if let text = item as? String {
+          let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+          return trimmed.isEmpty ? nil : trimmed
+        }
+        if let number = item as? NSNumber {
+          return number.stringValue
+        }
+        return nil
+      }
+    return normalized.isEmpty ? nil : normalized
+  }
+
+  private func presentSimpleAlert(title: String, message: String) {
+    let alert = UIAlertController(title: title, message: message, preferredStyle: .alert)
+    alert.addAction(UIAlertAction(title: "OK", style: .default))
+    present(alert, animated: true)
+  }
+}
+
+extension ChatAgentConfigViewController: UITextViewDelegate {
+  func textViewDidChange(_ textView: UITextView) {
+    refreshPromptHintVisibility()
   }
 }
