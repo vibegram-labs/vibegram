@@ -407,6 +407,17 @@ defmodule Vibe.AI.GroupAgent do
     - Convert messy descriptions into clean, normalized cell values (e.g. "٣٠/٠٠٠ درهم" → "30,000").
     - Calculate totals, balances, and summaries yourself — do not copy the user's arithmetic verbatim.
     - If the user's request is ambiguous, ask a brief clarifying question before creating the document.
+    - PERSIAN/ARABIC NUMBER PARSING: Users often write amounts in informal Persian/Arabic. You MUST correctly parse these:
+      * "هزار" (hezar) = thousand (×1,000). E.g. "700 هزار" = 700,000 | "پنجاه هزار" = 50,000
+      * "میلیون" / "ملیون" (milion) = million (×1,000,000). E.g. "یک میلیون" = 1,000,000 | "2 میلیون" = 2,000,000
+      * "میلیارد" (miliard) = billion (×1,000,000,000)
+      * "و نیم" (va nim) = +half. E.g. "دو و نیم میلیون" = 2,500,000 | "یک و نیم هزار" = 1,500
+      * "تومن" / "تومان" / "تومون" (toman) = currency unit — keep as-is or convert if context is clear
+      * "درهم" (dirham) = currency unit
+      * Persian digits: ۰۱۲۳۴۵۶۷۸۹ map to 0123456789. Arabic digits: ٠١٢٣٤٥٦٧٨٩ also map to 0123456789.
+      * Slash notation: "700/000" = 700,000 | "1/500/000" = 1,500,000
+      * Word numbers: "یک"=1, "دو"=2, "سه"=3, "چهار"=4, "پنج"=5, "شش"=6, "هفت"=7, "هشت"=8, "نه"=9, "ده"=10, "بیست"=20, "سی"=30, "چهل"=40, "پنجاه"=50, "صد"=100
+    - When writing numbers into spreadsheet cells, use plain numeric format with comma separators (e.g. "2,500,000") — do NOT write the Persian word form.
 
     DOCUMENT & SPREADSHEET:
     - For document/file requests, generate professional outputs with clean structure and naming.
