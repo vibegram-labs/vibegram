@@ -564,8 +564,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // MODE 3: Spring Batch — UIView.animate wraps entire performBatchUpdates
     // ===================================================================
     if shouldAnimateUpdate && animMode == 3 {
+      // For received messages, use damping 1.0 (no bounce) to avoid spring layout issues.
+      let isReceiveBatch = pendingSendTransition == nil && activeSendTransition == nil
+      let damping: CGFloat = isReceiveBatch ? 1.0 : 0.88
+      let duration: TimeInterval = isReceiveBatch ? 0.25 : 0.45
       UIView.animate(
-        withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0.0,
+        withDuration: duration, delay: 0, usingSpringWithDamping: damping, initialSpringVelocity: 0.0,
         options: [.allowUserInteraction, .beginFromCurrentState],
         animations: { [weak self] in
           guard let self else { return }
@@ -658,14 +662,17 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
 
     if shouldAnimateUpdate {
-      // Telegram timing: 0.3s spring (matches kCAMediaTimingFunctionSpring).
-      // NOT a custom cubic bezier — a real spring with 0.3s settling time.
+      // Smooth ease-out for received messages; spring-like for sent messages.
       let animDuration: CFTimeInterval = 0.3
-      let animTiming = chatListSendVerticalTiming
+      let sendTiming = chatListSendVerticalTiming
+      let receiveTiming = CAMediaTimingFunction(name: .easeOut)
       var dbgShifted = 0
       var dbgNewSlide = 0
       var dbgMaxDelta: CGFloat = 0
       var dbgScrollDelta: CGFloat = 0
+
+      // Check if this batch is a received-only update (no user send in progress).
+      let isReceiveUpdate = pendingSendTransition == nil && activeSendTransition == nil
 
       switch animMode {
       case 1:
@@ -677,12 +684,16 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           {
             continue
           }
+          let isReceivedCell = ip.item < rows.count && !rows[ip.item].isMe
+          let slideOffset = isReceivedCell
+            ? pixelAlignedValue(cell.bounds.height)
+            : pixelAlignedValue(debugAnimSlideOffset)
           let slideUp = CABasicAnimation(keyPath: "position.y")
-          slideUp.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
+          slideUp.fromValue = slideOffset as NSNumber
           slideUp.toValue = 0.0 as NSNumber
           slideUp.isAdditive = true
-          slideUp.duration = animDuration
-          slideUp.timingFunction = animTiming
+          slideUp.duration = isReceivedCell ? 0.25 : animDuration
+          slideUp.timingFunction = isReceivedCell ? receiveTiming : sendTiming
           slideUp.isRemovedOnCompletion = true
           cell.layer.add(slideUp, forKey: "insertSlideUp")
           dbgNewSlide += 1
@@ -695,9 +706,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         let postOffset = collectionView.contentOffset.y
         dbgScrollDelta = postOffset - preUpdateOffset
         NSLog(
-          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d",
+          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d recv:%@",
           preUpdateScreenY.count, preUpdateOffset, postOffset, dbgScrollDelta,
-          collectionView.visibleCells.count)
+          collectionView.visibleCells.count, isReceiveUpdate ? "true" : "false")
+
+        // For received messages, use ease-out timing and longer duration to
+        // avoid the spring bounce that causes overlap on tall cells.
+        let shiftTiming = isReceiveUpdate ? receiveTiming : sendTiming
+        let shiftDuration: CFTimeInterval = isReceiveUpdate ? 0.25 : animDuration
 
         for cell in collectionView.visibleCells {
           guard let ip = collectionView.indexPath(for: cell),
@@ -713,8 +729,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               anim.fromValue = delta as NSNumber
               anim.toValue = 0.0 as NSNumber
               anim.isAdditive = true
-              anim.duration = animDuration
-              anim.timingFunction = animTiming
+              anim.duration = shiftDuration
+              anim.timingFunction = shiftTiming
               anim.isRemovedOnCompletion = true
               cell.layer.add(anim, forKey: "insertionShift")
               dbgShifted += 1
@@ -729,18 +745,25 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               return self.rows[ip.item].messageId == hid
             }()
             if !isHiddenForSend {
+              let isReceivedCell = ip.item < rows.count && !rows[ip.item].isMe
+              // For received cells, use the cell's full height so it slides in
+              // from just below the visible area instead of a tiny 20px offset
+              // that causes it to "appear from behind" the last message.
+              let slideOffset = isReceivedCell
+                ? pixelAlignedValue(cell.bounds.height)
+                : pixelAlignedValue(debugAnimSlideOffset)
               let slideAnim = CABasicAnimation(keyPath: "position.y")
-              slideAnim.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
+              slideAnim.fromValue = slideOffset as NSNumber
               slideAnim.toValue = 0.0 as NSNumber
               slideAnim.isAdditive = true
-              slideAnim.duration = animDuration
-              slideAnim.timingFunction = animTiming
+              slideAnim.duration = isReceivedCell ? 0.25 : animDuration
+              slideAnim.timingFunction = isReceivedCell ? receiveTiming : sendTiming
               slideAnim.isRemovedOnCompletion = true
               cell.layer.add(slideAnim, forKey: "insertSlideUp")
               dbgNewSlide += 1
               NSLog(
-                "[ChatListAnim]   newSlide '%@' offset:%.0f", String(key.prefix(12)),
-                debugAnimSlideOffset)
+                "[ChatListAnim]   newSlide '%@' offset:%.0f recv:%@", String(key.prefix(12)),
+                slideOffset, isReceivedCell ? "true" : "false")
             } else {
               NSLog("[ChatListAnim]   skip hidden '%@'", String(key.prefix(12)))
             }
