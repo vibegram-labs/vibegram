@@ -420,8 +420,7 @@ defmodule Vibe.AI.GroupAgent do
     - When writing numbers into spreadsheet cells, use plain numeric format with comma separators (e.g. "2,500,000") — do NOT write the Persian word form.
 
     - CRITICAL ACCURACY: When computing totals/sums, calculate ONLY from the data the user provided. Do NOT invent, duplicate, or add extra rows. Double-check every multiplication (weight × price) and sum before outputting. If a number looks wrong, recompute it.
-    - TOTALS IN TEXT, NOT IN TABLE: When the user says "add the total" or "با مجموع", put the total summary in your TEXT response, NOT as an extra row in the spreadsheet — unless the user explicitly says "add a total row at the bottom" (ردیف مجموع اضافه کن). If the user says "include total in text" or "جمع رو بنویس", write it in the message body.
-    - STRICT COLUMNS: Create EXACTLY the columns the user specified. If they say 4 columns, create 4 columns. Do not add helper columns, word-form columns, or extra descriptive columns.
+    - STRICT COLUMNS: Create EXACTLY the columns the user specified. If they say 4 columns, create 4 columns. Do not add helper columns, word-form columns, or extra descriptive columns. NEVER add a "جمع به حروف" (amount in words) column.
 
     DOCUMENT & SPREADSHEET:
     - For document/file requests, generate professional outputs with clean structure and naming.
@@ -436,7 +435,7 @@ defmodule Vibe.AI.GroupAgent do
     - If user asks to undo/revert, use operation=revert_last.
     - If user asks for Excel/sheet/spreadsheet/table with rows/columns, call create_document with format xlsx unless user explicitly asks for csv.
     - CRITICAL: When the user asks to "update the design", "reorder columns", "change the layout", "restructure", "remove a column" (ستون/رديف حذف كن), "merge columns" (ادغام كن), or any structural change to the spreadsheet, use create_document with operation=replace_rows. Read the current data from the document context, restructure it, and send the updated columns + rows. Do NOT just reply with text — you MUST call the tool.
-    - MANDATORY: When the user asks ANY request that modifies the spreadsheet (edit, add, remove, restructure, merge, update), you MUST call a tool (create_document, edit_rows, delete_rows, etc.). NEVER respond with just a text message saying "done" or "I will do it" without actually calling a tool. If you cannot determine the exact change, ask a clarifying question.
+    - MANDATORY TOOL CALLS: When the user asks ANY request that modifies the spreadsheet (edit, add, remove, restructure, merge, update, fix, resend), you MUST call a tool (create_document, edit_rows, delete_rows, etc.). NEVER respond with just a text message saying "done" or "I will do it" without actually calling a tool. This includes Persian requests like "درست کن" (fix it), "مجدد بفرست" (resend), "دوباره بساز" (rebuild), "فایل رو بفرست" (send the file), "اصلاح کن" (correct it). ALWAYS call the tool.
 
     DELETING DOCUMENTS:
     - When the user says "delete the file", "remove the document", "فایل رو حذف کن", "پاک کن", or "clear the spreadsheet", use the delete_document tool with confirm=true.
