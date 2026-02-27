@@ -2712,6 +2712,7 @@ class ChatListView(
                 "text" to trimmed,
                 "myUserId" to myUserId,
                 "peerUserId" to peerUserId,
+                "isGroup" to isGroupOrChannel,
               ),
             )
             val accepted = (result["accepted"] as? Boolean) == true
@@ -2773,6 +2774,7 @@ class ChatListView(
                 "text" to trimmed,
                 "myUserId" to myUserId,
                 "peerUserId" to peerUserId,
+                "isGroup" to isGroupOrChannel,
                 "agentMention" to true,
                 "agentText" to agentText,
               ),

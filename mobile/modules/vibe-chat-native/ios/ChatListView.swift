@@ -169,6 +169,19 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }()
 
   private var isPeerTyping: Bool = false
+  private var isAgentProgressActive: Bool = false
+  private var agentProgressLabel: String?
+  private var isGroupOrChannel: Bool = false
+
+  // Floating activity overlay (typing / agent progress) — lives OUTSIDE the collection view
+  private let activityOverlay = UIView()
+  private let activityDotContainer = UIView()
+  private let activityDots: [UIView] = (0..<3).map { _ in UIView() }
+  private let activityTextLabel = UILabel()
+
+  func setIsGroupOrChannel(_ value: Bool) {
+    isGroupOrChannel = value
+  }
 
   required init(appContext: AppContext? = nil) {
     NSLog("[ChatListView] init START")
@@ -221,6 +234,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     transitionOverlayHost.clipsToBounds = false
     addSubview(transitionOverlayHost)
 
+    setupActivityOverlay()
     setupDebugPanel()
 
     // Keyboard observers
@@ -271,6 +285,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     if inputBarEnabled {
       layoutInputBarAndInset()
     }
+    layoutActivityOverlay()
 
     let currentHeight = collectionView.bounds.height
     lastKnownViewportHeight = currentHeight
@@ -307,10 +322,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     isApplyingRowsUpdate = true
 
     let mergedRows = mergedRowsPayload(from: nextRows)
-    var parsed = mergedRows.compactMap(ChatListRow.init)
-    if isPeerTyping {
-      parsed.append(.typingIndicator())
-    }
+    let parsed = mergedRows.compactMap(ChatListRow.init)
     NSLog("[ChatListView] setRows parsed: %d, previous: %d", parsed.count, rows.count)
     let previousRows = rows
     let previousDistanceFromBottom = currentDistanceFromBottom()
@@ -818,6 +830,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     inputBar?.applyAppearance(next)
     if visualChanged {
       applyWallpaperAppearance()
+      applyActivityOverlayTheme()
       collectionView.reloadData()
     }
   }
@@ -1113,9 +1126,21 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return
     }
     let reason = (note.userInfo?["reason"] as? String) ?? "engine"
+    if reason == "agentProgress" {
+      let isActive = note.userInfo?["isActive"] as? Bool ?? false
+      let label = note.userInfo?["label"] as? String
+      setAgentProgress(active: isActive, label: label)
+      return
+    }
     if reason == "peerTyping" {
       let typingMessageId = note.userInfo?["messageId"] as? String
       let isTyping = typingMessageId == "true"
+      // If agent progress is already active, skip peer-typing overlay
+      // (agent-progress events carry the real label)
+      if isAgentProgressActive && isTyping {
+        isPeerTyping = isTyping
+        return
+      }
       setPeerTyping(isTyping)
       return
     }
@@ -2327,6 +2352,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // Keep transition overlay host above everything
     transitionOverlayHost.frame = bounds
     bringSubviewToFront(transitionOverlayHost)
+    layoutActivityOverlay()
   }
 
   // MARK: - Native Send (synchronous, no bridge delay)
@@ -2445,6 +2471,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         "replyToId": replyToMessageId as Any,
         "myUserId": myUserId,
         "peerUserId": peerUserId,
+        "isGroup": isGroupOrChannel,
       ]
       if agentMention, let agentText {
         sendPayload["agentMention"] = true
@@ -2968,10 +2995,165 @@ extension ChatListView: ChatInputBarDelegate {
     onNativeEvent(["type": "replyDismissed"])
   }
 
-  // MARK: - Peer Typing Indicator
+  // MARK: - Activity Overlay (Typing / Agent Progress)
+
+  private func setupActivityOverlay() {
+    activityOverlay.isUserInteractionEnabled = false
+    activityOverlay.alpha = 0
+    activityOverlay.clipsToBounds = true
+
+    // Dot container holds the three animated dots
+    activityDotContainer.isUserInteractionEnabled = false
+    let dotSize: CGFloat = 5
+    let dotSpacing: CGFloat = 4
+    for (i, dot) in activityDots.enumerated() {
+      dot.frame = CGRect(
+        x: CGFloat(i) * (dotSize + dotSpacing), y: 0,
+        width: dotSize, height: dotSize)
+      dot.layer.cornerRadius = dotSize / 2
+      activityDotContainer.addSubview(dot)
+    }
+    let dotsW = CGFloat(activityDots.count) * dotSize + CGFloat(activityDots.count - 1) * dotSpacing
+    activityDotContainer.frame = CGRect(x: 10, y: 0, width: dotsW, height: dotSize)
+    activityOverlay.addSubview(activityDotContainer)
+
+    activityTextLabel.font = .systemFont(ofSize: 13, weight: .medium)
+    activityTextLabel.numberOfLines = 1
+    activityTextLabel.lineBreakMode = .byTruncatingTail
+    activityOverlay.addSubview(activityTextLabel)
+
+    insertSubview(activityOverlay, belowSubview: transitionOverlayHost)
+  }
+
+  private func applyActivityOverlayTheme() {
+    let isDark = appearance.isDark
+    activityOverlay.backgroundColor =
+      isDark
+      ? UIColor(white: 1.0, alpha: 0.08)
+      : UIColor(white: 0.0, alpha: 0.05)
+    activityOverlay.layer.cornerRadius = 14
+    let dotColor =
+      isDark
+      ? UIColor(white: 1.0, alpha: 0.5)
+      : UIColor(white: 0.0, alpha: 0.35)
+    for dot in activityDots {
+      dot.backgroundColor = dotColor
+    }
+    activityTextLabel.textColor =
+      isDark
+      ? UIColor(white: 1.0, alpha: 0.65)
+      : UIColor(white: 0.0, alpha: 0.5)
+  }
+
+  private func layoutActivityOverlay() {
+    guard activityOverlay.alpha > 0 || isAgentProgressActive || isPeerTyping else { return }
+
+    let overlayH: CGFloat = 28
+    let overlayMaxW = min(bounds.width - 32, 260)
+    let dotSize: CGFloat = 5
+    let dotSpacing: CGFloat = 4
+    let dotsW = CGFloat(activityDots.count) * dotSize + CGFloat(activityDots.count - 1) * dotSpacing
+    let labelX: CGFloat = 10 + dotsW + 6
+    let text = activityTextLabel.text ?? ""
+    let textSize = (text as NSString).size(withAttributes: [.font: activityTextLabel.font!])
+    let labelW = min(ceil(textSize.width), overlayMaxW - labelX - 10)
+    let overlayW = labelX + labelW + 10
+
+    // Position dots vertically centered
+    activityDotContainer.frame = CGRect(
+      x: 10, y: (overlayH - dotSize) / 2, width: dotsW, height: dotSize)
+    activityTextLabel.frame = CGRect(
+      x: labelX, y: 0, width: labelW, height: overlayH)
+
+    // Position overlay just above the content padding (input bar area)
+    let bottomY: CGFloat
+    if inputBarEnabled, let bar = inputBar {
+      bottomY = bar.frame.minY - 6
+    } else {
+      bottomY = bounds.height - contentPaddingBottom - 6
+    }
+    let overlayX: CGFloat = messageHorizontalInset
+    activityOverlay.frame = CGRect(
+      x: overlayX, y: bottomY - overlayH,
+      width: overlayW, height: overlayH)
+  }
+
+  private func showActivityOverlay(text: String) {
+    applyActivityOverlayTheme()
+    activityTextLabel.text = text
+    layoutActivityOverlay()
+    startDotPulseAnimation()
+
+    guard activityOverlay.alpha < 1.0 else {
+      // Already visible — just update text + layout
+      UIView.animate(withDuration: 0.15, delay: 0, options: .curveEaseOut) {
+        self.layoutActivityOverlay()
+      }
+      return
+    }
+
+    activityOverlay.transform = CGAffineTransform(translationX: 0, y: 8)
+    UIView.animate(
+      withDuration: 0.25, delay: 0,
+      usingSpringWithDamping: 0.85, initialSpringVelocity: 0,
+      options: .curveEaseOut
+    ) {
+      self.activityOverlay.alpha = 1.0
+      self.activityOverlay.transform = .identity
+    }
+  }
+
+  private func hideActivityOverlay() {
+    guard activityOverlay.alpha > 0 else { return }
+    UIView.animate(withDuration: 0.2, delay: 0, options: .curveEaseIn) {
+      self.activityOverlay.alpha = 0
+      self.activityOverlay.transform = CGAffineTransform(translationX: 0, y: 4)
+    } completion: { _ in
+      self.stopDotPulseAnimation()
+      self.activityOverlay.transform = .identity
+    }
+  }
+
+  private func startDotPulseAnimation() {
+    for (i, dot) in activityDots.enumerated() {
+      dot.layer.removeAnimation(forKey: "dotPulse")
+      let anim = CABasicAnimation(keyPath: "opacity")
+      anim.fromValue = 0.3
+      anim.toValue = 1.0
+      anim.duration = 0.5
+      anim.autoreverses = true
+      anim.repeatCount = .infinity
+      anim.beginTime = CACurrentMediaTime() + Double(i) * 0.15
+      anim.isRemovedOnCompletion = false
+      dot.layer.add(anim, forKey: "dotPulse")
+    }
+  }
+
+  private func stopDotPulseAnimation() {
+    for dot in activityDots {
+      dot.layer.removeAnimation(forKey: "dotPulse")
+    }
+  }
+
   private func setPeerTyping(_ typing: Bool) {
     if isPeerTyping == typing { return }
     isPeerTyping = typing
-    setRows(sourceRowsPayload)
+    updateActivityOverlayState()
+  }
+
+  private func setAgentProgress(active: Bool, label: String?) {
+    isAgentProgressActive = active
+    agentProgressLabel = active ? label : nil
+    updateActivityOverlayState()
+  }
+
+  private func updateActivityOverlayState() {
+    if isAgentProgressActive, let label = agentProgressLabel, !label.isEmpty {
+      showActivityOverlay(text: label)
+    } else if isPeerTyping && !isAgentProgressActive {
+      showActivityOverlay(text: "Typing...")
+    } else {
+      hideActivityOverlay()
+    }
   }
 }

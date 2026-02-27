@@ -274,22 +274,37 @@ defmodule VibeWeb.ChatChannel do
             "isAgent" => true
           })
 
-          case GroupAgent.handle_mention(chat_id, dispatch_text, user_id, metadata) do
-            {:ok, _response} ->
-              Logger.info("[ChatChannel] Agent responded in chat #{chat_id}")
-
-            {:error, :no_agent} ->
-              Logger.debug("[ChatChannel] No agent configured for chat #{chat_id}")
-
-            {:error, reason} ->
-              Logger.error("[ChatChannel] Agent dispatch failed for chat #{chat_id}: #{inspect(reason)}")
-          end
-
-          # Stop typing indicator
-          VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "stop-typing", %{
+          VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "agent-progress", %{
             "userId" => GroupAgent.agent_user_id(),
-            "isAgent" => true
+            "isAgent" => true,
+            "label" => "Thinking...",
+            "status" => "running"
           })
+
+          try do
+            case GroupAgent.handle_mention(chat_id, dispatch_text, user_id, metadata) do
+              {:ok, _response} ->
+                Logger.info("[ChatChannel] Agent responded in chat #{chat_id}")
+
+              {:error, :no_agent} ->
+                Logger.debug("[ChatChannel] No agent configured for chat #{chat_id}")
+
+              {:error, reason} ->
+                Logger.error("[ChatChannel] Agent dispatch failed for chat #{chat_id}: #{inspect(reason)}")
+            end
+          after
+            VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "agent-progress", %{
+              "userId" => GroupAgent.agent_user_id(),
+              "isAgent" => true,
+              "status" => "done"
+            })
+
+            # Stop typing indicator
+            VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "stop-typing", %{
+              "userId" => GroupAgent.agent_user_id(),
+              "isAgent" => true
+            })
+          end
         end)
       else
         Logger.info("[ChatChannel] Reply to agent but empty text for chat #{chat_id}")

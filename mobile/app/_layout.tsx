@@ -721,6 +721,7 @@ export default function RootLayout() {
             <Stack.Screen name="(auth)" />
             <Stack.Screen name="(tabs)" />
             <Stack.Screen name="chat" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
+            <Stack.Screen name="chat-profile" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
             <Stack.Screen name="agent" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
             <Stack.Screen name="profile" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
             <Stack.Screen

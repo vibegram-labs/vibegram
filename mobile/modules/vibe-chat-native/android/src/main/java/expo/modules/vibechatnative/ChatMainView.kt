@@ -101,6 +101,7 @@ class ChatMainView(
   private var currentPage: String = "chat"
   private var pendingNativePageTarget: String? = null
   private var pendingNativePageLockUntilMs: Long = 0L
+  private var standaloneProfileMode = false
   private var avatarLoadToken = 0
   private val engineListenerId = "chat-main-view-${System.identityHashCode(this)}"
 
@@ -312,8 +313,41 @@ class ChatMainView(
     updateProfileActionState()
   }
 
+  fun setStandaloneProfileMode(value: Boolean) {
+    if (standaloneProfileMode == value) return
+    standaloneProfileMode = value
+    if (value) {
+      chatListView.setInputBarEnabled(false)
+      chatListView.setNativeSendEnabled(false)
+      currentPage = "profile"
+      pendingNativePageTarget = null
+      pendingNativePageLockUntilMs = 0L
+      applyPageState(animated = false, emitEvent = false)
+    }
+  }
+
   fun setPage(value: String, animated: Boolean) {
-    val next = if (value.trim().lowercase() == "profile") "profile" else "chat"
+    val normalized = value.trim().lowercase()
+    if (normalized == "profile") {
+      if (standaloneProfileMode) {
+        if (currentPage != "profile") {
+          currentPage = "profile"
+          applyPageState(animated = animated, emitEvent = false)
+        }
+      } else {
+        onNativeEvent(mapOf("type" to "headerAvatarPressed"))
+      }
+      return
+    }
+    if (normalized == "agent") {
+      onNativeEvent(mapOf("type" to "headerAgentPressed"))
+      return
+    }
+    if (standaloneProfileMode) {
+      onNativeEvent(mapOf("type" to "headerBack"))
+      return
+    }
+    val next = "chat"
     val now = System.currentTimeMillis()
     val pendingTarget = pendingNativePageTarget
     if (pendingTarget != null && now < pendingNativePageLockUntilMs && next != pendingTarget) {
@@ -527,9 +561,6 @@ class ChatMainView(
     chatProfileGroup.gravity = Gravity.CENTER_VERTICAL
     chatProfileGroup.setOnClickListener {
       if (currentPage != "chat") return@setOnClickListener
-      markPendingNativePageChange("profile")
-      currentPage = "profile"
-      applyPageState(animated = true, emitEvent = true)
       onNativeEvent(mapOf("type" to "headerAvatarPressed"))
     }
     setTouchAlphaPress(chatProfileGroup)
@@ -648,9 +679,13 @@ class ChatMainView(
     profileBackButton.textSize = 30f
     profileBackButton.typeface = Typeface.DEFAULT_BOLD
     profileBackButton.setOnClickListener {
-      markPendingNativePageChange("chat")
-      currentPage = "chat"
-      applyPageState(animated = true, emitEvent = true)
+      if (standaloneProfileMode) {
+        onNativeEvent(mapOf("type" to "headerBack"))
+      } else {
+        markPendingNativePageChange("chat")
+        currentPage = "chat"
+        applyPageState(animated = true, emitEvent = true)
+      }
     }
     profileHeader.addView(
       profileBackButton,

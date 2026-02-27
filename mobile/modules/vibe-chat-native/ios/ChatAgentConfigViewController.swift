@@ -53,11 +53,6 @@ final class ChatAgentConfigViewController: UIViewController {
     configureViews()
   }
 
-  override func viewDidAppear(_ animated: Bool) {
-    super.viewDidAppear(animated)
-    configureSheetIfNeeded()
-  }
-
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
 
@@ -175,11 +170,20 @@ final class ChatAgentConfigViewController: UIViewController {
 
   private func configureNavigation() {
     navigationItem.title = agentConfig == nil ? "Add AI Agent" : "Edit AI Agent"
+    navigationItem.largeTitleDisplayMode = .never
 
     let saveTitle = agentConfig == nil ? "Create" : "Save"
     let saveItem = UIBarButtonItem(
       title: saveTitle, style: .done, target: self, action: #selector(handleSave))
     navigationItem.rightBarButtonItem = saveItem
+
+    if navigationController?.viewControllers.first === self || presentingViewController != nil {
+      navigationItem.leftBarButtonItem = UIBarButtonItem(
+        barButtonSystemItem: .close,
+        target: self,
+        action: #selector(handleCancel)
+      )
+    }
   }
 
   private func configureViews() {
@@ -375,27 +379,8 @@ final class ChatAgentConfigViewController: UIViewController {
     contentView.addSubview(deleteButton)
   }
 
-  private func configureSheetIfNeeded() {
-    guard let sheet = navigationController?.sheetPresentationController else { return }
-    if #available(iOS 16.0, *) {
-      let custom = UISheetPresentationController.Detent.custom(identifier: .init("agent-config")) {
-        context in context.maximumDetentValue * 0.94
-      }
-      sheet.detents = [custom]
-    } else {
-      sheet.detents = [.large()]
-    }
-    sheet.prefersGrabberVisible = true
-    sheet.prefersScrollingExpandsWhenScrolledToEdge = false
-    sheet.preferredCornerRadius = 30.0
-  }
-
   @objc private func handleCancel() {
-    if let nav = navigationController, nav.viewControllers.count > 1 {
-      nav.popViewController(animated: true)
-    } else {
-      dismiss(animated: true)
-    }
+    closeEditor()
   }
 
   @objc private func handleSave() {
@@ -432,11 +417,7 @@ final class ChatAgentConfigViewController: UIViewController {
     }
 
     onSave?(config)
-    if let nav = navigationController, nav.viewControllers.count > 1 {
-      nav.popViewController(animated: true)
-    } else {
-      dismiss(animated: true)
-    }
+    closeEditor()
   }
 
   @objc private func handleDelete() {
@@ -449,9 +430,17 @@ final class ChatAgentConfigViewController: UIViewController {
     alert.addAction(
       UIAlertAction(title: "Remove", style: .destructive) { [weak self] _ in
         self?.onDelete?()
-        self?.dismiss(animated: true)
+        self?.closeEditor()
       })
     present(alert, animated: true)
+  }
+
+  private func closeEditor() {
+    if let nav = navigationController, nav.viewControllers.count > 1 {
+      nav.popViewController(animated: true)
+      return
+    }
+    dismiss(animated: true)
   }
 
   private func refreshPromptHintVisibility() {

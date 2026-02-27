@@ -223,6 +223,7 @@ public final class ChatMainView: ExpoView,
   private var pendingNativePageLockUntil: CFTimeInterval = 0.0
   private var profileSwipeStartProgress: CGFloat = 0.0
   private var chatHeaderCenterMinWidth: CGFloat = 0.0
+  private var standaloneProfileMode = false
 
   private lazy var profileSwipeBackGesture: UIScreenEdgePanGestureRecognizer = {
     let gesture = UIScreenEdgePanGestureRecognizer(
@@ -488,14 +489,51 @@ public final class ChatMainView: ExpoView,
     updateProfileTexts()
   }
 
+  func setStandaloneProfileMode(_ value: Bool) {
+    if standaloneProfileMode == value { return }
+    standaloneProfileMode = value
+    refreshAgentCardVisibility()
+    if value {
+      chatListView.setInputBarEnabled(false)
+      chatListView.setNativeSendEnabled(false)
+      currentPage = .profile
+      pendingNativePageTarget = nil
+      pendingNativePageLockUntil = 0.0
+      applyPageState(animated: false, emitEvent: false)
+    }
+  }
+
   func setPage(_ value: String, animated: Bool) {
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    if normalized == "profile" {
+      if standaloneProfileMode {
+        if currentPage != .profile {
+          currentPage = .profile
+          applyPageState(animated: animated, emitEvent: false)
+        }
+      } else {
+        onNativeEvent(["type": "headerAvatarPressed"])
+      }
+      return
+    }
+    if normalized == "agent" {
+      if standaloneProfileMode {
+        if currentPage != .profile {
+          currentPage = .profile
+          applyPageState(animated: animated, emitEvent: false)
+        }
+        presentAgentConfigEditor()
+      } else {
+        onNativeEvent(["type": "headerAgentPressed"])
+      }
+      return
+    }
+    if standaloneProfileMode {
+      onNativeEvent(["type": "headerBack"])
+      return
+    }
     var nextPage: ChatMainPage = {
       switch normalized {
-      case "profile":
-        return .profile
-      case "agent":
-        return .agent
       default:
         return .chat
       }
@@ -756,7 +794,7 @@ public final class ChatMainView: ExpoView,
     profileContentView.addSubview(profileTabContentContainer)
     profileTabContentContainer.addSubview(profileTabPlaceholderLabel)
 
-    profileContentView.addSubview(profileAgentRow)
+    profileIdentityCard.addSubview(profileAgentRow)
     profileAgentRow.addTarget(self, action: #selector(handleAgentRowTapped), for: .touchUpInside)
 
     profileAvatarView.clipsToBounds = true
@@ -1764,19 +1802,29 @@ public final class ChatMainView: ExpoView,
     profileUsernameRow.frame = CGRect(
       x: 0.0, y: 0.0, width: profileIdentityCard.bounds.width, height: 62.0)
 
+    var identityCardHeight: CGFloat = profileUsernameRow.frame.maxY
     let showsSecondaryIdentityRow =
       isGroupOrChannel || !profileBioText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     if showsSecondaryIdentityRow {
       profileBioRow.isHidden = false
       profileBioRow.frame = CGRect(
-        x: 0.0, y: profileUsernameRow.frame.maxY, width: profileIdentityCard.bounds.width,
+        x: 0.0, y: identityCardHeight, width: profileIdentityCard.bounds.width,
         height: 62.0)
-      profileIdentityCard.frame.size.height = 124.0
+      identityCardHeight = profileBioRow.frame.maxY
     } else {
       profileBioRow.isHidden = true
-      profileIdentityCard.frame.size.height = 62.0
       profileBioRow.frame = .zero
     }
+
+    if !profileAgentRow.isHidden {
+      profileAgentRow.frame = CGRect(
+        x: 0.0, y: identityCardHeight, width: profileIdentityCard.bounds.width, height: 62.0)
+      identityCardHeight = profileAgentRow.frame.maxY
+    } else {
+      profileAgentRow.frame = .zero
+    }
+
+    profileIdentityCard.frame.size.height = identityCardHeight
 
     var bottomAnchor = profileIdentityCard.frame.maxY
 
@@ -1825,24 +1873,6 @@ public final class ChatMainView: ExpoView,
     } else {
       profileTabsCard.isHidden = true
       profileTabContentContainer.isHidden = true
-    }
-
-    let hPad: CGFloat = 16.0
-    let sectionPad: CGFloat = 18.0
-    let contentWidth = width
-
-    if !profileAgentRow.isHidden {
-      let promptNodeWidth = contentWidth - (hPad * 2)
-      let promptNodeHeight: CGFloat = 62.0
-      profileAgentRow.frame = CGRect(
-        x: hPad,
-        y: bottomAnchor + sectionPad,
-        width: promptNodeWidth,
-        height: promptNodeHeight
-      )
-      bottomAnchor = profileAgentRow.frame.maxY
-    } else {
-      profileAgentRow.frame = .zero
     }
 
     let totalHeight = bottomAnchor + 36.0
@@ -2060,14 +2090,8 @@ public final class ChatMainView: ExpoView,
     }
     chatTitleLabel.text = resolvedTitle
     chatSubtitleLabel.text = resolvedSubtitle
-    if currentPage == .agent {
-      let enabled = normalizedAgentEnabledValue(agentConfig?["enabled"], defaultValue: false)
-      profileTitleLabel.text = "AI Agent"
-      profileSubtitleLabel.text = enabled ? "Enabled" : "Disabled"
-    } else {
-      profileTitleLabel.text = profileNameText.isEmpty ? resolvedTitle : profileNameText
-      profileSubtitleLabel.text = isGroupOrChannel ? "Group Profile" : "Profile"
-    }
+    profileTitleLabel.text = profileNameText.isEmpty ? resolvedTitle : profileNameText
+    profileSubtitleLabel.text = isGroupOrChannel ? "Group Profile" : "Profile"
     chatSubtitleLabel.textColor =
       {
         if groupTypingSubtitle != nil || (connectionSubtitle == nil && isOnline) {
@@ -2101,6 +2125,7 @@ public final class ChatMainView: ExpoView,
     profileMuteButton.setTitle(isChatMuted ? "Unmute" : "Mute")
 
     if isGroupOrChannel {
+      let showsAgentRow = standaloneProfileMode && isGroupOrChannel
       profileUsernameRow.configure(
         title: "Members",
         subtitle: resolvedGroupMembersRowSubtitle(),
@@ -2111,7 +2136,7 @@ public final class ChatMainView: ExpoView,
         title: "Typing",
         subtitle: resolvedGroupTypingSubtitle() ?? "No one typing right now",
         titleColor: nil,
-        showsSeparator: false
+        showsSeparator: showsAgentRow
       )
 
       let agentName = normalizedAgentString(agentConfig?["name"]) ?? "Vibe AI"
@@ -2119,16 +2144,11 @@ public final class ChatMainView: ExpoView,
       let docsCount = getAgentDocuments().count
       let docsLabel = docsCount == 1 ? "1 file" : "\(docsCount) files"
       let stateLabel = enabled ? "Enabled" : "Disabled"
-      let accentColor =
-        appearance.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
       profileAgentRow.configure(
         title: "AI Agent",
         subtitle: "\(stateLabel) • \(agentName) • \(docsLabel)",
-        titleColor: accentColor,
-        showsSeparator: false,
-        iconName: "sparkles",
-        iconTintColor: accentColor,
-        iconBackgroundColor: accentColor.withAlphaComponent(0.16)
+        titleColor: nil,
+        showsSeparator: false
       )
     } else {
       let usernameRowSubtitle: String
@@ -2158,12 +2178,9 @@ public final class ChatMainView: ExpoView,
 
       profileAgentRow.configure(
         title: "AI Agent",
-        subtitle: "Group-only feature",
+        subtitle: "Available in group profile",
         titleColor: nil,
-        showsSeparator: false,
-        iconName: "sparkles",
-        iconTintColor: appearance.timeColorThem.withAlphaComponent(0.85),
-        iconBackgroundColor: appearance.timeColorThem.withAlphaComponent(0.16)
+        showsSeparator: false
       )
     }
 
@@ -2503,12 +2520,22 @@ public final class ChatMainView: ExpoView,
     -> Bool
   {
     if gestureRecognizer === profileSwipeBackGesture {
+      if standaloneProfileMode { return false }
       return currentPage == .profile
     }
     return true
   }
 
   @objc private func handleBackPressed() {
+    if standaloneProfileMode {
+      if currentPage == .agent {
+        currentPage = .profile
+        applyPageState(animated: true, emitEvent: false)
+        return
+      }
+      onNativeEvent(["type": "headerBack"])
+      return
+    }
     if currentPage == .agent {
       markPendingNativePageChange(.profile)
       currentPage = .profile
@@ -2526,9 +2553,6 @@ public final class ChatMainView: ExpoView,
 
   @objc private func handleAvatarPressed() {
     guard currentPage == .chat else { return }
-    markPendingNativePageChange(.profile)
-    currentPage = .profile
-    applyPageState(animated: true, emitEvent: true)
     onNativeEvent(["type": "headerAvatarPressed"])
   }
 
@@ -2589,10 +2613,7 @@ public final class ChatMainView: ExpoView,
   }
 
   @objc private func handleAgentRowTapped() {
-    guard isGroupOrChannel else { return }
-    markPendingNativePageChange(.agent)
-    currentPage = .agent
-    applyPageState(animated: true, emitEvent: true)
+    presentAgentConfigEditor()
   }
 
   // MARK: - Agent Config
@@ -2608,11 +2629,12 @@ public final class ChatMainView: ExpoView,
   }
 
   func agentPromptNodeDidRequestFullEditor(_ node: ChatMainProfileAgentPromptNode) {
-    // Agent config is now a dedicated page in ChatMainView; keep interaction in-page.
+    presentAgentConfigEditor()
   }
 
   func setIsGroupOrChannel(_ value: Bool) {
     isGroupOrChannel = value
+    chatListView.setIsGroupOrChannel(value)
     refreshAgentCardVisibility()
     refreshTypingStateFromEngine(force: true)
     updateHeaderTexts()
@@ -2636,7 +2658,7 @@ public final class ChatMainView: ExpoView,
   }
 
   private func refreshAgentCardVisibility() {
-    let shouldShow = isGroupOrChannel
+    let shouldShow = standaloneProfileMode && isGroupOrChannel
     if !shouldShow && currentPage == .agent {
       currentPage = .profile
       applyPageState(animated: false, emitEvent: false)
@@ -2689,6 +2711,40 @@ public final class ChatMainView: ExpoView,
         print("[ChatMainView] Failed to delete agent config natively")
       }
     }
+  }
+
+  private func presentAgentConfigEditor() {
+    guard standaloneProfileMode, isGroupOrChannel else { return }
+    let currentId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !currentId.isEmpty else { return }
+    guard let presenter = topMostViewController() else { return }
+
+    if presenter is ChatAgentConfigViewController {
+      return
+    }
+
+    let controller = ChatAgentConfigViewController()
+    controller.chatId = currentId
+    controller.agentConfig = agentConfig
+    controller.documents = getAgentDocuments()
+    controller.onSave = { [weak self] config in
+      self?.applyAgentConfigUpdate(config)
+    }
+    controller.onDelete = { [weak self] in
+      self?.applyAgentConfigDeletion()
+    }
+
+    if let nav = (presenter as? UINavigationController) ?? presenter.navigationController {
+      if nav.topViewController is ChatAgentConfigViewController {
+        return
+      }
+      nav.pushViewController(controller, animated: true)
+      return
+    }
+
+    let nav = UINavigationController(rootViewController: controller)
+    nav.modalPresentationStyle = .fullScreen
+    presenter.present(nav, animated: true)
   }
 
   private func normalizedAgentConfig(_ config: [String: Any]?, fallbackChatId: String)

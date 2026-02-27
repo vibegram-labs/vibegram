@@ -161,6 +161,61 @@ struct ChatListRow {
     ])!
   }
 
+  static func agentProgressIndicator(label: String, tool: String? = nil, status: String? = nil)
+    -> ChatListRow
+  {
+    let trimmedLabel = label.trimmingCharacters(in: .whitespacesAndNewlines)
+    let displayLabel = trimmedLabel.isEmpty ? "Working..." : trimmedLabel
+
+    var metadata: [String: Any] = [:]
+    if let tool {
+      let trimmedTool = tool.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !trimmedTool.isEmpty {
+        metadata["tool"] = trimmedTool
+      }
+    }
+    if let status {
+      let trimmedStatus = status.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !trimmedStatus.isEmpty {
+        metadata["status"] = trimmedStatus
+      }
+    }
+
+    var message: [String: Any] = [
+      "text": displayLabel,
+      "timestamp": "",
+      "isMe": false,
+      "type": "agent_progress",
+      "isAgentMessage": true,
+      "agentName": "Vibe AI",
+      "plainContent": displayLabel,
+      "bubbleShape": [
+        "showTail": false,
+        "borderTopLeftRadius": 18,
+        "borderTopRightRadius": 18,
+        "borderBottomLeftRadius": 18,
+        "borderBottomRightRadius": 18,
+      ],
+    ]
+    if !metadata.isEmpty {
+      message["metadata"] = metadata
+    }
+
+    if let row = ChatListRow(raw: [
+      "kind": "message",
+      "key": "agent-progress-indicator",
+      "message": message,
+    ]) {
+      return row
+    }
+
+    return ChatListRow(raw: [
+      "kind": "day",
+      "key": "agent-progress-indicator-fallback",
+      "label": "",
+    ])!
+  }
+
   var shouldShowUploadOverlay: Bool {
     guard isMe else {
       return false

@@ -202,6 +202,7 @@ export default function ChatListRoute() {
       chatId: effectiveChatId,
       myUserId: user?.userId || undefined,
       peerUserId: activeChat?.friendId || undefined,
+      isGroup: activeChat?.type === 'group' || activeChat?.type === 'channel',
     };
 
     if (type === 'sendMessage') {

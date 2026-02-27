@@ -846,26 +846,31 @@ internal object ChatEngine {
 
     return synchronized(lock) {
       val effectivePayload = LinkedHashMap(payload)
+      val isGroup = (payload["isGroup"] as? Boolean == true) || (payload["isGroupOrChannel"] as? Boolean == true)
+      Log.i("ChatEngine", "sendMessage START chatId=$chatId messageId=$messageId isGroup=$isGroup")
+      
       val peerUserId = peerUserIdHint ?: chatPeerUserIdsByChatId[chatId]
-      val friendPublicKey = resolveFriendPublicKeyLocked(chatId, peerUserId)
-        ?: run {
-          Log.w(
-            "ChatEngine",
-            "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId",
-          )
-          pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
-          upsertLocalStatusLocked(chatId, messageId, "pending")
-          queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
-          emitChangeLocked("messageStatusChanged", chatId, messageId)
-          ensureNativeTransportAsync("send_missing_friend_key")
-          return@synchronized mapOf(
-            "accepted" to true,
-            "queued" to true,
-            "reason" to "missing_friend_key",
-            "messageId" to messageId,
-            "state" to "pending",
-          )
-        }
+      val friendPublicKey = if (isGroup) null else {
+        resolveFriendPublicKeyLocked(chatId, peerUserId)
+          ?: run {
+            Log.w(
+              "ChatEngine",
+              "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId",
+            )
+            pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
+            upsertLocalStatusLocked(chatId, messageId, "pending")
+            queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
+            emitChangeLocked("messageStatusChanged", chatId, messageId)
+            ensureNativeTransportAsync("send_missing_friend_key")
+            return@synchronized mapOf(
+              "accepted" to true,
+              "queued" to true,
+              "reason" to "missing_friend_key",
+              "messageId" to messageId,
+              "state" to "pending",
+            )
+          }
+      }
 
       val decryptedFields = linkedMapOf<String, Any?>("text" to text)
       if (!mediaUrl.isNullOrBlank()) decryptedFields["mediaUrl"] = mediaUrl
@@ -1012,16 +1017,18 @@ internal object ChatEngine {
       val fullPayloadString = JSONObject(fullPayload).toString()
       val myPublicKeyPem = normalized(getConfigValueLocked("publicKeyPem") ?: getConfigValueLocked("publicKey"))
 
-      val encryptedContent = try {
-        chatEngineEncryptHybridMessage(friendPublicKey, fullPayloadString, myPublicKeyPem)
-      } catch (e: Throwable) {
-        upsertLocalStatusLocked(chatId, messageId, "error")
-        appendJournalLocked(
-          "native-send-message-error",
-          mapOf("chatId" to chatId, "messageId" to messageId, "reason" to "encrypt_failed", "error" to (e.message ?: "encrypt_failed")),
-        )
-        emitChangeLocked("messageStatusChanged", chatId, messageId)
-        return@synchronized mapOf("accepted" to false, "reason" to "encrypt_failed", "messageId" to messageId)
+      val encryptedContent = if (isGroup) fullPayloadString else {
+        try {
+          chatEngineEncryptHybridMessage(friendPublicKey, fullPayloadString, myPublicKeyPem)
+        } catch (e: Throwable) {
+          upsertLocalStatusLocked(chatId, messageId, "error")
+          appendJournalLocked(
+            "native-send-message-error",
+            mapOf("chatId" to chatId, "messageId" to messageId, "reason" to "encrypt_failed", "error" to (e.message ?: "encrypt_failed")),
+          )
+          emitChangeLocked("messageStatusChanged", chatId, messageId)
+          return@synchronized mapOf("accepted" to false, "reason" to "encrypt_failed", "messageId" to messageId)
+        }
       }
 
       optimisticMessage["encryptedContent"] = encryptedContent
@@ -1089,6 +1096,18 @@ internal object ChatEngine {
       }
       val ref = client.push(chatTopic(chatId), "message", wirePayload)
       nativePendingMessagePushRefs[ref] = chatId to messageId
+      
+      Handler(Looper.getMainLooper()).postDelayed({
+        synchronized(lock) {
+          val pending = nativePendingMessagePushRefs.remove(ref)
+          if (pending != null) {
+            appendJournalLocked("native-send-timeout", mapOf("chatId" to pending.first, "messageId" to pending.second, "ref" to ref))
+            upsertLocalStatusLocked(pending.first, pending.second, "error")
+            emitChangeLocked("messageStatusChanged", pending.first, pending.second)
+          }
+        }
+      }, 15000L)
+      
       appendJournalLocked("native-send-message", mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref))
       emitChangeLocked("messageStatusChanged", chatId, messageId)
       mapOf("accepted" to true, "transport" to "native", "ref" to ref, "messageId" to messageId, "state" to "sending")
@@ -1129,6 +1148,18 @@ internal object ChatEngine {
       upsertLocalStatusLocked(chatId, messageId, "sending")
       val ref = client.push(chatTopic(chatId), "message", messagePayload)
       nativePendingMessagePushRefs[ref] = chatId to messageId
+      
+      Handler(Looper.getMainLooper()).postDelayed({
+        synchronized(lock) {
+          val pending = nativePendingMessagePushRefs.remove(ref)
+          if (pending != null) {
+            appendJournalLocked("native-send-timeout", mapOf("chatId" to pending.first, "messageId" to pending.second, "ref" to ref))
+            upsertLocalStatusLocked(pending.first, pending.second, "error")
+            emitChangeLocked("messageStatusChanged", pending.first, pending.second)
+          }
+        }
+      }, 15000L)
+      
       appendJournalLocked("native-send-message", mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref))
       emitChangeLocked("messageStatusChanged", chatId, messageId)
       mapOf("accepted" to true, "transport" to "native", "ref" to ref)

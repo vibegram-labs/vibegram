@@ -293,6 +293,13 @@ final class ChatEngine {
     let peerUserId: String?
   }
 
+  private struct AgentProgressState: Equatable {
+    let label: String
+    let tool: String?
+    let status: String
+    let updatedAtMs: Int64
+  }
+
   private let queue = DispatchQueue(label: "vibe.chat.engine")
   private let queueSpecificKey = DispatchSpecificKey<UInt8>()
   private let queueSpecificValue: UInt8 = 1
@@ -325,6 +332,7 @@ final class ChatEngine {
   private var pendingOutboundQueueByChat: [String: [String]] = [:]
   private var nativeTypingStateByChatId: [String: Bool] = [:]
   private var peerTypingUserIdsByChatId: [String: Set<String>] = [:]
+  private var agentProgressByChatId: [String: AgentProgressState] = [:]
   private var nativeRecordingStateByChatId: [String: Bool] = [:]
   private var historyRowsByChat: [String: [[String: Any]]] = [:]
   private var historyLoadingChats = Set<String>()
@@ -676,6 +684,7 @@ final class ChatEngine {
       pendingOutboundQueueByChat.removeAll()
       nativeTypingStateByChatId.removeAll()
       peerTypingUserIdsByChatId.removeAll()
+      agentProgressByChatId.removeAll()
       nativeRecordingStateByChatId.removeAll()
       liveMessageRowsByChat.removeAll()
       deletedMessageIdsByChat.removeAll()
@@ -795,6 +804,7 @@ final class ChatEngine {
           openChatChannels.removeValue(forKey: chatId)
           nativeJoinedChatIds.remove(chatId)
           peerTypingUserIdsByChatId.removeValue(forKey: chatId)
+          agentProgressByChatId.removeValue(forKey: chatId)
           if let client = phoenixClient as? ChatPhoenixClient {
             client.leave(topic: chatTopic(for: chatId))
           }
@@ -1094,42 +1104,56 @@ final class ChatEngine {
 
     return queue.sync {
       var effectivePayload = payload
+      let isGroup =
+        (payload["isGroup"] as? Bool) == true || (payload["isGroupOrChannel"] as? Bool) == true
+      NSLog(
+        "[ChatEngine] sendMessage START chatId=%@ messageId=%@ isGroup=%@", chatId, messageId,
+        isGroup ? "true" : "false")
+
       if let peerUserIdHint {
         chatPeerUserIdsByChatId[chatId] = peerUserIdHint
       }
       let peerUserId = peerUserIdHint ?? chatPeerUserIdsByChatId[chatId]
-      guard
-        let friendPublicKey = resolveFriendPublicKeyLocked(
-          chatId: chatId, peerUserIdHint: peerUserId)
-      else {
-        upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
-        pendingOutboundDraftsByMessageId[messageId] = effectivePayload
-        queueOutboundDraftLocked(
-          chatId: chatId, messageId: messageId, payload: effectivePayload,
-          reason: "missing_friend_key")
-        scheduleFriendPublicKeyFetchLocked(
-          chatId: chatId,
-          peerUserIdHint: peerUserId,
-          trigger: "send_missing_friend_key"
-        )
-        loadChatHistoryIfNeededLocked(chatId: chatId, force: true)
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-          self?.ensureNativeTransport(trigger: "send_missing_friend_key")
-        }
-        appendJournalLocked(
-          event: "native-send-message-error",
-          payload: [
-            "chatId": chatId,
+
+      let friendPublicKey: String?
+      if isGroup {
+        friendPublicKey = nil
+      } else {
+        guard
+          let key = resolveFriendPublicKeyLocked(
+            chatId: chatId, peerUserIdHint: peerUserId)
+        else {
+          upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
+          pendingOutboundDraftsByMessageId[messageId] = effectivePayload
+          queueOutboundDraftLocked(
+            chatId: chatId, messageId: messageId, payload: effectivePayload,
+            reason: "missing_friend_key")
+          scheduleFriendPublicKeyFetchLocked(
+            chatId: chatId,
+            peerUserIdHint: peerUserId,
+            trigger: "send_missing_friend_key"
+          )
+          loadChatHistoryIfNeededLocked(chatId: chatId, force: true)
+          DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.ensureNativeTransport(trigger: "send_missing_friend_key")
+          }
+          appendJournalLocked(
+            event: "native-send-message-error",
+            payload: [
+              "chatId": chatId,
+              "messageId": messageId,
+              "reason": "missing_friend_key",
+            ])
+          postChangeLocked(
+            reason: "messageStatusChanged",
+            userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
+          return [
+            "accepted": true, "queued": true, "reason": "missing_friend_key",
             "messageId": messageId,
-            "reason": "missing_friend_key",
-          ])
-        postChangeLocked(
-          reason: "messageStatusChanged",
-          userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
-        return [
-          "accepted": true, "queued": true, "reason": "missing_friend_key", "messageId": messageId,
-          "state": "pending",
-        ]
+            "state": "pending",
+          ]
+        }
+        friendPublicKey = key
       }
 
       var decryptedFields: [String: Any] = ["text": text]
@@ -1344,11 +1368,15 @@ final class ChatEngine {
         getConfigValueLocked("publicKeyPem") ?? getConfigValueLocked("publicKey"))
       let encryptedContent: String
       do {
-        encryptedContent = try chatEngineEncryptHybridMessage(
-          recipientPublicKeyPem: friendPublicKey,
-          message: fullPayloadString,
-          myPublicKeyPem: myPublicKeyPem
-        )
+        if isGroup || friendPublicKey == nil {
+          encryptedContent = fullPayloadString
+        } else {
+          encryptedContent = try chatEngineEncryptHybridMessage(
+            recipientPublicKeyPem: friendPublicKey!,
+            message: fullPayloadString,
+            myPublicKeyPem: myPublicKeyPem
+          )
+        }
       } catch {
         upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
         appendJournalLocked(
@@ -1454,6 +1482,26 @@ final class ChatEngine {
 
       let ref = client.push(topic: chatTopic(for: chatId), event: "message", payload: wirePayload)
       nativePendingMessagePushRefs[ref] = (chatId: chatId, messageId: messageId)
+
+      let timeoutRef = ref
+      queue.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+        guard let self = self else { return }
+        if let pending = self.nativePendingMessagePushRefs.removeValue(forKey: timeoutRef) {
+          self.appendJournalLocked(
+            event: "native-send-timeout",
+            payload: [
+              "chatId": pending.chatId,
+              "messageId": pending.messageId,
+              "ref": timeoutRef,
+            ])
+          self.upsertLocalStatusLocked(
+            chatId: pending.chatId, messageId: pending.messageId, status: "error")
+          self.postChangeLocked(
+            reason: "messageStatusChanged",
+            userInfo: ["chatId": pending.chatId, "messageId": pending.messageId, "status": "error"])
+        }
+      }
+
       appendJournalLocked(
         event: "native-send-message",
         payload: [
@@ -1504,6 +1552,26 @@ final class ChatEngine {
       let ref = client.push(
         topic: chatTopic(for: chatId), event: "message", payload: messagePayload)
       nativePendingMessagePushRefs[ref] = (chatId: chatId, messageId: messageId)
+
+      let timeoutRef = ref
+      queue.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+        guard let self = self else { return }
+        if let pending = self.nativePendingMessagePushRefs.removeValue(forKey: timeoutRef) {
+          self.appendJournalLocked(
+            event: "native-send-timeout",
+            payload: [
+              "chatId": pending.chatId,
+              "messageId": pending.messageId,
+              "ref": timeoutRef,
+            ])
+          self.upsertLocalStatusLocked(
+            chatId: pending.chatId, messageId: pending.messageId, status: "error")
+          self.postChangeLocked(
+            reason: "messageStatusChanged",
+            userInfo: ["chatId": pending.chatId, "messageId": pending.messageId, "status": "error"])
+        }
+      }
+
       appendJournalLocked(
         event: "native-send-message",
         payload: [
@@ -1875,6 +1943,7 @@ final class ChatEngine {
       pendingOutboundQueueByChat.removeValue(forKey: chatId)
       nativeTypingStateByChatId.removeValue(forKey: chatId)
       peerTypingUserIdsByChatId.removeValue(forKey: chatId)
+      agentProgressByChatId.removeValue(forKey: chatId)
       nativeRecordingStateByChatId.removeValue(forKey: chatId)
       chatPeerUserIdsByChatId.removeValue(forKey: chatId)
       openChatChannels.removeValue(forKey: chatId)
@@ -2131,6 +2200,23 @@ final class ChatEngine {
     }
   }
 
+  func agentProgress(chatId: String?) -> [String: Any]? {
+    guard let chatId = normalizedString(chatId), !chatId.isEmpty else { return nil }
+    return syncOnQueue {
+      guard let state = agentProgressByChatId[chatId] else { return nil }
+      var payload: [String: Any] = [
+        "label": state.label,
+        "status": state.status,
+        "updatedAtMs": state.updatedAtMs,
+        "isActive": true,
+      ]
+      if let tool = state.tool {
+        payload["tool"] = tool
+      }
+      return payload
+    }
+  }
+
   /// Returns true only if native chat history has been successfully fetched
   /// from the server for this chatId. Used by ChatListView to decide whether
   /// native rows can fully replace JS rows.
@@ -2369,6 +2455,107 @@ final class ChatEngine {
     return rank(rhs) >= rank(lhs) ? rhs : (lhs ?? rhs)
   }
 
+  private func defaultAgentProgressLabel(tool: String?) -> String {
+    switch tool {
+    case "search_google":
+      return "Searching the web..."
+    case "analyze_image":
+      return "Analyzing image..."
+    case "analyze_document":
+      return "Reading document..."
+    case "create_document":
+      return "Creating document..."
+    case "find_rows":
+      return "Finding rows..."
+    case "edit_rows":
+      return "Editing rows..."
+    case "delete_rows":
+      return "Deleting rows..."
+    case "export_rows":
+      return "Exporting document..."
+    default:
+      return "Working..."
+    }
+  }
+
+  private func setAgentProgressLocked(
+    chatId: String,
+    label: String?,
+    tool: String?,
+    status: String
+  ) {
+    let normalizedStatus =
+      status
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+        .lowercased()
+        .isEmpty
+      ? "running"
+      : status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+
+    let shouldClear = Set([
+      "done", "complete", "completed", "idle", "stopped", "stop", "error", "failed",
+    ]).contains(normalizedStatus)
+
+    if shouldClear {
+      clearAgentProgressLocked(chatId: chatId, status: normalizedStatus)
+      return
+    }
+
+    let trimmedLabel = label?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let trimmedToolValue = tool?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let normalizedTool = trimmedToolValue.isEmpty ? nil : trimmedToolValue
+    let resolvedLabel =
+      trimmedLabel.isEmpty ? defaultAgentProgressLabel(tool: normalizedTool) : trimmedLabel
+    let next = AgentProgressState(
+      label: resolvedLabel,
+      tool: normalizedTool,
+      status: normalizedStatus,
+      updatedAtMs: Int64(nowMs())
+    )
+    let previous = agentProgressByChatId[chatId]
+    guard previous != next else { return }
+    agentProgressByChatId[chatId] = next
+    emitAgentProgressChangeLocked(chatId: chatId, state: next)
+  }
+
+  private func clearAgentProgressLocked(chatId: String, status: String = "done") {
+    guard let previous = agentProgressByChatId.removeValue(forKey: chatId) else { return }
+    let normalizedStatus =
+      status.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      ? "done"
+      : status.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    emitAgentProgressChangeLocked(
+      chatId: chatId, state: nil, previous: previous, status: normalizedStatus)
+  }
+
+  private func emitAgentProgressChangeLocked(
+    chatId: String,
+    state: AgentProgressState?,
+    previous: AgentProgressState? = nil,
+    status: String? = nil
+  ) {
+    let snapshot = statusSnapshotLocked()
+    var userInfo: [String: Any] = [
+      "chatId": chatId,
+      "state": snapshot,
+      "isActive": state != nil,
+    ]
+    if let state {
+      userInfo["label"] = state.label
+      userInfo["status"] = state.status
+      userInfo["updatedAtMs"] = state.updatedAtMs
+      if let tool = state.tool {
+        userInfo["tool"] = tool
+      }
+    } else {
+      userInfo["status"] = status ?? previous?.status ?? "done"
+      if let previous {
+        userInfo["updatedAtMs"] = previous.updatedAtMs
+      }
+    }
+    postChangeLocked(reason: "agentProgress", userInfo: userInfo)
+  }
+
   private func statusSnapshotLocked() -> [String: Any] {
     var snapshot = state
     snapshot["onlineUserCount"] = onlineUsers.count
@@ -2385,6 +2572,7 @@ final class ChatEngine {
     snapshot["outboundQueuedCount"] = pendingOutboundQueueByChat.values.reduce(0) { $0 + $1.count }
     snapshot["typingChatCount"] = peerTypingUserIdsByChatId.count
     snapshot["typingUserCount"] = peerTypingUserIdsByChatId.values.reduce(0) { $0 + $1.count }
+    snapshot["agentProgressChatCount"] = agentProgressByChatId.count
     snapshot["journalCount"] = store.getJournal(limit: nil).count
     return snapshot
   }
@@ -2450,6 +2638,7 @@ final class ChatEngine {
         pendingOutboundQueueByChat.removeAll()
         nativeTypingStateByChatId.removeAll()
         peerTypingUserIdsByChatId.removeAll()
+        agentProgressByChatId.removeAll()
         nativeRecordingStateByChatId.removeAll()
         historyLoadingChats.removeAll()
         liveMessageRowsByChat.removeAll()
@@ -2493,6 +2682,7 @@ final class ChatEngine {
       self.state["state"] = "native-socket-open"
       self.state["updatedAt"] = self.nowMs()
       self.state["note"] = "ChatEngine native Phoenix socket open"
+      NSLog("[ChatEngine] native Phoenix socket open - Triggering reconnects")
       self.appendJournalLocked(event: "native-socket-open", payload: [:])
       self.nativeUserTopic = userTopic
       self.nativeUserJoinRef = client.join(topic: userTopic, payload: [:])
@@ -2503,6 +2693,7 @@ final class ChatEngine {
       self.nativePendingDeletePushRefs.removeAll()
       self.nativeTypingStateByChatId.removeAll()
       self.peerTypingUserIdsByChatId.removeAll()
+      self.agentProgressByChatId.removeAll()
       self.nativeRecordingStateByChatId.removeAll()
       self.historyLoadingChats.removeAll()
       self.liveMessageRowsByChat.removeAll()
@@ -2540,6 +2731,7 @@ final class ChatEngine {
       self.nativePendingDeletePushRefs.removeAll()
       self.nativeTypingStateByChatId.removeAll()
       self.peerTypingUserIdsByChatId.removeAll()
+      self.agentProgressByChatId.removeAll()
       self.nativeRecordingStateByChatId.removeAll()
       self.historyLoadingChats.removeAll()
       self.liveMessageRowsByChat.removeAll()
@@ -2587,6 +2779,7 @@ final class ChatEngine {
         self.nativePendingDeletePushRefs.removeAll()
         self.nativeTypingStateByChatId.removeAll()
         self.peerTypingUserIdsByChatId.removeAll()
+        self.agentProgressByChatId.removeAll()
         self.nativeRecordingStateByChatId.removeAll()
         self.state["connected"] = false
         self.state["state"] = "native-socket-error"
@@ -2728,6 +2921,20 @@ final class ChatEngine {
 
       if frame.topic.hasPrefix("chat:") {
         let chatId = String(frame.topic.dropFirst(5))
+        if frame.event == "agent-progress" {
+          let payloadUserId = self.normalizedString(
+            frame.payload["userId"] ?? frame.payload["user_id"] ?? frame.payload["id"])
+          let isAgentEvent =
+            (frame.payload["isAgent"] as? Bool == true)
+            || payloadUserId?.lowercased() == Self.agentUserId
+          if isAgentEvent {
+            let label = self.normalizedString(frame.payload["label"])
+            let tool = self.normalizedString(frame.payload["tool"])
+            let status = self.normalizedString(frame.payload["status"]) ?? "running"
+            self.setAgentProgressLocked(chatId: chatId, label: label, tool: tool, status: status)
+          }
+          return
+        }
         if frame.event == "typing" || frame.event == "stop-typing" {
           let typing = frame.event == "typing"
           let payloadUserId = self.normalizedUpper(
@@ -2749,6 +2956,9 @@ final class ChatEngine {
             self.peerTypingUserIdsByChatId.removeValue(forKey: chatId)
             typingUsers.removeAll()
           }
+          if !typing, payloadUserId?.lowercased() == Self.agentUserId {
+            self.clearAgentProgressLocked(chatId: chatId, status: "done")
+          }
           let typingUserIds = Array(typingUsers).sorted()
           let isAnyTyping = !typingUserIds.isEmpty || (typing && payloadUserId == nil)
           self.postChangeLocked(
@@ -2765,6 +2975,13 @@ final class ChatEngine {
           let insertedMessageId = self.applyNativeIncomingMessageEventLocked(
             chatId: chatId, payload: frame.payload)
         {
+          let fromId = self.normalizedString(frame.payload["fromId"] ?? frame.payload["from_id"])
+          let isAgentMessage =
+            (frame.payload["isAgentMessage"] as? Bool == true)
+            || fromId?.lowercased() == Self.agentUserId
+          if isAgentMessage {
+            self.clearAgentProgressLocked(chatId: chatId, status: "done")
+          }
           if self.peerTypingUserIdsByChatId[chatId] != nil {
             self.peerTypingUserIdsByChatId.removeValue(forKey: chatId)
             self.postChangeLocked(
@@ -3718,6 +3935,9 @@ final class ChatEngine {
 
   private func scheduleReplayQueuedOutboundLocked(chatId: String, trigger: String) {
     let ids = pendingOutboundQueueByChat[chatId] ?? []
+    NSLog(
+      "[ChatEngine] scheduleReplayQueuedOutboundLocked chatId=%@ trigger=%@ count=%d", chatId,
+      trigger, ids.count)
     guard !ids.isEmpty else { return }
     var drafts: [[String: Any]] = []
     for messageId in ids {

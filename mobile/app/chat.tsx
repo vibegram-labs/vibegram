@@ -258,6 +258,8 @@ export default function ChatScreen() {
     }
 
     if (type === 'headerAvatarPressed') {
+      if (!effectiveChatId) return;
+      router.push({ pathname: '/chat-profile', params: { chatId: effectiveChatId } });
       return;
     }
 
@@ -347,6 +349,7 @@ export default function ChatScreen() {
       chatId: effectiveChatId,
       myUserId: user?.userId || undefined,
       peerUserId: activeChat?.friendId || undefined,
+      isGroup: isGroupOrChannel,
     };
 
     if (type === 'sendMessage') {
@@ -573,10 +576,10 @@ export default function ChatScreen() {
           isGroupOrChannel
             ? (groupMemberCount ? `${groupMemberCount} members` : subtitle)
             : (
-                activeChat?.friendName
-                  ? `@${activeChat.friendName}`
-                  : (activeChat?.friendId ? `id: ${activeChat.friendId}` : subtitle)
-              )
+              activeChat?.friendName
+                ? `@${activeChat.friendName}`
+                : (activeChat?.friendId ? `id: ${activeChat.friendId}` : subtitle)
+            )
         }
         profileBio={activeChat?.description || ''}
         avatarUri={
