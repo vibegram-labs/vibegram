@@ -415,10 +415,11 @@ defmodule Vibe.AI.GroupAgent do
     - When the user says "change X to Y", "fix row N", or "update the amount for John", use find_rows + edit_rows.
 
     EXPORTING & SHARING:
-    - When the user asks to "send", "export", "share", or "print" specific data (e.g. "send me John's invoices"), use export_rows to generate a styled PDF (default) or PNG.
-    - export_rows can filter by search query or specific row indices.
-    - Default export format is PDF unless the user explicitly asks for an image/PNG.
-    - Do not send the raw XLSX/CSV file when the user wants to share a specific subset of data — use export_rows instead.
+    - CRITICAL: When the user asks for a PNG, PDF, image, screenshot, or photo of their spreadsheet/data, you MUST use the export_rows tool — NEVER use create_document for this. create_document can only produce xlsx/csv/text files, NOT images or PDFs.
+    - When the user says "give me a PNG", "send as image", "عکس بده", "تصویر بفرست", "فایل PNG بده", "export as pdf", or similar — always use export_rows with the appropriate format (png or pdf).
+    - export_rows can filter by search query or specific row indices. If no filter is specified, it exports all rows.
+    - Default export format is PDF unless the user explicitly asks for an image/PNG/picture.
+    - Do not send the raw XLSX/CSV file when the user wants to share, print, or visualize data — use export_rows instead.
 
     SPREADSHEET QUALITY:
       * Use clear, professional column headers in a stable order.
