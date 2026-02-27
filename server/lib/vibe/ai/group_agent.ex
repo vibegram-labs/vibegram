@@ -311,7 +311,13 @@ defmodule Vibe.AI.GroupAgent do
 
     # 3. Build message history from memory + current message
     messages = build_messages(memory, user_message, metadata)
-    broadcast_agent_progress(chat_id, "Understanding the task and planning changes...", "react_plan", "running")
+    broadcast_agent_progress(
+      chat_id,
+      "Understanding the task and planning changes...",
+      "react_plan",
+      "running",
+      %{"stage" => "planning"}
+    )
     Logger.info("[GroupAgent] Calling Claude for #{chat_id}: #{length(messages)} messages, system_prompt_len=#{String.length(system_prompt)}")
 
     # 4. Call Claude
@@ -352,7 +358,13 @@ defmodule Vibe.AI.GroupAgent do
         maybe_compact(chat_id, user_id)
 
         # 7. Broadcast agent response as a chat message
-        broadcast_agent_progress(chat_id, "Task completed and verified.", "react_plan", "complete")
+        broadcast_agent_progress(
+          chat_id,
+          "Task completed and verified.",
+          "react_plan",
+          "complete",
+          %{"stage" => "verification"}
+        )
         broadcast_agent_message(
           chat_id,
           agent_config,
@@ -366,7 +378,13 @@ defmodule Vibe.AI.GroupAgent do
 
       {:error, reason} ->
         Logger.error("[GroupAgent] Claude error for chat #{chat_id}: #{inspect(reason)}")
-        broadcast_agent_progress(chat_id, "Task failed after retries.", "react_plan", "error")
+        broadcast_agent_progress(
+          chat_id,
+          "Task failed after retries.",
+          "react_plan",
+          "error",
+          %{"stage" => "failed"}
+        )
         # Broadcast an error message so users know something went wrong
         broadcast_agent_message(
           chat_id,
@@ -462,6 +480,7 @@ defmodule Vibe.AI.GroupAgent do
     - Use delete_rows to remove specific data rows by index. Always use find_rows first to confirm the correct row.
     - When the user says "change X to Y", "fix row N", or "update the amount for John", use find_rows + edit_rows.
     - When the user says "حذف كن" (delete), "تغيير بده" (change), "اضافه كن" (add), "ادغام كن" (merge) — ALWAYS call the appropriate tool immediately.
+    - If the user challenges correctness (e.g., "wrong file", "check again", "you made a mistake"), re-check the current file before defending your answer. Use tools to verify, then either fix the file or clearly confirm why it is already correct.
 
     EXPORTING & SHARING:
     - CRITICAL: When the user asks for a PNG, PDF, image, screenshot, or photo of their spreadsheet/data, you MUST use the export_rows tool — NEVER use create_document for this. create_document can only produce xlsx/csv/text files, NOT images or PDFs.
@@ -506,12 +525,15 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp build_group_document_context(chat_id) do
-    case GroupAgentDocument.get_current(chat_id) do
+    latest_document = GroupAgentDocument.get_current(chat_id)
+    current_spreadsheet = resolve_current_spreadsheet_document(chat_id, latest_document)
+
+    case current_spreadsheet do
       nil ->
         "No active spreadsheet file for this group yet."
 
-      current ->
-        column_list = List.wrap(current.columns)
+      spreadsheet ->
+        column_list = List.wrap(spreadsheet.columns)
 
         columns =
           column_list
@@ -527,7 +549,7 @@ defmodule Vibe.AI.GroupAgent do
           |> default_if_blank("- none")
 
         row_preview =
-          case read_agent_document_file(current) do
+          case read_agent_document_file(spreadsheet) do
             {:ok, csv} ->
               {_cols, rows} = parse_csv_content(csv)
 
@@ -543,22 +565,58 @@ defmodule Vibe.AI.GroupAgent do
               "  (unavailable)"
           end
 
+        latest_generated_file =
+          case latest_document do
+            %GroupAgentDocument{id: latest_id} when latest_id != spreadsheet.id ->
+              "- latest generated file: #{latest_document.title} (#{latest_document.format}) => #{latest_document.file_url}"
+
+            _ ->
+              "- latest generated file: same as editable spreadsheet"
+          end
+
         """
-        Current file:
-        - version: #{current.version}
-        - title: #{current.title}
-        - format: #{current.format}
-        - rows: #{current.row_count}
+        Current editable spreadsheet:
+        - version: #{spreadsheet.version}
+        - title: #{spreadsheet.title}
+        - format: #{spreadsheet.format}
+        - rows: #{spreadsheet.row_count}
         - columns: #{columns}
-        - file_url: #{current.file_url}
+        - file_url: #{spreadsheet.file_url}
         - preview (first 5 rows):
         #{row_preview}
+        #{latest_generated_file}
 
         Recent versions:
         #{recent_versions}
         """
         |> String.trim()
     end
+  end
+
+  defp resolve_current_spreadsheet_document(chat_id, %GroupAgentDocument{} = current_document) do
+    if spreadsheet_document_format?(current_document.format) do
+      current_document
+    else
+      latest_spreadsheet_document(chat_id)
+    end
+  end
+
+  defp resolve_current_spreadsheet_document(chat_id, _), do: latest_spreadsheet_document(chat_id)
+
+  defp latest_spreadsheet_document(chat_id) do
+    chat_id
+    |> GroupAgentDocument.list_recent(50)
+    |> Enum.find(fn document -> spreadsheet_document_format?(document.format) end)
+  end
+
+  defp spreadsheet_document_format?(format) do
+    normalized =
+      format
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    normalized in ["csv", "xlsx", "excel", "spreadsheet", "google_sheet", "google_sheets"]
   end
 
   defp build_messages(memory, current_message, metadata) do
@@ -761,7 +819,8 @@ defmodule Vibe.AI.GroupAgent do
   defp execute_tool(name, input, user_id, enabled_tools, chat_id) do
     if name in enabled_tools do
       progress_label = tool_progress_label(name, input)
-      broadcast_agent_progress(chat_id, progress_label, name, "running", %{"attempt" => 1})
+      running_stage = tool_progress_stage(name, "running")
+      broadcast_agent_progress(chat_id, progress_label, name, "running", %{"attempt" => 1, "stage" => running_stage})
       start_time = System.monotonic_time(:millisecond)
 
       # Log raw tool input for debugging
@@ -782,7 +841,8 @@ defmodule Vibe.AI.GroupAgent do
       duration_ms = System.monotonic_time(:millisecond) - start_time
       Logger.info("[GroupAgent] Tool #{name} completed in #{duration_ms}ms attempts=#{attempts_used}")
       status = if tool_result_error?(result), do: "error", else: "complete"
-      broadcast_agent_progress(chat_id, progress_label, name, status, %{"durationMs" => duration_ms, "attempts" => attempts_used})
+      completed_stage = tool_progress_stage(name, status)
+      broadcast_agent_progress(chat_id, progress_label, name, status, %{"durationMs" => duration_ms, "attempts" => attempts_used, "stage" => completed_stage})
       add_tool_runtime_metadata(result, name, duration_ms)
     else
       Logger.warning("[GroupAgent] Blocked disabled tool call #{name}")
@@ -808,7 +868,7 @@ defmodule Vibe.AI.GroupAgent do
           "Recovering from #{name} error (retry #{next_attempt}/#{@max_tool_attempts})...",
           name,
           "running",
-          %{"attempt" => next_attempt}
+          %{"attempt" => next_attempt, "stage" => "retrying"}
         )
 
         execute_tool_with_recovery(name, input, user_id, chat_id, next_attempt)
@@ -1000,6 +1060,30 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
+  defp tool_progress_stage(name, status) do
+    normalized_status = status |> to_string() |> String.downcase()
+
+    cond do
+      normalized_status == "complete" ->
+        "completed"
+
+      normalized_status == "error" ->
+        "failed"
+
+      name in ["find_rows", "search_google", "analyze_document", "analyze_image"] ->
+        "reading"
+
+      name in ["create_document", "edit_rows", "delete_rows", "delete_document"] ->
+        "updating"
+
+      name == "export_rows" ->
+        "exporting"
+
+      true ->
+        "processing"
+    end
+  end
+
   defp broadcast_agent_progress(chat_id, label, tool, status, extra \\ %{})
 
   defp broadcast_agent_progress(chat_id, label, tool, status, extra) when is_binary(chat_id) do
@@ -1136,7 +1220,9 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp build_spreadsheet_document(chat_id, input, title, body, sections, user_id, output_format) do
-    current_document = GroupAgentDocument.get_current(chat_id)
+    latest_document = GroupAgentDocument.get_current(chat_id)
+    current_document = resolve_current_spreadsheet_document(chat_id, latest_document)
+
     operation = resolve_spreadsheet_operation(input, current_document)
     resolved_output_format = resolve_spreadsheet_output_format(output_format, current_document)
 
@@ -3384,6 +3470,8 @@ defmodule Vibe.AI.GroupAgent do
                 "[GroupAgent] Agent message persisted chat_id=#{chat_id} message_id=#{message_id}"
               )
 
+              maybe_refresh_pinned_agent_file(chat_id, message_id, message_type)
+
               # Notify all participants about the new message
               participants = Vibe.Chat.get_all_participant_settings(chat_id)
 
@@ -3405,6 +3493,43 @@ defmodule Vibe.AI.GroupAgent do
           Logger.error("[GroupAgent] Failed to ensure agent user row: #{inspect(reason)}")
       end
     end)
+  end
+
+  defp maybe_refresh_pinned_agent_file(_chat_id, _message_id, message_type)
+       when message_type != "file",
+       do: :ok
+
+  defp maybe_refresh_pinned_agent_file(chat_id, message_id, "file") do
+    case Vibe.Chat.refresh_pinned_agent_file(chat_id, message_id) do
+      {:ok, updated_count} when updated_count > 0 ->
+        Logger.info(
+          "[GroupAgent] Refreshed pinned agent file chat_id=#{chat_id} message_id=#{message_id} updated_users=#{updated_count}"
+        )
+
+        VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "pinned-updated", %{
+          "messageId" => message_id,
+          "updatedUsers" => updated_count
+        })
+
+        :ok
+
+      {:ok, _} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "[GroupAgent] Failed to refresh pinned agent file chat_id=#{chat_id}: #{inspect(reason)}"
+        )
+
+        :ok
+    end
+  rescue
+    error ->
+      Logger.warning(
+        "[GroupAgent] Exception while refreshing pinned agent file chat_id=#{chat_id}: #{inspect(error)}"
+      )
+
+      :ok
   end
 
   defp ensure_agent_user_record do

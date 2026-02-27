@@ -471,6 +471,67 @@ defmodule Vibe.Chat do
     end)
   end
 
+  @doc """
+  If users have pinned an older agent-generated file message in this chat,
+  move their pin to the newest agent file message.
+  """
+  def refresh_pinned_agent_file(chat_id, new_message_id) do
+    with {:ok, new_uuid} <- Ecto.UUID.cast(new_message_id) do
+      Repo.transaction(fn ->
+        pinned_user_ids =
+          Repo.all(
+            from pm in PinnedMessage,
+              join: m in Message,
+              on: m.id == pm.message_id,
+              where:
+                pm.chat_id == ^chat_id and
+                  m.chat_id == ^chat_id and
+                  m.from_id == ^@agent_user_id and
+                  m.type == "file",
+              select: pm.user_id,
+              distinct: true
+          )
+
+        if pinned_user_ids == [] do
+          0
+        else
+          from(pm in PinnedMessage,
+            join: m in Message,
+            on: m.id == pm.message_id,
+            where:
+              pm.chat_id == ^chat_id and
+                m.chat_id == ^chat_id and
+                m.from_id == ^@agent_user_id and
+                m.type == "file"
+          )
+          |> Repo.delete_all()
+
+          Enum.each(pinned_user_ids, fn pinned_user_id ->
+            %PinnedMessage{}
+            |> PinnedMessage.changeset(%{
+              user_id: pinned_user_id,
+              chat_id: chat_id,
+              message_id: new_uuid
+            })
+            |> Repo.insert(
+              on_conflict: :nothing,
+              conflict_target: [:user_id, :chat_id, :message_id]
+            )
+          end)
+
+          length(pinned_user_ids)
+        end
+      end)
+      |> case do
+        {:ok, updated_count} -> {:ok, updated_count}
+        {:error, reason} -> {:error, reason}
+      end
+    else
+      :error ->
+        {:error, :invalid_message_id}
+    end
+  end
+
   def set_muted(chat_id, user_id, muted) do
     from(p in Participant, where: p.chat_id == ^chat_id and p.user_id == ^user_id)
     |> Repo.update_all(set: [muted: muted])
