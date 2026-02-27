@@ -388,6 +388,7 @@ defmodule Vibe.AI.GroupAgent do
     - When using tools, call them IMMEDIATELY without intro text.
     - Only use tools that are enabled for this group.
     - If attachments are provided in the current message context, use them.
+    - CRITICAL: The user's LATEST message is the highest priority. If the user specifies column order, column names, or layout structure, follow their request EXACTLY — do NOT copy column structure from previous documents in the conversation history. Always obey the latest instruction.
 
     DATA INTERPRETATION:
     - When a user describes data in natural language, carefully parse their intent and extract structured values.
@@ -1012,6 +1013,7 @@ defmodule Vibe.AI.GroupAgent do
        ) do
     columns = spreadsheet_columns(input, sections, [])
     rows = spreadsheet_rows(input, columns, body, [])
+    Logger.info("[GroupAgent] create_new_spreadsheet cols=#{inspect(columns)} row_count=#{length(rows)}")
 
     with {:ok, storage, csv_content} <-
            write_spreadsheet_document_file(title, columns, rows, output_format),
