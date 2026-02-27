@@ -22,35 +22,49 @@ defmodule VibeWeb.UserChannel do
     user_id = socket.assigns.user_id
     user = Accounts.get_user(user_id)
 
-    # Track this user's presence (ONLY if visible)
+    # Track this user's presence immediately (fast, no DB)
     if user && user.show_online_status do
       {:ok, _} = Presence.track(socket, user_id, %{
         online_at: System.system_time(:second)
       })
     end
 
-    # Fetch friends (people I have open DMs with)
-    # This might be heavy if many chats, but necessary for sharded presence
-    chats = Chat.list_chats(user_id)
-    friend_ids = Enum.map(chats, fn c -> c[:friendId] end) |> Enum.reject(&is_nil/1)
+    # Heavy work (list_chats = 6 DB queries) runs in a background Task
+    # so the channel process stays responsive for incoming messages
+    channel_pid = self()
+    show_online = user && user.show_online_status
 
-    # 1. Notify friends I am online (ONLY if visible)
-    if user && user.show_online_status do
-      Enum.each(friend_ids, fn fid ->
-        VibeWeb.Endpoint.broadcast("user:#{fid}", "friend-online", %{
-          userId: user_id,
-          user_id: user_id # Send snake_case too just in case
-        })
+    Task.start(fn ->
+      chats = Chat.list_chats(user_id)
+      friend_ids = Enum.map(chats, fn c -> c[:friendId] end) |> Enum.reject(&is_nil/1)
+
+      # Notify friends I am online
+      if show_online do
+        Enum.each(friend_ids, fn fid ->
+          VibeWeb.Endpoint.broadcast("user:#{fid}", "friend-online", %{
+            userId: user_id,
+            user_id: user_id
+          })
+        end)
+      end
+
+      # Find which friends are online
+      online_friend_ids = Enum.filter(friend_ids, fn fid ->
+        VibeWeb.Presence.list("user:#{fid}") |> map_size() > 0
       end)
-    end
 
-    # 2. Find which friends are online
-    online_friend_ids = Enum.filter(friend_ids, fn fid ->
-      # Check if friend has presence on their own channel
-      VibeWeb.Presence.list("user:#{fid}") |> map_size() > 0
+      # Send results back to the channel process (push must happen there)
+      send(channel_pid, {:after_join_complete, friend_ids, online_friend_ids})
     end)
 
-    # 3. Push initial presence to me
+    {:noreply, socket}
+  end
+
+  @impl true
+  def handle_info({:after_join_complete, friend_ids, online_friend_ids}, socket) do
+    # Cache friend_ids so terminate/2 doesn't need to re-fetch
+    socket = assign(socket, :friend_ids, friend_ids)
+
     push(socket, "initial-presence", %{
       onlineFriendIds: online_friend_ids,
       online_friend_ids: online_friend_ids
@@ -62,32 +76,43 @@ defmodule VibeWeb.UserChannel do
   @impl true
   def terminate(_reason, socket) do
     user_id = socket.assigns.user_id
-    user = Accounts.get_user(user_id)
-    last_seen = DateTime.utc_now()
+    # Use cached friend_ids from :after_join_complete (avoids re-running list_chats)
+    cached_friend_ids = socket.assigns[:friend_ids]
 
-    if user do
-      _ = Accounts.update_user(user, %{last_seen: last_seen})
-    end
+    # Run all terminate work asynchronously so the process exits immediately
+    Task.start(fn ->
+      user = Accounts.get_user(user_id)
+      last_seen = DateTime.utc_now()
 
-    # Notify friends I am offline
-    # We must re-fetch friends or cache them. Re-fetching is safer.
-    chats = Chat.list_chats(user_id)
-    friend_ids = Enum.map(chats, fn c -> c[:friendId] end) |> Enum.reject(&is_nil/1)
+      if user do
+        _ = Accounts.update_user(user, %{last_seen: last_seen})
+      end
 
-    if user && user.show_online_status do
-      Enum.each(friend_ids, fn fid ->
-        VibeWeb.Endpoint.broadcast("user:#{fid}", "friend-offline", %{
-          userId: user_id,
-          user_id: user_id,
-          lastSeen: if(user.show_last_seen, do: last_seen, else: nil),
-          last_seen: if(user.show_last_seen, do: last_seen, else: nil),
-          lastSeenMs:
-            if(user.show_last_seen, do: DateTime.to_unix(last_seen, :millisecond), else: nil),
-          last_seen_ms:
-            if(user.show_last_seen, do: DateTime.to_unix(last_seen, :millisecond), else: nil)
-        })
-      end)
-    end
+      friend_ids =
+        case cached_friend_ids do
+          ids when is_list(ids) -> ids
+          _ ->
+            # Fallback: fetch if cache wasn't populated (e.g. very short session)
+            chats = Chat.list_chats(user_id)
+            Enum.map(chats, fn c -> c[:friendId] end) |> Enum.reject(&is_nil/1)
+        end
+
+      if user && user.show_online_status do
+        Enum.each(friend_ids, fn fid ->
+          VibeWeb.Endpoint.broadcast("user:#{fid}", "friend-offline", %{
+            userId: user_id,
+            user_id: user_id,
+            lastSeen: if(user.show_last_seen, do: last_seen, else: nil),
+            last_seen: if(user.show_last_seen, do: last_seen, else: nil),
+            lastSeenMs:
+              if(user.show_last_seen, do: DateTime.to_unix(last_seen, :millisecond), else: nil),
+            last_seen_ms:
+              if(user.show_last_seen, do: DateTime.to_unix(last_seen, :millisecond), else: nil)
+          })
+        end)
+      end
+    end)
+
     :ok
   end
 
