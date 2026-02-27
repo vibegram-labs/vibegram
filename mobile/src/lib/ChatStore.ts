@@ -221,7 +221,7 @@ const parseDecryptedContent = (decrypted: string): Partial<Message> => {
 };
 
 const normalizeMessage = (m: any): Message => {
-    let content = m.plaintext || m._senderPlaintext || m.sender_plaintext;
+    let content = m.plaintext || m.plainContent || m.plain_content || m._senderPlaintext || m.sender_plaintext;
     let extra: Partial<Message> = {};
 
     // Detect if content is a JSON string (e.g. {"text":"..."})

@@ -124,7 +124,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private static var wallpaperMaskImageCache: [String: CGImage] = [:]
   private static let cachedThemeIdDefaultsKey = "vibe.chat.native.themeId.v1"
   private static let cachedThemeIsDarkDefaultsKey = "vibe.chat.native.themeIsDark.v1"
-  private static let documentPreviewSession: URLSession = URLSession.shared
+  private static let documentPreviewSession: URLSession = {
+    if #available(iOS 13.0, *) {
+      return ChatPhoenixClient.makePinnedURLSession()
+    }
+    return URLSession.shared
+  }()
 
   private var isPeerTyping: Bool = false
 
@@ -2561,6 +2566,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     var request = URLRequest(url: remoteURL)
     request.timeoutInterval = 60
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+    if let authHeader = ChatEngine.shared.authorizationHeaderForAPI() {
+      request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+    }
     let task = Self.documentPreviewSession.downloadTask(with: request) {
       [weak self] tempURL, response, error in
       guard let self else { return }

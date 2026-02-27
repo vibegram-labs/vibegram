@@ -1541,7 +1541,6 @@ final class ChatListCell: UICollectionViewCell {
     let metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
     let bubbleWidth = metrics.bubbleWidth
     let bubbleHeight = metrics.bubbleHeight
-    let agentLabelHeight: CGFloat = (row.isAgentMessage || row.isAgentMention) ? 18.0 : 0.0
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
     let bubbleFrame = pixelAlignedRect(
@@ -1552,18 +1551,7 @@ final class ChatListCell: UICollectionViewCell {
         height: ceil(bubbleHeight)
       ))
 
-    // Agent sender label positioned above the bubble
-    if (row.isAgentMessage || row.isAgentMention) && !agentSenderLabel.isHidden {
-      agentSenderLabel.frame = pixelAlignedRect(
-        CGRect(
-          x: bubbleFrame.minX,
-          y: bubbleFrame.minY - agentLabelHeight - 2,
-          width: bubbleFrame.width,
-          height: agentLabelHeight
-        ))
-    } else {
-      agentSenderLabel.frame = .zero
-    }
+    // Agent sender label removed (now using inline icon)
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)

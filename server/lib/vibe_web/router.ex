@@ -40,8 +40,6 @@ defmodule VibeWeb.Router do
     get "/servers", ApiController, :servers
     get "/vapid-key", ApiController, :vapid_key
     get "/push/avatar/:user_id", PushAvatarController, :show
-    get "/agent/document/:key", GroupAgentController, :download_document
-    get "/agent/document/:key/:name", GroupAgentController, :download_document
   end
 
   scope "/api", VibeWeb do
@@ -128,6 +126,8 @@ defmodule VibeWeb.Router do
     put "/group/:id/agent", GroupAgentController, :update
     delete "/group/:id/agent", GroupAgentController, :delete
     post "/group/:id/agent/generate_prompt", GroupAgentController, :generate_prompt
+    get "/agent/document/:key", GroupAgentController, :download_document
+    get "/agent/document/:key/:name", GroupAgentController, :download_document
 
     # Channels
     post "/channel", ChannelController, :create

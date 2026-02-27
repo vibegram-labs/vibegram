@@ -1,7 +1,18 @@
 defmodule Vibe.Chat do
   import Ecto.Query, warn: false
   alias Vibe.Repo
-  alias Vibe.Chat.{Room, Message, Participant, MessageRead, SavedMessage, ScheduledPost, PinnedMessage}
+  alias Vibe.Chat.{
+    Room,
+    Message,
+    Participant,
+    MessageRead,
+    SavedMessage,
+    ScheduledPost,
+    PinnedMessage,
+    AgentMessageCrypto
+  }
+
+  @agent_user_id "00000000-0000-0000-0000-000000000001"
 
   def save_message(attrs) do
     %SavedMessage{}
@@ -134,6 +145,8 @@ defmodule Vibe.Chat do
           nil
         end
 
+      last_msg_for_client = to_client_message(last_msg)
+
       %{
         chatId: chat_id,
         type: room_type,
@@ -147,7 +160,7 @@ defmodule Vibe.Chat do
         friendName: if(friend_p && friend_p.user, do: friend_p.user.username, else: nil),
         friendImage: if(friend_p && friend_p.user, do: friend_p.user.profile_image, else: nil),
         members: members,
-        messages: if(last_msg, do: [last_msg], else: []),
+        messages: if(last_msg_for_client, do: [last_msg_for_client], else: []),
         unreadCount: 0,
         pinned: my_settings.pinned,
         muted: my_settings.muted
@@ -207,6 +220,7 @@ defmodule Vibe.Chat do
              where: m.chat_id == ^chat_id,
              order_by: [asc: m.timestamp],
              preload: [:reads])
+    |> Enum.map(&to_client_message/1)
   end
 
   def get_messages_for_user(chat_id, user_id) do
@@ -230,6 +244,7 @@ defmodule Vibe.Chat do
     end
 
     Repo.all(query)
+    |> Enum.map(&to_client_message/1)
   end
 
   def mark_read(message_id, reader_id) do
@@ -649,5 +664,47 @@ defmodule Vibe.Chat do
       nil ->
         {:error, "Not found"}
     end
+  end
+
+  defp to_client_message(nil), do: nil
+
+  defp to_client_message(%Message{} = message) do
+    if is_agent_message?(message) do
+      plain_text = AgentMessageCrypto.decrypt_from_storage(message.encrypted_content || "")
+      base = base_message_map(message)
+
+      Map.merge(base, %{
+        encrypted_content: "",
+        plaintext: plain_text,
+        plain_content: plain_text,
+        is_agent_message: true,
+        agent_name: "Vibe AI"
+      })
+    else
+      message
+    end
+  end
+
+  defp to_client_message(other), do: other
+
+  defp is_agent_message?(%Message{from_id: from_id}) do
+    case {Ecto.UUID.cast(from_id), Ecto.UUID.cast(@agent_user_id)} do
+      {{:ok, a}, {:ok, b}} -> a == b
+      _ -> false
+    end
+  end
+
+  defp base_message_map(%Message{} = message) do
+    %{
+      id: message.id,
+      chat_id: message.chat_id,
+      from_id: message.from_id,
+      timestamp: message.timestamp,
+      type: message.type,
+      encrypted_content: message.encrypted_content,
+      status: message.status,
+      media_url: message.media_url,
+      reply_to_id: message.reply_to_id
+    }
   end
 end

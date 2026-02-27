@@ -7,7 +7,7 @@ defmodule Vibe.AI.GroupAgent do
 
   require Logger
 
-  alias Vibe.Chat.{GroupAgent, GroupAgentMemory, GroupAgentDocument}
+  alias Vibe.Chat.{GroupAgent, GroupAgentMemory, GroupAgentDocument, AgentMessageCrypto}
   alias Vibe.Repo
 
   @claude_api "https://api.anthropic.com/v1/messages"
@@ -23,6 +23,7 @@ defmodule Vibe.AI.GroupAgent do
   @context_message_limit 30
   @uploads_dir "/app/uploads"
   @agent_docs_dir "agent-docs"
+  @max_agent_document_bytes 1_000_000
 
   @default_system_prompt """
   You are Vibe AI, a helpful assistant in this group chat.
@@ -1276,22 +1277,26 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp write_agent_document_file(title, content, extension) do
-    filename = build_agent_document_filename(title, extension)
-    blob_key = build_agent_document_blob_key()
-    relative_url = "/api/agent/document/#{blob_key}/#{filename}"
+    if byte_size(to_string(content || "")) > @max_agent_document_bytes do
+      {:error, :document_too_large}
+    else
+      filename = build_agent_document_filename(title, extension)
+      blob_key = build_agent_document_blob_key()
+      relative_url = "/api/agent/document/#{blob_key}/#{filename}"
 
-    {:ok,
-     %{
-       relative_url: relative_url,
-       file_url: public_upload_url(relative_url),
-       metadata: %{
-         "storage_kind" => "db_inline",
-         "blob_key" => blob_key,
-         "download_name" => filename,
-         "content_type" => content_type_for_extension(extension),
-         "inline_content" => to_string(content || "")
-       }
-     }}
+      {:ok,
+       %{
+         relative_url: relative_url,
+         file_url: public_upload_url(relative_url),
+         metadata: %{
+           "storage_kind" => "db_inline",
+           "blob_key" => blob_key,
+           "download_name" => filename,
+           "content_type" => content_type_for_extension(extension),
+           "inline_content" => to_string(content || "")
+         }
+       }}
+    end
   end
 
   defp build_agent_document_blob_key do
@@ -1745,7 +1750,9 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp broadcast_agent_message(chat_id, agent_config, text, metadata) do
-    Logger.info("[GroupAgent] Broadcasting agent message in #{chat_id}: #{String.slice(text, 0..80)}...")
+    Logger.info(
+      "[GroupAgent] Broadcasting agent message chat_id=#{chat_id} len=#{String.length(text || "")}"
+    )
 
     message_id = Ecto.UUID.generate()
     timestamp = :os.system_time(:millisecond)
@@ -1790,7 +1797,7 @@ defmodule Vibe.AI.GroupAgent do
             id: message_id,
             chat_id: chat_id,
             from_id: @agent_user_id,
-            encrypted_content: plain_text,
+            encrypted_content: AgentMessageCrypto.encrypt_for_storage(plain_text),
             type: message_type,
             timestamp: timestamp,
             reply_to_id: reply_to_id

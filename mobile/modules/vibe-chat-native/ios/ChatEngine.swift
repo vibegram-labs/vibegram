@@ -614,6 +614,13 @@ final class ChatEngine {
     syncOnQueue { resolveURLForOpenLocked(raw) }
   }
 
+  func authorizationHeaderForAPI() -> String? {
+    syncOnQueue {
+      guard let token = authHeaderTokenLocked(), !token.isEmpty else { return nil }
+      return "Bearer \(token)"
+    }
+  }
+
   func isUserOnline(userId: String?) -> Bool {
     syncOnQueue {
       guard let normalized = normalizedUpper(userId), !normalized.isEmpty else { return false }

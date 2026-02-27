@@ -184,52 +184,58 @@ defmodule VibeWeb.GroupAgentController do
 
   # GET /api/agent/document/:key(/:name) — Download/preview generated agent document
   def download_document(conn, %{"key" => blob_key}) do
+    user_id = conn.assigns.current_user.id
+
     case GroupAgentDocument.get_by_blob_key(blob_key) do
       nil ->
         conn |> put_status(:not_found) |> json(%{error: "Document not found"})
 
       document ->
-        metadata = if is_map(document.metadata), do: document.metadata, else: %{}
-        content = metadata["inline_content"] || metadata[:inline_content]
+        if Chat.is_participant?(document.chat_id, user_id) do
+          metadata = if is_map(document.metadata), do: document.metadata, else: %{}
+          content = metadata["inline_content"] || metadata[:inline_content]
 
-        if is_binary(content) do
-          content_type_raw =
-            (metadata["content_type"] || metadata[:content_type] || "text/csv")
-            |> to_string()
-            |> String.trim()
+          if is_binary(content) do
+            content_type_raw =
+              (metadata["content_type"] || metadata[:content_type] || "text/csv")
+              |> to_string()
+              |> String.trim()
 
-          content_type =
-            content_type_raw
-            |> case do
-              "" ->
-                "text/csv"
+            content_type =
+              content_type_raw
+              |> case do
+                "" ->
+                  "text/csv"
 
-              value ->
-                value
-                |> String.split(";", parts: 2)
-                |> List.first()
-                |> to_string()
-                |> String.trim()
-                |> case do
-                  "" -> "text/csv"
-                  mime -> mime
-                end
-            end
+                value ->
+                  value
+                  |> String.split(";", parts: 2)
+                  |> List.first()
+                  |> to_string()
+                  |> String.trim()
+                  |> case do
+                    "" -> "text/csv"
+                    mime -> mime
+                  end
+              end
 
-          file_name =
-            metadata["download_name"] || metadata[:download_name] ||
-              Path.basename(to_string(document.relative_url || "document.csv"))
+            file_name =
+              metadata["download_name"] || metadata[:download_name] ||
+                Path.basename(to_string(document.relative_url || "document.csv"))
 
-          conn
-          |> put_resp_header("cache-control", "private, max-age=31536000")
-          |> put_resp_header(
-            "content-disposition",
-            ~s(inline; filename="#{safe_download_filename(file_name)}")
-          )
-          |> put_resp_content_type(content_type)
-          |> send_resp(200, content)
+            conn
+            |> put_resp_header("cache-control", "private, no-store")
+            |> put_resp_header(
+              "content-disposition",
+              ~s(inline; filename="#{safe_download_filename(file_name)}")
+            )
+            |> put_resp_content_type(content_type)
+            |> send_resp(200, content)
+          else
+            conn |> put_status(:not_found) |> json(%{error: "Document content not found"})
+          end
         else
-          conn |> put_status(:not_found) |> json(%{error: "Document content not found"})
+          conn |> put_status(:forbidden) |> json(%{error: "Not a participant"})
         end
     end
   end
