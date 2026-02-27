@@ -331,6 +331,10 @@ private func formatBubbleDuration(seconds: Double?) -> String {
 }
 
 private func bubbleMetaWidths(for row: ChatListRow) -> ChatBubbleMetaWidths {
+  if row.messageType == "agent_progress" {
+    return ChatBubbleMetaWidths(edited: 0.0, pinned: 0.0, timestamp: 0.0, total: 0.0)
+  }
+
   var items: [CGFloat] = []
   let editedWidth = measuredTextWidth("edited", font: bubbleMetaFont)
   let pinnedWidth = measuredTextWidth("pinned", font: bubbleMetaFont)
@@ -376,16 +380,65 @@ private func hasInlineFileAttachment(_ row: ChatListRow) -> Bool {
   return row.isAgentMessage && (row.messageType == "file" || hasFileNameHint)
 }
 
-private func bubbleDisplayText(for row: ChatListRow) -> String {
+private func isRTL(_ text: String) -> Bool {
+  return text.range(of: "[\\u0600-\\u06FF]", options: .regularExpression) != nil
+}
+
+private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? = nil) -> NSAttributedString {
+  let isRtl = isRTL(text)
+  let paragraphStyle = NSMutableParagraphStyle()
+  paragraphStyle.alignment = isRtl ? .right : .natural
+  paragraphStyle.baseWritingDirection = isRtl ? .rightToLeft : .natural
+  
+  var attrs: [NSAttributedString.Key: Any] = [
+    .font: font,
+    .paragraphStyle: paragraphStyle
+  ]
+  if let c = textColor {
+    attrs[.foregroundColor] = c
+  }
+  
+  let attrString = NSMutableAttributedString(string: text, attributes: attrs)
+  
+  if let regex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*") {
+    let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+    for match in matches.reversed() {
+      if let range = Range(match.range(at: 1), in: text) {
+        let boldContent = String(text[range])
+        var boldAttrs = attrs
+        if let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold) {
+          boldAttrs[.font] = UIFont(descriptor: descriptor, size: font.pointSize)
+        } else {
+          boldAttrs[.font] = UIFont.boldSystemFont(ofSize: font.pointSize)
+        }
+        let replacement = NSAttributedString(string: boldContent, attributes: boldAttrs)
+        attrString.replaceCharacters(in: match.range, with: replacement)
+      }
+    }
+  }
+  
+  return attrString
+}
+
+private func bubbleDisplayAttributedString(for row: ChatListRow, font: UIFont, textColor: UIColor? = nil) -> NSAttributedString {
+  var t: String
+  var addPrefix = false
   if row.isAgentMessage {
-    let t = row.plainContent ?? row.text
-    return t.isEmpty ? "✦" : "✦ \(t)"
+    t = row.plainContent ?? row.text
+    addPrefix = true
+  } else if row.isAgentMention {
+    t = row.textWithoutMention
+    addPrefix = true
+  } else {
+    t = row.text
   }
-  if row.isAgentMention {
-    let t = row.textWithoutMention
-    return t.isEmpty ? "✦" : "✦ \(t)"
+  
+  if addPrefix {
+    let prefix = isRTL(t) ? "\u{200F}✦ " : "✦ "
+    t = t.isEmpty ? prefix : prefix + t
   }
-  return row.text
+  
+  return parseAgentMarkdown(text: t, font: font, textColor: textColor)
 }
 
 func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
@@ -444,14 +497,13 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     hasInlineAttachment
     ? maxContentWidth
     : max(1.0, maxContentWidth - meta.total - bubbleMetaInlineSpacing)
-  let displayText = bubbleDisplayText(for: row)
   let font =
     row.messageType == "typing"
     ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
-  let textRect = (displayText as NSString).boundingRect(
+  let displayText = bubbleDisplayAttributedString(for: row, font: font)
+  let textRect = displayText.boundingRect(
     with: CGSize(width: textMaxWidth, height: .greatestFiniteMagnitude),
     options: [.usesLineFragmentOrigin, .usesFontLeading],
-    attributes: [.font: font],
     context: nil
   )
   let textWidth = min(textMaxWidth, ceil(textRect.width))
@@ -1368,7 +1420,10 @@ final class ChatListCell: UICollectionViewCell {
       metaContainerView.isHidden = isGhostHidden
 
       // Agent/Mention labeling
-      messageLabel.text = bubbleDisplayText(for: row)
+      let isTyping = row.messageType == "typing"
+      let messageFont = isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
+      let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
+      messageLabel.attributedText = bubbleDisplayAttributedString(for: row, font: messageFont, textColor: resolveTextColor)
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
       editedLabel.isHidden = !row.isEdited
