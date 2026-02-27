@@ -1092,11 +1092,7 @@ defmodule Vibe.AI.GroupAgent do
 
     case raw_operation do
       op when op in ["create_new", "new"] ->
-        if current_document && not explicit_new_request_in_input?(input) do
-          :edit_current
-        else
-          :create_new
-        end
+        :create_new
 
       "append_rows" -> :append_rows
       "append" -> :append_rows
@@ -1149,7 +1145,15 @@ defmodule Vibe.AI.GroupAgent do
          output_format
        ) do
     columns = spreadsheet_columns(input, sections, [])
-    rows = spreadsheet_rows(input, columns, body, [])
+
+    # For create_new, if Claude explicitly sent rows=[] (empty list), respect it
+    # and create a headers-only spreadsheet. Don't fall back to body text.
+    explicit_rows_raw = tool_input_raw(input, "rows")
+    rows = if is_list(explicit_rows_raw) and explicit_rows_raw == [] do
+      []
+    else
+      spreadsheet_rows(input, columns, body, [])
+    end
     Logger.info("[GroupAgent] create_new_spreadsheet cols=#{inspect(columns)} row_count=#{length(rows)}")
 
     with {:ok, storage, csv_content} <-
@@ -2833,7 +2837,14 @@ defmodule Vibe.AI.GroupAgent do
         "new spreadsheet",
         "from scratch",
         "start over",
-        "another file"
+        "another file",
+        "خام",
+        "خالی",
+        "جدید",
+        "فایل جدید",
+        "blank",
+        "empty",
+        "template"
       ],
       &String.contains?(message, &1)
     )
