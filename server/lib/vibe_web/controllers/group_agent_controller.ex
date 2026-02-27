@@ -274,7 +274,23 @@ defmodule VibeWeb.GroupAgentController do
 
   defp send_document_content(conn, document) do
     metadata = if is_map(document.metadata), do: document.metadata, else: %{}
-    content = metadata["inline_content"] || metadata[:inline_content]
+    content_base64 = metadata["inline_content_base64"] || metadata[:inline_content_base64]
+    content_text = metadata["inline_content"] || metadata[:inline_content]
+
+    content =
+      cond do
+        is_binary(content_base64) and String.trim(content_base64) != "" ->
+          case Base.decode64(content_base64) do
+            {:ok, decoded} -> decoded
+            :error -> nil
+          end
+
+        is_binary(content_text) ->
+          content_text
+
+        true ->
+          nil
+      end
 
     if is_binary(content) do
       content_type_raw =

@@ -71,7 +71,7 @@ defmodule Vibe.AI.GroupAgent do
     %{
       name: "create_document",
       description:
-        "Create or edit a formatted document OR editable spreadsheet file scoped to this group. For spreadsheet requests, use format csv (Excel/Google Sheets compatible).",
+        "Create or edit a formatted document OR editable spreadsheet file scoped to this group. For spreadsheet requests, default to format xlsx (Excel) unless user explicitly asks for csv.",
       input_schema: %{
         type: "object",
         properties: %{
@@ -90,7 +90,7 @@ defmodule Vibe.AI.GroupAgent do
               "spreadsheet",
               "google_sheet"
             ],
-            description: "Output document format. Use csv/excel/spreadsheet/google_sheet for editable table files."
+            description: "Output document format. Use xlsx/excel/spreadsheet/google_sheet by default for editable table files; use csv only when explicitly requested."
           },
           sections: %{
             type: "array",
@@ -305,13 +305,19 @@ defmodule Vibe.AI.GroupAgent do
     - You are #{agent_config.name}, an AI assistant in this group chat.
     - Keep responses concise and relevant — this is mobile chat.
     - When using tools, call them IMMEDIATELY without intro text.
+    - For document/file requests, generate professional outputs with clean structure and naming.
     - Spreadsheet behavior is stateful per group chat.
     - Default behavior is to edit the current spreadsheet for this chat.
     - Use operation=create_new only when user explicitly asks for a NEW file/from-scratch sheet.
     - For adding data, prefer operation=append_rows.
     - For corrections, prefer operation=edit_current or replace_rows.
     - If user asks to undo/revert, use operation=revert_last.
-    - If user asks for Excel/sheet/spreadsheet/table with rows/columns, call create_document with format csv.
+    - If user asks for Excel/sheet/spreadsheet/table with rows/columns, call create_document with format xlsx unless user explicitly asks for csv.
+    - Spreadsheet quality requirements:
+      * Use clear, professional column headers in a stable order.
+      * Keep every row aligned to the column count (no missing/extra cells).
+      * Normalize noisy values (trim spaces, remove filler text, keep wording consistent).
+      * Prefer normalized date and amount representations when possible.
     - When a tool creates/updates a file, respond naturally and state that the file is attached (do not paste raw URLs).
     - You can reference previous conversations from your memory.
     - Address users naturally, referring to the group context.
@@ -625,7 +631,10 @@ defmodule Vibe.AI.GroupAgent do
 
     case format do
       "csv" ->
-        build_spreadsheet_document(chat_id, input, title, body, sections, user_id)
+        build_spreadsheet_document(chat_id, input, title, body, sections, user_id, "csv")
+
+      "xlsx" ->
+        build_spreadsheet_document(chat_id, input, title, body, sections, user_id, "xlsx")
 
       _ ->
         content =
@@ -680,13 +689,22 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp build_spreadsheet_document(chat_id, input, title, body, sections, user_id) do
+  defp build_spreadsheet_document(chat_id, input, title, body, sections, user_id, output_format) do
     current_document = GroupAgentDocument.get_current(chat_id)
     operation = resolve_spreadsheet_operation(input, current_document)
+    resolved_output_format = resolve_spreadsheet_output_format(output_format, current_document)
 
     case operation do
       :create_new ->
-        create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id)
+        create_new_spreadsheet_document(
+          chat_id,
+          input,
+          title,
+          body,
+          sections,
+          user_id,
+          resolved_output_format
+        )
 
       :append_rows ->
         edit_current_spreadsheet_document(
@@ -697,7 +715,8 @@ defmodule Vibe.AI.GroupAgent do
           sections,
           user_id,
           current_document,
-          :append_rows
+          :append_rows,
+          resolved_output_format
         )
 
       :replace_rows ->
@@ -709,11 +728,19 @@ defmodule Vibe.AI.GroupAgent do
           sections,
           user_id,
           current_document,
-          :replace_rows
+          :replace_rows,
+          resolved_output_format
         )
 
       :revert_last ->
-        revert_spreadsheet_document(chat_id, title, body, user_id, current_document)
+        revert_spreadsheet_document(
+          chat_id,
+          title,
+          body,
+          user_id,
+          current_document,
+          resolved_output_format
+        )
 
       :edit_current ->
         edit_current_spreadsheet_document(
@@ -724,7 +751,8 @@ defmodule Vibe.AI.GroupAgent do
           sections,
           user_id,
           current_document,
-          :edit_current
+          :edit_current,
+          resolved_output_format
         )
     end
   end
@@ -740,12 +768,37 @@ defmodule Vibe.AI.GroupAgent do
       "html" -> "html"
       "json" -> "json"
       "csv" -> "csv"
-      "xlsx" -> "csv"
-      "excel" -> "csv"
-      "spreadsheet" -> "csv"
-      "google_sheet" -> "csv"
-      "google_sheets" -> "csv"
+      "xlsx" -> "xlsx"
+      "excel" -> "xlsx"
+      "spreadsheet" -> "xlsx"
+      "google_sheet" -> "xlsx"
+      "google_sheets" -> "xlsx"
       _ -> "markdown"
+    end
+  end
+
+  defp resolve_spreadsheet_output_format(requested_format, current_document) do
+    requested =
+      requested_format
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    cond do
+      requested == "csv" ->
+        "csv"
+
+      requested in ["xlsx", "excel", "spreadsheet", "google_sheet", "google_sheets"] ->
+        "xlsx"
+
+      is_struct(current_document, GroupAgentDocument) ->
+        case current_document.format |> to_string() |> String.trim() |> String.downcase() do
+          "csv" -> "csv"
+          _ -> "xlsx"
+        end
+
+      true ->
+        "xlsx"
     end
   end
 
@@ -812,17 +865,25 @@ defmodule Vibe.AI.GroupAgent do
     new_file_request?(hint)
   end
 
-  defp create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id) do
+  defp create_new_spreadsheet_document(
+         chat_id,
+         input,
+         title,
+         body,
+         sections,
+         user_id,
+         output_format
+       ) do
     columns = spreadsheet_columns(input, sections, [])
     rows = spreadsheet_rows(input, columns, body, [])
-    csv_content = csv_from_rows(columns, rows)
 
-    with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv"),
+    with {:ok, storage, csv_content} <-
+           write_spreadsheet_document_file(title, columns, rows, output_format),
          {:ok, doc} <-
            persist_document_version(
              chat_id,
              title,
-             "csv",
+             output_format,
              storage.relative_url,
              storage.file_url,
              columns,
@@ -833,18 +894,18 @@ defmodule Vibe.AI.GroupAgent do
              ),
              "create",
              user_id
-           ) do
+      ) do
       spreadsheet_tool_response(
         doc,
         columns,
         rows,
         csv_content,
-        "Spreadsheet created. Future edits in this group update this file unless user asks for a new one."
+        "Spreadsheet created and attached. Future edits in this group update this file unless user asks for a new one."
       )
     else
       {:error, reason} ->
         Logger.error("[GroupAgent] Failed to create spreadsheet: #{inspect(reason)}")
-        spreadsheet_error_response(title, reason)
+        spreadsheet_error_response(title, reason, output_format)
     end
   end
 
@@ -856,10 +917,19 @@ defmodule Vibe.AI.GroupAgent do
          sections,
          user_id,
          current_document,
-         operation
+         operation,
+         output_format
        ) do
     if is_nil(current_document) do
-      create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id)
+      create_new_spreadsheet_document(
+        chat_id,
+        input,
+        title,
+        body,
+        sections,
+        user_id,
+        output_format
+      )
     else
       with {:ok, existing_csv} <- read_agent_document_file(current_document) do
         {existing_columns, existing_rows} = parse_csv_content(existing_csv)
@@ -889,14 +959,13 @@ defmodule Vibe.AI.GroupAgent do
           end
           |> ensure_non_empty_rows(columns, body)
 
-        csv_content = csv_from_rows(columns, final_rows)
-
-        with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv"),
+        with {:ok, storage, csv_content} <-
+               write_spreadsheet_document_file(title, columns, final_rows, output_format),
              {:ok, doc} <-
                persist_document_version(
                  chat_id,
                  title,
-                 "csv",
+                 output_format,
                  storage.relative_url,
                  storage.file_url,
                  columns,
@@ -918,7 +987,7 @@ defmodule Vibe.AI.GroupAgent do
         else
           {:error, reason} ->
             Logger.error("[GroupAgent] Failed to edit spreadsheet: #{inspect(reason)}")
-            spreadsheet_error_response(title, reason)
+            spreadsheet_error_response(title, reason, output_format)
         end
       else
         {:error, :enoent} ->
@@ -934,14 +1003,14 @@ defmodule Vibe.AI.GroupAgent do
             |> normalize_spreadsheet_rows(columns)
 
           final_rows = ensure_non_empty_rows(incoming_rows, columns, body)
-          csv_content = csv_from_rows(columns, final_rows)
 
-          with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv"),
+          with {:ok, storage, csv_content} <-
+                 write_spreadsheet_document_file(title, columns, final_rows, output_format),
                {:ok, doc} <-
                  persist_document_version(
                    chat_id,
                    title,
-                   "csv",
+                   output_format,
                    storage.relative_url,
                    storage.file_url,
                    columns,
@@ -963,21 +1032,28 @@ defmodule Vibe.AI.GroupAgent do
           else
             {:error, reason} ->
               Logger.error("[GroupAgent] Failed to rebuild missing spreadsheet: #{inspect(reason)}")
-              spreadsheet_error_response(title, reason)
+              spreadsheet_error_response(title, reason, output_format)
           end
 
         {:error, reason} ->
           Logger.error("[GroupAgent] Failed to read current spreadsheet: #{inspect(reason)}")
-          spreadsheet_error_response(title, reason)
+          spreadsheet_error_response(title, reason, output_format)
       end
     end
   end
 
-  defp revert_spreadsheet_document(chat_id, title, body, user_id, current_document) do
+  defp revert_spreadsheet_document(
+         chat_id,
+         title,
+         body,
+         user_id,
+         current_document,
+         output_format
+       ) do
     if is_nil(current_document) do
       %{
         ok: false,
-        format: "csv",
+        format: output_format,
         title: title,
         error: "No active spreadsheet to revert in this group."
       }
@@ -987,19 +1063,20 @@ defmodule Vibe.AI.GroupAgent do
       if is_nil(previous_document) do
         %{
           ok: false,
-          format: "csv",
+          format: output_format,
           title: title,
           error: "No previous spreadsheet version available to revert."
         }
       else
         with {:ok, csv_content} <- read_agent_document_file(previous_document),
              {columns, rows} <- parse_csv_content(csv_content),
-             {:ok, storage} <- write_agent_document_file(previous_document.title, csv_content, "csv"),
+             {:ok, storage, normalized_csv_content} <-
+               write_spreadsheet_document_file(previous_document.title, columns, rows, output_format),
              {:ok, doc} <-
                persist_document_version(
                  chat_id,
                  previous_document.title,
-                 "csv",
+                 output_format,
                  storage.relative_url,
                  storage.file_url,
                  columns,
@@ -1015,13 +1092,13 @@ defmodule Vibe.AI.GroupAgent do
             doc,
             columns,
             rows,
-            csv_content,
+            normalized_csv_content,
             "Reverted spreadsheet to previous content safely. A new version snapshot was created."
           )
         else
           {:error, reason} ->
             Logger.error("[GroupAgent] Failed to revert spreadsheet: #{inspect(reason)}")
-            spreadsheet_error_response(title, reason)
+            spreadsheet_error_response(title, reason, output_format)
         end
       end
     end
@@ -1066,10 +1143,20 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp spreadsheet_tool_response(doc, columns, rows, csv_content, note) do
+    format =
+      doc.format
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+      |> case do
+        "csv" -> "csv"
+        _ -> "xlsx"
+      end
+
     %{
       ok: true,
       title: doc.title,
-      format: "csv",
+      format: format,
       columns: columns,
       rows: rows,
       row_count: length(rows),
@@ -1082,12 +1169,12 @@ defmodule Vibe.AI.GroupAgent do
     }
   end
 
-  defp spreadsheet_error_response(title, reason) do
+  defp spreadsheet_error_response(title, reason, output_format \\ "xlsx") do
     %{
       ok: false,
       error: "Failed to handle spreadsheet file",
       reason: inspect(reason),
-      format: "csv",
+      format: if(output_format == "csv", do: "csv", else: "xlsx"),
       title: title
     }
   end
@@ -1189,14 +1276,14 @@ defmodule Vibe.AI.GroupAgent do
 
   defp normalize_single_spreadsheet_row(raw_row, columns) when is_list(raw_row) do
     raw_row
-    |> Enum.map(&to_string(&1 || ""))
+    |> Enum.map(&normalize_spreadsheet_cell/1)
     |> fit_row_to_column_count(length(columns))
   end
 
   defp normalize_single_spreadsheet_row(raw_row, columns) when is_map(raw_row) do
     normalized_lookup =
       raw_row
-      |> Enum.map(fn {k, v} -> {String.downcase(to_string(k)), to_string(v || "")} end)
+      |> Enum.map(fn {k, v} -> {String.downcase(to_string(k)), normalize_spreadsheet_cell(v)} end)
       |> Map.new()
 
     columns
@@ -1207,6 +1294,7 @@ defmodule Vibe.AI.GroupAgent do
   defp normalize_single_spreadsheet_row(raw_row, columns) when is_binary(raw_row) do
     raw_row
     |> String.split(~r/\s*,\s*/, trim: true)
+    |> Enum.map(&normalize_spreadsheet_cell/1)
     |> fit_row_to_column_count(length(columns))
   end
 
@@ -1215,7 +1303,7 @@ defmodule Vibe.AI.GroupAgent do
   defp fit_row_to_column_count(values, column_count) when is_list(values) and column_count >= 0 do
     trimmed =
       values
-      |> Enum.map(&to_string(&1 || ""))
+      |> Enum.map(&normalize_spreadsheet_cell/1)
       |> Enum.take(column_count)
 
     padding_count = max(column_count - length(trimmed), 0)
@@ -1249,6 +1337,14 @@ defmodule Vibe.AI.GroupAgent do
     |> fit_row_to_column_count(length(columns))
   end
 
+  defp normalize_spreadsheet_cell(value) do
+    value
+    |> to_string()
+    |> String.replace(~r/\r\n?|\n/, " ")
+    |> String.replace(~r/[ \t]+/, " ")
+    |> String.trim()
+  end
+
   defp maybe_infer_rows_from_body(body, columns, operation, existing_rows) do
     if existing_rows == [] and operation == :append_rows and body_has_data_hint?(body) do
       [default_spreadsheet_row(columns, body)]
@@ -1268,15 +1364,48 @@ defmodule Vibe.AI.GroupAgent do
     Map.merge(base, storage)
   end
 
+  defp write_spreadsheet_document_file(title, columns, rows, output_format) do
+    csv_content = csv_from_rows(columns, rows)
+    resolved_format = if output_format == "csv", do: "csv", else: "xlsx"
+
+    case resolved_format do
+      "csv" ->
+        with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv") do
+          {:ok, storage, csv_content}
+        end
+
+      _ ->
+        with {:ok, xlsx_binary} <- xlsx_from_rows(columns, rows),
+             {:ok, storage} <-
+               write_agent_document_binary_file(
+                 title,
+                 xlsx_binary,
+                 "xlsx",
+                 %{
+                   "spreadsheet_source_csv" => csv_content,
+                   "spreadsheet_source_format" => "csv"
+                 }
+               ) do
+          {:ok, storage, csv_content}
+        end
+    end
+  end
+
   defp read_agent_document_file(%GroupAgentDocument{} = document) do
     metadata = if is_map(document.metadata), do: document.metadata, else: %{}
 
-    case metadata["inline_content"] || metadata[:inline_content] do
-      inline_content when is_binary(inline_content) ->
-        {:ok, inline_content}
+    case metadata["spreadsheet_source_csv"] || metadata[:spreadsheet_source_csv] do
+      csv_source when is_binary(csv_source) and csv_source != "" ->
+        {:ok, csv_source}
 
       _ ->
-        read_agent_document_file(document.relative_url)
+        case metadata["inline_content"] || metadata[:inline_content] do
+          inline_content when is_binary(inline_content) ->
+            {:ok, inline_content}
+
+          _ ->
+            read_agent_document_file(document.relative_url)
+        end
     end
   end
 
@@ -1341,18 +1470,39 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp sanitize_csv_columns(columns) when is_list(columns) do
+    columns
+    |> sanitize_spreadsheet_columns()
+    |> case do
+      [] -> ["Item", "Value"]
+      value -> value
+    end
+  end
+
+  defp sanitize_spreadsheet_columns(columns) when is_list(columns) do
     normalized =
       columns
       |> Enum.with_index(1)
       |> Enum.map(fn {column, idx} ->
         column
         |> to_string()
+        |> String.replace(~r/\s+/, " ")
         |> String.trim()
         |> default_if_blank("Column #{idx}")
       end)
 
-    if normalized == [], do: ["Item", "Value"], else: normalized
+    {deduped, _seen} =
+      Enum.map_reduce(normalized, %{}, fn column, seen ->
+        key = String.downcase(column)
+        count = Map.get(seen, key, 0) + 1
+        next_seen = Map.put(seen, key, count)
+        final_name = if count == 1, do: column, else: "#{column} (#{count})"
+        {final_name, next_seen}
+      end)
+
+    deduped
   end
+
+  defp sanitize_spreadsheet_columns(_), do: []
 
   defp parse_csv_line(line) when is_binary(line) do
     line
@@ -1437,6 +1587,224 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
+  defp write_agent_document_binary_file(title, binary_content, extension, extra_metadata \\ %{}) do
+    if !is_binary(binary_content) do
+      {:error, :invalid_document_binary}
+    else
+      if byte_size(binary_content) > @max_agent_document_bytes do
+        {:error, :document_too_large}
+      else
+        filename = build_agent_document_filename(title, extension)
+        blob_key = build_agent_document_blob_key()
+        relative_url = "/api/agent/document/#{blob_key}/#{filename}"
+
+        metadata =
+          %{
+            "storage_kind" => "db_inline",
+            "blob_key" => blob_key,
+            "download_name" => filename,
+            "content_type" => content_type_for_extension(extension),
+            "inline_content_base64" => Base.encode64(binary_content)
+          }
+          |> Map.merge(if(is_map(extra_metadata), do: extra_metadata, else: %{}))
+
+        {:ok,
+         %{
+           relative_url: relative_url,
+           file_url: public_upload_url(relative_url),
+           metadata: metadata
+         }}
+      end
+    end
+  end
+
+  defp xlsx_from_rows(columns, rows) do
+    sanitized_columns =
+      columns
+      |> sanitize_spreadsheet_columns()
+      |> case do
+        [] -> ["Item", "Value"]
+        value -> value
+      end
+
+    sanitized_rows =
+      rows
+      |> align_rows_to_column_count(length(sanitized_columns))
+      |> Enum.map(&Enum.map(&1, fn value -> normalize_spreadsheet_cell(value) end))
+
+    sheet_rows = [sanitized_columns | sanitized_rows]
+
+    entries = [
+      {~c"[Content_Types].xml", xlsx_content_types_xml()},
+      {~c"_rels/.rels", xlsx_root_rels_xml()},
+      {~c"xl/workbook.xml", xlsx_workbook_xml()},
+      {~c"xl/_rels/workbook.xml.rels", xlsx_workbook_rels_xml()},
+      {~c"xl/styles.xml", xlsx_styles_xml()},
+      {~c"xl/worksheets/sheet1.xml", xlsx_sheet_xml(sheet_rows)}
+    ]
+
+    case :zip.create(~c"spreadsheet.xlsx", entries, [:memory]) do
+      {:ok, {_name, zip_binary}} when is_binary(zip_binary) ->
+        {:ok, zip_binary}
+
+      {:ok, zip_binary} when is_binary(zip_binary) ->
+        {:ok, zip_binary}
+
+      {:error, reason} ->
+        {:error, {:xlsx_zip_create_failed, reason}}
+
+      other ->
+        {:error, {:xlsx_zip_unexpected_result, other}}
+    end
+  end
+
+  defp xlsx_content_types_xml do
+    """
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+      <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+      <Default Extension="xml" ContentType="application/xml"/>
+      <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+      <Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>
+      <Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/>
+    </Types>
+    """
+    |> String.trim()
+  end
+
+  defp xlsx_root_rels_xml do
+    """
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>
+    </Relationships>
+    """
+    |> String.trim()
+  end
+
+  defp xlsx_workbook_xml do
+    """
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">
+      <sheets>
+        <sheet name="Sheet1" sheetId="1" r:id="rId1"/>
+      </sheets>
+    </workbook>
+    """
+    |> String.trim()
+  end
+
+  defp xlsx_workbook_rels_xml do
+    """
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+      <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/>
+      <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+    </Relationships>
+    """
+    |> String.trim()
+  end
+
+  defp xlsx_styles_xml do
+    """
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <fonts count="1">
+        <font>
+          <sz val="11"/>
+          <name val="Calibri"/>
+        </font>
+      </fonts>
+      <fills count="2">
+        <fill><patternFill patternType="none"/></fill>
+        <fill><patternFill patternType="gray125"/></fill>
+      </fills>
+      <borders count="1">
+        <border>
+          <left/><right/><top/><bottom/><diagonal/>
+        </border>
+      </borders>
+      <cellStyleXfs count="1">
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
+      </cellStyleXfs>
+      <cellXfs count="1">
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+      </cellXfs>
+      <cellStyles count="1">
+        <cellStyle name="Normal" xfId="0" builtinId="0"/>
+      </cellStyles>
+    </styleSheet>
+    """
+    |> String.trim()
+  end
+
+  defp xlsx_sheet_xml(rows) when is_list(rows) do
+    row_xml =
+      rows
+      |> Enum.with_index(1)
+      |> Enum.map_join("", fn {cells, row_index} ->
+        cell_xml =
+          cells
+          |> Enum.with_index(1)
+          |> Enum.map_join("", fn {value, col_index} ->
+            xlsx_cell_xml(row_index, col_index, value)
+          end)
+
+        ~s(<row r="#{row_index}">#{cell_xml}</row>)
+      end)
+
+    """
+    <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+      <sheetViews>
+        <sheetView workbookViewId="0"/>
+      </sheetViews>
+      <sheetData>#{row_xml}</sheetData>
+    </worksheet>
+    """
+    |> String.trim()
+  end
+
+  defp xlsx_cell_xml(row_index, col_index, value) do
+    ref = excel_cell_ref(row_index, col_index)
+    text = normalize_spreadsheet_cell(value)
+
+    if text == "" do
+      ~s(<c r="#{ref}"/>)
+    else
+      preserve = if text != String.trim(text), do: ~s( xml:space="preserve"), else: ""
+      escaped = xml_escape(text)
+      ~s(<c r="#{ref}" t="inlineStr"><is><t#{preserve}>#{escaped}</t></is></c>)
+    end
+  end
+
+  defp excel_cell_ref(row_index, col_index) when row_index > 0 and col_index > 0 do
+    excel_column_name(col_index) <> Integer.to_string(row_index)
+  end
+
+  defp excel_column_name(index) when index > 0 do
+    do_excel_column_name(index, "")
+  end
+
+  defp do_excel_column_name(index, acc) when index > 0 do
+    rem_value = rem(index - 1, 26)
+    next_index = div(index - 1, 26)
+    letter = <<rem_value + ?A>>
+    do_excel_column_name(next_index, letter <> acc)
+  end
+
+  defp do_excel_column_name(0, acc), do: acc
+
+  defp xml_escape(value) do
+    value
+    |> to_string()
+    |> String.replace("&", "&amp;")
+    |> String.replace("<", "&lt;")
+    |> String.replace(">", "&gt;")
+    |> String.replace("\"", "&quot;")
+    |> String.replace("'", "&apos;")
+  end
+
   defp build_agent_document_blob_key do
     :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
   end
@@ -1444,6 +1812,10 @@ defmodule Vibe.AI.GroupAgent do
   defp content_type_for_extension(extension) do
     case extension |> to_string() |> String.trim() |> String.downcase() do
       "csv" -> "text/csv"
+      "xlsx" -> "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      "xls" -> "application/vnd.ms-excel"
+      "pdf" -> "application/pdf"
+      "md" -> "text/markdown"
       "json" -> "application/json"
       "html" -> "text/html"
       "txt" -> "text/plain"
@@ -1616,7 +1988,7 @@ defmodule Vibe.AI.GroupAgent do
         case create_document_tool(chat_id, %{
                "title" => title,
                "body" => user_message,
-               "format" => "csv",
+               "format" => "xlsx",
                "operation" => operation
              }, user_id) do
           %{ok: true, row_count: row_count} = result ->
@@ -1775,7 +2147,7 @@ defmodule Vibe.AI.GroupAgent do
   defp spreadsheet_fallback_message(_file_url, row_count, columns) do
     col_count = length(columns)
 
-    "Created editable spreadsheet file (CSV) and attached it.\nColumns: #{col_count}, Rows: #{row_count}\nYou can open it in Excel or Google Sheets."
+    "Created editable spreadsheet file (Excel .xlsx) and attached it.\nColumns: #{col_count}, Rows: #{row_count}\nYou can open it in Excel, Numbers, or Google Sheets."
   end
 
   defp extract_tool_attachment("create_document", result), do: attachment_from_document_result(result)
@@ -1857,13 +2229,27 @@ defmodule Vibe.AI.GroupAgent do
       |> Enum.map_join(", ", &"`#{&1}`")
 
     """
-    Create a high-quality system prompt for a group chat AI assistant.
-    The prompt must be practical, concise, and optimized for short mobile-chat answers.
+    Create a high-quality, production-ready system prompt for a group chat AI assistant.
+    The prompt must be practical and concise for mobile chat, but with strong structure and execution rules.
     It should include tone, boundaries, response style, and how to use tools safely.
     Enabled tools for this assistant: #{tool_list}.
 
     Admin's high-level intent:
     #{user_input}
+
+    Required prompt structure (use clear section headers):
+    1) Role & Objective
+    2) Response Contract (clarity, brevity, answer quality)
+    3) Tool Usage Rules
+    4) Spreadsheet & Document Standards
+       - Prefer Excel (.xlsx) for spreadsheets unless user explicitly asks for csv.
+       - Enforce clean columns, aligned rows, and normalized values.
+       - Keep professional naming and consistent data formatting.
+    5) Clarification Policy (when to ask follow-up questions)
+    6) Safety & Boundaries
+    7) Two short examples:
+       - one normal chat response example
+       - one spreadsheet-generation behavior example
 
     Return only the final system prompt text. No markdown fences. No explanations.
     """
@@ -1888,14 +2274,28 @@ defmodule Vibe.AI.GroupAgent do
     """
     #{@default_system_prompt}
 
-    Group-specific objective:
+    Role & Objective:
     #{user_input}
 
-    Behavior:
-    - Prioritize direct answers in 1-3 short paragraphs.
-    - Ask clarifying questions when user intent is ambiguous.
-    - Use enabled tools when they improve factual accuracy or attachment analysis.
-    - If a requested action requires a disabled tool, state that clearly and suggest an alternative.
+    Response Contract:
+    - Prioritize direct, useful answers in short mobile-friendly format.
+    - Avoid generic wording; be specific, actionable, and context-aware.
+    - If intent is ambiguous, ask focused clarifying questions.
+
+    Tool Usage Rules:
+    - Use enabled tools whenever they materially improve accuracy or output quality.
+    - If a requested action requires a disabled tool, state that clearly and offer alternatives.
+
+    Spreadsheet & Document Standards:
+    - For spreadsheet requests, default to Excel (.xlsx) unless user explicitly asks for csv.
+    - Use clear professional column names and stable column order.
+    - Keep each row aligned to the column schema (no missing/extra cells).
+    - Normalize noisy data (trim spaces, consistent wording, remove filler placeholders).
+    - Prefer consistent date/amount formats across rows.
+
+    Clarification Policy:
+    - Ask a short follow-up when key schema fields are missing.
+    - If reasonable assumptions are needed, state them briefly.
     """
     |> String.trim()
   end

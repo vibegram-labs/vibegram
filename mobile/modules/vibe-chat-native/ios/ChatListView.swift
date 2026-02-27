@@ -2576,7 +2576,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return
     }
 
-    if presentTextDocumentPreviewIfSupported(localURL: localURL, presenter: presenter) {
+    if presentPlainTextDocumentPreviewIfSupported(localURL: localURL, presenter: presenter) {
       return
     }
 
@@ -2692,9 +2692,16 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
   }
 
-  private func presentTextDocumentPreviewIfSupported(localURL: URL, presenter: UIViewController) -> Bool {
+  private func presentPlainTextDocumentPreviewIfSupported(
+    localURL: URL,
+    presenter: UIViewController
+  ) -> Bool {
     let ext = localURL.pathExtension.lowercased()
-    let textLikeExtensions: Set<String> = ["csv", "txt", "md", "markdown", "json", "tsv", "log"]
+    // Spreadsheet/PDF files should use native Quick Look so users get table/page previews.
+    let quickLookPreferredExtensions: Set<String> = ["csv", "tsv", "xls", "xlsx", "pdf"]
+    if quickLookPreferredExtensions.contains(ext) { return false }
+
+    let textLikeExtensions: Set<String> = ["txt", "md", "markdown", "json", "log"]
     guard textLikeExtensions.contains(ext) else { return false }
 
     guard
@@ -2765,6 +2772,20 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       switch mime {
       case "text/csv":
         return "csv"
+      case "application/pdf":
+        return "pdf"
+      case "application/vnd.ms-excel":
+        return "xls"
+      case "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        return "xlsx"
+      case "application/msword":
+        return "doc"
+      case "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return "docx"
+      case "application/vnd.ms-powerpoint":
+        return "ppt"
+      case "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        return "pptx"
       case "application/json":
         return "json"
       case "text/plain":
