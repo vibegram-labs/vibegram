@@ -169,15 +169,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }()
 
   private var isPeerTyping: Bool = false
-  private var isGroupOrChannel: Bool = false
-
-  private struct AgentProgressState: Equatable {
-    let label: String
-    let tool: String?
-    let status: String
-  }
-
-  private var activeAgentProgress: AgentProgressState?
 
   required init(appContext: AppContext? = nil) {
     NSLog("[ChatListView] init START")
@@ -317,11 +308,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     let mergedRows = mergedRowsPayload(from: nextRows)
     var parsed = mergedRows.compactMap(ChatListRow.init)
-    if let progress = activeAgentProgress {
-      parsed.append(
-        .agentProgressIndicator(label: progress.label, tool: progress.tool, status: progress.status)
-      )
-    } else if isPeerTyping && !isGroupOrChannel {
+    if isPeerTyping {
       parsed.append(.typingIndicator())
     }
     NSLog("[ChatListView] setRows parsed: %d, previous: %d", parsed.count, rows.count)
@@ -564,12 +551,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // MODE 3: Spring Batch — UIView.animate wraps entire performBatchUpdates
     // ===================================================================
     if shouldAnimateUpdate && animMode == 3 {
-      // For received messages, use damping 1.0 (no bounce) to avoid spring layout issues.
-      let isReceiveBatch = pendingSendTransition == nil && activeSendTransition == nil
-      let damping: CGFloat = isReceiveBatch ? 1.0 : 0.88
-      let duration: TimeInterval = isReceiveBatch ? 0.25 : 0.45
       UIView.animate(
-        withDuration: duration, delay: 0, usingSpringWithDamping: damping, initialSpringVelocity: 0.0,
+        withDuration: 0.45, delay: 0, usingSpringWithDamping: 0.88, initialSpringVelocity: 0.0,
         options: [.allowUserInteraction, .beginFromCurrentState],
         animations: { [weak self] in
           guard let self else { return }
@@ -662,17 +645,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
 
     if shouldAnimateUpdate {
-      // Smooth ease-out for received messages; spring-like for sent messages.
+      // Telegram timing: 0.3s spring (matches kCAMediaTimingFunctionSpring).
+      // NOT a custom cubic bezier — a real spring with 0.3s settling time.
       let animDuration: CFTimeInterval = 0.3
-      let sendTiming = chatListSendVerticalTiming
-      let receiveTiming = CAMediaTimingFunction(name: .easeOut)
+      let animTiming = chatListSendVerticalTiming
       var dbgShifted = 0
       var dbgNewSlide = 0
       var dbgMaxDelta: CGFloat = 0
       var dbgScrollDelta: CGFloat = 0
-
-      // Check if this batch is a received-only update (no user send in progress).
-      let isReceiveUpdate = pendingSendTransition == nil && activeSendTransition == nil
 
       switch animMode {
       case 1:
@@ -684,16 +664,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           {
             continue
           }
-          let isReceivedCell = ip.item < rows.count && !rows[ip.item].isMe
-          let slideOffset = isReceivedCell
-            ? pixelAlignedValue(cell.bounds.height)
-            : pixelAlignedValue(debugAnimSlideOffset)
           let slideUp = CABasicAnimation(keyPath: "position.y")
-          slideUp.fromValue = slideOffset as NSNumber
+          slideUp.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
           slideUp.toValue = 0.0 as NSNumber
           slideUp.isAdditive = true
-          slideUp.duration = isReceivedCell ? 0.25 : animDuration
-          slideUp.timingFunction = isReceivedCell ? receiveTiming : sendTiming
+          slideUp.duration = animDuration
+          slideUp.timingFunction = animTiming
           slideUp.isRemovedOnCompletion = true
           cell.layer.add(slideUp, forKey: "insertSlideUp")
           dbgNewSlide += 1
@@ -706,14 +682,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         let postOffset = collectionView.contentOffset.y
         dbgScrollDelta = postOffset - preUpdateOffset
         NSLog(
-          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d recv:%@",
+          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d",
           preUpdateScreenY.count, preUpdateOffset, postOffset, dbgScrollDelta,
-          collectionView.visibleCells.count, isReceiveUpdate ? "true" : "false")
-
-        // For received messages, use ease-out timing and longer duration to
-        // avoid the spring bounce that causes overlap on tall cells.
-        let shiftTiming = isReceiveUpdate ? receiveTiming : sendTiming
-        let shiftDuration: CFTimeInterval = isReceiveUpdate ? 0.25 : animDuration
+          collectionView.visibleCells.count)
 
         for cell in collectionView.visibleCells {
           guard let ip = collectionView.indexPath(for: cell),
@@ -729,8 +700,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               anim.fromValue = delta as NSNumber
               anim.toValue = 0.0 as NSNumber
               anim.isAdditive = true
-              anim.duration = shiftDuration
-              anim.timingFunction = shiftTiming
+              anim.duration = animDuration
+              anim.timingFunction = animTiming
               anim.isRemovedOnCompletion = true
               cell.layer.add(anim, forKey: "insertionShift")
               dbgShifted += 1
@@ -745,25 +716,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               return self.rows[ip.item].messageId == hid
             }()
             if !isHiddenForSend {
-              let isReceivedCell = ip.item < rows.count && !rows[ip.item].isMe
-              // For received cells, use the cell's full height so it slides in
-              // from just below the visible area instead of a tiny 20px offset
-              // that causes it to "appear from behind" the last message.
-              let slideOffset = isReceivedCell
-                ? pixelAlignedValue(cell.bounds.height)
-                : pixelAlignedValue(debugAnimSlideOffset)
               let slideAnim = CABasicAnimation(keyPath: "position.y")
-              slideAnim.fromValue = slideOffset as NSNumber
+              slideAnim.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
               slideAnim.toValue = 0.0 as NSNumber
               slideAnim.isAdditive = true
-              slideAnim.duration = isReceivedCell ? 0.25 : animDuration
-              slideAnim.timingFunction = isReceivedCell ? receiveTiming : sendTiming
+              slideAnim.duration = animDuration
+              slideAnim.timingFunction = animTiming
               slideAnim.isRemovedOnCompletion = true
               cell.layer.add(slideAnim, forKey: "insertSlideUp")
               dbgNewSlide += 1
               NSLog(
-                "[ChatListAnim]   newSlide '%@' offset:%.0f recv:%@", String(key.prefix(12)),
-                slideOffset, isReceivedCell ? "true" : "false")
+                "[ChatListAnim]   newSlide '%@' offset:%.0f", String(key.prefix(12)),
+                debugAnimSlideOffset)
             } else {
               NSLog("[ChatListAnim]   skip hidden '%@'", String(key.prefix(12)))
             }
@@ -801,14 +765,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
     if engineChatId == next { return }
     engineChatId = next
-    isPeerTyping = false
-    activeAgentProgress = nil
     nativeEngineRowsById.removeAll()
     nativeEngineOrder.removeAll()
     nativeDeletedMessageIds.removeAll()
     updateChatEngineBinding()
     updateChatEngineChannelBinding()
-    refreshAgentProgressFromEngine()
     refreshVisibleStatuses(reason: "chatId")
   }
 
@@ -830,20 +791,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   func setStatusAuthorityEnabled(_ enabled: Bool) {
     if statusAuthorityEnabled == enabled { return }
     statusAuthorityEnabled = enabled
-    if statusAuthorityEnabled {
-      refreshAgentProgressFromEngine()
-    } else {
-      isPeerTyping = false
-      activeAgentProgress = nil
-      setRows(sourceRowsPayload)
-    }
     refreshVisibleStatuses(reason: "statusAuthorityEnabled")
-  }
-
-  func setIsGroupOrChannel(_ value: Bool) {
-    if isGroupOrChannel == value { return }
-    isGroupOrChannel = value
-    setRows(sourceRowsPayload)
   }
 
   func setAppearance(_ rawAppearance: [String: Any]) {
@@ -1171,10 +1119,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       setPeerTyping(isTyping)
       return
     }
-    if reason == "agentProgress" {
-      setAgentProgress(from: note.userInfo)
-      return
-    }
     if reason == "chatMessageInserted"
       || reason == "chatMessageEdited"
       || reason == "chatMessageDeleted"
@@ -1230,74 +1174,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     if let desiredChatId, engineOpenedChatId != desiredChatId {
       _ = ChatEngine.shared.openChatChannel(["chatId": desiredChatId])
       engineOpenedChatId = desiredChatId
-    }
-  }
-
-  private func refreshAgentProgressFromEngine() {
-    guard statusAuthorityEnabled else {
-      setAgentProgress(from: nil)
-      return
-    }
-    let payload = ChatEngine.shared.agentProgress(chatId: engineChatId)
-    setAgentProgress(from: payload)
-  }
-
-  private func setAgentProgress(from payload: [AnyHashable: Any]?) {
-    let next = resolvedAgentProgress(from: payload)
-    guard next != activeAgentProgress else { return }
-    activeAgentProgress = next
-    setRows(sourceRowsPayload)
-  }
-
-  private func resolvedAgentProgress(from payload: [AnyHashable: Any]?) -> AgentProgressState? {
-    guard let payload else { return nil }
-    let rawStatus =
-      (payload["status"] as? String)?
-      .trimmingCharacters(in: .whitespacesAndNewlines)
-      .lowercased()
-      ?? "running"
-
-    let shouldClear = Set([
-      "done", "complete", "completed", "idle", "stopped", "stop", "error", "failed",
-    ]).contains(rawStatus)
-    if shouldClear || (payload["isActive"] as? Bool == false) {
-      return nil
-    }
-
-    let rawLabel =
-      (payload["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    let rawTool = (payload["tool"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-    let normalizedTool: String?
-    if let rawTool, !rawTool.isEmpty {
-      normalizedTool = rawTool
-    } else {
-      normalizedTool = nil
-    }
-    let label = rawLabel.isEmpty ? fallbackAgentProgressLabel(tool: normalizedTool) : rawLabel
-    return AgentProgressState(label: label, tool: normalizedTool, status: rawStatus)
-  }
-
-  private func fallbackAgentProgressLabel(tool: String?) -> String {
-    guard let tool else { return "Working..." }
-    switch tool {
-    case "analyze_document":
-      return "Reading document..."
-    case "create_document":
-      return "Creating document..."
-    case "edit_rows":
-      return "Editing rows..."
-    case "delete_rows":
-      return "Deleting rows..."
-    case "export_rows":
-      return "Exporting file..."
-    case "find_rows":
-      return "Finding rows..."
-    case "search_google":
-      return "Searching web..."
-    case "analyze_image":
-      return "Analyzing image..."
-    default:
-      return "Working..."
     }
   }
 
@@ -1745,17 +1621,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       }
       merged.append(row)
     }
-
-    // Sort the final merged array chronologically by timestamp
-    // to prevent outgoing messages from jumping below newly arrived server messages.
-    merged.sort { lhs, rhs in
-      let lMsg = lhs["message"] as? [String: Any]
-      let rMsg = rhs["message"] as? [String: Any]
-      let lTime = (lMsg?["timestamp"] as? Int64) ?? (lMsg?["timestampMs"] as? Int64) ?? 0
-      let rTime = (rMsg?["timestamp"] as? Int64) ?? (rMsg?["timestampMs"] as? Int64) ?? 0
-      return lTime < rTime
-    }
-
     return merged
   }
 

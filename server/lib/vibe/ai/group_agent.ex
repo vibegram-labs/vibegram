@@ -403,6 +403,7 @@ defmodule Vibe.AI.GroupAgent do
     - The generated XLSX files already have professional styling (dark headers, alternating row colors, auto-sized columns, frozen header, auto-filters, RTL layout) — do NOT add any formatting hints, borders, colors, or decorators in cell text values. Keep cell data clean and plain.
     - Spreadsheet behavior is stateful per group chat. Default: edit the current spreadsheet.
     - Use operation=create_new ONLY when user explicitly asks for a completely NEW file/from-scratch sheet.
+    - CRITICAL BLANK/RAW FILE: When the user says "new and raw/blank/empty" (خام, خالی, جدید و خام, فايل خام, blank, empty, template), create the spreadsheet with ONLY the column headers and ZERO data rows (rows=[]). Do NOT fill in any data from conversation history or memory. The user wants a clean template to fill in themselves.
     - For adding data, prefer operation=append_rows.
     - For corrections, prefer operation=edit_current or replace_rows.
     - If user asks to undo/revert, use operation=revert_last.
@@ -708,6 +709,8 @@ defmodule Vibe.AI.GroupAgent do
 
   defp execute_tool(name, input, user_id, enabled_tools, chat_id) do
     if name in enabled_tools do
+      progress_label = tool_progress_label(name, input)
+      broadcast_agent_progress(chat_id, progress_label, name, "running")
       start_time = System.monotonic_time(:millisecond)
 
       result =
@@ -725,12 +728,114 @@ defmodule Vibe.AI.GroupAgent do
 
       duration_ms = System.monotonic_time(:millisecond) - start_time
       Logger.info("[GroupAgent] Tool #{name} completed in #{duration_ms}ms")
+      status = if tool_result_error?(result), do: "error", else: "complete"
+      broadcast_agent_progress(chat_id, progress_label, name, status, %{"durationMs" => duration_ms})
       result
     else
       Logger.warning("[GroupAgent] Blocked disabled tool call #{name}")
+      broadcast_agent_progress(chat_id, "Tool #{name} is disabled for this group.", name, "error")
       %{error: "Tool '#{name}' is disabled for this group."}
     end
   end
+
+  defp tool_result_error?(result) when is_map(result) do
+    has_error =
+      Map.get(result, :error) ||
+        Map.get(result, "error")
+
+    not is_nil(has_error) and to_string(has_error) != ""
+  end
+
+  defp tool_result_error?(_), do: false
+
+  defp tool_progress_label(name, input) do
+    case name do
+      "search_google" ->
+        "Searching the web..."
+
+      "analyze_image" ->
+        "Analyzing image..."
+
+      "analyze_document" ->
+        "Reading document..."
+
+      "create_document" ->
+        operation =
+          input
+          |> tool_input_value("operation")
+          |> String.downcase()
+
+        case operation do
+          "append_rows" -> "Adding rows..."
+          "replace_rows" -> "Restructuring spreadsheet..."
+          "edit_current" -> "Editing spreadsheet..."
+          "revert_last" -> "Reverting spreadsheet..."
+          "create_new" -> "Creating spreadsheet..."
+          _ -> "Creating document..."
+        end
+
+      "find_rows" ->
+        "Finding rows..."
+
+      "edit_rows" ->
+        "Editing rows..."
+
+      "delete_rows" ->
+        "Deleting rows..."
+
+      "export_rows" ->
+        format =
+          input
+          |> tool_input_value("format")
+          |> String.downcase()
+
+        if format == "png", do: "Exporting image...", else: "Exporting document..."
+
+      _ ->
+        "Working..."
+    end
+  end
+
+  defp broadcast_agent_progress(chat_id, label, tool, status, extra \\ %{})
+
+  defp broadcast_agent_progress(chat_id, label, tool, status, extra) when is_binary(chat_id) do
+    normalized_chat_id = chat_id |> String.trim()
+
+    if normalized_chat_id != "" do
+      normalized_label = label |> to_string() |> String.trim()
+      normalized_tool = tool |> to_string() |> String.trim()
+
+      normalized_status =
+        status
+        |> to_string()
+        |> String.trim()
+        |> default_if_blank("running")
+
+      payload =
+        %{
+          "userId" => @agent_user_id,
+          "isAgent" => true,
+          "status" => normalized_status
+        }
+        |> then(fn acc ->
+          if normalized_label == "", do: acc, else: Map.put(acc, "label", normalized_label)
+        end)
+        |> then(fn acc ->
+          if normalized_tool == "", do: acc, else: Map.put(acc, "tool", normalized_tool)
+        end)
+        |> Map.merge(if(is_map(extra), do: extra, else: %{}))
+
+      VibeWeb.Endpoint.broadcast!("chat:#{normalized_chat_id}", "agent-progress", payload)
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning("[GroupAgent] Failed to broadcast agent-progress chat_id=#{inspect(chat_id)} error=#{inspect(error)}")
+      :ok
+  end
+
+  defp broadcast_agent_progress(_chat_id, _label, _tool, _status, _extra), do: :ok
 
   defp create_document_tool(chat_id, input, user_id) do
     title =
