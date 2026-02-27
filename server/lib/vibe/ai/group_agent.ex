@@ -406,13 +406,15 @@ defmodule Vibe.AI.GroupAgent do
     - For corrections, prefer operation=edit_current or replace_rows.
     - If user asks to undo/revert, use operation=revert_last.
     - If user asks for Excel/sheet/spreadsheet/table with rows/columns, call create_document with format xlsx unless user explicitly asks for csv.
-    - CRITICAL: When the user asks to "update the design", "reorder columns", "change the layout", or "restructure" an existing spreadsheet, use operation=replace_rows with the SAME data reorganized (e.g., columns reordered). Do NOT use create_new — that would lose the document history.
+    - CRITICAL: When the user asks to "update the design", "reorder columns", "change the layout", "restructure", "remove a column" (ستون/رديف حذف كن), "merge columns" (ادغام كن), or any structural change to the spreadsheet, use create_document with operation=replace_rows. Read the current data from the document context, restructure it, and send the updated columns + rows. Do NOT just reply with text — you MUST call the tool.
+    - MANDATORY: When the user asks ANY request that modifies the spreadsheet (edit, add, remove, restructure, merge, update), you MUST call a tool (create_document, edit_rows, delete_rows, etc.). NEVER respond with just a text message saying "done" or "I will do it" without actually calling a tool. If you cannot determine the exact change, ask a clarifying question.
 
     ROW-LEVEL EDITING:
     - For targeted edits (changing a few cells or rows), use find_rows to locate the row first, then edit_rows with the row index. Do NOT resend all rows via create_document for small changes.
-    - For bulk replacements, column reordering, or design changes, use create_document with operation=replace_rows.
-    - Use delete_rows to remove specific rows by index. Always use find_rows first to confirm the correct row.
+    - For column removal, column merging, column reordering, or any structural change to the table shape, use create_document with operation=replace_rows. Include ALL existing rows with the new column structure.
+    - Use delete_rows to remove specific data rows by index. Always use find_rows first to confirm the correct row.
     - When the user says "change X to Y", "fix row N", or "update the amount for John", use find_rows + edit_rows.
+    - When the user says "حذف كن" (delete), "تغيير بده" (change), "اضافه كن" (add), "ادغام كن" (merge) — ALWAYS call the appropriate tool immediately.
 
     EXPORTING & SHARING:
     - CRITICAL: When the user asks for a PNG, PDF, image, screenshot, or photo of their spreadsheet/data, you MUST use the export_rows tool — NEVER use create_document for this. create_document can only produce xlsx/csv/text files, NOT images or PDFs.
@@ -421,7 +423,8 @@ defmodule Vibe.AI.GroupAgent do
     - Default export format is PDF unless the user explicitly asks for an image/PNG/picture.
     - Do not send the raw XLSX/CSV file when the user wants to share, print, or visualize data — use export_rows instead.
 
-    SPREADSHEET QUALITY:
+    SPREADSHEET QUALITY & RTL:
+      * RTL COLUMN ORDER: The XLSX is rendered right-to-left. The FIRST column in the columns array appears on the RIGHT side of the spreadsheet. So order columns from most important (right/first) to least important (left/last). For example: [شماره کانتینر, فرستنده, کالا, تعداد, گیرنده/تماس, یادداشت].
       * Use clear, professional column headers in a stable order.
       * Keep every row aligned to the column count (no missing/extra cells).
       * Normalize noisy values (trim spaces, remove filler text, keep wording consistent).
@@ -429,11 +432,10 @@ defmodule Vibe.AI.GroupAgent do
       * Each data item must appear exactly once — never duplicate rows.
       * Keep notes/comments in a dedicated column; never mix them into data value cells.
       * Separate summary or total rows clearly from data rows (place them last).
-      * For RTL languages (Arabic, Persian/Farsi), order columns right-to-left and keep text concise per cell.
       * Do NOT put emoji, symbols, or decorative characters in data cells — the renderer handles all visual styling.
       * NEVER put greeting text or any religious/greeting phrases as a data row. If the user includes such text, put it in the document title instead.
       * NEVER duplicate the column headers as the first data row. The renderer already adds a styled header row — do NOT repeat it in the rows array.
-      * Keep column count reasonable (5-8 columns max). Merge or omit columns with mostly empty values to keep the table compact and readable.
+      * Keep column count reasonable (5-7 columns max). Merge related info into single columns (e.g., "گیرنده/تماس" instead of separate "گیرنده" and "شماره تماس" columns) to keep the table compact.
 
     ENABLED TOOLS:
     #{if tool_descriptions == "", do: "- none", else: tool_descriptions}
