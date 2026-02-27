@@ -130,6 +130,7 @@ defmodule VibeWeb.Router do
     put "/group/:id/agent", GroupAgentController, :update
     delete "/group/:id/agent", GroupAgentController, :delete
     post "/group/:id/agent/generate_prompt", GroupAgentController, :generate_prompt
+    post "/group/:id/agent/chat/sync", GroupAgentController, :chat_sync
     get "/agent/document/:key", GroupAgentController, :download_document
     get "/agent/document/:key/:name", GroupAgentController, :download_document
 

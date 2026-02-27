@@ -182,6 +182,43 @@ defmodule VibeWeb.GroupAgentController do
     end
   end
 
+  # POST /api/group/:id/agent/chat/sync — Send a direct message to the group agent via HTTP
+  # Body:
+  # {
+  #   "message": "text",
+  #   "metadata": {
+  #     "image_urls": ["..."],
+  #     "document_urls": ["..."],
+  #     "reply_to_id": "..."
+  #   }
+  # }
+  def chat_sync(conn, %{"id" => chat_id, "message" => message} = params) do
+    user_id = conn.assigns.current_user.id
+
+    if Chat.is_participant?(chat_id, user_id) do
+      metadata =
+        case Map.get(params, "metadata") do
+          value when is_map(value) -> value
+          _ -> %{}
+        end
+
+      case AIGroupAgent.handle_mention(chat_id, message, user_id, metadata) do
+        {:ok, response} ->
+          json(conn, %{success: true, response: response})
+
+        {:error, :no_agent} ->
+          conn |> put_status(404) |> json(%{error: "No enabled group agent for this chat"})
+
+        {:error, reason} ->
+          conn
+          |> put_status(500)
+          |> json(%{error: "Group agent failed", details: inspect(reason)})
+      end
+    else
+      conn |> put_status(:forbidden) |> json(%{error: "Not a participant"})
+    end
+  end
+
   # GET /api/agent/document/:key(/:name) — Download/preview generated agent document
   def download_document(conn, %{"key" => blob_key}) do
     user_id = conn.assigns.current_user.id
