@@ -26,7 +26,8 @@ log = logging.getLogger(__name__)
 # ── Modern XLSX Styles ──
 
 # Header style — dark indigo gradient look
-HEADER_FONT = Font(name="Calibri", size=12, bold=True, color="FFFFFF")
+# Tahoma has built-in Persian/Arabic glyphs and renders correctly in Excel
+HEADER_FONT = Font(name="Tahoma", size=12, bold=True, color="FFFFFF")
 HEADER_FILL = PatternFill(start_color="1B3A5C", end_color="1B3A5C", fill_type="solid")
 HEADER_BORDER = Border(
     left=Side(style="thin", color="0F2640"),
@@ -37,8 +38,8 @@ HEADER_BORDER = Border(
 HEADER_ALIGN = Alignment(horizontal="center", vertical="center", wrap_text=True, readingOrder=2)
 
 # Data rows — clean modern look
-DATA_FONT = Font(name="Calibri", size=11, color="1A1A2E")
-DATA_FONT_ALT = Font(name="Calibri", size=11, color="1A1A2E")
+DATA_FONT = Font(name="Tahoma", size=11, color="1A1A2E")
+DATA_FONT_ALT = Font(name="Tahoma", size=11, color="1A1A2E")
 DATA_BORDER = Border(
     left=Side(style="thin", color="D0D5DD"),
     right=Side(style="thin", color="D0D5DD"),
@@ -47,6 +48,16 @@ DATA_BORDER = Border(
 )
 DATA_ALIGN = Alignment(horizontal="right", vertical="center", wrap_text=True, readingOrder=2)
 DATA_ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True, readingOrder=2)
+
+# Total/summary row style
+TOTAL_FONT = Font(name="Tahoma", size=11, bold=True, color="1B3A5C")
+TOTAL_FILL = PatternFill(start_color="D6E4F0", end_color="D6E4F0", fill_type="solid")
+TOTAL_BORDER = Border(
+    left=Side(style="thin", color="B0C8DE"),
+    right=Side(style="thin", color="B0C8DE"),
+    top=Side(style="medium", color="1B3A5C"),
+    bottom=Side(style="medium", color="1B3A5C"),
+)
 
 # Alternating row fills for readability
 EVEN_ROW_FILL = PatternFill(start_color="F8F9FC", end_color="F8F9FC", fill_type="solid")
@@ -237,15 +248,39 @@ def xlsx():
     try:
         wb = Workbook()
         ws = wb.active
-        ws.title = title[:31] if len(title) <= 31 else title[:31]  # Excel sheet name limit
+        ws.title = title[:31]
         ws.sheet_view.rightToLeft = sheet_rtl
 
-        num_cols = len(columns)
+        # ── RTL column reversal ─────────────────────────────────────────────
+        # In RTL mode, Excel shows column A on the RIGHT side of the screen.
+        # So for proper RTL layout (first column on the right), we reverse
+        # the column order physically: last logical column becomes column A.
+        # This matches the HTML/PDF output where the first column is on the right.
+        if sheet_rtl:
+            display_columns = list(reversed(columns))
+            display_rows = [list(reversed(row)) if row else row for row in rows]
+        else:
+            display_columns = list(columns)
+            display_rows = [list(row) if row else row for row in rows]
+
+        num_cols = len(display_columns)
+
+        # Keywords that mark a total/summary row
+        TOTAL_KEYWORDS = [
+            "مجموع", "جمع کل", "جمع", "کل", "total", "sum", "subtotal",
+            "grand total", "مجموع کل", "خلاصه"
+        ]
+
+        def is_total_row(row_data):
+            return any(
+                any(kw in str(cell).lower() for kw in TOTAL_KEYWORDS)
+                for cell in row_data
+            )
 
         # ── Auto-size column widths ──
-        for i, col in enumerate(columns, 1):
+        for i, col in enumerate(display_columns, 1):
             letter = get_column_letter(i)
-            col_values = [row[i - 1] if i - 1 < len(row) else "" for row in rows]
+            col_values = [row[i - 1] if i - 1 < len(row) else "" for row in display_rows]
             ws.column_dimensions[letter].width = _auto_column_width(col, col_values)
 
         # ── Set default row height ──
@@ -255,43 +290,54 @@ def xlsx():
         header_row_num = 1
         ws.row_dimensions[header_row_num].height = 32
 
-        for col_idx, col_name in enumerate(columns, 1):
+        for col_idx, col_name in enumerate(display_columns, 1):
             cell = ws.cell(row=header_row_num, column=col_idx, value=str(col_name))
             cell.font = HEADER_FONT
             cell.fill = HEADER_FILL
             cell.border = HEADER_BORDER
             cell.alignment = HEADER_ALIGN
 
-        # ── Data rows with alternating colors ──
-        for row_idx, row_data in enumerate(rows, 2):
+        # ── Data rows with alternating colors & total detection ──
+        for row_idx, row_data in enumerate(display_rows, 2):
+            total_row = is_total_row(row_data)
             is_even = (row_idx % 2 == 0)
-            row_fill = EVEN_ROW_FILL if is_even else ODD_ROW_FILL
 
-            ws.row_dimensions[row_idx].height = 24
+            if total_row:
+                row_fill = TOTAL_FILL
+                row_font = TOTAL_FONT
+                row_border = TOTAL_BORDER
+                row_height = 28
+            else:
+                row_fill = EVEN_ROW_FILL if is_even else ODD_ROW_FILL
+                row_font = DATA_FONT
+                row_border = DATA_BORDER
+                row_height = 24
+
+            ws.row_dimensions[row_idx].height = row_height
 
             for col_idx, value in enumerate(row_data, 1):
                 if col_idx > num_cols:
                     break
                 cell = ws.cell(row=row_idx, column=col_idx, value=str(value))
-                cell.font = DATA_FONT
-                cell.border = DATA_BORDER
+                cell.font = row_font
+                cell.border = row_border
                 cell.alignment = DATA_ALIGN
                 cell.fill = row_fill
 
             # Fill empty trailing cells
             for col_idx in range(len(row_data) + 1, num_cols + 1):
                 cell = ws.cell(row=row_idx, column=col_idx, value="")
-                cell.border = DATA_BORDER
+                cell.border = row_border
                 cell.alignment = DATA_ALIGN
                 cell.fill = row_fill
 
         # ── Freeze header row for scrolling ──
         ws.freeze_panes = "A2"
 
-        # ── Auto-filter on all columns ──
-        if rows:
+        # ── Auto-filter on all columns (only for non-empty data) ──
+        if display_rows:
             last_col_letter = get_column_letter(num_cols)
-            last_row = len(rows) + 1
+            last_row = len(display_rows) + 1
             ws.auto_filter.ref = f"A1:{last_col_letter}{last_row}"
 
         # ── Print settings ──
@@ -305,7 +351,7 @@ def xlsx():
         wb.save(buf)
         buf.seek(0)
 
-        log.info(f"Generated XLSX: {len(columns)} cols, {len(rows)} rows, {buf.getbuffer().nbytes} bytes")
+        log.info(f"Generated XLSX: {len(display_columns)} cols, {len(display_rows)} rows, {buf.getbuffer().nbytes} bytes")
         return send_file(
             buf,
             mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
