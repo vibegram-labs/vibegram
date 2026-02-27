@@ -20,6 +20,43 @@ private final class ChatListDocumentPreviewDataSource: NSObject, QLPreviewContro
   }
 }
 
+private final class ChatListTextPreviewController: UIViewController {
+  private let previewTitle: String
+  private let textContent: String
+  private let textView = UITextView()
+
+  init(title: String, text: String) {
+    self.previewTitle = title
+    self.textContent = text
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = .systemBackground
+    title = previewTitle
+
+    textView.translatesAutoresizingMaskIntoConstraints = false
+    textView.isEditable = false
+    textView.alwaysBounceVertical = true
+    textView.textContainerInset = UIEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+    textView.font = .monospacedSystemFont(ofSize: 14, weight: .regular)
+    textView.text = textContent
+
+    view.addSubview(textView)
+    NSLayoutConstraint.activate([
+      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      textView.topAnchor.constraint(equalTo: view.topAnchor),
+      textView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+    ])
+  }
+}
+
 private let chatListSendVerticalTiming = CAMediaTimingFunction(
   controlPoints: Float(0.19919472913616398),
   Float(0.010644531250000006),
@@ -2538,6 +2575,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         localURL.path)
       return
     }
+
+    if presentTextDocumentPreviewIfSupported(localURL: localURL, presenter: presenter) {
+      return
+    }
+
     let preview = QLPreviewController()
     let dataSource = ChatListDocumentPreviewDataSource(previewURL: localURL)
     documentPreviewDataSource = dataSource
@@ -2614,12 +2656,22 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return nil
     }
 
-    let remoteFileName = remoteURL.deletingPathExtension().lastPathComponent
+    let preferredName = preferredDownloadFileName(remoteURL: remoteURL, response: response)
+    let preferredExtension = preferredDownloadFileExtension(
+      remoteURL: remoteURL,
+      response: response,
+      fallbackName: preferredName,
+      tempURL: tempURL
+    )
+
+    let fileBaseName =
+      preferredName
+      .replacingOccurrences(of: "\\.[A-Za-z0-9]{1,12}$", with: "", options: .regularExpression)
+
     let safeBase =
-      (remoteFileName.isEmpty ? "document" : remoteFileName)
+      (fileBaseName.isEmpty ? "document" : fileBaseName)
       .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
-    let extensionValue =
-      remoteURL.pathExtension.isEmpty ? tempURL.pathExtension : remoteURL.pathExtension
+    let extensionValue = preferredExtension
     let destinationName =
       "\(safeBase)-\(UUID().uuidString)\(extensionValue.isEmpty ? "" : ".\(extensionValue)")"
     let destinationURL = previewDir.appendingPathComponent(destinationName, isDirectory: false)
@@ -2638,6 +2690,130 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         return nil
       }
     }
+  }
+
+  private func presentTextDocumentPreviewIfSupported(localURL: URL, presenter: UIViewController) -> Bool {
+    let ext = localURL.pathExtension.lowercased()
+    let textLikeExtensions: Set<String> = ["csv", "txt", "md", "markdown", "json", "tsv", "log"]
+    guard textLikeExtensions.contains(ext) else { return false }
+
+    guard
+      let data = try? Data(contentsOf: localURL),
+      data.count <= 5_000_000
+    else {
+      return false
+    }
+
+    let decodedText =
+      String(data: data, encoding: .utf8)
+      ?? String(data: data, encoding: .utf16)
+      ?? String(data: data, encoding: .unicode)
+      ?? String(data: data, encoding: .ascii)
+    guard let text = decodedText else { return false }
+
+    let title = localURL.lastPathComponent.isEmpty ? "Document" : localURL.lastPathComponent
+    let controller = ChatListTextPreviewController(title: title, text: text)
+    let nav = UINavigationController(rootViewController: controller)
+    controller.navigationItem.rightBarButtonItem = UIBarButtonItem(
+      barButtonSystemItem: .done,
+      target: self,
+      action: #selector(dismissPresentedPreview)
+    )
+    presenter.present(nav, animated: true)
+    return true
+  }
+
+  @objc private func dismissPresentedPreview() {
+    topPresentingViewController()?.dismiss(animated: true)
+  }
+
+  private func preferredDownloadFileName(remoteURL: URL, response: URLResponse?) -> String {
+    if let http = response as? HTTPURLResponse,
+      let disposition = http.value(forHTTPHeaderField: "Content-Disposition"),
+      let fromHeader = parseFileNameFromContentDisposition(disposition)
+    {
+      return fromHeader
+    }
+
+    if let suggested = response?.suggestedFilename?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !suggested.isEmpty
+    {
+      return suggested
+    }
+
+    let urlName = remoteURL.lastPathComponent.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !urlName.isEmpty, urlName != remoteURL.host {
+      return urlName
+    }
+
+    return "document"
+  }
+
+  private func preferredDownloadFileExtension(
+    remoteURL: URL,
+    response: URLResponse?,
+    fallbackName: String,
+    tempURL: URL
+  ) -> String {
+    let nameExtension = (fallbackName as NSString).pathExtension.lowercased()
+    if !nameExtension.isEmpty { return nameExtension }
+
+    let remoteExtension = remoteURL.pathExtension.lowercased()
+    if !remoteExtension.isEmpty { return remoteExtension }
+
+    if let mime = response?.mimeType?.lowercased() {
+      switch mime {
+      case "text/csv":
+        return "csv"
+      case "application/json":
+        return "json"
+      case "text/plain":
+        return "txt"
+      case "text/markdown":
+        return "md"
+      case "text/html":
+        return "html"
+      default:
+        break
+      }
+    }
+
+    return tempURL.pathExtension.lowercased()
+  }
+
+  private func parseFileNameFromContentDisposition(_ value: String) -> String? {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+
+    if let range = trimmed.range(of: "filename*=", options: .caseInsensitive) {
+      let encodedPart = String(trimmed[range.upperBound...])
+        .components(separatedBy: ";")
+        .first?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      if let encodedPart, let decoded = decodeRFC5987FileName(encodedPart), !decoded.isEmpty {
+        return decoded
+      }
+    }
+
+    if let range = trimmed.range(of: "filename=", options: .caseInsensitive) {
+      let raw = String(trimmed[range.upperBound...])
+        .components(separatedBy: ";")
+        .first?
+        .trimmingCharacters(in: .whitespacesAndNewlines)
+      let cleaned = raw?.trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) ?? ""
+      if !cleaned.isEmpty { return cleaned }
+    }
+    return nil
+  }
+
+  private func decodeRFC5987FileName(_ raw: String) -> String? {
+    let cleaned = raw.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+    let parts = cleaned.components(separatedBy: "'")
+    if parts.count >= 3 {
+      let encodedName = parts[2]
+      return encodedName.removingPercentEncoding ?? encodedName
+    }
+    return cleaned.removingPercentEncoding
   }
 }
 

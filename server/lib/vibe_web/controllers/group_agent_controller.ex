@@ -192,51 +192,28 @@ defmodule VibeWeb.GroupAgentController do
 
       document ->
         if Chat.is_participant?(document.chat_id, user_id) do
-          metadata = if is_map(document.metadata), do: document.metadata, else: %{}
-          content = metadata["inline_content"] || metadata[:inline_content]
-
-          if is_binary(content) do
-            content_type_raw =
-              (metadata["content_type"] || metadata[:content_type] || "text/csv")
-              |> to_string()
-              |> String.trim()
-
-            content_type =
-              content_type_raw
-              |> case do
-                "" ->
-                  "text/csv"
-
-                value ->
-                  value
-                  |> String.split(";", parts: 2)
-                  |> List.first()
-                  |> to_string()
-                  |> String.trim()
-                  |> case do
-                    "" -> "text/csv"
-                    mime -> mime
-                  end
-              end
-
-            file_name =
-              metadata["download_name"] || metadata[:download_name] ||
-                Path.basename(to_string(document.relative_url || "document.csv"))
-
-            conn
-            |> put_resp_header("cache-control", "private, no-store")
-            |> put_resp_header(
-              "content-disposition",
-              ~s(inline; filename="#{safe_download_filename(file_name)}")
-            )
-            |> put_resp_content_type(content_type)
-            |> send_resp(200, content)
-          else
-            conn |> put_status(:not_found) |> json(%{error: "Document content not found"})
-          end
+          send_document_content(conn, document)
         else
           conn |> put_status(:forbidden) |> json(%{error: "Not a participant"})
         end
+    end
+  end
+
+  # GET /uploads/agent-docs/:name — Legacy URL compatibility for previously stored agent links
+  def download_legacy_document(conn, %{"name" => file_name}) do
+    user_id = conn.assigns.current_user.id
+
+    document =
+      file_name
+      |> GroupAgentDocument.list_by_download_name(50)
+      |> Enum.find(fn doc -> Chat.is_participant?(doc.chat_id, user_id) end)
+
+    case document do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "Document not found"})
+
+      doc ->
+        send_document_content(conn, doc)
     end
   end
 
@@ -292,6 +269,51 @@ defmodule VibeWeb.GroupAgentController do
     |> case do
       "" -> "document.csv"
       filename -> filename
+    end
+  end
+
+  defp send_document_content(conn, document) do
+    metadata = if is_map(document.metadata), do: document.metadata, else: %{}
+    content = metadata["inline_content"] || metadata[:inline_content]
+
+    if is_binary(content) do
+      content_type_raw =
+        (metadata["content_type"] || metadata[:content_type] || "text/csv")
+        |> to_string()
+        |> String.trim()
+
+      content_type =
+        content_type_raw
+        |> case do
+          "" ->
+            "text/csv"
+
+          value ->
+            value
+            |> String.split(";", parts: 2)
+            |> List.first()
+            |> to_string()
+            |> String.trim()
+            |> case do
+              "" -> "text/csv"
+              mime -> mime
+            end
+        end
+
+      file_name =
+        metadata["download_name"] || metadata[:download_name] ||
+          Path.basename(to_string(document.relative_url || "document.csv"))
+
+      conn
+      |> put_resp_header("cache-control", "private, no-store")
+      |> put_resp_header(
+        "content-disposition",
+        ~s(inline; filename="#{safe_download_filename(file_name)}")
+      )
+      |> put_resp_content_type(content_type)
+      |> send_resp(200, content)
+    else
+      conn |> put_status(:not_found) |> json(%{error: "Document content not found"})
     end
   end
 end

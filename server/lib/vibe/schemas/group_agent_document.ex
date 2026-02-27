@@ -80,6 +80,29 @@ defmodule Vibe.Chat.GroupAgentDocument do
 
   def get_by_blob_key(_), do: nil
 
+  def list_by_download_name(file_name, limit \\ 20) when is_binary(file_name) do
+    normalized = file_name |> String.trim()
+    safe_limit = if is_integer(limit) and limit > 0, do: limit, else: 20
+
+    if normalized == "" do
+      []
+    else
+      suffix_match = "%/#{normalized}"
+
+      Repo.all(
+        from d in __MODULE__,
+          where:
+            fragment("?->>'download_name' = ?", d.metadata, ^normalized) or
+              ilike(d.relative_url, ^suffix_match) or
+              ilike(d.file_url, ^suffix_match),
+          order_by: [desc: d.inserted_at],
+          limit: ^safe_limit
+      )
+    end
+  end
+
+  def list_by_download_name(_, _), do: []
+
   def get_previous(chat_id, current_version) when is_integer(current_version) do
     Repo.one(
       from d in __MODULE__,

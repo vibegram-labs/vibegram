@@ -10,6 +10,10 @@ defmodule VibeWeb.Router do
     plug VibeWeb.Plugs.ApiAuth, required: true
   end
 
+  pipeline :file_authenticated do
+    plug VibeWeb.Plugs.ApiAuth, required: true
+  end
+
   # SECURITY: Rate limited pipeline for auth endpoints
   pipeline :auth_rate_limited do
     plug :accepts, ["json"]
@@ -162,6 +166,12 @@ defmodule VibeWeb.Router do
   scope "/api", VibeWeb do
     pipe_through :api
     post "/webhooks/lemonsqueezy", WebhookController, :lemon_squeezy
+  end
+
+  # Legacy authenticated file routes
+  scope "/", VibeWeb do
+    pipe_through :file_authenticated
+    get "/uploads/agent-docs/:name", GroupAgentController, :download_legacy_document
   end
 
   # Serve React SPA for all other routes

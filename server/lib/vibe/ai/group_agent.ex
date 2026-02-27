@@ -225,15 +225,19 @@ defmodule Vibe.AI.GroupAgent do
 
     # 4. Call Claude
     case call_claude(messages, system_prompt, user_id, enabled_tools, chat_id) do
-      {:ok, response_text} ->
-        response =
+      {:ok, %{text: response_text, attachment: tool_attachment}} ->
+        fallback_result =
           maybe_attach_spreadsheet_fallback(
             chat_id,
             user_message,
             response_text,
             enabled_tools,
-            user_id
+            user_id,
+            tool_attachment
           )
+
+        response = fallback_result.text
+        resolved_attachment = fallback_result.attachment
 
         # 5. Store in memory
         attachment_summary = summarize_attachments_for_memory(metadata)
@@ -257,7 +261,14 @@ defmodule Vibe.AI.GroupAgent do
         maybe_compact(chat_id, user_id)
 
         # 7. Broadcast agent response as a chat message
-        broadcast_agent_message(chat_id, agent_config, response, user_id, metadata)
+        broadcast_agent_message(
+          chat_id,
+          agent_config,
+          response,
+          user_id,
+          metadata,
+          resolved_attachment
+        )
 
         {:ok, response}
 
@@ -410,7 +421,8 @@ defmodule Vibe.AI.GroupAgent do
         user_id,
         enabled_tools,
         enabled_tool_definitions,
-        chat_id
+        chat_id,
+        nil
       )
     end
   end
@@ -423,7 +435,8 @@ defmodule Vibe.AI.GroupAgent do
          user_id,
          enabled_tools,
          enabled_tool_definitions,
-         chat_id
+         chat_id,
+         pending_attachment
        ) do
     if depth > 3 do
       {:error, "Max tool depth reached"}
@@ -461,19 +474,20 @@ defmodule Vibe.AI.GroupAgent do
                   user_id,
                   enabled_tools,
                   enabled_tool_definitions,
-                  chat_id
+                  chat_id,
+                  pending_attachment
                 )
               else
                 # Extract text from response
                 text = extract_text(content)
-                {:ok, text}
+                {:ok, %{text: text, attachment: pending_attachment}}
               end
 
             {:ok, %{"content" => content} = parsed} ->
               Logger.info("[GroupAgent] Claude response received, stop_reason=#{inspect(Map.get(parsed, "stop_reason"))}")
               # Extract text from response
               text = extract_text(content)
-              {:ok, text}
+              {:ok, %{text: text, attachment: pending_attachment}}
 
             other ->
               Logger.error("[GroupAgent] Failed to parse Claude response: #{inspect(other)}")
@@ -499,7 +513,8 @@ defmodule Vibe.AI.GroupAgent do
          user_id,
          enabled_tools,
          enabled_tool_definitions,
-         chat_id
+         chat_id,
+         pending_attachment
        ) do
     # Extract tool calls from content
     tool_calls = Enum.filter(content, fn
@@ -507,15 +522,23 @@ defmodule Vibe.AI.GroupAgent do
       _ -> false
     end)
 
-    # Execute tools
-    tool_results = Enum.map(tool_calls, fn tool ->
-      result = execute_tool(tool["name"], tool["input"], user_id, enabled_tools, chat_id)
-      %{
-        "type" => "tool_result",
-        "tool_use_id" => tool["id"],
-        "content" => Jason.encode!(result)
-      }
-    end)
+    # Execute tools and carry forward latest attachment from create_document.
+    {tool_results, latest_attachment} =
+      Enum.reduce(tool_calls, {[], pending_attachment}, fn tool, {acc_results, acc_attachment} ->
+        result = execute_tool(tool["name"], tool["input"], user_id, enabled_tools, chat_id)
+        tool_attachment = extract_tool_attachment(tool["name"], result)
+
+        tool_result = %{
+          "type" => "tool_result",
+          "tool_use_id" => tool["id"],
+          "content" => Jason.encode!(result)
+        }
+
+        next_attachment = tool_attachment || acc_attachment
+        {[tool_result | acc_results], next_attachment}
+      end)
+
+    tool_results = Enum.reverse(tool_results)
 
     # Build content blocks for assistant message (text + tool_use blocks)
     assistant_content = Enum.map(content, fn
@@ -539,7 +562,8 @@ defmodule Vibe.AI.GroupAgent do
       user_id,
       enabled_tools,
       enabled_tool_definitions,
-      chat_id
+      chat_id,
+      latest_attachment
     )
   end
 
@@ -623,13 +647,36 @@ defmodule Vibe.AI.GroupAgent do
               "# #{title}\n\n#{structured_body}"
           end
 
-        %{
-          ok: true,
-          title: title,
-          format: format,
-          content: content,
-          note: "Document draft generated. You can send or refine it in chat."
-        }
+        extension = file_extension_for_document_format(format)
+
+        with {:ok, storage} <- write_agent_document_file(title, content, extension),
+             {:ok, doc} <-
+               persist_document_version(
+                 chat_id,
+                 title,
+                 format,
+                 storage.relative_url,
+                 storage.file_url,
+                 [],
+                 0,
+                 merge_document_metadata(
+                   build_document_metadata(format, body),
+                   storage.metadata
+                 ),
+                 "create",
+                 user_id
+               ) do
+          document_tool_response(
+            doc,
+            format,
+            content,
+            "Document created and attached."
+          )
+        else
+          {:error, reason} ->
+            Logger.error("[GroupAgent] Failed to create document format=#{format}: #{inspect(reason)}")
+            document_error_response(title, format, reason)
+        end
     end
   end
 
@@ -874,6 +921,51 @@ defmodule Vibe.AI.GroupAgent do
             spreadsheet_error_response(title, reason)
         end
       else
+        {:error, :enoent} ->
+          Logger.warning(
+            "[GroupAgent] Current spreadsheet source missing for chat #{chat_id}; rebuilding from current schema."
+          )
+
+          columns = spreadsheet_columns(input, sections, List.wrap(current_document.columns))
+
+          incoming_rows =
+            input
+            |> tool_input_raw("rows")
+            |> normalize_spreadsheet_rows(columns)
+
+          final_rows = ensure_non_empty_rows(incoming_rows, columns, body)
+          csv_content = csv_from_rows(columns, final_rows)
+
+          with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv"),
+               {:ok, doc} <-
+                 persist_document_version(
+                   chat_id,
+                   title,
+                   "csv",
+                   storage.relative_url,
+                   storage.file_url,
+                   columns,
+                   length(final_rows),
+                   merge_document_metadata(
+                     build_spreadsheet_metadata("rebuild_missing_source", current_document.version, body),
+                     storage.metadata
+                   ),
+                   "edit",
+                   user_id
+                 ) do
+            spreadsheet_tool_response(
+              doc,
+              columns,
+              final_rows,
+              csv_content,
+              "Source file was missing; rebuilt and attached a fresh spreadsheet version."
+            )
+          else
+            {:error, reason} ->
+              Logger.error("[GroupAgent] Failed to rebuild missing spreadsheet: #{inspect(reason)}")
+              spreadsheet_error_response(title, reason)
+          end
+
         {:error, reason} ->
           Logger.error("[GroupAgent] Failed to read current spreadsheet: #{inspect(reason)}")
           spreadsheet_error_response(title, reason)
@@ -1000,10 +1092,50 @@ defmodule Vibe.AI.GroupAgent do
     }
   end
 
+  defp document_tool_response(doc, format, content, note) do
+    %{
+      ok: true,
+      title: doc.title,
+      format: format,
+      content: content,
+      download_path: doc.relative_url,
+      file_url: doc.file_url,
+      version: doc.version,
+      note: note
+    }
+  end
+
+  defp document_error_response(title, format, reason) do
+    %{
+      ok: false,
+      title: title,
+      format: format,
+      error: "Failed to create document",
+      reason: inspect(reason)
+    }
+  end
+
+  defp file_extension_for_document_format(format) do
+    case format do
+      "plain_text" -> "txt"
+      "html" -> "html"
+      "json" -> "json"
+      _ -> "md"
+    end
+  end
+
   defp build_spreadsheet_metadata(operation, source_version, body) do
     %{
       "operation" => operation,
       "source_version" => source_version,
+      "request_hint" => body |> to_string() |> String.slice(0, 300)
+    }
+  end
+
+  defp build_document_metadata(format, body) do
+    %{
+      "operation" => "create_document",
+      "format" => format,
       "request_hint" => body |> to_string() |> String.slice(0, 300)
     }
   end
@@ -1465,35 +1597,55 @@ defmodule Vibe.AI.GroupAgent do
     if trimmed == "", do: fallback, else: trimmed
   end
 
-  defp maybe_attach_spreadsheet_fallback(chat_id, user_message, response, enabled_tools, user_id) do
-    if should_auto_generate_spreadsheet?(chat_id, user_message, response, enabled_tools) do
-      title = infer_spreadsheet_title(user_message)
-      operation = infer_fallback_spreadsheet_operation(user_message, chat_id)
+  defp maybe_attach_spreadsheet_fallback(
+         chat_id,
+         user_message,
+         response,
+         enabled_tools,
+         user_id,
+         existing_attachment \\ nil
+       ) do
+    cond do
+      existing_attachment ->
+        %{text: response, attachment: existing_attachment}
 
-      case create_document_tool(chat_id, %{
-             "title" => title,
-             "body" => user_message,
-             "format" => "csv",
-             "operation" => operation
-           }, user_id) do
-        %{ok: true, file_url: file_url, row_count: row_count} = result ->
-          Logger.info(
-            "[GroupAgent] Auto-generated spreadsheet fallback title=#{title} rows=#{row_count} operation=#{operation}"
-          )
+      should_auto_generate_spreadsheet?(chat_id, user_message, response, enabled_tools) ->
+        title = infer_spreadsheet_title(user_message)
+        operation = infer_fallback_spreadsheet_operation(user_message, chat_id)
 
-          fallback_message = spreadsheet_fallback_message(file_url, row_count, result[:columns] || [])
+        case create_document_tool(chat_id, %{
+               "title" => title,
+               "body" => user_message,
+               "format" => "csv",
+               "operation" => operation
+             }, user_id) do
+          %{ok: true, row_count: row_count} = result ->
+            Logger.info(
+              "[GroupAgent] Auto-generated spreadsheet fallback title=#{title} rows=#{row_count} operation=#{operation}"
+            )
 
-          if refusal_language?(response) do
-            fallback_message
-          else
-            response <> "\n\n" <> fallback_message
-          end
+            fallback_message =
+              spreadsheet_fallback_message(
+                result[:file_url] || result["file_url"],
+                row_count,
+                result[:columns] || result["columns"] || []
+              )
 
-        _ ->
-          response
-      end
-    else
-      response
+            resolved_text =
+              if refusal_language?(response) do
+                fallback_message
+              else
+                response <> "\n\n" <> fallback_message
+              end
+
+            %{text: resolved_text, attachment: attachment_from_document_result(result)}
+
+          _ ->
+            %{text: response, attachment: nil}
+        end
+
+      true ->
+        %{text: response, attachment: nil}
     end
   end
 
@@ -1626,6 +1778,52 @@ defmodule Vibe.AI.GroupAgent do
     "Created editable spreadsheet file (CSV) and attached it.\nColumns: #{col_count}, Rows: #{row_count}\nYou can open it in Excel or Google Sheets."
   end
 
+  defp extract_tool_attachment("create_document", result), do: attachment_from_document_result(result)
+  defp extract_tool_attachment(_tool_name, _result), do: nil
+
+  defp attachment_from_document_result(result) when is_map(result) do
+    ok? =
+      Map.get(result, :ok) ||
+        Map.get(result, "ok")
+
+    file_url =
+      Map.get(result, :file_url) ||
+        Map.get(result, "file_url") ||
+        Map.get(result, :download_path) ||
+        Map.get(result, "download_path")
+
+    with true <- ok? == true,
+         url when is_binary(url) <- normalize_attachment_url(file_url),
+         true <- url != "" do
+      file_name = derive_file_name_from_url(url) || "document"
+      %{url: url, file_name: file_name}
+    else
+      _ -> nil
+    end
+  end
+
+  defp attachment_from_document_result(_), do: nil
+
+  defp normalize_attachment_url(value) when is_binary(value) do
+    normalized = value |> String.trim()
+
+    cond do
+      normalized == "" ->
+        nil
+
+      String.starts_with?(normalized, "http://") or String.starts_with?(normalized, "https://") ->
+        normalized
+
+      String.starts_with?(normalized, "/") ->
+        public_upload_url(normalized)
+
+      true ->
+        normalized
+    end
+  end
+
+  defp normalize_attachment_url(_), do: nil
+
   defp extract_text(content) when is_list(content) do
     content
     |> Enum.filter(fn
@@ -1755,7 +1953,7 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
-  defp broadcast_agent_message(chat_id, agent_config, text, user_id, metadata) do
+  defp broadcast_agent_message(chat_id, agent_config, text, user_id, metadata, explicit_attachment \\ nil) do
     Logger.info(
       "[GroupAgent] Broadcasting agent message chat_id=#{chat_id} len=#{String.length(text || "")}"
     )
@@ -1763,7 +1961,9 @@ defmodule Vibe.AI.GroupAgent do
     message_id = Ecto.UUID.generate()
     timestamp = :os.system_time(:millisecond)
     reply_to_id = Map.get(metadata, "reply_to_id")
-    attachment = extract_agent_document_attachment(chat_id, text)
+    attachment =
+      normalize_explicit_attachment(explicit_attachment) ||
+        extract_agent_document_attachment(chat_id, text)
     plain_text = sanitize_agent_plain_text(text, attachment)
     message_type = if attachment, do: "file", else: "text"
 
@@ -1880,6 +2080,26 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
+  defp normalize_explicit_attachment(%{url: url, file_name: file_name}) do
+    with normalized_url when is_binary(normalized_url) <- normalize_attachment_url(url),
+         true <- normalized_url != "" do
+      resolved_name =
+        file_name
+        |> to_string()
+        |> String.trim()
+        |> case do
+          "" -> derive_file_name_from_url(normalized_url) || "document"
+          value -> value
+        end
+
+      %{url: normalized_url, file_name: resolved_name}
+    else
+      _ -> nil
+    end
+  end
+
+  defp normalize_explicit_attachment(_), do: nil
+
   defp extract_agent_document_url(text, chat_id) do
     normalized_text = text |> to_string()
 
@@ -1906,8 +2126,11 @@ defmodule Vibe.AI.GroupAgent do
       true ->
         if document_intent_in_response?(normalized_text) do
           case GroupAgentDocument.get_current(chat_id) do
-            %GroupAgentDocument{file_url: file_url} when is_binary(file_url) and file_url != "" ->
-              {:ok, file_url}
+            %GroupAgentDocument{} = document ->
+              case current_document_url(document) do
+                url when is_binary(url) and url != "" -> {:ok, url}
+                _ -> {:error, :not_found}
+              end
 
             _ ->
               {:error, :not_found}
@@ -1915,6 +2138,33 @@ defmodule Vibe.AI.GroupAgent do
         else
           {:error, :not_found}
         end
+    end
+  end
+
+  defp current_document_url(%GroupAgentDocument{} = document) do
+    metadata = if is_map(document.metadata), do: document.metadata, else: %{}
+    blob_key = metadata["blob_key"] || metadata[:blob_key]
+    download_name = metadata["download_name"] || metadata[:download_name]
+
+    cond do
+      is_binary(blob_key) and String.trim(blob_key) != "" ->
+        key = String.trim(blob_key)
+        name =
+          download_name
+          |> to_string()
+          |> String.trim()
+          |> default_if_blank("document")
+
+        public_upload_url("/api/agent/document/#{key}/#{name}")
+
+      is_binary(document.relative_url) and document.relative_url != "" ->
+        normalize_attachment_url(document.relative_url)
+
+      is_binary(document.file_url) and document.file_url != "" ->
+        normalize_attachment_url(document.file_url)
+
+      true ->
+        nil
     end
   end
 

@@ -2174,7 +2174,7 @@ final class ChatEngine {
 
     if normalizedRaw == "read" { return "read" }
 
-    return queue.sync {
+    return syncOnQueue {
       var receiptStatus: String?
       var localStatus: String?
       if let chatId, let messageId {
@@ -2222,7 +2222,7 @@ final class ChatEngine {
     let messageId =
       normalizedString(payload["messageId"]) ?? normalizedString(payload["message_id"])
     guard let chatId, let messageId else { return getStatus() }
-    return queue.sync {
+    return syncOnQueue {
       upsertReceiptLocked(chatId: chatId, messageId: messageId, status: status)
       appendJournalLocked(event: eventName, payload: payload)
       let snapshot = statusSnapshotLocked()
@@ -2244,7 +2244,7 @@ final class ChatEngine {
     let messageId =
       normalizedString(payload["messageId"]) ?? normalizedString(payload["message_id"])
     guard let chatId, let messageId else { return getStatus() }
-    return queue.sync {
+    return syncOnQueue {
       upsertReceiptLocked(chatId: chatId, messageId: messageId, status: status)
 
       var accepted = false
