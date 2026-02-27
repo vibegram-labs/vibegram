@@ -318,6 +318,10 @@ defmodule Vibe.AI.GroupAgent do
       * Keep every row aligned to the column count (no missing/extra cells).
       * Normalize noisy values (trim spaces, remove filler text, keep wording consistent).
       * Prefer normalized date and amount representations when possible.
+      * Each data item must appear exactly once — never duplicate rows.
+      * Keep notes/comments in a dedicated column; never mix them into data value cells.
+      * Separate summary or total rows clearly from data rows (place them last).
+      * For RTL languages (Arabic, Persian/Farsi), structure column order right-to-left and keep text concise per cell.
     - When a tool creates/updates a file, respond naturally and state that the file is attached (do not paste raw URLs).
     - You can reference previous conversations from your memory.
     - Address users naturally, referring to the group context.
@@ -643,7 +647,7 @@ defmodule Vibe.AI.GroupAgent do
               "#{title}\n\n#{structured_body}"
 
             "html" ->
-              "<h1>#{escape_html(title)}</h1>\n<p>#{escape_html(structured_body)}</p>"
+              build_html_document(title, structured_body)
 
             "json" ->
               Jason.encode!(%{
@@ -1709,26 +1713,46 @@ defmodule Vibe.AI.GroupAgent do
     """
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
-      <fonts count="1">
+      <fonts count="2">
         <font>
           <sz val="11"/>
           <name val="Calibri"/>
         </font>
+        <font>
+          <b/>
+          <sz val="11"/>
+          <color rgb="FFFFFFFF"/>
+          <name val="Calibri"/>
+        </font>
       </fonts>
-      <fills count="2">
+      <fills count="3">
         <fill><patternFill patternType="none"/></fill>
         <fill><patternFill patternType="gray125"/></fill>
+        <fill><patternFill patternType="solid"><fgColor rgb="FF2B5797"/><bgColor indexed="64"/></patternFill></fill>
       </fills>
-      <borders count="1">
+      <borders count="2">
         <border>
           <left/><right/><top/><bottom/><diagonal/>
+        </border>
+        <border>
+          <left style="thin"><color auto="1"/></left>
+          <right style="thin"><color auto="1"/></right>
+          <top style="thin"><color auto="1"/></top>
+          <bottom style="thin"><color auto="1"/></bottom>
+          <diagonal/>
         </border>
       </borders>
       <cellStyleXfs count="1">
         <xf numFmtId="0" fontId="0" fillId="0" borderId="0"/>
       </cellStyleXfs>
-      <cellXfs count="1">
+      <cellXfs count="3">
         <xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/>
+        <xf numFmtId="0" fontId="1" fillId="2" borderId="1" xfId="0" applyFont="1" applyFill="1" applyBorder="1" applyAlignment="1">
+          <alignment horizontal="center" vertical="center" wrapText="1"/>
+        </xf>
+        <xf numFmtId="0" fontId="0" fillId="0" borderId="1" xfId="0" applyBorder="1" applyAlignment="1">
+          <alignment vertical="center" wrapText="1"/>
+        </xf>
       </cellXfs>
       <cellStyles count="1">
         <cellStyle name="Normal" xfId="0" builtinId="0"/>
@@ -1739,15 +1763,28 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp xlsx_sheet_xml(rows) when is_list(rows) do
+    col_count =
+      case rows do
+        [first | _] -> length(first)
+        _ -> 1
+      end
+
+    cols_xml =
+      1..col_count
+      |> Enum.map_join("", fn i -> ~s(<col min="#{i}" max="#{i}" width="22" customWidth="1"/>) end)
+
     row_xml =
       rows
       |> Enum.with_index(1)
       |> Enum.map_join("", fn {cells, row_index} ->
+        # Row 1 = header (style 1), rest = data (style 2)
+        style_id = if row_index == 1, do: "1", else: "2"
+
         cell_xml =
           cells
           |> Enum.with_index(1)
           |> Enum.map_join("", fn {value, col_index} ->
-            xlsx_cell_xml(row_index, col_index, value)
+            xlsx_cell_xml(row_index, col_index, value, style_id)
           end)
 
         ~s(<row r="#{row_index}">#{cell_xml}</row>)
@@ -1757,24 +1794,25 @@ defmodule Vibe.AI.GroupAgent do
     <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
     <worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
       <sheetViews>
-        <sheetView workbookViewId="0"/>
+        <sheetView rightToLeft="true" workbookViewId="0"/>
       </sheetViews>
+      <cols>#{cols_xml}</cols>
       <sheetData>#{row_xml}</sheetData>
     </worksheet>
     """
     |> String.trim()
   end
 
-  defp xlsx_cell_xml(row_index, col_index, value) do
+  defp xlsx_cell_xml(row_index, col_index, value, style_id \\ "0") do
     ref = excel_cell_ref(row_index, col_index)
     text = normalize_spreadsheet_cell(value)
 
     if text == "" do
-      ~s(<c r="#{ref}"/>)
+      ~s(<c r="#{ref}" s="#{style_id}"/>)
     else
       preserve = if text != String.trim(text), do: ~s( xml:space="preserve"), else: ""
       escaped = xml_escape(text)
-      ~s(<c r="#{ref}" t="inlineStr"><is><t#{preserve}>#{escaped}</t></is></c>)
+      ~s(<c r="#{ref}" s="#{style_id}" t="inlineStr"><is><t#{preserve}>#{escaped}</t></is></c>)
     end
   end
 
@@ -1955,6 +1993,97 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp normalize_section_headings(_), do: []
+
+  defp build_html_document(title, body) do
+    escaped_title = escape_html(title)
+    escaped_body = escape_html(body)
+
+    body_html =
+      escaped_body
+      |> String.split(~r/\r?\n/, trim: false)
+      |> Enum.map_join("\n", fn line ->
+        trimmed = String.trim(line)
+        cond do
+          trimmed == "" -> ""
+          String.starts_with?(trimmed, "## ") -> "<h2>#{String.trim_leading(trimmed, "## ")}</h2>"
+          String.starts_with?(trimmed, "- ") -> "<li>#{String.trim_leading(trimmed, "- ")}</li>"
+          true -> "<p>#{line}</p>"
+        end
+      end)
+
+    """
+    <!DOCTYPE html>
+    <html dir="rtl" lang="fa">
+    <head>
+    <meta charset="UTF-8"/>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>#{escaped_title}</title>
+    <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, Arial, sans-serif;
+      font-size: 15px;
+      line-height: 1.6;
+      color: #1a1a1a;
+      background: #ffffff;
+      padding: 20px;
+      direction: rtl;
+      text-align: right;
+    }
+    h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #2B5797;
+      margin-bottom: 16px;
+      padding-bottom: 10px;
+      border-bottom: 2px solid #2B5797;
+    }
+    h2 {
+      font-size: 17px;
+      font-weight: 600;
+      color: #333;
+      margin: 16px 0 8px;
+    }
+    p { margin: 6px 0; }
+    li { margin: 4px 0 4px 20px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin: 16px 0;
+      direction: rtl;
+    }
+    th {
+      background: #2B5797;
+      color: #fff;
+      font-weight: 600;
+      padding: 10px 12px;
+      text-align: right;
+      border: 1px solid #1e3f6f;
+      white-space: nowrap;
+    }
+    td {
+      padding: 8px 12px;
+      border: 1px solid #d0d0d0;
+      text-align: right;
+      vertical-align: top;
+    }
+    tr:nth-child(even) td { background: #f5f7fa; }
+    tr:hover td { background: #e8edf4; }
+    .summary-row td {
+      font-weight: 700;
+      background: #eef2f8;
+      border-top: 2px solid #2B5797;
+    }
+    </style>
+    </head>
+    <body>
+    <h1>#{escaped_title}</h1>
+    #{body_html}
+    </body>
+    </html>
+    """
+    |> String.trim()
+  end
 
   defp escape_html(text) do
     text
