@@ -2811,7 +2811,7 @@ defmodule Vibe.AI.GroupAgent do
 
   defp should_auto_generate_spreadsheet?(chat_id, user_message, response, enabled_tools) do
     has_current = not is_nil(GroupAgentDocument.get_current(chat_id))
-    trigger = spreadsheet_intent?(user_message) or (has_current and undo_intent?(user_message))
+    trigger = spreadsheet_intent?(user_message) or (has_current and undo_intent?(user_message)) or (has_current and resend_or_fix_intent?(user_message))
 
     "create_document" in enabled_tools and trigger and not response_contains_download_link?(response)
   end
@@ -2882,7 +2882,13 @@ defmodule Vibe.AI.GroupAgent do
       "google sheets",
       "csv",
       "rows",
-      "columns"
+      "columns",
+      # Persian terms
+      "فایل",
+      "فايل",
+      "جدول",
+      "اکسل",
+      "صفحه"
     ]
 
     action_terms = [
@@ -2897,11 +2903,39 @@ defmodule Vibe.AI.GroupAgent do
       "add",
       "append",
       "revert",
-      "undo"
+      "undo",
+      # Persian action terms
+      "بساز",
+      "بفرست",
+      "درست",
+      "اصلاح",
+      "ویرایش",
+      "اضافه",
+      "حذف",
+      "دوباره",
+      "مجدد"
     ]
 
     Enum.any?(spreadsheet_terms, &String.contains?(down, &1)) and
       Enum.any?(action_terms, &String.contains?(down, &1))
+  end
+
+  defp resend_or_fix_intent?(message) do
+    down = message |> to_string() |> String.downcase()
+
+    resend_terms = [
+      "بفرست",
+      "دوباره",
+      "مجدد",
+      "resend",
+      "send again",
+      "درست کن",
+      "اصلاح",
+      "fix",
+      "correct"
+    ]
+
+    Enum.any?(resend_terms, &String.contains?(down, &1))
   end
 
   defp response_contains_download_link?(response) do
