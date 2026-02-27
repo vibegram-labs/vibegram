@@ -359,15 +359,31 @@ private let inlineAttachmentHeight: CGFloat = 48.0
 private let inlineAttachmentSpacing: CGFloat = 8.0
 
 private func hasInlineFileAttachment(_ row: ChatListRow) -> Bool {
-  row.isAgentMessage && row.messageType == "file" && (row.mediaUrl?.isEmpty == false)
+  guard let mediaUrl = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+    !mediaUrl.isEmpty
+  else {
+    return false
+  }
+  let hasFileNameHint =
+    !(row.fileName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+  let lowerMediaURL = mediaUrl.lowercased()
+  let isAgentDocURL =
+    lowerMediaURL.contains("/uploads/agent-docs/")
+    || lowerMediaURL.contains("/api/agent/document/")
+  if isAgentDocURL {
+    return true
+  }
+  return row.isAgentMessage && (row.messageType == "file" || hasFileNameHint)
 }
 
 private func bubbleDisplayText(for row: ChatListRow) -> String {
   if row.isAgentMessage {
-    return row.plainContent ?? row.text
+    let t = row.plainContent ?? row.text
+    return t.isEmpty ? "✦" : "✦ \(t)"
   }
   if row.isAgentMention {
-    return row.textWithoutMention
+    let t = row.textWithoutMention
+    return t.isEmpty ? "✦" : "✦ \(t)"
   }
   return row.text
 }
@@ -1115,7 +1131,7 @@ final class ChatListCell: UICollectionViewCell {
 
   let bubbleView = BubbleBackgroundView()
   let tailView = BubbleTailView()
-  private let agentSenderLabel = UILabel()
+
   private let messageLabel = UILabel()
   private let mediaContainerView = UIView()
   private let mediaPrimaryIconView = UIImageView()
@@ -1160,7 +1176,7 @@ final class ChatListCell: UICollectionViewCell {
 
     contentView.addSubview(bubbleView)
     contentView.addSubview(tailView)
-    contentView.addSubview(agentSenderLabel)
+
     contentView.addSubview(messageLabel)
     contentView.addSubview(mediaContainerView)
     mediaContainerView.addSubview(mediaPrimaryIconView)
@@ -1186,11 +1202,6 @@ final class ChatListCell: UICollectionViewCell {
 
     contentView.addSubview(reactionPillView)
     reactionPillView.addSubview(reactionLabel)
-
-    agentSenderLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
-    agentSenderLabel.textColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
-    agentSenderLabel.isHidden = true
-    agentSenderLabel.numberOfLines = 1
 
     messageLabel.numberOfLines = 0
     messageLabel.font = bubbleMessageFont
@@ -1278,7 +1289,7 @@ final class ChatListCell: UICollectionViewCell {
 
     bubbleView.isHidden = true
     tailView.isHidden = true
-    agentSenderLabel.isHidden = true
+    // agentSenderLabel removed
     messageLabel.isHidden = true
     mediaContainerView.isHidden = true
     mediaPrimaryIconView.isHidden = true
@@ -1357,20 +1368,7 @@ final class ChatListCell: UICollectionViewCell {
       metaContainerView.isHidden = isGhostHidden
 
       // Agent/Mention labeling
-      if row.isAgentMessage {
-        agentSenderLabel.text = "✦ \(row.agentName ?? "Vibe AI")"
-        agentSenderLabel.textAlignment = .left
-        agentSenderLabel.isHidden = isGhostHidden
-        messageLabel.text = row.plainContent ?? row.text
-      } else if row.isAgentMention {
-        agentSenderLabel.text = "✦ Vibe AI"
-        agentSenderLabel.textAlignment = .right
-        agentSenderLabel.isHidden = isGhostHidden
-        messageLabel.text = row.textWithoutMention
-      } else {
-        agentSenderLabel.isHidden = true
-        messageLabel.text = row.text
-      }
+      messageLabel.text = bubbleDisplayText(for: row)
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
       editedLabel.isHidden = !row.isEdited
@@ -1485,11 +1483,6 @@ final class ChatListCell: UICollectionViewCell {
     applyContextMenuHoldIfNeeded(animated: false)
     contentView.alpha = 1.0
     contentView.transform = .identity
-    // Clear any residual hold-scale layer animations from the previous lifecycle.
-    for v in [bubbleView, tailView, agentSenderLabel] as [UIView] {
-      v.layer.removeAnimation(forKey: "holdScale")
-      v.layer.transform = CATransform3DIdentity
-    }
     layer.removeAllAnimations()
     contentView.layer.removeAllAnimations()
     stopTypingShimmer()
@@ -2114,48 +2107,44 @@ final class ChatListCell: UICollectionViewCell {
     reactionPillView.alpha = alpha
   }
 
-  // MARK: - Hold effect (scales bubbleView + tailView only via CALayer — never touches contentView.transform)
+  // MARK: - Hold effect
 
   private func applyContextMenuHoldIfNeeded(animated: Bool) {
     let scale: CGFloat = isContextMenuHeld ? 0.95 : 1.0
-    let scaleTransform = CATransform3DMakeScale(scale, scale, 1.0)
+    let targetTransform: CGAffineTransform
 
-    let views: [UIView] = [bubbleView, tailView, agentSenderLabel]
+    if isContextMenuHeld {
+      // Find the center of the bubble view
+      let px = bubbleView.center.x
+      let py = bubbleView.center.y
+
+      // Find the center of the contentView (the default pivot of the scale)
+      let cx = contentView.bounds.midX
+      let cy = contentView.bounds.midY
+
+      // Calculate how much the pivot moves due to scaling
+      let tx = (px - cx) * (1.0 - scale)
+      let ty = (py - cy) * (1.0 - scale)
+
+      targetTransform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
+    } else {
+      targetTransform = .identity
+    }
+
     if !animated {
-      CATransaction.begin()
-      CATransaction.setDisableActions(true)
-      for v in views { v.layer.transform = scaleTransform }
-      CATransaction.commit()
+      contentView.transform = targetTransform
       return
     }
 
-    // Use CASpringAnimation so the hold compresses and the release bounces naturally.
-    // This runs entirely on the render server — no contentView.transform involved,
-    // so it cannot conflict with the swipe-reply pan or the extraction alpha.
-    let anim = CASpringAnimation(keyPath: "transform")
-    anim.fromValue = views.first?.layer.presentation()?.transform ?? scaleTransform
-    anim.toValue = scaleTransform
-    if isContextMenuHeld {
-      // Quick, firm press-in — overdamped so no bounce on the way down
-      anim.mass = 1.0
-      anim.stiffness = 280
-      anim.damping = 28
-      anim.initialVelocity = 0
-    } else {
-      // Satisfying bounce on release
-      anim.mass = 1.0
-      anim.stiffness = 220
-      anim.damping = 18
-      anim.initialVelocity = 0
-    }
-    anim.duration = anim.settlingDuration
-    anim.fillMode = .forwards
-    anim.isRemovedOnCompletion = false
-
-    for v in views {
-      v.layer.removeAnimation(forKey: "holdScale")
-      v.layer.add(anim, forKey: "holdScale")
-      v.layer.transform = scaleTransform  // also set model layer so it stays after animation
+    // A smooth, firm press using a modern UIView spring animation
+    UIView.animate(
+      withDuration: isContextMenuHeld ? 0.28 : 0.45,
+      delay: 0,
+      usingSpringWithDamping: isContextMenuHeld ? 0.95 : 0.65,
+      initialSpringVelocity: 0,
+      options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
+    ) {
+      self.contentView.transform = targetTransform
     }
   }
 
@@ -2211,13 +2200,13 @@ final class ChatListCell: UICollectionViewCell {
       return nil
     }
 
-    // compute frame in window coordinates without the temporary hold scale
     let currentTransform = contentView.transform
     contentView.transform = .identity
     snapshot.frame = contentView.convert(captureRect, to: view)
     contentView.transform = currentTransform
 
     snapshot.clipsToBounds = false
+
     return snapshot
   }
 

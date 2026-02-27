@@ -3077,9 +3077,14 @@ final class ChatEngine {
       cachedDecryptPrivateKeyPem = nil
       cachedDecryptKeyTimestamp = nil
     }
-    if let cached = cachedDecryptPrivateKey, cachedDecryptPrivateKeyPem == pem {
-      cachedDecryptKeyTimestamp = Date()
-      return cached
+    if cachedDecryptPrivateKeyPem == pem {
+      if let cached = cachedDecryptPrivateKey {
+        cachedDecryptKeyTimestamp = Date()
+        return cached
+      }
+      if let ts = cachedDecryptKeyTimestamp, Date().timeIntervalSince(ts) < keyTTL {
+        return nil
+      }
     }
     let key = chatEnginePrivateKey(from: pem)
     if key == nil {
@@ -3116,6 +3121,30 @@ final class ChatEngine {
     }
     let mapped = rawList.compactMap { parseDoubleValue($0) }.map { max(0.0, min(1.0, $0)) }
     return mapped.isEmpty ? nil : mapped
+  }
+
+  private func deriveFileNameFromURL(_ rawURL: String?) -> String? {
+    guard let rawURL = normalizedString(rawURL), !rawURL.isEmpty else { return nil }
+    let normalizedPath = rawURL.split(separator: "?", maxSplits: 1).first.map(String.init)
+    let name = (normalizedPath ?? rawURL).split(separator: "/").last.map(String.init)
+    guard let name else { return nil }
+    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? nil : trimmed
+  }
+
+  private func isLikelyHybridCiphertext(_ raw: String?) -> Bool {
+    guard let raw = normalizedString(raw) else { return false }
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8) else {
+      return false
+    }
+    guard
+      let object = try? JSONSerialization.jsonObject(with: data),
+      let json = object as? [String: Any]
+    else {
+      return false
+    }
+    return json["iv"] != nil && json["c"] != nil && json["k"] != nil
   }
 
   private func parseDecryptedMessagePayload(_ raw: String) -> [String: Any] {
@@ -3353,11 +3382,17 @@ final class ChatEngine {
     let type = normalizedString(payload["type"]) ?? "text"
     let timestampMs = parseLongValue(payload["timestamp"]) ?? Int64(nowMs())
     let isMe = normalizedUpper(fromId) != nil && normalizedUpper(fromId) == currentUserIdLocked()
+    let rawMediaUrl = normalizedString(payload["mediaUrl"] ?? payload["media_url"])
+    let rawFileName = normalizedString(payload["fileName"] ?? payload["file_name"])
+    let derivedFileName = deriveFileNameFromURL(rawMediaUrl)
+    let encryptedLooksHybrid = isLikelyHybridCiphertext(encryptedContent)
 
     // Detect agent messages by fromId or explicit flag
     let isAgentMessage =
       (payload["isAgentMessage"] as? Bool == true)
       || (normalizedString(fromId)?.lowercased() == Self.agentUserId)
+      || (rawMediaUrl?.lowercased().contains("/uploads/agent-docs/") == true)
+      || (rawMediaUrl?.lowercased().contains("/api/agent/document/") == true)
     let plainContent = normalizedString(payload["plainContent"] ?? payload["plain_content"])
     let agentName = normalizedString(payload["agentName"] ?? payload["agent_name"])
 
@@ -3367,17 +3402,31 @@ final class ChatEngine {
       if isAgentMessage, let plainContent, !plainContent.isEmpty {
         return plainContent
       }
-      guard let encryptedContent, !encryptedContent.isEmpty,
-        let privateKey = decryptPrivateKeyLocked()
-      else {
+      guard let encryptedContent, !encryptedContent.isEmpty else {
         return ""
       }
+      if !encryptedLooksHybrid {
+        return encryptedContent
+      }
+      guard let privateKey = decryptPrivateKeyLocked() else { return "" }
       return chatEngineDecryptHybridMessage(
         privateKey: privateKey, ciphertext: encryptedContent, isMyMessage: isMe)
     }()
-    let decryptionFailed = !isAgentMessage && hadEncryptedContent && decryptedText.isEmpty
+    let decryptionFailed =
+      !isAgentMessage && hadEncryptedContent && encryptedLooksHybrid && decryptedText.isEmpty
 
-    let decryptedFields = parseDecryptedMessagePayload(decryptedText)
+    var decryptedFields = parseDecryptedMessagePayload(decryptedText)
+    if let rawMediaUrl, !rawMediaUrl.isEmpty, normalizedString(decryptedFields["mediaUrl"]) == nil {
+      decryptedFields["mediaUrl"] = rawMediaUrl
+    }
+    let fileNameForRow =
+      rawFileName
+      ?? ((normalizedString(type)?.lowercased() == "file") ? derivedFileName : nil)
+    if let fileNameForRow, !fileNameForRow.isEmpty,
+      normalizedString(decryptedFields["fileName"]) == nil
+    {
+      decryptedFields["fileName"] = fileNameForRow
+    }
     var row = buildLiveRowPayloadLocked(
       chatId: chatId,
       messageId: messageId,
@@ -3490,11 +3539,13 @@ final class ChatEngine {
         ?? Int64(nowMs())
       let isMe = normalizedUpper(fromId) != nil && normalizedUpper(fromId) == currentUserIdLocked()
       let decryptedFields: [String: Any] = {
-        guard let encryptedContent, !encryptedContent.isEmpty,
-          let privateKey = decryptPrivateKeyLocked()
-        else {
+        guard let encryptedContent, !encryptedContent.isEmpty else {
           return [:]
         }
+        if !isLikelyHybridCiphertext(encryptedContent) {
+          return parseDecryptedMessagePayload(encryptedContent)
+        }
+        guard let privateKey = decryptPrivateKeyLocked() else { return [:] }
         let decrypted = chatEngineDecryptHybridMessage(
           privateKey: privateKey,
           ciphertext: encryptedContent,
@@ -4074,18 +4125,14 @@ final class ChatEngine {
       let editedAt = raw["editedAt"] ?? raw["edited_at"]
       let rawMediaUrl = normalizedString(raw["mediaUrl"] ?? raw["media_url"])
       let rawFileName = normalizedString(raw["fileName"] ?? raw["file_name"])
-      let derivedFileName: String? = {
-        guard let rawMediaUrl else { return nil }
-        let normalizedPath = rawMediaUrl.split(separator: "?", maxSplits: 1).first.map(String.init)
-        let name = (normalizedPath ?? rawMediaUrl).split(separator: "/").last.map(String.init)
-        guard let name else { return nil }
-        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
-      }()
+      let derivedFileName = deriveFileNameFromURL(rawMediaUrl)
       let isMe = normalizedUpper(fromId) != nil && normalizedUpper(fromId) == currentUserIdLocked()
+      let encryptedLooksHybrid = isLikelyHybridCiphertext(encryptedContent)
       let historyIsAgent =
         (raw["isAgentMessage"] as? Bool == true)
         || (normalizedString(fromId)?.lowercased() == Self.agentUserId)
+        || (rawMediaUrl?.lowercased().contains("/uploads/agent-docs/") == true)
+        || (rawMediaUrl?.lowercased().contains("/api/agent/document/") == true)
       let agentPlainContent =
         normalizedString(raw["plainContent"] ?? raw["plain_content"])
         ?? encryptedContent
@@ -4099,11 +4146,14 @@ final class ChatEngine {
           return [:]
         }
 
-      if let encryptedContent, !encryptedContent.isEmpty {
-        guard let privateKey = decryptPrivateKeyLocked() else {
-          historyDecryptionFailed = true
-          return plaintextFallback.isEmpty ? [:] : ["text": plaintextFallback]
-        }
+        if let encryptedContent, !encryptedContent.isEmpty {
+          if !encryptedLooksHybrid {
+            return parseDecryptedMessagePayload(encryptedContent)
+          }
+          guard let privateKey = decryptPrivateKeyLocked() else {
+            historyDecryptionFailed = true
+            return plaintextFallback.isEmpty ? [:] : ["text": plaintextFallback]
+          }
           let decrypted = chatEngineDecryptHybridMessage(
             privateKey: privateKey,
             ciphertext: encryptedContent,
@@ -4116,8 +4166,8 @@ final class ChatEngine {
           let parsed = parseDecryptedMessagePayload(decrypted)
           if !parsed.isEmpty { return parsed }
           historyDecryptionFailed = true
-      }
-      return plaintextFallback.isEmpty ? [:] : ["text": plaintextFallback]
+        }
+        return plaintextFallback.isEmpty ? [:] : ["text": plaintextFallback]
       }()
       var enrichedFields = decryptedFields
       if let rawMediaUrl, !rawMediaUrl.isEmpty, normalizedString(enrichedFields["mediaUrl"]) == nil {
@@ -4159,7 +4209,8 @@ final class ChatEngine {
         if let reactionEmoji = normalizedString(raw["reactionEmoji"] ?? raw["reaction_emoji"]) {
           message["reactionEmoji"] = reactionEmoji
         }
-        if !historyIsAgent && hadEncryptedContent && historyDecryptionFailed {
+        if !historyIsAgent && hadEncryptedContent && encryptedLooksHybrid && historyDecryptionFailed
+        {
           message["decryptionFailed"] = true
         }
         row["message"] = message

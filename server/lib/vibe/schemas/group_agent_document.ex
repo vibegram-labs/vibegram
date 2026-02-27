@@ -63,6 +63,23 @@ defmodule Vibe.Chat.GroupAgentDocument do
   def get_by_id(id) when is_binary(id), do: Repo.get(__MODULE__, id)
   def get_by_id(_), do: nil
 
+  def get_by_blob_key(blob_key) when is_binary(blob_key) do
+    normalized = blob_key |> String.trim()
+
+    if normalized == "" do
+      nil
+    else
+      Repo.one(
+        from d in __MODULE__,
+          where: fragment("?->>'blob_key' = ?", d.metadata, ^normalized),
+          order_by: [desc: d.inserted_at],
+          limit: 1
+      )
+    end
+  end
+
+  def get_by_blob_key(_), do: nil
+
   def get_previous(chat_id, current_version) when is_integer(current_version) do
     Repo.one(
       from d in __MODULE__,

@@ -409,21 +409,24 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
       // Make sure the cell's contentView has no stale swipe-reply translation.
       cell.contentView.transform = .identity
 
-      // Fire haptic immediately, then animate the bubble scale-down via CALayer.
-      // Opening the menu right after ensures the extraction (alpha → 0) happens
-      // in the SAME run-loop iteration as the hold-scale, so there is no flicker.
+      // Fire haptic immediately and start the scale-down animation
       UIImpactFeedbackGenerator(style: .medium).impactOccurred()
       cell.setContextMenuHeld(true, animated: true)
-      openContextMenu(at: point)
 
-      // If the menu failed to open (e.g. not a message row), release the hold.
-      if customContextMenuOverlay == nil {
-        cell.setContextMenuHeld(false, animated: true)
+      // Delay opening the menu just enough (50ms) to let the bubble visually compress,
+      // giving the user physical-feeling feedback.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+        guard let self = self, gesture.state == .began || gesture.state == .changed else { return }
+        self.openContextMenu(at: point)
+
+        // If the menu failed to open (e.g. not a message row), release the hold.
+        if self.customContextMenuOverlay == nil {
+          cell.setContextMenuHeld(false, animated: true)
+        }
       }
 
     case .ended, .cancelled, .failed:
       // Belt-and-suspenders: if the overlay never opened, release the hold.
-      // (Normally dismiss happens through contextMenuDidDismiss.)
       if customContextMenuOverlay == nil {
         let point = gesture.location(in: collectionView)
         if let indexPath = collectionView.indexPathForItem(at: point),

@@ -281,11 +281,14 @@ export default function ChatScreen() {
     if (type === 'openFile') {
       const rawUrl = typeof payload.url === 'string' ? payload.url : '';
       const url = rawUrl ? normalizeOpenFileUrl(rawUrl) : '';
-      if (url) {
-        Linking.openURL(url).catch((error) => {
-          console.warn('[chat/native-main] failed to open file url', { url, error });
-        });
+      if (!url) return;
+      if (Platform.OS === 'ios') {
+        console.warn('[chat/native-main] openFile ignored on iOS; native preview should handle file open', { url });
+        return;
       }
+      Linking.openURL(url).catch((error) => {
+        console.warn('[chat/native-main] failed to open file url', { url, error });
+      });
       return;
     }
 

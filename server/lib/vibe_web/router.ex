@@ -40,6 +40,8 @@ defmodule VibeWeb.Router do
     get "/servers", ApiController, :servers
     get "/vapid-key", ApiController, :vapid_key
     get "/push/avatar/:user_id", PushAvatarController, :show
+    get "/agent/document/:key", GroupAgentController, :download_document
+    get "/agent/document/:key/:name", GroupAgentController, :download_document
   end
 
   scope "/api", VibeWeb do

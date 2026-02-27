@@ -2,6 +2,7 @@ defmodule VibeWeb.GroupAgentController do
   use VibeWeb, :controller
   alias Vibe.Chat
   alias Vibe.Chat.GroupAgent
+  alias Vibe.Chat.GroupAgentDocument
   alias Vibe.AI.GroupAgent, as: AIGroupAgent
 
   # POST /api/group/:id/agent — Create/configure agent (owner/admin only)
@@ -181,6 +182,58 @@ defmodule VibeWeb.GroupAgentController do
     end
   end
 
+  # GET /api/agent/document/:key(/:name) — Download/preview generated agent document
+  def download_document(conn, %{"key" => blob_key}) do
+    case GroupAgentDocument.get_by_blob_key(blob_key) do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "Document not found"})
+
+      document ->
+        metadata = if is_map(document.metadata), do: document.metadata, else: %{}
+        content = metadata["inline_content"] || metadata[:inline_content]
+
+        if is_binary(content) do
+          content_type_raw =
+            (metadata["content_type"] || metadata[:content_type] || "text/csv")
+            |> to_string()
+            |> String.trim()
+
+          content_type =
+            content_type_raw
+            |> case do
+              "" ->
+                "text/csv"
+
+              value ->
+                value
+                |> String.split(";", parts: 2)
+                |> List.first()
+                |> to_string()
+                |> String.trim()
+                |> case do
+                  "" -> "text/csv"
+                  mime -> mime
+                end
+            end
+
+          file_name =
+            metadata["download_name"] || metadata[:download_name] ||
+              Path.basename(to_string(document.relative_url || "document.csv"))
+
+          conn
+          |> put_resp_header("cache-control", "private, max-age=31536000")
+          |> put_resp_header(
+            "content-disposition",
+            ~s(inline; filename="#{safe_download_filename(file_name)}")
+          )
+          |> put_resp_content_type(content_type)
+          |> send_resp(200, content)
+        else
+          conn |> put_status(:not_found) |> json(%{error: "Document content not found"})
+        end
+    end
+  end
+
   # ── Helpers ──
 
   defp authorize_admin(chat_id, user_id) do
@@ -224,4 +277,15 @@ defmodule VibeWeb.GroupAgentController do
     |> Enum.join("; ")
   end
   defp format_errors(error), do: inspect(error)
+
+  defp safe_download_filename(value) do
+    value
+    |> to_string()
+    |> String.replace(~r/[\r\n"]+/, "_")
+    |> String.trim()
+    |> case do
+      "" -> "document.csv"
+      filename -> filename
+    end
+  end
 end

@@ -763,18 +763,20 @@ defmodule Vibe.AI.GroupAgent do
     rows = spreadsheet_rows(input, columns, body, [])
     csv_content = csv_from_rows(columns, rows)
 
-    with {:ok, %{relative_url: relative_url, file_url: file_url}} <-
-           write_agent_document_file(title, csv_content, "csv"),
+    with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv"),
          {:ok, doc} <-
            persist_document_version(
              chat_id,
              title,
              "csv",
-             relative_url,
-             file_url,
+             storage.relative_url,
+             storage.file_url,
              columns,
              length(rows),
-             build_spreadsheet_metadata("create_new", nil, body),
+             merge_document_metadata(
+               build_spreadsheet_metadata("create_new", nil, body),
+               storage.metadata
+             ),
              "create",
              user_id
            ) do
@@ -805,7 +807,7 @@ defmodule Vibe.AI.GroupAgent do
     if is_nil(current_document) do
       create_new_spreadsheet_document(chat_id, input, title, body, sections, user_id)
     else
-      with {:ok, existing_csv} <- read_agent_document_file(current_document.relative_url) do
+      with {:ok, existing_csv} <- read_agent_document_file(current_document) do
         {existing_columns, existing_rows} = parse_csv_content(existing_csv)
         columns = spreadsheet_columns(input, sections, existing_columns)
         existing_rows_aligned = align_rows_to_column_count(existing_rows, length(columns))
@@ -835,18 +837,20 @@ defmodule Vibe.AI.GroupAgent do
 
         csv_content = csv_from_rows(columns, final_rows)
 
-        with {:ok, %{relative_url: relative_url, file_url: file_url}} <-
-               write_agent_document_file(title, csv_content, "csv"),
+        with {:ok, storage} <- write_agent_document_file(title, csv_content, "csv"),
              {:ok, doc} <-
                persist_document_version(
                  chat_id,
                  title,
                  "csv",
-                 relative_url,
-                 file_url,
+                 storage.relative_url,
+                 storage.file_url,
                  columns,
                  length(final_rows),
-                 build_spreadsheet_metadata(to_string(operation), current_document.version, body),
+                 merge_document_metadata(
+                   build_spreadsheet_metadata(to_string(operation), current_document.version, body),
+                   storage.metadata
+                 ),
                  "edit",
                  user_id
                ) do
@@ -889,20 +893,22 @@ defmodule Vibe.AI.GroupAgent do
           error: "No previous spreadsheet version available to revert."
         }
       else
-        with {:ok, csv_content} <- read_agent_document_file(previous_document.relative_url),
+        with {:ok, csv_content} <- read_agent_document_file(previous_document),
              {columns, rows} <- parse_csv_content(csv_content),
-             {:ok, %{relative_url: relative_url, file_url: file_url}} <-
-               write_agent_document_file(previous_document.title, csv_content, "csv"),
+             {:ok, storage} <- write_agent_document_file(previous_document.title, csv_content, "csv"),
              {:ok, doc} <-
                persist_document_version(
                  chat_id,
                  previous_document.title,
                  "csv",
-                 relative_url,
-                 file_url,
+                 storage.relative_url,
+                 storage.file_url,
                  columns,
                  length(rows),
-                 build_spreadsheet_metadata("revert_last", current_document.version, body),
+                 merge_document_metadata(
+                   build_spreadsheet_metadata("revert_last", current_document.version, body),
+                   storage.metadata
+                 ),
                  "revert",
                  user_id
                ) do
@@ -1117,6 +1123,24 @@ defmodule Vibe.AI.GroupAgent do
     text != "" and text != "draft content" and text != "document"
   end
 
+  defp merge_document_metadata(base_metadata, storage_metadata) do
+    base = if is_map(base_metadata), do: base_metadata, else: %{}
+    storage = if is_map(storage_metadata), do: storage_metadata, else: %{}
+    Map.merge(base, storage)
+  end
+
+  defp read_agent_document_file(%GroupAgentDocument{} = document) do
+    metadata = if is_map(document.metadata), do: document.metadata, else: %{}
+
+    case metadata["inline_content"] || metadata[:inline_content] do
+      inline_content when is_binary(inline_content) ->
+        {:ok, inline_content}
+
+      _ ->
+        read_agent_document_file(document.relative_url)
+    end
+  end
+
   defp read_agent_document_file(relative_url) do
     with {:ok, full_path} <- resolve_agent_document_path(relative_url),
          {:ok, content} <- File.read(full_path) do
@@ -1252,21 +1276,35 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp write_agent_document_file(title, content, extension) do
-    docs_dir = Path.join(@uploads_dir, @agent_docs_dir)
     filename = build_agent_document_filename(title, extension)
-    full_path = Path.join(docs_dir, filename)
-    relative_url = "/uploads/#{@agent_docs_dir}/#{filename}"
+    blob_key = build_agent_document_blob_key()
+    relative_url = "/api/agent/document/#{blob_key}/#{filename}"
 
-    with :ok <- File.mkdir_p(docs_dir),
-         :ok <- File.write(full_path, content) do
-      {:ok,
-       %{
-         relative_url: relative_url,
-         file_url: public_upload_url(relative_url)
-       }}
-    else
-      {:error, reason} ->
-        {:error, reason}
+    {:ok,
+     %{
+       relative_url: relative_url,
+       file_url: public_upload_url(relative_url),
+       metadata: %{
+         "storage_kind" => "db_inline",
+         "blob_key" => blob_key,
+         "download_name" => filename,
+         "content_type" => content_type_for_extension(extension),
+         "inline_content" => to_string(content || "")
+       }
+     }}
+  end
+
+  defp build_agent_document_blob_key do
+    :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+  end
+
+  defp content_type_for_extension(extension) do
+    case extension |> to_string() |> String.trim() |> String.downcase() do
+      "csv" -> "text/csv"
+      "json" -> "application/json"
+      "html" -> "text/html"
+      "txt" -> "text/plain"
+      _ -> "application/octet-stream"
     end
   end
 
@@ -1540,6 +1578,7 @@ defmodule Vibe.AI.GroupAgent do
     text = response |> to_string() |> String.downcase()
 
     String.contains?(text, "/uploads/") or
+      String.contains?(text, "/api/agent/document/") or
       Regex.match?(~r/https?:\/\/\S+\.(csv|xlsx?)(\?\S*)?/i, text) or
       Regex.match?(~r/https?:\/\/\S+\/agent-docs\/\S+/i, text)
   end
@@ -1834,10 +1873,13 @@ defmodule Vibe.AI.GroupAgent do
     absolute =
       Regex.scan(~r/https?:\/\/[^\s)]+/i, normalized_text)
       |> List.flatten()
-      |> Enum.find(&String.contains?(&1, "/uploads/#{@agent_docs_dir}/"))
+      |> Enum.find(fn url ->
+        String.contains?(url, "/uploads/#{@agent_docs_dir}/")
+          || String.contains?(url, "/api/agent/document/")
+      end)
 
     relative =
-      Regex.scan(~r/\/uploads\/agent-docs\/[^\s)]+/i, normalized_text)
+      Regex.scan(~r/(?:\/uploads\/agent-docs\/[^\s)]+|\/api\/agent\/document\/[^\s)]+)/i, normalized_text)
       |> List.flatten()
       |> List.first()
 
@@ -1901,6 +1943,8 @@ defmodule Vibe.AI.GroupAgent do
 
   defp strip_upload_links(text) do
     text
+    |> String.replace(~r/https?:\/\/[^\s)]*\/api\/agent\/document\/[^\s)]+/i, "")
+    |> String.replace(~r/\/api\/agent\/document\/[^\s)]+/i, "")
     |> String.replace(~r/https?:\/\/[^\s)]*\/uploads\/agent-docs\/[^\s)]+/i, "")
     |> String.replace(~r/\/uploads\/agent-docs\/[^\s)]+/i, "")
     |> String.replace(~r/\[([^\]]+)\]\(\s*\)/, "\\1")

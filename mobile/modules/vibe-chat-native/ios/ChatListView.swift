@@ -13,7 +13,9 @@ private final class ChatListDocumentPreviewDataSource: NSObject, QLPreviewContro
     1
   }
 
-  func previewController(_ controller: QLPreviewController, previewItemAt index: Int) -> QLPreviewItem {
+  func previewController(_ controller: QLPreviewController, previewItemAt index: Int)
+    -> QLPreviewItem
+  {
     previewURL as NSURL
   }
 }
@@ -122,12 +124,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private static var wallpaperMaskImageCache: [String: CGImage] = [:]
   private static let cachedThemeIdDefaultsKey = "vibe.chat.native.themeId.v1"
   private static let cachedThemeIsDarkDefaultsKey = "vibe.chat.native.themeIsDark.v1"
-  private static let documentPreviewSession: URLSession = {
-    if #available(iOS 13.0, *) {
-      return ChatPhoenixClient.makePinnedURLSession()
-    }
-    return URLSession.shared
-  }()
+  private static let documentPreviewSession: URLSession = URLSession.shared
 
   private var isPeerTyping: Bool = false
 
@@ -1041,11 +1038,22 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     return cell
   }
 
-  public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+  public func collectionView(
+    _ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath
+  ) {
     guard indexPath.item < rows.count else { return }
     let row = rows[indexPath.item]
-    guard row.isAgentMessage, row.messageType == "file" else { return }
-    guard let mediaURL = row.mediaUrl, !mediaURL.isEmpty else { return }
+    guard let mediaURLRaw = row.mediaUrl else { return }
+    let mediaURL = mediaURLRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !mediaURL.isEmpty else { return }
+    let hasFileNameHint =
+      !(row.fileName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    let isFileLikeType = row.messageType == "file"
+    let lowerMediaURL = mediaURL.lowercased()
+    let isAgentDocURL =
+      lowerMediaURL.contains("/uploads/agent-docs/")
+      || lowerMediaURL.contains("/api/agent/document/")
+    guard isFileLikeType || hasFileNameHint || isAgentDocURL else { return }
     openDocumentInApp(urlString: mediaURL)
   }
 
@@ -1228,12 +1236,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private func estimateMessageHeight(_ row: ChatListRow, rowWidth: CGFloat) -> CGFloat {
-    let bubbleHeight = measureMessageBubbleLayout(row: row, rowWidth: rowWidth).bubbleHeight
-    // Agent messages/mentions have a sender label above the bubble
-    if row.isAgentMessage || row.isAgentMention {
-      return bubbleHeight + 20.0  // 18pt label + 2pt gap
-    }
-    return bubbleHeight
+    return measureMessageBubbleLayout(row: row, rowWidth: rowWidth).bubbleHeight
   }
 
   private func currentDistanceFromBottom() -> CGFloat {
@@ -2520,18 +2523,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return
     }
 
-    onNativeEvent([
-      "type": "openFile",
-      "url": resolved,
-    ])
+    NSLog("[ChatListView] openDocumentInApp unsupported url=%@", resolved)
   }
 
   private func presentDocumentPreview(localURL: URL) {
     guard let presenter = topPresentingViewController() else {
-      onNativeEvent([
-        "type": "openFile",
-        "url": localURL.path,
-      ])
+      NSLog(
+        "[ChatListView] presentDocumentPreview skipped - presenter unavailable for %@",
+        localURL.path)
       return
     }
     let preview = QLPreviewController()
@@ -2543,10 +2542,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
   private func openRemoteDocumentInPreview(remoteURL: URL, fallbackURL: String) {
     guard topPresentingViewController() != nil else {
-      onNativeEvent([
-        "type": "openFile",
-        "url": fallbackURL,
-      ])
+      NSLog(
+        "[ChatListView] openRemoteDocumentInPreview skipped - presenter unavailable for %@",
+        fallbackURL)
       return
     }
 
@@ -2563,7 +2561,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     var request = URLRequest(url: remoteURL)
     request.timeoutInterval = 60
-    let task = Self.documentPreviewSession.downloadTask(with: request) { [weak self] tempURL, response, error in
+    let task = Self.documentPreviewSession.downloadTask(with: request) {
+      [weak self] tempURL, response, error in
       guard let self else { return }
       let localURL = self.persistDownloadedDocument(
         tempURL: tempURL,
@@ -2578,10 +2577,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           self.presentDocumentPreview(localURL: localURL)
           return
         }
-        self.onNativeEvent([
-          "type": "openFile",
-          "url": fallbackURL,
-        ])
+        NSLog("[ChatListView] openRemoteDocumentInPreview failed url=%@", fallbackURL)
       }
     }
     task.resume()
@@ -2594,7 +2590,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     error: Error?
   ) -> URL? {
     guard error == nil, let tempURL else { return nil }
-    if let statusCode = (response as? HTTPURLResponse)?.statusCode, !(200...299).contains(statusCode) {
+    if let statusCode = (response as? HTTPURLResponse)?.statusCode,
+      !(200...299).contains(statusCode)
+    {
       return nil
     }
 
@@ -2611,7 +2609,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let safeBase =
       (remoteFileName.isEmpty ? "document" : remoteFileName)
       .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
-    let extensionValue = remoteURL.pathExtension.isEmpty ? tempURL.pathExtension : remoteURL.pathExtension
+    let extensionValue =
+      remoteURL.pathExtension.isEmpty ? tempURL.pathExtension : remoteURL.pathExtension
     let destinationName =
       "\(safeBase)-\(UUID().uuidString)\(extensionValue.isEmpty ? "" : ".\(extensionValue)")"
     let destinationURL = previewDir.appendingPathComponent(destinationName, isDirectory: false)
