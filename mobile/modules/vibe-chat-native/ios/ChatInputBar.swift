@@ -97,6 +97,20 @@ final class FluidVADVisualizer: UIView {
   }
 }
 
+private final class ChatComposerTextView: UITextView {
+  override func paste(_ sender: Any?) {
+    if let clipboardText = UIPasteboard.general.string, !clipboardText.isEmpty {
+      if let selected = selectedTextRange {
+        replace(selected, withText: clipboardText)
+      } else {
+        insertText(clipboardText)
+      }
+      return
+    }
+    super.paste(sender)
+  }
+}
+
 private final class VideoNoteRecorderViewController: UIViewController,
   AVCaptureFileOutputRecordingDelegate
 {
@@ -644,7 +658,7 @@ final class ChatInputBar: UIView {
   private let pillContainer = UIView()
   private let pillGlass = UIVisualEffectView(effect: nil)
   private let pillTapOverlay = UIView()
-  private let textView = UITextView()
+  private let textView = ChatComposerTextView()
   private let placeholderLabel = UILabel()
   private let gifButton = UIButton(type: .system)
   private let sendButton = UIButton(type: .system)
@@ -979,8 +993,12 @@ final class ChatInputBar: UIView {
     textView.font = UIFont.systemFont(ofSize: 16)
     textView.textContainerInset = .zero
     textView.textContainer.lineFragmentPadding = 0
+    textView.isEditable = true
+    textView.isSelectable = true
+    textView.allowsEditingTextAttributes = false
     textView.isScrollEnabled = false
-    textView.returnKeyType = .send
+    // Keep multiline input behavior: show "return" key instead of iOS blue "send".
+    textView.returnKeyType = .default
     textView.delegate = self
     textView.showsVerticalScrollIndicator = false
     pillContainer.addSubview(textView)
@@ -1417,8 +1435,10 @@ final class ChatInputBar: UIView {
     contentRow.frame = CGRect(x: 0, y: rowY, width: w, height: rowH)
 
     // Side buttons are perfectly circular
+    // Pin them to the bottom of the pill, aligned with the text input box,
+    // so they don't float up when text expands or banners are added.
     let textRowH = clampedTextH + textInsetV * 2
-    let btnCenterY = bannerExtra + (textRowH / 2)
+    let btnCenterY = pillH - (textRowH / 2)
     let squareBounds = CGRect(origin: .zero, size: CGSize(width: sideSize, height: sideSize))
 
     attachButton.bounds = squareBounds
@@ -2820,10 +2840,7 @@ extension ChatInputBar: UITextViewDelegate {
   func textView(_ tv: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String)
     -> Bool
   {
-    if text == "\n" {
-      sendTapped()
-      return false
-    }
+    // Allow newline insertion from keyboard return key.
     return true
   }
 }
@@ -2834,6 +2851,11 @@ extension ChatInputBar: UIGestureRecognizerDelegate {
   {
     guard gestureRecognizer.view === pillContainer else { return true }
     guard let touchedView = touch.view else { return true }
+
+    if touchedView.isDescendant(of: textView) {
+      // Do not intercept UITextView touches; keep native select/copy/paste menu behavior.
+      return false
+    }
 
     if touchedView.isDescendant(of: gifButton)
       || touchedView.isDescendant(of: sendButton)
