@@ -265,17 +265,31 @@ def xlsx():
 
         num_cols = len(display_columns)
 
-        # Keywords that mark a total/summary row
-        TOTAL_KEYWORDS = [
-            "مجموع", "جمع کل", "جمع", "کل", "total", "sum", "subtotal",
-            "grand total", "مجموع کل", "خلاصه"
+        # Keywords that mark a total/summary row — must match as whole word/phrase,
+        # not as a substring (e.g. "کل" must NOT match "سکله")
+        TOTAL_KEYWORDS_EXACT = [
+            "مجموع", "جمع کل", "مجموع کل", "total", "sum", "subtotal",
+            "grand total", "خلاصه"
+        ]
+        # Keywords that must appear at the START of the cell text
+        TOTAL_KEYWORDS_PREFIX = [
+            "جمع کل", "مجموع", "جمع:", "total", "sum"
         ]
 
         def is_total_row(row_data):
-            return any(
-                any(kw in str(cell).lower() for kw in TOTAL_KEYWORDS)
-                for cell in row_data
-            )
+            """Detect total/summary rows without false positives."""
+            for cell in row_data:
+                text = str(cell).strip().lower()
+                if not text:
+                    continue
+                # Exact match: entire cell is a total keyword
+                if text in TOTAL_KEYWORDS_EXACT:
+                    return True
+                # Prefix match: cell starts with a total keyword
+                for kw in TOTAL_KEYWORDS_PREFIX:
+                    if text.startswith(kw):
+                        return True
+            return False
 
         # ── Auto-size column widths ──
         for i, col in enumerate(display_columns, 1):

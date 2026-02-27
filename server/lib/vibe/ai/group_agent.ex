@@ -419,6 +419,10 @@ defmodule Vibe.AI.GroupAgent do
       * Word numbers: "یک"=1, "دو"=2, "سه"=3, "چهار"=4, "پنج"=5, "شش"=6, "هفت"=7, "هشت"=8, "نه"=9, "ده"=10, "بیست"=20, "سی"=30, "چهل"=40, "پنجاه"=50, "صد"=100
     - When writing numbers into spreadsheet cells, use plain numeric format with comma separators (e.g. "2,500,000") — do NOT write the Persian word form.
 
+    - CRITICAL ACCURACY: When computing totals/sums, calculate ONLY from the data the user provided. Do NOT invent, duplicate, or add extra rows. Double-check every multiplication (weight × price) and sum before outputting. If a number looks wrong, recompute it.
+    - TOTALS IN TEXT, NOT IN TABLE: When the user says "add the total" or "با مجموع", put the total summary in your TEXT response, NOT as an extra row in the spreadsheet — unless the user explicitly says "add a total row at the bottom" (ردیف مجموع اضافه کن). If the user says "include total in text" or "جمع رو بنویس", write it in the message body.
+    - STRICT COLUMNS: Create EXACTLY the columns the user specified. If they say 4 columns, create 4 columns. Do not add helper columns, word-form columns, or extra descriptive columns.
+
     DOCUMENT & SPREADSHEET:
     - For document/file requests, generate professional outputs with clean structure and naming.
     - When a tool creates/updates a file, respond naturally and state that the file is attached (do not paste raw URLs).
