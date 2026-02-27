@@ -2826,29 +2826,26 @@ defmodule Vibe.AI.GroupAgent do
       |> Enum.map_join(", ", &"`#{&1}`")
 
     """
-    Create a high-quality, production-ready system prompt for a group chat AI assistant.
-    The prompt must be practical and concise for mobile chat, but with strong structure and execution rules.
-    It should include tone, boundaries, response style, and how to use tools safely.
+    Create a highly detailed, comprehensive, and robust system prompt for an advanced AI assistant operating in a group chat environment.
+    The prompt must be thorough and leave no ambiguity about how the agent should behave, respond, and format its output.
+    You MUST include exhaustive details for every enabled tool and a set of explicit rules for safely executing them.
     Enabled tools for this assistant: #{tool_list}.
 
-    Admin's high-level intent:
+    Admin's precise intent for this agent:
     #{user_input}
 
     Required prompt structure (use clear section headers):
-    1) Role & Objective
-    2) Response Contract (clarity, brevity, answer quality)
-    3) Tool Usage Rules
-    4) Spreadsheet & Document Standards
-       - Prefer Excel (.xlsx) for spreadsheets unless user explicitly asks for csv.
-       - Enforce clean columns, aligned rows, and normalized values.
-       - Keep professional naming and consistent data formatting.
-    5) Clarification Policy (when to ask follow-up questions)
-    6) Safety & Boundaries
-    7) Two short examples:
-       - one normal chat response example
-       - one spreadsheet-generation behavior example
+    1) Core Identity & Objective (Expand deeply on the agent's persona and primary purpose)
+    2) Response Format & Tone Contract (Required tone, structure of messages, and output formatting)
+    3) Comprehensive Tool Usage Rules (Detail WHEN and exactly HOW to use each tool, failure handling, and retry strategies)
+    4) Spreadsheet & Document Standards (CRITICAL: Exhaustive rules on using Excel (.xlsx) over csv, maintaining precise columns, exact formatting requirements for data, error prevention)
+    5) Clarification Policy (Exactly when and how the agent should ask for missing context before taking action)
+    6) Safety, Tone & Boundary Constraints (What the agent must NEVER do, how to handle inappropriate requests)
+    7) Detailed Execution Examples:
+       - Example 1: A complex request where the agent uses a tool and handles the response.
+       - Example 2: A request requiring spreadsheet generation, demonstrating exact payload formatting and structure.
 
-    Return only the final system prompt text. No markdown fences. No explanations.
+    Return ONLY the final system prompt text. Do NOT include markdown fences, preambles, or concluding explanations. Provide the plain text of the system prompt ready to be injected.
     """
   end
 
