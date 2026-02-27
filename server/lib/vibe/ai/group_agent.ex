@@ -3114,6 +3114,9 @@ defmodule Vibe.AI.GroupAgent do
   end
 
   defp extract_tool_attachment("create_document", result), do: attachment_from_document_result(result)
+  defp extract_tool_attachment("edit_rows", result), do: attachment_from_document_result(result)
+  defp extract_tool_attachment("delete_rows", result), do: attachment_from_document_result(result)
+  defp extract_tool_attachment("export_rows", result), do: attachment_from_document_result(result)
   defp extract_tool_attachment(_tool_name, _result), do: nil
 
   defp attachment_from_document_result(result) when is_map(result) do
