@@ -509,6 +509,7 @@ defmodule Vibe.AI.GroupAgent do
     - For "pin it" right after a file is created/exported, default to target=latest_agent_file.
     - If user specifies a specific message, pass message_id.
     - After pin/unpin, confirm exactly what was pinned/unpinned.
+    - STRICT CONFIRMATION GATE: you must not claim "pinned/unpinned" unless pin_message returned ok=true in this turn.
 
     ROW-LEVEL EDITING:
     - For targeted edits (changing a few cells or rows), use find_rows to locate the row first, then edit_rows with the row index. Do NOT resend all rows via create_document for small changes.
@@ -708,7 +709,8 @@ defmodule Vibe.AI.GroupAgent do
         enabled_tools,
         enabled_tool_definitions,
         chat_id,
-        nil
+        nil,
+        %{pin_message_called: false, pin_message_ok: false}
       )
     end
   end
@@ -722,7 +724,8 @@ defmodule Vibe.AI.GroupAgent do
          enabled_tools,
          enabled_tool_definitions,
          chat_id,
-         pending_attachment
+         pending_attachment,
+         tool_audit
        ) do
     if depth > @max_claude_tool_depth do
       {:error, "Max tool depth reached (#{@max_claude_tool_depth})"}
@@ -761,19 +764,46 @@ defmodule Vibe.AI.GroupAgent do
                   enabled_tools,
                   enabled_tool_definitions,
                   chat_id,
-                  pending_attachment
+                  pending_attachment,
+                  tool_audit
                 )
               else
                 # Extract text from response
                 text = extract_text(content)
-                {:ok, %{text: text, attachment: pending_attachment}}
+                maybe_force_llm_confirmation(
+                  messages,
+                  content,
+                  text,
+                  system_prompt,
+                  api_key,
+                  depth,
+                  user_id,
+                  enabled_tools,
+                  enabled_tool_definitions,
+                  chat_id,
+                  pending_attachment,
+                  tool_audit
+                )
               end
 
             {:ok, %{"content" => content} = parsed} ->
               Logger.info("[GroupAgent] Claude response received, stop_reason=#{inspect(Map.get(parsed, "stop_reason"))}")
               # Extract text from response
               text = extract_text(content)
-              {:ok, %{text: text, attachment: pending_attachment}}
+              maybe_force_llm_confirmation(
+                messages,
+                content,
+                text,
+                system_prompt,
+                api_key,
+                depth,
+                user_id,
+                enabled_tools,
+                enabled_tool_definitions,
+                chat_id,
+                pending_attachment,
+                tool_audit
+              )
 
             other ->
               Logger.error("[GroupAgent] Failed to parse Claude response: #{inspect(other)}")
@@ -800,7 +830,8 @@ defmodule Vibe.AI.GroupAgent do
          enabled_tools,
          enabled_tool_definitions,
          chat_id,
-         pending_attachment
+         pending_attachment,
+         tool_audit
        ) do
     # Extract tool calls from content
     tool_calls = Enum.filter(content, fn
@@ -809,10 +840,11 @@ defmodule Vibe.AI.GroupAgent do
     end)
 
     # Execute tools and carry forward latest attachment from create_document.
-    {tool_results, latest_attachment} =
-      Enum.reduce(tool_calls, {[], pending_attachment}, fn tool, {acc_results, acc_attachment} ->
+    {tool_results, latest_attachment, next_tool_audit} =
+      Enum.reduce(tool_calls, {[], pending_attachment, tool_audit}, fn tool, {acc_results, acc_attachment, acc_audit} ->
         result = execute_tool(tool["name"], tool["input"], user_id, enabled_tools, chat_id)
         tool_attachment = extract_tool_attachment(tool["name"], result)
+        updated_audit = update_tool_audit(acc_audit, tool["name"], result)
 
         tool_result = %{
           "type" => "tool_result",
@@ -821,7 +853,7 @@ defmodule Vibe.AI.GroupAgent do
         }
 
         next_attachment = tool_attachment || acc_attachment
-        {[tool_result | acc_results], next_attachment}
+        {[tool_result | acc_results], next_attachment, updated_audit}
       end)
 
     tool_results = Enum.reverse(tool_results)
@@ -849,9 +881,199 @@ defmodule Vibe.AI.GroupAgent do
       enabled_tools,
       enabled_tool_definitions,
       chat_id,
-      latest_attachment
+      latest_attachment,
+      next_tool_audit
     )
   end
+
+  defp content_blocks_from_claude_content(content) when is_list(content) do
+    Enum.map(content, fn
+      %{"type" => "text", "text" => text} -> %{type: "text", text: text}
+      %{"type" => "tool_use", "id" => id, "name" => name, "input" => input} ->
+        %{type: "tool_use", id: id, name: name, input: input}
+      other -> other
+    end)
+  end
+
+  defp content_blocks_from_claude_content(_), do: []
+
+  defp maybe_force_llm_confirmation(
+         messages,
+         content,
+         text,
+         system_prompt,
+         api_key,
+         depth,
+         user_id,
+         enabled_tools,
+         enabled_tool_definitions,
+         chat_id,
+         pending_attachment,
+         tool_audit
+       ) do
+    case llm_confirm_tool_execution(messages, text, tool_audit, api_key) do
+      {:ok, :pass} ->
+        {:ok, %{text: text, attachment: pending_attachment}}
+
+      {:ok, {:retry, retry_instruction}} ->
+        Logger.warning(
+          "[GroupAgent] LLM confirmation gate requested retry before final response chat_id=#{chat_id} instruction=#{inspect(retry_instruction)}"
+        )
+
+        assistant_content = content_blocks_from_claude_content(content)
+
+        forced_user_check = %{
+          role: "user",
+          content: [
+            %{
+              type: "text",
+              text: retry_instruction
+            }
+          ]
+        }
+
+        call_claude_with_tools(
+          messages ++ [%{role: "assistant", content: assistant_content}, forced_user_check],
+          system_prompt,
+          api_key,
+          depth + 1,
+          user_id,
+          enabled_tools,
+          enabled_tool_definitions,
+          chat_id,
+          pending_attachment,
+          tool_audit
+        )
+
+      {:error, reason} ->
+        Logger.warning(
+          "[GroupAgent] LLM confirmation gate failed, allowing response chat_id=#{chat_id} reason=#{inspect(reason)}"
+        )
+
+        {:ok, %{text: text, attachment: pending_attachment}}
+    end
+  end
+
+  defp update_tool_audit(audit, "pin_message", result) when is_map(audit) do
+    pin_ok =
+      case result do
+        %{ok: true} -> true
+        %{"ok" => true} -> true
+        _ -> false
+      end
+
+    audit
+    |> Map.put(:pin_message_called, true)
+    |> Map.put(:pin_message_ok, Map.get(audit, :pin_message_ok, false) or pin_ok)
+  end
+
+  defp update_tool_audit(audit, _tool_name, _result) when is_map(audit), do: audit
+  defp update_tool_audit(_audit, _tool_name, _result), do: %{pin_message_called: false, pin_message_ok: false}
+
+  defp llm_confirm_tool_execution(messages, draft_response_text, tool_audit, api_key) do
+    latest_user_text =
+      messages
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        %{role: "user", content: content} -> extract_text_from_message_content(content)
+        _ -> nil
+      end)
+      |> to_string()
+      |> String.trim()
+
+    audit_payload = %{
+      pin_message_called: Map.get(tool_audit, :pin_message_called, false),
+      pin_message_ok: Map.get(tool_audit, :pin_message_ok, false)
+    }
+
+    confirmation_prompt = """
+    You are a strict execution validator.
+    Decide whether this assistant draft is allowed to be sent.
+
+    Rules:
+    - Return JSON only (no markdown).
+    - Determine from the user request intent whether pin/unpin action is required.
+    - If pin/unpin is required, the response is allowed only when pin_message_ok=true.
+    - If pin/unpin is not required, allow response.
+
+    Output schema:
+    {"allow": boolean, "needs_pin_action": boolean, "retry_instruction": string}
+
+    latest_user_request:
+    #{latest_user_text}
+
+    draft_assistant_response:
+    #{draft_response_text}
+
+    tool_audit:
+    #{Jason.encode!(audit_payload)}
+    """
+
+    body = Jason.encode!(%{
+      model: @claude_model,
+      max_tokens: 220,
+      system: "Return strict JSON only.",
+      messages: [%{role: "user", content: confirmation_prompt}]
+    })
+
+    headers = [
+      {"Content-Type", "application/json"},
+      {"x-api-key", api_key},
+      {"anthropic-version", "2023-06-01"}
+    ]
+
+    request = Finch.build(:post, @claude_api, headers, body)
+
+    with {:ok, %{status: 200, body: resp_body}} <- Finch.request(request, Vibe.Finch, receive_timeout: 15_000),
+         {:ok, %{"content" => content}} <- Jason.decode(resp_body),
+         raw_text when is_binary(raw_text) <- extract_text(content),
+         {:ok, parsed} <- Jason.decode(raw_text) do
+      allow = Map.get(parsed, "allow") == true
+      needs_pin_action = Map.get(parsed, "needs_pin_action") == true
+      retry_instruction_raw = Map.get(parsed, "retry_instruction")
+
+      retry_instruction =
+        if is_binary(retry_instruction_raw) and String.trim(retry_instruction_raw) != "" do
+          String.trim(retry_instruction_raw)
+        else
+          "SYSTEM CONFIRMATION GATE: Pin/unpin was requested. You must execute pin_message successfully, verify result, then reply."
+        end
+
+      Logger.info(
+        "[GroupAgent] LLM confirmation result allow=#{allow} needs_pin_action=#{needs_pin_action} pin_message_ok=#{Map.get(tool_audit, :pin_message_ok, false)}"
+      )
+
+      if allow do
+        {:ok, :pass}
+      else
+        {:ok, {:retry, retry_instruction}}
+      end
+    else
+      {:ok, %{status: status, body: body}} ->
+        {:error, {:confirmation_api_error, status, String.slice(body, 0..220)}}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      other ->
+        {:error, {:confirmation_parse_error, other}}
+    end
+  end
+
+  defp extract_text_from_message_content(content) when is_binary(content), do: content
+
+  defp extract_text_from_message_content(content) when is_list(content) do
+    content
+    |> Enum.map(fn
+      %{"type" => "text", "text" => text} when is_binary(text) -> text
+      %{type: "text", text: text} when is_binary(text) -> text
+      _ -> ""
+    end)
+    |> Enum.join(" ")
+    |> String.trim()
+  end
+
+  defp extract_text_from_message_content(_), do: nil
 
   defp execute_tool(name, input, user_id, enabled_tools, chat_id) do
     if name in enabled_tools do
