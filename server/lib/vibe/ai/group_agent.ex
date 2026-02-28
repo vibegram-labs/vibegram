@@ -26,6 +26,7 @@ defmodule Vibe.AI.GroupAgent do
   @max_agent_document_bytes 1_000_000
   @max_claude_tool_depth 8
   @max_tool_attempts 3
+  @always_enabled_tools ["pin_message"]
 
   @default_system_prompt """
   You are Vibe AI, a helpful assistant in this group chat.
@@ -256,9 +257,12 @@ defmodule Vibe.AI.GroupAgent do
   @doc """
   Normalize enabled tools list coming from API input/database.
   Falls back to all available tools if list is empty or invalid.
+  Mandatory tools are always enabled even if omitted in selections.
   """
   def normalize_enabled_tools(raw_tools) do
-    allowed = MapSet.new(available_tool_names())
+    available = available_tool_names()
+    allowed = MapSet.new(available)
+    mandatory = Enum.filter(@always_enabled_tools, &MapSet.member?(allowed, &1))
 
     normalized =
       raw_tools
@@ -269,7 +273,9 @@ defmodule Vibe.AI.GroupAgent do
       |> Enum.uniq()
       |> Enum.filter(&MapSet.member?(allowed, &1))
 
-    if normalized == [], do: available_tool_names(), else: normalized
+    selected = if normalized == [], do: available, else: normalized
+    selected_set = MapSet.new(selected ++ mandatory)
+    Enum.filter(available, &MapSet.member?(selected_set, &1))
   end
 
   @doc """
