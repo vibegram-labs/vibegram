@@ -212,6 +212,24 @@ defmodule Vibe.AI.GroupAgent do
         },
         required: ["confirm"]
       }
+    },
+    %{
+      name: "pin_message",
+      description:
+        "Pin or unpin a message/file in this chat. Use when the user says pin it, pin this file, or unpin.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          message_id: %{type: "string", description: "Optional specific message UUID to pin/unpin"},
+          target: %{
+            type: "string",
+            enum: ["latest_agent_file", "latest_file", "latest_message"],
+            description:
+              "Fallback target when message_id is omitted. Use latest_agent_file for 'pin it' after agent creates a file."
+          },
+          pinned: %{type: "boolean", description: "true=pin (default), false=unpin"}
+        }
+      }
     }
   ]
 
@@ -473,6 +491,12 @@ defmodule Vibe.AI.GroupAgent do
     DELETING DOCUMENTS:
     - When the user says "delete the file", "remove the document", "فایل رو حذف کن", "پاک کن", or "clear the spreadsheet", use the delete_document tool with confirm=true.
     - After deletion, confirm to the user that the file has been removed.
+
+    PINNING FILES/MESSAGES:
+    - When the user says "pin it", "pin this", "pin this file", "سنجاقش کن", "پین کن", or asks to unpin, use pin_message.
+    - For "pin it" right after a file is created/exported, default to target=latest_agent_file.
+    - If user specifies a specific message, pass message_id.
+    - After pin/unpin, confirm exactly what was pinned/unpinned.
 
     ROW-LEVEL EDITING:
     - For targeted edits (changing a few cells or rows), use find_rows to locate the row first, then edit_rows with the row index. Do NOT resend all rows via create_document for small changes.
@@ -889,6 +913,7 @@ defmodule Vibe.AI.GroupAgent do
       "delete_rows" -> delete_rows_tool(chat_id, input, user_id)
       "export_rows" -> export_rows_tool(chat_id, input, user_id)
       "delete_document" -> delete_document_tool(chat_id, input, user_id)
+      "pin_message" -> pin_message_tool(chat_id, input, user_id)
       _ -> %{error: "Unknown tool: #{name}"}
     end
   end
@@ -1003,6 +1028,9 @@ defmodule Vibe.AI.GroupAgent do
       "export_rows" ->
         "Retry export_rows with valid row filters and a supported format (pdf or png)."
 
+      "pin_message" ->
+        "Retry pin_message with an explicit message_id or use target=latest_agent_file/latest_message."
+
       _ ->
         "Diagnose the tool error, adjust inputs, and retry the correct tool."
     end <>
@@ -1055,6 +1083,9 @@ defmodule Vibe.AI.GroupAgent do
       "delete_document" ->
         "Deleting document..."
 
+      "pin_message" ->
+        "Updating pinned message..."
+
       _ ->
         "Working..."
     end
@@ -1073,7 +1104,7 @@ defmodule Vibe.AI.GroupAgent do
       name in ["find_rows", "search_google", "analyze_document", "analyze_image"] ->
         "reading"
 
-      name in ["create_document", "edit_rows", "delete_rows", "delete_document"] ->
+      name in ["create_document", "edit_rows", "delete_rows", "delete_document", "pin_message"] ->
         "updating"
 
       name == "export_rows" ->
@@ -1949,6 +1980,174 @@ defmodule Vibe.AI.GroupAgent do
     end
   end
 
+  defp pin_message_tool(chat_id, input, user_id) do
+    explicit_message_id =
+      input
+      |> tool_input_value("message_id")
+      |> default_if_blank("")
+
+    target =
+      input
+      |> tool_input_value("target")
+      |> normalize_pin_target()
+
+    pinned = tool_input_bool(input, "pinned", true)
+
+    with {:ok, message} <- resolve_pin_target_message(chat_id, user_id, explicit_message_id, target),
+         {:ok, _} <- Vibe.Chat.set_message_pin(chat_id, message.id, user_id, pinned) do
+      broadcast_pinned_updated(chat_id, message.id, pinned, %{
+        "userId" => user_id,
+        "target" => target
+      })
+
+      %{
+        ok: true,
+        pinned: pinned,
+        action: if(pinned, do: "pinned", else: "unpinned"),
+        target: target,
+        message_id: message.id,
+        message_type: message.type,
+        file_url: message.media_url,
+        note:
+          if(pinned,
+            do: "Pinned message #{message.id}.",
+            else: "Unpinned message #{message.id}."
+          )
+      }
+    else
+      {:error, :no_target_message} ->
+        %{error: "No message found to pin for target '#{target}'."}
+
+      {:error, :not_found} ->
+        %{error: "Message not found for pinning."}
+
+      {:error, :invalid_id} ->
+        %{error: "Invalid message_id format for pinning."}
+
+      {:error, :forbidden} ->
+        %{error: "Not allowed to pin messages in this chat."}
+
+      {:error, reason} ->
+        %{error: "Failed to update pin: #{inspect(reason)}"}
+    end
+  end
+
+  defp resolve_pin_target_message(chat_id, user_id, explicit_message_id, target)
+       when is_binary(explicit_message_id) do
+    if explicit_message_id != "" do
+      case Vibe.Chat.get_message(chat_id, explicit_message_id, user_id) do
+        nil -> {:error, :not_found}
+        message -> {:ok, normalize_pin_message(message)}
+      end
+    else
+      find_pin_target_message(chat_id, user_id, target)
+    end
+  end
+
+  defp resolve_pin_target_message(chat_id, user_id, _explicit_message_id, target) do
+    find_pin_target_message(chat_id, user_id, target)
+  end
+
+  defp find_pin_target_message(chat_id, user_id, target) do
+    candidate =
+      Vibe.Chat.get_messages_for_user(chat_id, user_id)
+      |> List.wrap()
+      |> Enum.reverse()
+      |> Enum.find(&pin_target_match?(&1, target))
+
+    case candidate do
+      nil -> {:error, :no_target_message}
+      message -> {:ok, normalize_pin_message(message)}
+    end
+  end
+
+  defp pin_target_match?(message, target) do
+    type = pin_message_value(message, :type) |> to_string() |> String.downcase()
+    from_id = pin_message_value(message, :from_id) |> to_string()
+
+    case target do
+      "latest_agent_file" ->
+        type == "file" and from_id == @agent_user_id
+
+      "latest_file" ->
+        type == "file"
+
+      _ ->
+        true
+    end
+  end
+
+  defp normalize_pin_message(message) do
+    %{
+      id: pin_message_value(message, :id) |> to_string(),
+      type: pin_message_value(message, :type) |> to_string() |> default_if_blank("text"),
+      media_url:
+        message
+        |> pin_message_value(:media_url)
+        |> case do
+          value when is_binary(value) -> String.trim(value)
+          _ -> nil
+        end
+    }
+  end
+
+  defp pin_message_value(message, key) when is_map(message) and is_atom(key) do
+    Map.get(message, key) || Map.get(message, Atom.to_string(key))
+  end
+
+  defp pin_message_value(_, _), do: nil
+
+  defp normalize_pin_target(raw_target) do
+    target =
+      raw_target
+      |> to_string()
+      |> String.trim()
+      |> String.downcase()
+
+    case target do
+      "" -> "latest_agent_file"
+      "latest-agent-file" -> "latest_agent_file"
+      "current_file" -> "latest_agent_file"
+      "latest_document" -> "latest_agent_file"
+      "latest-document" -> "latest_agent_file"
+      "latest-file" -> "latest_file"
+      "file" -> "latest_file"
+      "latest-message" -> "latest_message"
+      "message" -> "latest_message"
+      "latest_agent_file" -> "latest_agent_file"
+      "latest_file" -> "latest_file"
+      "latest_message" -> "latest_message"
+      _ -> "latest_agent_file"
+    end
+  end
+
+  defp broadcast_pinned_updated(chat_id, message_id, pinned, extra \\ %{})
+
+  defp broadcast_pinned_updated(chat_id, message_id, pinned, extra) do
+    normalized_chat_id = chat_id |> to_string() |> String.trim()
+    normalized_message_id = message_id |> to_string() |> String.trim()
+
+    payload =
+      %{
+        "messageId" => normalized_message_id,
+        "pinned" => pinned
+      }
+      |> Map.merge(if(is_map(extra), do: extra, else: %{}))
+
+    if normalized_chat_id != "" and normalized_message_id != "" do
+      VibeWeb.Endpoint.broadcast!("chat:#{normalized_chat_id}", "pinned-updated", payload)
+    end
+
+    :ok
+  rescue
+    error ->
+      Logger.warning(
+        "[GroupAgent] Failed to broadcast pinned-updated chat_id=#{inspect(chat_id)} message_id=#{inspect(message_id)} error=#{inspect(error)}"
+      )
+
+      :ok
+  end
+
   defp delete_document_tool(chat_id, input, _user_id) do
     confirm = case input do
       %{"confirm" => true} -> true
@@ -2105,6 +2304,26 @@ defmodule Vibe.AI.GroupAgent do
           {int, _} -> int
           :error -> default
         end
+    end
+  end
+
+  defp tool_input_bool(input, key, default \\ false) do
+    case tool_input_raw(input, key) do
+      nil ->
+        default
+
+      value when value in [true, "true", "TRUE", "1", 1, "yes", "YES", "on", "ON"] ->
+        true
+
+      value when value in [false, "false", "FALSE", "0", 0, "no", "NO", "off", "OFF"] ->
+        false
+
+      value when is_binary(value) ->
+        normalized = value |> String.trim() |> String.downcase()
+        normalized in ["true", "1", "yes", "on"]
+
+      _ ->
+        default
     end
   end
 
@@ -3504,8 +3723,7 @@ defmodule Vibe.AI.GroupAgent do
           "[GroupAgent] Refreshed pinned agent file chat_id=#{chat_id} message_id=#{message_id} updated_users=#{updated_count}"
         )
 
-        VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "pinned-updated", %{
-          "messageId" => message_id,
+        broadcast_pinned_updated(chat_id, message_id, true, %{
           "updatedUsers" => updated_count
         })
 
