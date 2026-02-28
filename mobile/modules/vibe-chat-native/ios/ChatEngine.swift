@@ -2629,23 +2629,27 @@ final class ChatEngine {
   private func defaultAgentProgressLabel(tool: String?) -> String {
     switch tool {
     case "search_google":
-      return "Searching the web..."
+      return "Thinking..."
     case "analyze_image":
-      return "Analyzing image..."
+      return "Thinking..."
     case "analyze_document":
-      return "Reading document..."
+      return "Thinking..."
     case "create_document":
-      return "Creating document..."
+      return "Updating file..."
     case "find_rows":
-      return "Finding rows..."
+      return "Thinking..."
     case "edit_rows":
-      return "Editing rows..."
+      return "Updating file..."
     case "delete_rows":
-      return "Deleting rows..."
+      return "Updating file..."
     case "export_rows":
-      return "Exporting document..."
+      return "Updating file..."
+    case "delete_document":
+      return "Updating file..."
+    case "pin_message":
+      return "Pinning..."
     default:
-      return "Working..."
+      return "Typing..."
     }
   }
 

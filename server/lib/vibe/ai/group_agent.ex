@@ -331,10 +331,10 @@ defmodule Vibe.AI.GroupAgent do
     messages = build_messages(memory, user_message, metadata)
     broadcast_agent_progress(
       chat_id,
-      "Understanding the task and planning changes...",
+      "Typing...",
       "react_plan",
       "running",
-      %{"stage" => "planning"}
+      %{"stage" => "typing"}
     )
     Logger.info("[GroupAgent] Calling Claude for #{chat_id}: #{length(messages)} messages, system_prompt_len=#{String.length(system_prompt)}")
 
@@ -378,10 +378,10 @@ defmodule Vibe.AI.GroupAgent do
         # 7. Broadcast agent response as a chat message
         broadcast_agent_progress(
           chat_id,
-          "Task completed and verified.",
+          "Finalizing...",
           "react_plan",
-          "complete",
-          %{"stage" => "verification"}
+          "running",
+          %{"stage" => "finalizing"}
         )
         broadcast_agent_message(
           chat_id,
@@ -391,6 +391,7 @@ defmodule Vibe.AI.GroupAgent do
           metadata,
           resolved_attachment
         )
+        broadcast_agent_progress(chat_id, "", "react_plan", "complete", %{"stage" => "completed"})
 
         {:ok, response}
 
@@ -398,7 +399,7 @@ defmodule Vibe.AI.GroupAgent do
         Logger.error("[GroupAgent] Claude error for chat #{chat_id}: #{inspect(reason)}")
         broadcast_agent_progress(
           chat_id,
-          "Task failed after retries.",
+          "Finalizing...",
           "react_plan",
           "error",
           %{"stage" => "failed"}
@@ -947,10 +948,32 @@ defmodule Vibe.AI.GroupAgent do
 
       {:error, reason} ->
         Logger.warning(
-          "[GroupAgent] LLM confirmation gate failed, allowing response chat_id=#{chat_id} reason=#{inspect(reason)}"
+          "[GroupAgent] LLM confirmation gate failed chat_id=#{chat_id} reason=#{inspect(reason)}"
         )
+        assistant_content = content_blocks_from_claude_content(content)
 
-        {:ok, %{text: text, attachment: pending_attachment}}
+        forced_user_check = %{
+          role: "user",
+          content: [
+            %{
+              type: "text",
+              text: "SYSTEM CONFIRMATION GATE: verify required tool execution before final response."
+            }
+          ]
+        }
+
+        call_claude_with_tools(
+          messages ++ [%{role: "assistant", content: assistant_content}, forced_user_check],
+          system_prompt,
+          api_key,
+          depth + 1,
+          user_id,
+          enabled_tools,
+          enabled_tool_definitions,
+          chat_id,
+          pending_attachment,
+          tool_audit
+        )
     end
   end
 
@@ -1027,7 +1050,7 @@ defmodule Vibe.AI.GroupAgent do
     with {:ok, %{status: 200, body: resp_body}} <- Finch.request(request, Vibe.Finch, receive_timeout: 15_000),
          {:ok, %{"content" => content}} <- Jason.decode(resp_body),
          raw_text when is_binary(raw_text) <- extract_text(content),
-         {:ok, parsed} <- Jason.decode(raw_text) do
+         {:ok, parsed} <- decode_lenient_json(raw_text) do
       allow = Map.get(parsed, "allow") == true
       needs_pin_action = Map.get(parsed, "needs_pin_action") == true
       retry_instruction_raw = Map.get(parsed, "retry_instruction")
@@ -1057,6 +1080,32 @@ defmodule Vibe.AI.GroupAgent do
 
       other ->
         {:error, {:confirmation_parse_error, other}}
+    end
+  end
+
+  defp decode_lenient_json(raw_text) when is_binary(raw_text) do
+    trimmed = raw_text |> String.trim() |> strip_markdown_code_fence()
+
+    case Jason.decode(trimmed) do
+      {:ok, parsed} ->
+        {:ok, parsed}
+
+      _ ->
+        case Regex.run(~r/\{.*\}/s, trimmed) do
+          [json_blob] -> Jason.decode(json_blob)
+          _ -> {:error, :invalid_json}
+        end
+    end
+  end
+
+  defp decode_lenient_json(_), do: {:error, :invalid_json}
+
+  defp strip_markdown_code_fence(text) when is_binary(text) do
+    trimmed = String.trim(text)
+
+    case Regex.run(~r/^```(?:json)?\s*(.*?)\s*```$/s, trimmed, capture: :all_but_first) do
+      [inner] -> inner
+      _ -> trimmed
     end
   end
 
@@ -1105,7 +1154,7 @@ defmodule Vibe.AI.GroupAgent do
       add_tool_runtime_metadata(result, name, duration_ms)
     else
       Logger.warning("[GroupAgent] Blocked disabled tool call #{name}")
-      broadcast_agent_progress(chat_id, "Tool #{name} is disabled for this group.", name, "error")
+      broadcast_agent_progress(chat_id, "Finalizing...", name, "error")
       %{error: "Tool '#{name}' is disabled for this group."}
     end
   end
@@ -1124,10 +1173,10 @@ defmodule Vibe.AI.GroupAgent do
 
         broadcast_agent_progress(
           chat_id,
-          "Recovering from #{name} error (retry #{next_attempt}/#{@max_tool_attempts})...",
+          "Thinking...",
           name,
           "running",
-          %{"attempt" => next_attempt, "stage" => "retrying"}
+          %{"attempt" => next_attempt, "stage" => "thinking"}
         )
 
         execute_tool_with_recovery(name, input, user_id, chat_id, next_attempt)
@@ -1275,13 +1324,13 @@ defmodule Vibe.AI.GroupAgent do
   defp tool_progress_label(name, input) do
     case name do
       "search_google" ->
-        "Searching the web..."
+        "Thinking..."
 
       "analyze_image" ->
-        "Analyzing image..."
+        "Thinking..."
 
       "analyze_document" ->
-        "Reading document..."
+        "Thinking..."
 
       "create_document" ->
         operation =
@@ -1290,39 +1339,34 @@ defmodule Vibe.AI.GroupAgent do
           |> String.downcase()
 
         case operation do
-          "append_rows" -> "Adding rows..."
-          "replace_rows" -> "Restructuring spreadsheet..."
-          "edit_current" -> "Editing spreadsheet..."
-          "revert_last" -> "Reverting spreadsheet..."
-          "create_new" -> "Creating spreadsheet..."
-          _ -> "Creating document..."
+          "append_rows" -> "Updating file..."
+          "replace_rows" -> "Updating file..."
+          "edit_current" -> "Updating file..."
+          "revert_last" -> "Updating file..."
+          "create_new" -> "Updating file..."
+          _ -> "Updating file..."
         end
 
       "find_rows" ->
-        "Inspecting current rows..."
+        "Thinking..."
 
       "edit_rows" ->
-        "Editing rows..."
+        "Updating file..."
 
       "delete_rows" ->
-        "Deleting rows..."
+        "Updating file..."
 
       "export_rows" ->
-        format =
-          input
-          |> tool_input_value("format")
-          |> String.downcase()
-
-        if format == "png", do: "Exporting image...", else: "Exporting document..."
+        "Updating file..."
 
       "delete_document" ->
-        "Deleting document..."
+        "Updating file..."
 
       "pin_message" ->
-        "Updating pinned message..."
+        "Pinning..."
 
       _ ->
-        "Working..."
+        "Thinking..."
     end
   end
 
@@ -1331,22 +1375,25 @@ defmodule Vibe.AI.GroupAgent do
 
     cond do
       normalized_status == "complete" ->
-        "completed"
+        "finalizing"
 
       normalized_status == "error" ->
-        "failed"
+        "finalizing"
 
       name in ["find_rows", "search_google", "analyze_document", "analyze_image"] ->
-        "reading"
+        "thinking"
 
-      name in ["create_document", "edit_rows", "delete_rows", "delete_document", "pin_message"] ->
-        "updating"
+      name in ["pin_message"] ->
+        "pinning"
+
+      name in ["create_document", "edit_rows", "delete_rows", "delete_document"] ->
+        "updating_file"
 
       name == "export_rows" ->
-        "exporting"
+        "updating_file"
 
       true ->
-        "processing"
+        "thinking"
     end
   end
 
