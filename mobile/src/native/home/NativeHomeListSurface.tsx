@@ -19,6 +19,7 @@ export interface NativeHomeListRow {
   name: string;
   preview: string;
   friendId?: string;
+  chatType?: 'dm' | 'group' | 'channel';
   avatarUri?: string;
   timeLabel?: string;
   unreadCount?: number;

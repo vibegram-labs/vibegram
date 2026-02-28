@@ -17,10 +17,15 @@ internal data class ChatNativeHomeListRow(
   val pinned: Boolean,
   val isTyping: Boolean,
   val isOnline: Boolean,
+  val peerUserId: String?,
   val avatarUri: String?,
   val avatarFallback: String,
   val isSavedMessages: Boolean,
-)
+) {
+  fun withPresence(isTyping: Boolean, isOnline: Boolean): ChatNativeHomeListRow {
+    return copy(isTyping = isTyping, isOnline = isOnline)
+  }
+}
 
 internal fun parseChatNativeHomeRows(
   rawRows: List<Map<String, Any?>>,
@@ -31,6 +36,8 @@ internal fun parseChatNativeHomeRows(
     val chatId = raw["chatId"]?.toString()?.trim().orEmpty()
     if (chatId.isEmpty()) return@mapNotNull null
     val isSavedMessages = chatId == "saved_messages"
+    val chatType = parseChatType(raw["chatType"] ?: raw["chat_type"] ?: raw["type"])
+    val isDirectChat = chatType == "dm"
 
     val title =
       raw["name"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
@@ -52,6 +59,7 @@ internal fun parseChatNativeHomeRows(
     val friendId =
       raw["friendId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
         ?: raw["friend_id"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+    val peerUserId = if (isDirectChat) friendId else null
     val rawAvatar =
       raw["avatarUri"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
         ?: raw["avatar_uri"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
@@ -61,7 +69,7 @@ internal fun parseChatNativeHomeRows(
         ?: raw["avatar_url"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
     val avatarUri = resolveAvatarUri(
       rawAvatar = rawAvatar,
-      friendId = friendId,
+      friendId = peerUserId,
       chatId = chatId,
       apiBaseUrl = apiBaseUrl,
     )
@@ -80,6 +88,7 @@ internal fun parseChatNativeHomeRows(
       pinned = pinned,
       isTyping = isTyping,
       isOnline = isOnline,
+      peerUserId = peerUserId,
       avatarUri = avatarUri,
       avatarFallback = avatarFallback,
       isSavedMessages = isSavedMessages,
@@ -178,3 +187,12 @@ private fun parseBool(value: Any?): Boolean? =
     }
     else -> null
   }
+
+private fun parseChatType(value: Any?): String {
+  val raw = value?.toString()?.trim()?.lowercase().orEmpty()
+  return when (raw) {
+    "group" -> "group"
+    "channel" -> "channel"
+    else -> "dm"
+  }
+}

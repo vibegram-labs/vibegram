@@ -17,9 +17,20 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     configureView()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleChatEngineDidChange(_:)),
+      name: ChatEngine.didChangeNotification,
+      object: nil
+    )
   }
 
   deinit {
+    NotificationCenter.default.removeObserver(
+      self,
+      name: ChatEngine.didChangeNotification,
+      object: nil
+    )
     removeContextMenuBackdrop()
     tableView.delegate = nil
     tableView.dataSource = nil
@@ -101,6 +112,52 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
 
     refreshControl.addTarget(self, action: #selector(handleRefresh), for: .valueChanged)
     tableView.refreshControl = refreshControl
+  }
+
+  @objc private func handleChatEngineDidChange(_ notification: Notification) {
+    if !Thread.isMainThread {
+      DispatchQueue.main.async { [weak self] in
+        self?.handleChatEngineDidChange(notification)
+      }
+      return
+    }
+
+    let reason =
+      ((notification.userInfo?["reason"] as? String) ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    if reason == "peerTyping" {
+      let changedChatId =
+        (notification.userInfo?["chatId"] as? String)?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      guard !changedChatId.isEmpty else {
+        tableView.reloadData()
+        return
+      }
+      if let rowIndex = rows.firstIndex(where: { $0.chatId == changedChatId }) {
+        tableView.reloadRows(
+          at: [IndexPath(row: rowIndex, section: 0)],
+          with: .none
+        )
+      }
+      return
+    }
+
+    if reason == "presenceChanged" {
+      tableView.reloadData()
+    }
+  }
+
+  private func resolvedPresenceRow(for row: ChatNativeHomeListRow) -> ChatNativeHomeListRow {
+    if row.isSavedMessages {
+      return row.withPresence(isTyping: false, isOnline: false)
+    }
+    guard let peerUserId = row.peerUserId, !peerUserId.isEmpty else {
+      // Group/channel rows do not show single-peer typing/online state.
+      return row.withPresence(isTyping: false, isOnline: false)
+    }
+    let isTyping = ChatEngine.shared.isTyping(["chatId": row.chatId])
+    let isOnline = ChatEngine.shared.isUserOnline(userId: peerUserId)
+    return row.withPresence(isTyping: isTyping, isOnline: isOnline)
   }
 
   @objc private func handleRefresh() {
@@ -215,9 +272,12 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
         self?.removeContextMenuBackdrop()
       }
     } else {
-      UIView.animate(withDuration: 0.18, animations: { [weak self] in
-        self?.contextMenuBackdropView.alpha = 0
-      }) { [weak self] _ in
+      UIView.animate(
+        withDuration: 0.18,
+        animations: { [weak self] in
+          self?.contextMenuBackdropView.alpha = 0
+        }
+      ) { [weak self] _ in
         self?.removeContextMenuBackdrop()
       }
     }
@@ -239,8 +299,9 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     else {
       return UITableViewCell()
     }
+    let displayRow = resolvedPresenceRow(for: rows[indexPath.row])
     cell.configure(
-      row: rows[indexPath.row],
+      row: displayRow,
       isDark: isDark,
       avatarBackgroundColor: resolvedAvatarBackgroundColor()
     )
@@ -353,15 +414,16 @@ private final class ChatPreviewViewController: UIViewController {
     }
     mainView.clipsToBounds = true
 
-    let appearance = Self.resolvedPreviewAppearance(rawAppearance: previewAppearance, isDark: isDark)
+    let appearance = Self.resolvedPreviewAppearance(
+      rawAppearance: previewAppearance, isDark: isDark)
     mainView.setAppearance(appearance)
     mainView.surfaceId = "preview_\(row.chatId)"
     mainView.setEngineSurfaceId(mainView.surfaceId)
     mainView.setEngineChatId(row.chatId)
     mainView.setEnginePeerUserId(row.peerUserId ?? "")
     if let myUserId = Self.normalizedString(
-      ChatEngineStore.shared.getConfig()["myUserId"] ?? ChatEngineStore.shared.getConfig()["userId"])
-    {
+      ChatEngineStore.shared.getConfig()["myUserId"] ?? ChatEngineStore.shared.getConfig()["userId"]
+    ) {
       mainView.setEngineMyUserId(myUserId)
     }
     mainView.setHeaderTitle(row.title)
@@ -369,7 +431,7 @@ private final class ChatPreviewViewController: UIViewController {
     mainView.setProfileName(row.title)
     mainView.setProfileHandle(Self.resolvedProfileHandle(for: row))
     mainView.setAvatarUri(row.avatarUri)
-    mainView.setIsOnline(row.isOnline)
+    mainView.setIsOnline(Self.resolvedIsOnline(for: row))
     mainView.setIsChatMuted(row.muted)
     mainView.setIsGroupOrChannel(Self.resolvedIsGroupOrChannel(for: row))
     mainView.setStatusAuthorityEnabled(true)
@@ -450,6 +512,10 @@ private final class ChatPreviewViewController: UIViewController {
     }
     let reason = Self.normalizedString(note.userInfo?["reason"]) ?? ""
     switch reason {
+    case "peerTyping", "presenceChanged":
+      mainView.setHeaderSubtitle(Self.resolvedHeaderSubtitle(for: row))
+      mainView.setIsOnline(Self.resolvedIsOnline(for: row))
+      mainView.setProfileHandle(Self.resolvedProfileHandle(for: row))
     case "chatRowsReloaded", "chatMessageInserted", "chatMessageEdited", "chatMessageDeleted",
       "chatMessageChanged", "messageStatusChanged":
       refreshPreviewRows()
@@ -524,32 +590,41 @@ private final class ChatPreviewViewController: UIViewController {
     if row.isSavedMessages {
       return "Saved Messages"
     }
-    if row.isTyping {
+    if ChatEngine.shared.isTyping(["chatId": row.chatId]) {
       return "typing..."
     }
-    if row.isOnline {
+    if resolvedIsOnline(for: row) {
       return "online"
     }
     return "last seen recently"
+  }
+
+  private static func resolvedIsOnline(for row: ChatNativeHomeListRow) -> Bool {
+    guard let peerUserId = normalizedString(row.peerUserId) else { return false }
+    return ChatEngine.shared.isUserOnline(userId: peerUserId)
   }
 
   private static func resolvedProfileHandle(for row: ChatNativeHomeListRow) -> String {
     if row.isSavedMessages {
       return "saved chat"
     }
+    if resolvedIsGroupOrChannel(for: row) {
+      return "group chat"
+    }
     if let peer = normalizedString(row.peerUserId) {
       return "id: \(peer)"
     }
-    return resolvedIsGroupOrChannel(for: row) ? "group chat" : resolvedHeaderSubtitle(for: row)
+    return resolvedHeaderSubtitle(for: row)
   }
 
   private static func resolvedIsGroupOrChannel(for row: ChatNativeHomeListRow) -> Bool {
     if row.isSavedMessages { return false }
-    return normalizedString(row.peerUserId) == nil
+    return row.isGroup || normalizedString(row.peerUserId) == nil
   }
 
   private static func previewRows(for row: ChatNativeHomeListRow) -> [[String: Any]] {
-    let previewText = row.preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    let previewText =
+      row.preview.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
       ? "Start a conversation"
       : row.preview
     let messageId = "preview_message_\(row.chatId)"
@@ -570,11 +645,13 @@ private final class ChatPreviewViewController: UIViewController {
         "borderBottomRightRadius": 18.0,
       ],
     ]
-    return [[
-      "kind": "message",
-      "key": messageId,
-      "message": message,
-    ]]
+    return [
+      [
+        "kind": "message",
+        "key": messageId,
+        "message": message,
+      ]
+    ]
   }
 
   private static func normalizedString(_ value: Any?) -> String? {

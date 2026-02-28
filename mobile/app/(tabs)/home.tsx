@@ -675,12 +675,20 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     }), [colors.card, colors.text, colors.textSecondary, effectiveTheme, resolvedWallpaperTheme])
 
     const nativeHomeRows = useMemo<NativeHomeListRow[]>(() => {
+        const useNativeEnginePresence = Platform.OS === 'ios' || Platform.OS === 'android'
         return filteredChats.map((chat: any) => {
             const friendId = (chat.friendId || '').toUpperCase()
+            const chatType = normalizeChatType(chat?.type)
+            const isDirectChat = chatType === 'dm'
+            const canShowPeerPresence =
+                chat.chatId !== 'saved_messages'
+                && isDirectChat
+                && friendId.length > 0
             const title = chat.chatId === 'saved_messages'
                 ? 'Saved Messages'
                 : (chat.name || chat.friendName || chat.friendId || 'Unknown')
-            const isTyping = typingUsers.has(friendId)
+            const isTyping = !useNativeEnginePresence && canShowPeerPresence && typingUsers.has(friendId)
+            const isOnline = !useNativeEnginePresence && canShowPeerPresence && onlineUsers.has(friendId)
             const preview = isTyping ? 'typing...' : getMessageText(chat.lastMessage)
             const lastMsgTime = chat.lastMessage ? timeAgo(chat.lastMessage.timestamp || chat.updatedAt) : ''
             const sourceMessages: any[] = Array.isArray(chat?.messages) ? chat.messages : []
@@ -737,7 +745,8 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 chatId: chat.chatId,
                 name: title,
                 preview,
-                friendId: chat.friendId || undefined,
+                friendId: isDirectChat ? (chat.friendId || undefined) : undefined,
+                chatType,
                 avatarUri: chat.avatarUrl || undefined,
                 timeLabel: lastMsgTime,
                 unreadCount: chat.unreadCount ?? 0,
@@ -745,7 +754,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 muted: !!chat.muted,
                 pinned: !!chat.pinned,
                 isTyping,
-                isOnline: onlineUsers.has(friendId),
+                isOnline,
                 avatarFallback: title.substring(0, 1).toUpperCase(),
                 previewRows,
             }
@@ -1009,8 +1018,13 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
     const renderItem = useCallback(({ item, index }: any) => {
         const friendId = (item.friendId || '').toUpperCase();
-        const isTyping = typingUsers.has(friendId);
-        const isOnline = onlineUsers.has(friendId);
+        const chatType = normalizeChatType(item?.type);
+        const canShowPeerPresence =
+            item?.chatId !== 'saved_messages'
+            && chatType === 'dm'
+            && friendId.length > 0;
+        const isTyping = canShowPeerPresence && typingUsers.has(friendId);
+        const isOnline = canShowPeerPresence && onlineUsers.has(friendId);
 
         return (
             <Animated.View>

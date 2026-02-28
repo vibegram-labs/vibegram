@@ -6,8 +6,9 @@ import UIKit
 private struct ChatEngineHybridPayload: Decodable {
   let iv: String
   let c: String
-  let k: String
+  let k: String?
   let s: String?
+  let g: String?
 }
 
 private func chatEngineReadDERLength(bytes: [UInt8], offset: inout Int) -> Int? {
@@ -235,23 +236,37 @@ private func chatEngineDecryptHybridMessage(
   let trimmed = ciphertext.trimmingCharacters(in: .whitespacesAndNewlines)
   guard !trimmed.isEmpty, let data = trimmed.data(using: .utf8) else { return "" }
   guard let payload = try? JSONDecoder().decode(ChatEngineHybridPayload.self, from: data) else {
+    NSLog(
+      "[ChatEngine] Decrypt failed: Payload decode error on JSON (isMyMessage: %@)",
+      isMyMessage ? "Y" : "N")
     return ""
   }
   guard
     let iv = Data(base64Encoded: payload.iv),
     let cipherAndTag = Data(base64Encoded: payload.c),
-    let recipientKeyBlob = Data(base64Encoded: payload.k),
     cipherAndTag.count >= 16
-  else { return "" }
+  else {
+    NSLog("[ChatEngine] Decrypt failed: Invalid iv or ciphertext structure")
+    return ""
+  }
 
   var keyCandidates = [Data]()
+
+  if let g = payload.g, let gBlob = Data(base64Encoded: g) {
+    keyCandidates.append(gBlob)
+  }
+
   if isMyMessage {
     if let s = payload.s, let senderBlob = Data(base64Encoded: s) {
       keyCandidates.append(senderBlob)
     }
-    keyCandidates.append(recipientKeyBlob)
+    if let k = payload.k, let recipientBlob = Data(base64Encoded: k) {
+      keyCandidates.append(recipientBlob)
+    }
   } else {
-    keyCandidates.append(recipientKeyBlob)
+    if let k = payload.k, let recipientBlob = Data(base64Encoded: k) {
+      keyCandidates.append(recipientBlob)
+    }
     if let s = payload.s, let senderBlob = Data(base64Encoded: s) {
       keyCandidates.append(senderBlob)
     }
@@ -264,7 +279,12 @@ private func chatEngineDecryptHybridMessage(
       break
     }
   }
-  guard let aesKeyData else { return "" }
+  guard let aesKeyData else {
+    NSLog(
+      "[ChatEngine] Decrypt failed: Could not decrypt AES key. Candidates count: %d",
+      keyCandidates.count)
+    return ""
+  }
 
   let ciphertextData = cipherAndTag.dropLast(16)
   let tagData = cipherAndTag.suffix(16)
@@ -278,6 +298,7 @@ private func chatEngineDecryptHybridMessage(
     let plaintextData = try AES.GCM.open(sealedBox, using: SymmetricKey(data: aesKeyData))
     return String(data: plaintextData, encoding: .utf8) ?? ""
   } catch {
+    NSLog("[ChatEngine] Decrypt failed (AES): %@", error.localizedDescription)
     return ""
   }
 }

@@ -684,6 +684,7 @@ final class ChatInputBar: UIView {
   private let replyPreviewLabel = UILabel()
   private let replyDismissButton = UIButton(type: .system)
   private var replyBannerVisible = false
+  private var replyBannerAnimatingOut = false
   private let replyBannerContentH: CGFloat = 36
   private let replyBannerGap: CGFloat = 4
 
@@ -807,6 +808,7 @@ final class ChatInputBar: UIView {
     replySenderLabel.text = isMe ? "You" : "Reply"
     replyPreviewLabel.text = text
     replyBanner.transform = .identity
+    replyBannerAnimatingOut = false
     replyBannerVisible = true
     replyBanner.isHidden = false
     replyBanner.alpha = 1
@@ -837,6 +839,7 @@ final class ChatInputBar: UIView {
     replyBanner.layer.removeAllAnimations()
     activeReplyToMessageId = nil
     replyBannerVisible = false
+    replyBannerAnimatingOut = false
 
     let applyLayout = {
       self.setNeedsLayout()
@@ -847,18 +850,24 @@ final class ChatInputBar: UIView {
 
     if animated {
       restorePillGlassVisualState()
+      replyBannerAnimatingOut = true
       replyBanner.alpha = 1
       replyBanner.transform = .identity
       replyBanner.isHidden = false
       UIView.animate(
-        withDuration: 0.22, delay: 0,
-        options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState]
+        withDuration: 0.1, delay: 0,
+        options: [.curveEaseOut, .beginFromCurrentState]
       ) {
         self.replyBanner.alpha = 0
-        self.replyBanner.transform = CGAffineTransform(translationX: 0, y: -4)
+      }
+      UIView.animate(
+        withDuration: 0.18, delay: 0,
+        options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState]
+      ) {
         applyLayout()
       } completion: { _ in
         if !self.replyBannerVisible {
+          self.replyBannerAnimatingOut = false
           self.replyBanner.transform = .identity
           self.replyBanner.alpha = 0
           self.replyBanner.isHidden = true
@@ -866,6 +875,7 @@ final class ChatInputBar: UIView {
         }
       }
     } else {
+      replyBannerAnimatingOut = false
       replyBanner.transform = .identity
       replyBanner.alpha = 0
       replyBanner.isHidden = true
@@ -1480,7 +1490,7 @@ final class ChatInputBar: UIView {
     }
 
     // ── Reply banner layout (inside pill, below mention if present) ──
-    if replyBannerVisible {
+    if replyBannerVisible || replyBannerAnimatingOut || !replyBanner.isHidden {
       let replyBannerY: CGFloat = 6 + mentionBannerExtra
       let bannerW = max(1, actualPillW - 16)
       replyBanner.frame = CGRect(x: 8, y: replyBannerY, width: bannerW, height: replyBannerContentH)
@@ -1571,15 +1581,11 @@ final class ChatInputBar: UIView {
     // ── Pill border glow when @vibe mention is active ──
     updateMentionBorderGlow(pillFrame: pillContainer.frame)
 
-    // ── Layer-only updates (no implicit animation wanted) ──
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
+    // ── View frame updates that should inherit UIView animations ──
     attachGlass.frame = attachButton.bounds
     micGlass.frame = micButton.bounds
     pillGlass.frame = pillContainer.bounds
     pillTapOverlay.frame = pillContainer.bounds
-    sendGradient.frame = sendButton.bounds
-    sendGradient.cornerRadius = 16
 
     if #available(iOS 26.0, *) {
       // Use native cornerConfiguration for liquid glass shapes
@@ -1599,6 +1605,12 @@ final class ChatInputBar: UIView {
       pillTapOverlay.layer.cornerRadius = pillContainer.layer.cornerRadius
       lockPill.layer.cornerRadius = lockPill.bounds.width / 2
     }
+
+    // ── Layer-only updates (no implicit animation wanted) ──
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    sendGradient.frame = sendButton.bounds
+    sendGradient.cornerRadius = 16
 
     backgroundGradientLayer.frame = backgroundMaskView.bounds
 

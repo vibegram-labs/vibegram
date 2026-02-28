@@ -14,6 +14,7 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
+import java.util.UUID
 
 @SuppressLint("ViewConstructor")
 class ChatNativeHomeListView(
@@ -25,6 +26,8 @@ class ChatNativeHomeListView(
   private var previewAppearance: Map<String, Any?> = emptyMap()
   private var contentTopInsetPx: Int = 0
   private var contentBottomInsetPx: Int = 0
+  private var rows: List<ChatNativeHomeListRow> = emptyList()
+  private val engineListenerId = "native-home-list-${UUID.randomUUID()}"
 
   private val swipeRefreshLayout = SwipeRefreshLayout(context)
   private val recyclerView = RecyclerView(context)
@@ -102,7 +105,8 @@ class ChatNativeHomeListView(
   }
 
   fun setRows(rawRows: List<Map<String, Any?>>) {
-    adapter.submitRows(parseChatNativeHomeRows(rawRows, context))
+    rows = parseChatNativeHomeRows(rawRows, context)
+    renderRowsWithNativePresence()
   }
 
   fun setRefreshing(refreshing: Boolean) {
@@ -138,6 +142,50 @@ class ChatNativeHomeListView(
       contentBottomInsetPx,
     )
     recyclerView.clipToPadding = false
+  }
+
+  override fun onAttachedToWindow() {
+    super.onAttachedToWindow()
+    registerChatEngineListener()
+    renderRowsWithNativePresence()
+  }
+
+  override fun onDetachedFromWindow() {
+    ChatEngine.setListener(engineListenerId, null)
+    super.onDetachedFromWindow()
+  }
+
+  private fun registerChatEngineListener() {
+    if (!isAttachedToWindow) {
+      ChatEngine.setListener(engineListenerId, null)
+      return
+    }
+    ChatEngine.setListener(engineListenerId) { reason, _, _ ->
+      if (reason != "peerTyping" && reason != "presenceChanged") return@setListener
+      post { renderRowsWithNativePresence() }
+    }
+  }
+
+  private fun renderRowsWithNativePresence() {
+    if (rows.isEmpty()) {
+      adapter.submitRows(emptyList())
+      return
+    }
+    adapter.submitRows(rows.map(::resolvedPresenceRow))
+  }
+
+  private fun resolvedPresenceRow(row: ChatNativeHomeListRow): ChatNativeHomeListRow {
+    if (row.isSavedMessages) {
+      return row.withPresence(isTyping = false, isOnline = false)
+    }
+    val peerUserId = row.peerUserId?.trim()
+    if (peerUserId.isNullOrEmpty()) {
+      // Group/channel rows should not show single-user typing/online.
+      return row.withPresence(isTyping = false, isOnline = false)
+    }
+    val isTyping = ChatEngine.isTyping(mapOf("chatId" to row.chatId))
+    val isOnline = ChatEngine.isUserOnline(peerUserId)
+    return row.withPresence(isTyping = isTyping, isOnline = isOnline)
   }
 
   private fun showNativePreview(row: ChatNativeHomeListRow) {

@@ -1,4 +1,5 @@
 import UIKit
+private let chatContextHoldDebugLogs = true
 
 public protocol ChatContextMenuOverlayDelegate: AnyObject {
   func contextMenuDidDismiss(overlay: ChatContextMenuOverlay)
@@ -63,6 +64,13 @@ public final class ChatContextMenuOverlay: UIView {
   private var isDismissing = false
   private var reactionMaskLayer: CALayer?
   private var contextMenuMaskLayer: CALayer?
+  private var ignoreBackgroundTapUntil: CFTimeInterval = 0
+  private var enableControlsWorkItem: DispatchWorkItem?
+
+  private func holdDebugLog(_ message: String) {
+    guard chatContextHoldDebugLogs else { return }
+    NSLog("[ChatContextHold] %@", message)
+  }
 
   // MARK: - Init
 
@@ -147,70 +155,32 @@ public final class ChatContextMenuOverlay: UIView {
   }
 
   private func setupGestures() {
-    let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap))
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap(_:)))
     tap.delegate = self
+    tap.cancelsTouchesInView = false
+    tap.delaysTouchesBegan = false
+    tap.delaysTouchesEnded = false
     addGestureRecognizer(tap)
   }
 
-  @objc private func handleBackgroundTap() {
-    animateOut()
+  @objc private func handleBackgroundTap(_ gesture: UITapGestureRecognizer) {
+    let now = CACurrentMediaTime()
+    let point = gesture.location(in: self)
+    if now < ignoreBackgroundTapUntil {
+      holdDebugLog(
+        "backgroundTap ignored point=\(NSCoder.string(for: point)) now=\(String(format: "%.3f", now)) until=\(String(format: "%.3f", ignoreBackgroundTapUntil))"
+      )
+      return
+    }
+    holdDebugLog("backgroundTap accepted point=\(NSCoder.string(for: point))")
+    animateOut(reason: "backgroundTap")
   }
 
   // MARK: - Layout
 
-  private func keyboardHostFrameInScreen(for window: UIWindow) -> CGRect? {
-    func walk(_ view: UIView) -> CGRect? {
-      let className = NSStringFromClass(type(of: view))
-      if className.contains("UIInputSetHostView") || className.contains("UIInputSetContainerView") {
-        return view.convert(view.bounds, to: nil)
-      }
-      // Traverse from top-most subviews first.
-      for child in view.subviews.reversed() {
-        if let frame = walk(child) {
-          return frame
-        }
-      }
-      return nil
-    }
-    return walk(window)
-  }
-
-  private func keyboardTopInOverlaySpace() -> CGFloat? {
-    guard #available(iOS 13.0, *) else { return nil }
-    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
-    let windows = scenes.flatMap { $0.windows }
-    var top: CGFloat?
-
-    for candidate in windows {
-      guard !candidate.isHidden else { continue }
-      let className = NSStringFromClass(type(of: candidate))
-      let looksLikeKeyboard =
-        className.contains("UIRemoteKeyboardWindow")
-        || className.contains("UITextEffectsWindow")
-      guard looksLikeKeyboard else { continue }
-
-      guard let frameInScreen = keyboardHostFrameInScreen(for: candidate) else { continue }
-      let frameInOverlay = self.convert(frameInScreen, from: nil)
-      let intersection = bounds.intersection(frameInOverlay)
-      guard !intersection.isNull, intersection.height > 0 else { continue }
-      top = min(top ?? intersection.minY, intersection.minY)
-    }
-
-    return top
-  }
-
-  /// Computes the shifted bubble frame and positions all elements.
-  /// Returns the final bubble frame (may be shifted from original).
-  @discardableResult
   private func layoutMenus() -> CGRect {
     let safeTop = safeAreaInsets.top + 10
-    var safeBottom = bounds.height - safeAreaInsets.bottom - 10
-    if let keyboardTop = keyboardTopInOverlaySpace() {
-      safeBottom = min(safeBottom, keyboardTop - 10)
-    }
-    if safeBottom <= safeTop + 40 {
-      safeBottom = bounds.height - safeAreaInsets.bottom - 10
-    }
+    let safeBottom = bounds.height - safeAreaInsets.bottom - 10
     let safeLeft: CGFloat = 16
     let safeRight = bounds.width - 16
 
@@ -316,22 +286,46 @@ public final class ChatContextMenuOverlay: UIView {
     let pickerFinalFrame = reactionPicker.frame
     let menuFinalFrame = contextMenu.frame
 
+    // Keep interactions disabled briefly so the long-press release does not
+    // immediately dismiss/select while the menu is animating in.
+    let now = CACurrentMediaTime()
+    ignoreBackgroundTapUntil = now + 0.65
+    reactionPicker.isUserInteractionEnabled = false
+    contextMenu.isUserInteractionEnabled = false
+    enableControlsWorkItem?.cancel()
+    let enableWork = DispatchWorkItem { [weak self] in
+      guard let self = self, !self.isDismissing else { return }
+      self.reactionPicker.isUserInteractionEnabled = true
+      self.contextMenu.isUserInteractionEnabled = true
+      self.holdDebugLog("controls enabled")
+    }
+    enableControlsWorkItem = enableWork
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.26, execute: enableWork)
+    holdDebugLog(
+      "animateIn arm interactions now=\(String(format: "%.3f", now)) until=\(String(format: "%.3f", ignoreBackgroundTapUntil))"
+    )
+
     // --- Background glass fade in ---
     UIView.animate(withDuration: 0.20, delay: 0, options: .curveEaseOut) {
       self.backgroundGlassView.alpha = 1
     }
 
-    // --- Bubble: Telegram-style quick extracted hold + settle ---
+    // --- Bubble: keep identity on open; hold pulse happens on the real cell pre-menu ---
     let startCenter = CGPoint(x: originalBubbleFrame.midX, y: originalBubbleFrame.midY)
     let endCenter = CGPoint(x: finalBubbleFrame.midX, y: finalBubbleFrame.midY)
     bubbleSnapshot.bounds = CGRect(origin: .zero, size: originalBubbleFrame.size)
     bubbleSnapshot.center = startCenter
     bubbleSnapshot.transform = .identity
+    holdDebugLog(
+      "animateIn start frame=\(NSCoder.string(for: originalBubbleFrame)) startCenter=\(NSCoder.string(for: startCenter)) endCenter=\(NSCoder.string(for: endCenter))"
+    )
 
     UIView.animate(
-      withDuration: 0.20,
+      withDuration: 0.22,
       delay: 0.0,
-      options: [.curveEaseOut, .beginFromCurrentState]
+      usingSpringWithDamping: 0.92,
+      initialSpringVelocity: 0,
+      options: [.allowUserInteraction, .beginFromCurrentState]
     ) {
       self.bubbleSnapshot.transform = .identity
       self.bubbleSnapshot.center = endCenter
@@ -422,28 +416,34 @@ public final class ChatContextMenuOverlay: UIView {
     CATransaction.commit()
   }
 
-  func animateOut(completion: (() -> Void)? = nil) {
+  func animateOut(reason: String = "unknown", completion: (() -> Void)? = nil) {
     if isDismissing { return }
     isDismissing = true
+    enableControlsWorkItem?.cancel()
+    enableControlsWorkItem = nil
+    reactionPicker.isUserInteractionEnabled = false
+    contextMenu.isUserInteractionEnabled = false
+    holdDebugLog("animateOut start reason=\(reason)")
 
     UIView.animate(
-      withDuration: 0.18, delay: 0, options: [.curveEaseIn, .beginFromCurrentState]
+      withDuration: 0.20, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]
     ) {
       self.backgroundGlassView.alpha = 0
       self.reactionPicker.alpha = 0
       self.contextMenu.alpha = 0
-      // Snap bubble back to original position smoothly (keep alpha at 1 to prevent flicker)
+      // Snap bubble back to original position smoothly
       self.bubbleSnapshot.transform = .identity
       self.bubbleSnapshot.bounds = CGRect(origin: .zero, size: self.originalBubbleFrame.size)
       self.bubbleSnapshot.center = CGPoint(
         x: self.originalBubbleFrame.midX,
         y: self.originalBubbleFrame.midY
       )
-      self.contextMenu.transform = CGAffineTransform(translationX: 0, y: -2)
+      self.contextMenu.transform = CGAffineTransform(translationX: 0, y: -2).scaledBy(
+        x: 0.95, y: 0.95)
       self.reactionPicker.transform = CGAffineTransform(
         translationX: self.bubbleIsMe ? 6 : -6,
         y: 0
-      )
+      ).scaledBy(x: 0.95, y: 0.95)
     } completion: { _ in
       self.reactionPicker.layer.mask = nil
       self.contextMenu.layer.mask = nil
@@ -462,6 +462,13 @@ extension ChatContextMenuOverlay: UIGestureRecognizerDelegate {
   public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer)
     -> Bool
   {
+    let now = CACurrentMediaTime()
+    if now < ignoreBackgroundTapUntil {
+      holdDebugLog(
+        "gestureShouldBegin ignored now=\(String(format: "%.3f", now)) until=\(String(format: "%.3f", ignoreBackgroundTapUntil))"
+      )
+      return false
+    }
     let point = gestureRecognizer.location(in: self)
     // Only dismiss if tap is outside the bubble, picker, and menu
     if bubbleSnapshot.frame.contains(point) { return false }

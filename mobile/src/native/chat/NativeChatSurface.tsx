@@ -58,10 +58,12 @@ interface NativeChatSurfaceProps {
   onViewportChanged?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeError?: (error: unknown, context: string) => void;
+  /** Testing/lab only: Strategy to use for cell hold animation. */
+  holdStrategy?: string;
 }
 
 export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurfaceProps>(
-  ({ surfaceId, rows, forceRender, engineSurfaceId, chatId, myUserId, peerUserId, statusAuthorityEnabled, appearance, contentPaddingTop, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
+  ({ surfaceId, rows, forceRender, engineSurfaceId, chatId, myUserId, peerUserId, statusAuthorityEnabled, appearance, contentPaddingTop, contentPaddingBottom, voicePlayback, inputBarEnabled, inputPlaceholder, nativeSendEnabled, debugAnimationPanel, holdStrategy, onViewportChanged, onNativeEvent, onNativeError }, ref) => {
     const nativeListModule = useMemo(() => getNativeChatListModule(), []);
     const debugNativeEvents = __DEV__ && (globalThis as any).__VIBE_NATIVE_CHAT_DEBUG === true;
     const reportNativeError = (error: unknown, context: string) => {
@@ -134,6 +136,7 @@ export const NativeChatSurface = forwardRef<NativeChatSurfaceRef, NativeChatSurf
         inputPlaceholder={inputPlaceholder}
         nativeSendEnabled={nativeSendEnabled}
         debugAnimationPanel={debugAnimationPanel}
+        holdStrategy={holdStrategy}
         onViewportChanged={(event: any) => {
           // Log once to verify event bridge works
           if (debugNativeEvents && onViewportChanged && !(onViewportChanged as any)._logged) {

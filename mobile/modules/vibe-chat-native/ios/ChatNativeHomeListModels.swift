@@ -16,7 +16,31 @@ struct ChatNativeHomeListRow {
   let avatarUri: String?
   let avatarFallback: String
   let isSavedMessages: Bool
+  let type: String?
+  let isGroup: Bool
   let previewRows: [[String: Any]]
+
+  func withPresence(isTyping: Bool, isOnline: Bool) -> ChatNativeHomeListRow {
+    ChatNativeHomeListRow(
+      chatId: chatId,
+      title: title,
+      preview: preview,
+      timeLabel: timeLabel,
+      unreadCount: unreadCount,
+      markedUnread: markedUnread,
+      muted: muted,
+      pinned: pinned,
+      isTyping: isTyping,
+      isOnline: isOnline,
+      peerUserId: peerUserId,
+      avatarUri: avatarUri,
+      avatarFallback: avatarFallback,
+      isSavedMessages: isSavedMessages,
+      type: type,
+      isGroup: isGroup,
+      previewRows: previewRows
+    )
+  }
 
   static func parse(_ raw: [String: Any]) -> ChatNativeHomeListRow? {
     guard let chatId = normalizedString(raw["chatId"] ?? raw["chat_id"]), !chatId.isEmpty else {
@@ -41,8 +65,12 @@ struct ChatNativeHomeListRow {
         raw["avatarUri"] ?? raw["avatar_uri"] ?? raw["friendImage"] ?? raw["friend_image"]
           ?? raw["avatarUrl"] ?? raw["avatar_url"])
     let avatarUri = resolveAvatarURI(rawAvatar: rawAvatar, friendId: friendId, chatId: chatId)
-    let avatarFallback = normalizedString(raw["avatarFallback"] ?? raw["avatar_fallback"])
+    let avatarFallback =
+      normalizedString(raw["avatarFallback"] ?? raw["avatar_fallback"])
       ?? String(title.prefix(1)).uppercased()
+    let type = normalizedString(raw["type"])
+    let isGroup =
+      parseBool(raw["isGroup"] ?? raw["is_group"]) ?? (type == "group" || type == "channel")
     let previewRows = parsePreviewRows(raw["previewRows"] ?? raw["preview_rows"])
 
     return ChatNativeHomeListRow(
@@ -60,6 +88,8 @@ struct ChatNativeHomeListRow {
       avatarUri: avatarUri,
       avatarFallback: avatarFallback,
       isSavedMessages: isSavedMessages,
+      type: type,
+      isGroup: isGroup,
       previewRows: previewRows
     )
   }
@@ -71,7 +101,9 @@ struct ChatNativeHomeListRow {
     }
   }
 
-  private static func resolveAvatarURI(rawAvatar: String?, friendId: String?, chatId: String) -> String? {
+  private static func resolveAvatarURI(rawAvatar: String?, friendId: String?, chatId: String)
+    -> String?
+  {
     if chatId == "saved_messages" {
       return nil
     }
@@ -121,9 +153,10 @@ struct ChatNativeHomeListRow {
     if !hasApiSuffix {
       url = url.appendingPathComponent("api")
     }
-    return url.appendingPathComponent("push").appendingPathComponent("avatar").appendingPathComponent(
-      userId
-    ).absoluteString
+    return url.appendingPathComponent("push").appendingPathComponent("avatar")
+      .appendingPathComponent(
+        userId
+      ).absoluteString
   }
 
   private static func isHTTPURL(_ value: String) -> Bool {

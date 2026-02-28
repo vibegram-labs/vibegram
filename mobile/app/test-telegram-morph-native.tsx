@@ -19,6 +19,7 @@ type DemoMessage = {
 };
 
 const MODE_LABELS = ['None', 'SlideUp', 'Telegram', 'Spring'] as const;
+const HOLD_STRATEGIES = ['contentView', 'scaleCell', 'scaleBubbleOnly', 'anchor_edge'] as const;
 
 const makeSeedMessages = (): DemoMessage[] => {
   const now = Date.now();
@@ -87,7 +88,7 @@ const HoldEffectBubble = ({ title, desc, scaleMethod, isMe }: any) => {
   // Bubble roughly 250px wide, centered in its side
   const BUBBLE_WIDTH = 250;
   const BUBBLE_HEIGHT = 60;
-  
+
   if (scaleMethod === 'scale_cell_center') {
     // Scales the whole cell row from the exact center of the cell
     containerTransform = [{ scale: scaleAnim }];
@@ -106,7 +107,7 @@ const HoldEffectBubble = ({ title, desc, scaleMethod, isMe }: any) => {
       inputRange: [0.95, 1],
       outputRange: [(px - cx) * (1 - 0.95), 0],
     });
-    
+
     containerTransform = [
       { translateX },
       { scale: scaleAnim },
@@ -127,13 +128,13 @@ const HoldEffectBubble = ({ title, desc, scaleMethod, isMe }: any) => {
     <View style={styles.labCard}>
       <Text style={styles.labCardTitle}>{title}</Text>
       <Text style={styles.labCardDesc}>{desc}</Text>
-      
+
       <Pressable onPressIn={handlePressIn} onPressOut={handlePressOut} delayLongPress={50}>
         <View style={styles.cellOuter}>
-          <Animated.View style={[styles.cellContainer, { transform: containerTransform }, isMe ? { alignItems: 'flex-end'} : {alignItems: 'flex-start'}]}>
-             <Animated.View style={[styles.demoBubble, isMe ? styles.demoBubbleMe : styles.demoBubbleThem, { transform: bubbleTransform }]}>
-                <Text style={styles.demoBubbleText}>Tap and hold me to test the effect!</Text>
-             </Animated.View>
+          <Animated.View style={[styles.cellContainer, { transform: containerTransform }, isMe ? { alignItems: 'flex-end' } : { alignItems: 'flex-start' }]}>
+            <Animated.View style={[styles.demoBubble, isMe ? styles.demoBubbleMe : styles.demoBubbleThem, { transform: bubbleTransform }]}>
+              <Text style={styles.demoBubbleText}>Tap and hold me to test the effect!</Text>
+            </Animated.View>
           </Animated.View>
         </View>
       </Pressable>
@@ -145,53 +146,53 @@ function HoldEffectLab() {
   return (
     <ScrollView style={styles.surfaceWrap} contentContainerStyle={{ padding: 16 }}>
       <Text style={styles.labInstruct}>
-        Tap and hold the bubbles below to see how they scale down. Look closely at how the bubble shifts horizontally. 
+        Tap and hold the bubbles below to see how they scale down. Look closely at how the bubble shifts horizontally.
       </Text>
-      
-      <HoldEffectBubble 
-         title="1. Scale Cell Center (Bad)" 
-         desc="Scales the whole row around the center of the screen. Bubble shifts towards center."
-         scaleMethod="scale_cell_center"
-         isMe={true}
+
+      <HoldEffectBubble
+        title="1. Scale Cell Center (Bad)"
+        desc="Scales the whole row around the center of the screen. Bubble shifts towards center."
+        scaleMethod="scale_cell_center"
+        isMe={true}
       />
 
-      <HoldEffectBubble 
-         title="2. Current iOS Math (Translate + Scale Cell)" 
-         desc="This is what the Swift code is doing now: scaling the whole cell but translating it to pivot on the bubble. Might cause jitter."
-         scaleMethod="ios_math"
-         isMe={true}
+      <HoldEffectBubble
+        title="2. Current iOS Math (Translate + Scale Cell)"
+        desc="This is what the Swift code is doing now: scaling the whole cell but translating it to pivot on the bubble. Might cause jitter."
+        scaleMethod="ios_math"
+        isMe={true}
       />
 
-      <HoldEffectBubble 
-         title="3. Scale Bubble Directly (Best)" 
-         desc="Only scales the bubble container itself around its own center. No translation math needed. Smooth."
-         scaleMethod="scale_bubble_direct"
-         isMe={true}
+      <HoldEffectBubble
+        title="3. Scale Bubble Directly (Best)"
+        desc="Only scales the bubble container itself around its own center. No translation math needed. Smooth."
+        scaleMethod="scale_bubble_direct"
+        isMe={true}
       />
 
-      <HoldEffectBubble 
-         title="4. Scale + Anchor Edge" 
-         desc="Scales the bubble directly but translates slightly to keep the bubble tail anchored to the edge."
-         scaleMethod="anchor_edge"
-         isMe={true}
+      <HoldEffectBubble
+        title="4. Scale + Anchor Edge"
+        desc="Scales the bubble directly but translates slightly to keep the bubble tail anchored to the edge."
+        scaleMethod="anchor_edge"
+        isMe={true}
       />
-      
-      <View style={{height: 40}} />
-      <Text style={{color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 10}}>Receiver (Them) Bubbles:</Text>
-      
-      <HoldEffectBubble 
-         title="Current iOS Math (Them)" 
-         desc="Translate + Scale cell on the left side."
-         scaleMethod="ios_math"
-         isMe={false}
+
+      <View style={{ height: 40 }} />
+      <Text style={{ color: '#fff', fontSize: 16, fontWeight: 'bold', marginBottom: 10 }}>Receiver (Them) Bubbles:</Text>
+
+      <HoldEffectBubble
+        title="Current iOS Math (Them)"
+        desc="Translate + Scale cell on the left side."
+        scaleMethod="ios_math"
+        isMe={false}
       />
-      <HoldEffectBubble 
-         title="Scale Bubble Directly (Them)" 
-         desc="Pivot around its own center."
-         scaleMethod="scale_bubble_direct"
-         isMe={false}
+      <HoldEffectBubble
+        title="Scale Bubble Directly (Them)"
+        desc="Pivot around its own center."
+        scaleMethod="scale_bubble_direct"
+        isMe={false}
       />
-            
+
     </ScrollView>
   );
 }
@@ -201,8 +202,9 @@ export default function TestTelegramMorphNativeScreen() {
   const runtime = useMemo(() => getNativeChatRuntimeInfo(), []);
 
   const [activeTab, setActiveTab] = useState<'surface' | 'lab'>('lab');
-  
+
   const [animMode, setAnimMode] = useState(2);
+  const [holdStrategy, setHoldStrategy] = useState<string>('contentView');
   const [sessionId, setSessionId] = useState(1);
   const [messages, setMessages] = useState<DemoMessage[]>(() => makeSeedMessages());
   const [lastEvent, setLastEvent] = useState('Ready');
@@ -303,6 +305,19 @@ export default function TestTelegramMorphNativeScreen() {
               </TouchableOpacity>
             ))}
           </View>
+          <View style={styles.modeRow}>
+            {HOLD_STRATEGIES.map((strategy) => (
+              <TouchableOpacity
+                key={strategy}
+                style={[styles.modeChip, holdStrategy === strategy && styles.modeChipActive]}
+                onPress={() => setHoldStrategy(strategy)}
+              >
+                <Text style={[styles.modeChipText, holdStrategy === strategy && styles.modeChipTextActive]}>
+                  {strategy}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
           <View style={styles.actionRow}>
             <TouchableOpacity style={styles.actionBtn} onPress={pushIncoming}>
               <Text style={styles.actionText}>+ Incoming</Text>
@@ -321,6 +336,7 @@ export default function TestTelegramMorphNativeScreen() {
               surfaceId={`test-telegram-morph-native-${sessionId}`}
               rows={rows}
               appearance={appearance}
+              holdStrategy={holdStrategy}
               inputBarEnabled
               nativeSendEnabled
               inputPlaceholder="Message"
@@ -461,7 +477,7 @@ const styles = StyleSheet.create({
   surfaceWrap: {
     flex: 1,
   },
-  
+
   // Lab styles
   labInstruct: {
     color: 'rgba(255,255,255,0.8)',

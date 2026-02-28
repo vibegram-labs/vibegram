@@ -100,6 +100,7 @@ public class ChatNativeListModule: Module {
         view.setNativeSendEnabled(enabled)
       }
 
+
       Prop("debugAnimationPanel") { (view: ChatListView, enabled: Bool) in
         view.setDebugAnimationPanel(enabled)
       }

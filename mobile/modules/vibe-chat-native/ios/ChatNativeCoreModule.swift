@@ -5,11 +5,12 @@ import Foundation
 import Security
 
 private struct HybridPayload: Decodable {
-  let v: Int
+  let v: Int?
   let iv: String
   let c: String
-  let k: String
+  let k: String?
   let s: String?
+  let g: String?
 }
 
 private struct PEMDecodeResult {
@@ -267,6 +268,7 @@ private func decryptHybridMessage(
     return ""
   }
   if !trimmed.hasPrefix("{") {
+    NSLog("[ChatNativeCore] Decrypt failed: Format not JSON")
     return "[Decryption Failed - Format]"
   }
 
@@ -275,13 +277,20 @@ private func decryptHybridMessage(
     let payload = try JSONDecoder().decode(HybridPayload.self, from: payloadData)
 
     var keyCandidates: [String] = []
+    if let g = payload.g {
+      keyCandidates.append(g)
+    }
     if isMyMessage {
       if let senderKey = payload.s {
         keyCandidates.append(senderKey)
       }
-      keyCandidates.append(payload.k)
+      if let recipientKey = payload.k {
+        keyCandidates.append(recipientKey)
+      }
     } else {
-      keyCandidates.append(payload.k)
+      if let recipientKey = payload.k {
+        keyCandidates.append(recipientKey)
+      }
       if let senderKey = payload.s {
         keyCandidates.append(senderKey)
       }
@@ -299,6 +308,9 @@ private func decryptHybridMessage(
     }
 
     guard let aesKeyData else {
+      NSLog(
+        "[ChatNativeCore] Decrypt failed: Could not decrypt AES key. Candidates count: %d",
+        keyCandidates.count)
       throw NSError(
         domain: "ChatNativeCore",
         code: 2,
@@ -311,6 +323,7 @@ private func decryptHybridMessage(
       let combinedData = Data(base64Encoded: payload.c),
       combinedData.count >= 16
     else {
+      NSLog("[ChatNativeCore] Decrypt failed: Invalid ciphertext payload")
       throw NSError(
         domain: "ChatNativeCore",
         code: 3,
@@ -329,6 +342,7 @@ private func decryptHybridMessage(
     let plaintextData = try AES.GCM.open(sealedBox, using: SymmetricKey(data: aesKeyData))
     return String(data: plaintextData, encoding: .utf8) ?? ""
   } catch {
+    NSLog("[ChatNativeCore] Decrypt failed: %@", error.localizedDescription)
     return "[Decryption Failed]"
   }
 }

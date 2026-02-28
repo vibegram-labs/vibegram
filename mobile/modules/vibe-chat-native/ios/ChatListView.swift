@@ -169,8 +169,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }()
 
   private var isPeerTyping: Bool = false
-  private var isAgentProgressActive: Bool = false
-  private var agentProgressLabel: String?
   private var isGroupOrChannel: Bool = false
 
   // Floating activity overlay (typing / agent progress) — lives OUTSIDE the collection view
@@ -322,7 +320,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     isApplyingRowsUpdate = true
 
     let mergedRows = mergedRowsPayload(from: nextRows)
-    let parsed = mergedRows.compactMap(ChatListRow.init)
+    let parsed = mergedRows.compactMap(ChatListRow.init).filter { row in
+      row.messageType != "agent_progress"
+    }
     NSLog("[ChatListView] setRows parsed: %d, previous: %d", parsed.count, rows.count)
     let previousRows = rows
     let previousDistanceFromBottom = currentDistanceFromBottom()
@@ -361,12 +361,22 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       guard let self else {
         return
       }
+      let preInsetContentH = self.collectionView.contentSize.height
+      let preInsetOffset = self.collectionView.contentOffset.y
       self.collectionView.layoutIfNeeded()
       self.updateBottomAnchorInset()
       // Force a second layout pass so contentSize reflects the inset change
       // before scrollToBottom reads it. Without this, maxOffsetY can be 0
       // causing the newest message to appear at the top instead of the bottom.
       self.collectionView.layoutIfNeeded()
+      let postInsetContentH = self.collectionView.contentSize.height
+      let postInsetOffset = self.collectionView.contentOffset.y
+      NSLog(
+        "[ChatListFinalize] wasNear:%@ anim:%@ preOff:%.1f postOff:%.1f preH:%.1f postH:%.1f bounds:%.1f rows:%d queued:%@",
+        wasNearBottom ? "Y" : "N", animated ? "Y" : "N",
+        preInsetOffset, postInsetOffset, preInsetContentH, postInsetContentH,
+        self.collectionView.bounds.height, parsed.count,
+        self.pendingRowsPayload != nil ? "Y" : "N")
       if wasNearBottom {
         self.scrollToBottom(animated: animated)
       } else if let anchor = stationaryAnchor,
@@ -415,6 +425,28 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     // Reorder/move-heavy updates are uncommon here; fallback to full reload.
     guard oldSharedOrder == newSharedOrder else {
+      // Find first mismatch to help debug which key triggered the reorder
+      var mismatchIdx = -1
+      for i in 0..<min(oldSharedOrder.count, newSharedOrder.count) {
+        if oldSharedOrder[i] != newSharedOrder[i] { mismatchIdx = i; break }
+      }
+      if mismatchIdx < 0 && oldSharedOrder.count != newSharedOrder.count {
+        mismatchIdx = min(oldSharedOrder.count, newSharedOrder.count)
+      }
+      let insertedKeys = newKeys.filter { !oldSet.contains($0) }
+      let deletedKeys = oldKeys.filter { !newSet.contains($0) }
+      NSLog(
+        "[ChatListView] ⚠️ reorder fallback — oldShared:%d newShared:%d mismatchAt:%d inserted:%d deleted:%d insertedKeys:%@ deletedKeys:%@",
+        oldSharedOrder.count, newSharedOrder.count, mismatchIdx,
+        insertedKeys.count, deletedKeys.count,
+        insertedKeys.prefix(3).map { String($0.prefix(16)) }.joined(separator: ","),
+        deletedKeys.prefix(3).map { String($0.prefix(16)) }.joined(separator: ","))
+      if mismatchIdx >= 0, mismatchIdx < min(oldSharedOrder.count, newSharedOrder.count) {
+        NSLog(
+          "[ChatListView]   mismatch old:'%@' new:'%@'",
+          String(oldSharedOrder[mismatchIdx].prefix(20)),
+          String(newSharedOrder[mismatchIdx].prefix(20)))
+      }
       applyDataSource()
       UIView.performWithoutAnimation {
         collectionView.reloadData()
@@ -498,9 +530,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     let expectedAfterCount = previousRows.count + insertions.count - deletions.count
     guard expectedAfterCount == parsed.count else {
+      let insertedKeys = parsed.enumerated().filter { !oldSet.contains($0.element.key) }.map { String($0.element.key.prefix(16)) }
       NSLog(
-        "[ChatListView] ⚠️ batch count mismatch (expected %d, got %d) — falling back to reloadData",
-        expectedAfterCount, parsed.count)
+        "[ChatListView] ⚠️ batch count mismatch (expected %d, got %d) — falling back to reloadData insertedKeys:%@",
+        expectedAfterCount, parsed.count, insertedKeys.prefix(5).joined(separator: ","))
       applyDataSource()
       UIView.performWithoutAnimation {
         collectionView.reloadData()
@@ -527,6 +560,17 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       isSmallUpdate
       && wasNearBottom
       && animMode > 0  // mode 0 = no animation
+
+    let insertedKeysSummary = insertions.prefix(3).compactMap { ip -> String? in
+      guard ip.item < parsed.count else { return nil }
+      let row = parsed[ip.item]
+      return "\(String(row.key.prefix(12)))(\(row.isMe ? "me" : "them"),\(row.isAgentMessage ? "agent" : "user"))"
+    }.joined(separator: " ")
+    NSLog(
+      "[ChatListView] animDecision — shouldAnim:%@ isSmall:%@ wasNear:%@ mode:%d del:%d ins:%d reload:%d keys:[%@]",
+      shouldAnimateUpdate ? "Y" : "N", isSmallUpdate ? "Y" : "N",
+      wasNearBottom ? "Y" : "N", animMode,
+      deletions.count, insertions.count, safeReloads.count, insertedKeysSummary)
 
     // Animate scroll-to-bottom for small appends, BUT NOT during a send
     // transition. During send, we scroll instantly so the cell is at its
@@ -693,11 +737,22 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         // scroll change that finalize introduced.
         let postOffset = collectionView.contentOffset.y
         dbgScrollDelta = postOffset - preUpdateOffset
-        NSLog(
-          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d",
-          preUpdateScreenY.count, preUpdateOffset, postOffset, dbgScrollDelta,
-          collectionView.visibleCells.count)
 
+        // --- Pass 1: compute shift deltas for existing cells ---
+        // We need the max delta BEFORE applying new-cell animations so
+        // the new cell's slide distance matches the existing shift.
+        // Without this, the new cell uses a tiny fixed offset (e.g. 20)
+        // while existing cells shift by ~74, causing the new cell to
+        // visually overlap/appear above existing bubbles at T=0.
+        struct CellAnimInfo {
+          let cell: UICollectionViewCell
+          let key: String
+          let indexPath: IndexPath
+          let delta: CGFloat      // shift delta for existing cells
+          let isNew: Bool
+          let isHiddenForSend: Bool
+        }
+        var cellInfos: [CellAnimInfo] = []
         for cell in collectionView.visibleCells {
           guard let ip = collectionView.indexPath(for: cell),
             ip.item < rows.count
@@ -707,46 +762,67 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           if let oldScreenY = preUpdateScreenY[key] {
             let currentScreenY = cell.center.y - postOffset
             let delta = pixelAlignedValue(oldScreenY - currentScreenY)
+            cellInfos.append(CellAnimInfo(
+              cell: cell, key: key, indexPath: ip, delta: delta,
+              isNew: false, isHiddenForSend: false))
             if abs(delta) > 0.5 {
+              dbgMaxDelta = max(dbgMaxDelta, abs(delta))
+            }
+          } else if insertedKeySet.contains(key) {
+            let isHidden: Bool = {
+              guard let hid = self.hiddenMessageId, ip.item < self.rows.count else { return false }
+              return self.rows[ip.item].messageId == hid
+            }()
+            cellInfos.append(CellAnimInfo(
+              cell: cell, key: key, indexPath: ip, delta: 0,
+              isNew: true, isHiddenForSend: isHidden))
+          }
+        }
+
+        // New cells must start BELOW all existing cells' old positions.
+        // Use the max existing shift (which equals how far existing cells
+        // "push up") so the new cell slides in from below, not from the
+        // middle of existing bubbles.
+        let newCellSlideOffset = pixelAlignedValue(
+          max(dbgMaxDelta, debugAnimSlideOffset))
+
+        NSLog(
+          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d maxΔ:%.1f newSlideOff:%.1f",
+          preUpdateScreenY.count, preUpdateOffset, postOffset, dbgScrollDelta,
+          collectionView.visibleCells.count, dbgMaxDelta, newCellSlideOffset)
+
+        // --- Pass 2: apply animations ---
+        for info in cellInfos {
+          if !info.isNew {
+            if abs(info.delta) > 0.5 {
               let anim = CABasicAnimation(keyPath: "position.y")
-              anim.fromValue = delta as NSNumber
+              anim.fromValue = info.delta as NSNumber
               anim.toValue = 0.0 as NSNumber
               anim.isAdditive = true
               anim.duration = animDuration
               anim.timingFunction = animTiming
               anim.isRemovedOnCompletion = true
-              cell.layer.add(anim, forKey: "insertionShift")
+              info.cell.layer.add(anim, forKey: "insertionShift")
               dbgShifted += 1
-              dbgMaxDelta = max(dbgMaxDelta, abs(delta))
               NSLog(
-                "[ChatListAnim]   shift '%@' Δ:%.1f (oldScr:%.1f newScr:%.1f)",
-                String(key.prefix(12)), delta, oldScreenY, currentScreenY)
+                "[ChatListAnim]   shift '%@' Δ:%.1f",
+                String(info.key.prefix(12)), info.delta)
             }
-          } else if insertedKeySet.contains(key) {
-            let isHiddenForSend: Bool = {
-              guard let hid = self.hiddenMessageId, ip.item < self.rows.count else { return false }
-              return self.rows[ip.item].messageId == hid
-            }()
-            if !isHiddenForSend {
-              let slideAnim = CABasicAnimation(keyPath: "position.y")
-              slideAnim.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
-              slideAnim.toValue = 0.0 as NSNumber
-              slideAnim.isAdditive = true
-              slideAnim.duration = animDuration
-              slideAnim.timingFunction = animTiming
-              slideAnim.isRemovedOnCompletion = true
-              cell.layer.add(slideAnim, forKey: "insertSlideUp")
-              dbgNewSlide += 1
-              NSLog(
-                "[ChatListAnim]   newSlide '%@' offset:%.0f", String(key.prefix(12)),
-                debugAnimSlideOffset)
-            } else {
-              NSLog("[ChatListAnim]   skip hidden '%@'", String(key.prefix(12)))
-            }
-          } else {
+          } else if !info.isHiddenForSend {
+            let slideAnim = CABasicAnimation(keyPath: "position.y")
+            slideAnim.fromValue = newCellSlideOffset as NSNumber
+            slideAnim.toValue = 0.0 as NSNumber
+            slideAnim.isAdditive = true
+            slideAnim.duration = animDuration
+            slideAnim.timingFunction = animTiming
+            slideAnim.isRemovedOnCompletion = true
+            info.cell.layer.add(slideAnim, forKey: "insertSlideUp")
+            dbgNewSlide += 1
             NSLog(
-              "[ChatListAnim]   noAnim '%@' (not in preScreenY, not inserted)",
-              String(key.prefix(12)))
+              "[ChatListAnim]   newSlide '%@' offset:%.0f (maxΔ:%.1f)",
+              String(info.key.prefix(12)), newCellSlideOffset, dbgMaxDelta)
+          } else {
+            NSLog("[ChatListAnim]   skip hidden '%@'", String(info.key.prefix(12)))
           }
         }
 
@@ -1126,22 +1202,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return
     }
     let reason = (note.userInfo?["reason"] as? String) ?? "engine"
-    if reason == "agentProgress" {
-      let isActive = note.userInfo?["isActive"] as? Bool ?? false
-      let label = note.userInfo?["label"] as? String
-      setAgentProgress(active: isActive, label: label)
-      return
-    }
     if reason == "peerTyping" {
-      let typingMessageId = note.userInfo?["messageId"] as? String
-      let isTyping = typingMessageId == "true"
-      // If agent progress is already active, skip peer-typing overlay
-      // (agent-progress events carry the real label)
-      if isAgentProgressActive && isTyping {
-        isPeerTyping = isTyping
-        return
-      }
-      setPeerTyping(isTyping)
+      // Typing indicator is handled in header; do not show list-level typing UI.
+      setPeerTyping(false)
       return
     }
     if reason == "chatMessageInserted"
@@ -1708,6 +1771,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       }
     }
 
+    let isAgent: Bool = {
+      if let row = nativeEngineRowsById[resolvedMessageId],
+        let msg = row["message"] as? [String: Any]
+      {
+        return (msg["isAgentMessage"] as? Bool) == true
+      }
+      return false
+    }()
+    NSLog(
+      "[ChatListEngine] syncMutation reason:%@ msgId:%@ action:%@ isAgent:%@ engineRows:%d engineOrder:%d",
+      reason, String(resolvedMessageId.prefix(12)), normalizedAction ?? "nil",
+      isAgent ? "Y" : "N", nativeEngineRowsById.count, nativeEngineOrder.count)
     setRows(sourceRowsPayload)
   }
 
@@ -3046,7 +3121,7 @@ extension ChatListView: ChatInputBarDelegate {
   }
 
   private func layoutActivityOverlay() {
-    guard activityOverlay.alpha > 0 || isAgentProgressActive || isPeerTyping else { return }
+    guard activityOverlay.alpha > 0 || isPeerTyping else { return }
 
     let overlayH: CGFloat = 28
     let overlayMaxW = min(bounds.width - 32, 260)
@@ -3135,25 +3210,14 @@ extension ChatListView: ChatInputBarDelegate {
     }
   }
 
-  private func setPeerTyping(_ typing: Bool) {
-    if isPeerTyping == typing { return }
-    isPeerTyping = typing
-    updateActivityOverlayState()
-  }
-
-  private func setAgentProgress(active: Bool, label: String?) {
-    isAgentProgressActive = active
-    agentProgressLabel = active ? label : nil
+  private func setPeerTyping(_ _: Bool) {
+    let next = false
+    if isPeerTyping == next { return }
+    isPeerTyping = next
     updateActivityOverlayState()
   }
 
   private func updateActivityOverlayState() {
-    if isAgentProgressActive, let label = agentProgressLabel, !label.isEmpty {
-      showActivityOverlay(text: label)
-    } else if isPeerTyping && !isAgentProgressActive {
-      showActivityOverlay(text: "Typing...")
-    } else {
-      hideActivityOverlay()
-    }
+    hideActivityOverlay()
   }
 }

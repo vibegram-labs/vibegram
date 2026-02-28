@@ -1,6 +1,8 @@
 import AVFoundation
 import UIKit
 
+private let chatCellHoldDebugLogs = true
+
 final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
   // Telegram approach: cells are ALWAYS fully opaque. No fade-in,
   // no fade-out, no transform. ALL visibility is position-based only.
@@ -384,22 +386,24 @@ private func isRTL(_ text: String) -> Bool {
   return text.range(of: "[\\u0600-\\u06FF]", options: .regularExpression) != nil
 }
 
-private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? = nil) -> NSAttributedString {
+private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? = nil)
+  -> NSAttributedString
+{
   let isRtl = isRTL(text)
   let paragraphStyle = NSMutableParagraphStyle()
   paragraphStyle.alignment = isRtl ? .right : .natural
   paragraphStyle.baseWritingDirection = isRtl ? .rightToLeft : .natural
-  
+
   var attrs: [NSAttributedString.Key: Any] = [
     .font: font,
-    .paragraphStyle: paragraphStyle
+    .paragraphStyle: paragraphStyle,
   ]
   if let c = textColor {
     attrs[.foregroundColor] = c
   }
-  
+
   let attrString = NSMutableAttributedString(string: text, attributes: attrs)
-  
+
   if let regex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*") {
     let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
     for match in matches.reversed() {
@@ -416,11 +420,13 @@ private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? 
       }
     }
   }
-  
+
   return attrString
 }
 
-private func bubbleDisplayAttributedString(for row: ChatListRow, font: UIFont, textColor: UIColor? = nil) -> NSAttributedString {
+private func bubbleDisplayAttributedString(
+  for row: ChatListRow, font: UIFont, textColor: UIColor? = nil
+) -> NSAttributedString {
   var t: String
   var addPrefix = false
   if row.isAgentMessage {
@@ -432,12 +438,12 @@ private func bubbleDisplayAttributedString(for row: ChatListRow, font: UIFont, t
   } else {
     t = row.text
   }
-  
+
   if addPrefix {
     let prefix = isRTL(t) ? "\u{200F}✦ " : "✦ "
     t = t.isEmpty ? prefix : prefix + t
   }
-  
+
   return parseAgentMarkdown(text: t, font: font, textColor: textColor)
 }
 
@@ -1213,6 +1219,15 @@ final class ChatListCell: UICollectionViewCell {
   private var isGhostHidden = false
   private var isContextMenuExtracted = false
   private var isContextMenuHeld = false
+  private var savedBubbleHiddenBeforeExtraction = false
+  private var savedTailHiddenBeforeExtraction = false
+  private var savedReactionHiddenBeforeExtraction = false
+  private var savedMessageAlphaBeforeExtraction: CGFloat = 1.0
+  private var savedMediaAlphaBeforeExtraction: CGFloat = 1.0
+  private var savedMetaAlphaBeforeExtraction: CGFloat = 0.72
+  private var hasSavedExtractionState = false
+  private var cellHoldAnchorApplied = false
+  private var contentViewHoldAnchorApplied = false
   private var externalVoiceMessageId: String?
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress: CGFloat = 0.0
@@ -1421,9 +1436,11 @@ final class ChatListCell: UICollectionViewCell {
 
       // Agent/Mention labeling
       let isTyping = row.messageType == "typing"
-      let messageFont = isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
+      let messageFont =
+        isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
       let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
-      messageLabel.attributedText = bubbleDisplayAttributedString(for: row, font: messageFont, textColor: resolveTextColor)
+      messageLabel.attributedText = bubbleDisplayAttributedString(
+        for: row, font: messageFont, textColor: resolveTextColor)
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
       editedLabel.isHidden = !row.isEdited
@@ -1534,8 +1551,9 @@ final class ChatListCell: UICollectionViewCell {
     statusLabel.text = nil
     isContextMenuExtracted = false
     isContextMenuHeld = false
+    hasSavedExtractionState = false
     applyContextMenuExtractionIfNeeded()
-    applyContextMenuHoldIfNeeded(animated: false)
+    applyContextMenuHoldIfNeeded(animated: false, strategy: "scaleCell")
     contentView.alpha = 1.0
     contentView.transform = .identity
     layer.removeAllAnimations()
@@ -2132,50 +2150,190 @@ final class ChatListCell: UICollectionViewCell {
 
   func setContextMenuExtracted(_ extracted: Bool) {
     isContextMenuExtracted = extracted
+    holdDebugLog("setExtracted extracted=\(extracted)")
     applyContextMenuExtractionIfNeeded()
   }
 
-  func setContextMenuHeld(_ held: Bool, animated: Bool) {
+  func setContextMenuHeld(_ held: Bool, animated: Bool, strategy: String = "scaleCell") {
+    if isContextMenuHeld == held {
+      let alreadyIdentity = transform.isIdentity && contentView.transform.isIdentity
+      if held || alreadyIdentity {
+        holdDebugLog("setHeld skip held=\(held) animated=\(animated) strategy=\(strategy)")
+        return
+      }
+    }
     isContextMenuHeld = held
-    applyContextMenuHoldIfNeeded(animated: animated)
+    holdDebugLog("setHeld held=\(held) animated=\(animated) strategy=\(strategy)")
+    applyContextMenuHoldIfNeeded(animated: animated, strategy: strategy)
+  }
+
+  private func holdDebugLog(_ message: String) {
+    guard chatCellHoldDebugLogs else { return }
+    NSLog("[ChatCellHold] %@", message)
   }
 
   private func applyContextMenuExtractionIfNeeded() {
-    let alpha: CGFloat = isContextMenuExtracted ? 0.0 : 1.0
-    bubbleView.alpha = alpha
-    tailView.alpha = alpha
-    messageLabel.alpha = isContextMenuExtracted ? 0.0 : 1.0
-    mediaContainerView.alpha = isContextMenuExtracted ? 0.0 : 1.0
-    metaContainerView.alpha = isContextMenuExtracted ? 0.0 : 0.72
-    reactionPillView.alpha = alpha
+    if isContextMenuExtracted {
+      if !hasSavedExtractionState {
+        savedBubbleHiddenBeforeExtraction = bubbleView.isHidden
+        savedTailHiddenBeforeExtraction = tailView.isHidden
+        savedReactionHiddenBeforeExtraction = reactionPillView.isHidden
+        savedMessageAlphaBeforeExtraction = messageLabel.alpha
+        savedMediaAlphaBeforeExtraction = mediaContainerView.alpha
+        savedMetaAlphaBeforeExtraction = metaContainerView.alpha
+        hasSavedExtractionState = true
+      }
+      bubbleView.isHidden = true
+      tailView.isHidden = true
+      reactionPillView.isHidden = true
+      // Keep text/media/meta rendering alive for snapshot correctness, but hide them.
+      messageLabel.alpha = 0.0
+      mediaContainerView.alpha = 0.0
+      metaContainerView.alpha = 0.0
+      holdDebugLog("applyExtraction extracted=true hidden=true")
+      return
+    }
+
+    guard hasSavedExtractionState else { return }
+    bubbleView.isHidden = savedBubbleHiddenBeforeExtraction
+    tailView.isHidden = savedTailHiddenBeforeExtraction
+    reactionPillView.isHidden = savedReactionHiddenBeforeExtraction
+    messageLabel.alpha = savedMessageAlphaBeforeExtraction
+    mediaContainerView.alpha = savedMediaAlphaBeforeExtraction
+    metaContainerView.alpha = savedMetaAlphaBeforeExtraction
+    hasSavedExtractionState = false
+    holdDebugLog("applyExtraction extracted=false restored=true")
   }
 
   // MARK: - Hold effect
 
-  private func applyContextMenuHoldIfNeeded(animated: Bool) {
-    let scale: CGFloat = isContextMenuHeld ? 0.95 : 1.0
-    let targetTransform: CGAffineTransform
+  private func setAnchorPoint(_ anchorPoint: CGPoint, for view: UIView) {
+    let oldOrigin = view.frame.origin
+    view.layer.anchorPoint = anchorPoint
+    let newOrigin = view.frame.origin
+    let transition = CGPoint(x: newOrigin.x - oldOrigin.x, y: newOrigin.y - oldOrigin.y)
+    view.center = CGPoint(x: view.center.x - transition.x, y: view.center.y - transition.y)
+  }
+
+  private func applyContentViewHoldAnchorIfNeeded() {
+    guard contentView.bounds.width > 0, contentView.bounds.height > 0 else { return }
+
+    // Pivot hold-scale around the bubble center (not the full row center)
+    // so right/left aligned bubbles do not drift on X during press/release.
+    let bubbleCenter = bubbleView.center
+    let anchorX = max(0.0, min(1.0, bubbleCenter.x / contentView.bounds.width))
+    let anchorY = max(0.0, min(1.0, bubbleCenter.y / contentView.bounds.height))
+    setAnchorPoint(CGPoint(x: anchorX, y: anchorY), for: contentView)
+    contentViewHoldAnchorApplied = true
+  }
+
+  private func applyCellHoldAnchorIfNeeded() {
+    guard bounds.width > 0, bounds.height > 0 else { return }
+
+    let bubbleCenter = contentView.convert(bubbleView.center, to: self)
+    let anchorX = max(0.0, min(1.0, bubbleCenter.x / bounds.width))
+    let anchorY = max(0.0, min(1.0, bubbleCenter.y / bounds.height))
+    setAnchorPoint(CGPoint(x: anchorX, y: anchorY), for: self)
+    cellHoldAnchorApplied = true
+  }
+
+  private func resetCellHoldAnchorIfNeeded() {
+    guard cellHoldAnchorApplied else { return }
+    setAnchorPoint(CGPoint(x: 0.5, y: 0.5), for: self)
+    cellHoldAnchorApplied = false
+  }
+
+  private func resetContentViewHoldAnchorIfNeeded() {
+    guard contentViewHoldAnchorApplied else { return }
+    setAnchorPoint(CGPoint(x: 0.5, y: 0.5), for: contentView)
+    contentViewHoldAnchorApplied = false
+  }
+
+  private func applyContextMenuHoldIfNeeded(animated: Bool, strategy: String) {
+    let scale: CGFloat =
+      strategy == "scaleCell"
+      ? (isContextMenuHeld ? 0.965 : 1.0)
+      : (isContextMenuHeld ? 0.95 : 1.0)
+    var targetTransform: CGAffineTransform = .identity
+    var cellTransform: CGAffineTransform = .identity
 
     if isContextMenuHeld {
-      // Find the center of the bubble view
-      let px = bubbleView.center.x
-      let py = bubbleView.center.y
-
-      // Find the center of the contentView (the default pivot of the scale)
-      let cx = contentView.bounds.midX
-      let cy = contentView.bounds.midY
-
-      // Calculate how much the pivot moves due to scaling
-      let tx = (px - cx) * (1.0 - scale)
-      let ty = (py - cy) * (1.0 - scale)
-
-      targetTransform = CGAffineTransform(translationX: tx, y: ty).scaledBy(x: scale, y: scale)
+      if strategy == "scaleCell" {
+        applyCellHoldAnchorIfNeeded()
+        cellTransform = CGAffineTransform(scaleX: scale, y: scale)
+      } else {
+        applyContentViewHoldAnchorIfNeeded()
+        targetTransform = CGAffineTransform(scaleX: scale, y: scale)
+      }
     } else {
-      targetTransform = .identity
+      if strategy == "scaleCell" {
+        cellTransform = .identity
+      } else {
+        targetTransform = .identity
+      }
     }
 
+    if strategy == "scaleCell" {
+      resetContentViewHoldAnchorIfNeeded()
+    }
+
+    let applyChanges = {
+      if strategy == "scaleCell" {
+        self.transform = cellTransform
+        self.contentView.transform = .identity
+      } else {
+        self.transform = .identity
+        self.contentView.transform = targetTransform
+      }
+    }
+
+    holdDebugLog(
+      "applyHold begin held=\(isContextMenuHeld) animated=\(animated) strategy=\(strategy) scale=\(String(format: "%.3f", scale)) cell=\(NSCoder.string(for: self.transform)) content=\(NSCoder.string(for: self.contentView.transform))"
+    )
+
     if !animated {
-      contentView.transform = targetTransform
+      applyChanges()
+      holdDebugLog(
+        "applyHold end(noanim) held=\(isContextMenuHeld) strategy=\(strategy) cell=\(NSCoder.string(for: self.transform)) content=\(NSCoder.string(for: self.contentView.transform))"
+      )
+      if !isContextMenuHeld {
+        if strategy == "scaleCell" {
+          resetCellHoldAnchorIfNeeded()
+        } else {
+          resetContentViewHoldAnchorIfNeeded()
+        }
+      }
+      return
+    }
+
+    if strategy == "scaleCell" {
+      let completion: (Bool) -> Void = { _ in
+        self.holdDebugLog(
+          "applyHold end(anim) held=\(self.isContextMenuHeld) strategy=\(strategy) cell=\(NSCoder.string(for: self.transform)) content=\(NSCoder.string(for: self.contentView.transform))"
+        )
+        if !self.isContextMenuHeld {
+          self.resetCellHoldAnchorIfNeeded()
+        }
+      }
+      if isContextMenuHeld {
+        UIView.animate(
+          withDuration: 0.18,
+          delay: 0,
+          options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
+        ) {
+          applyChanges()
+        } completion: completion
+      } else {
+        UIView.animate(
+          withDuration: 0.24,
+          delay: 0,
+          usingSpringWithDamping: 0.90,
+          initialSpringVelocity: 0,
+          options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
+        ) {
+          applyChanges()
+        } completion: completion
+      }
       return
     }
 
@@ -2187,7 +2345,18 @@ final class ChatListCell: UICollectionViewCell {
       initialSpringVelocity: 0,
       options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
     ) {
-      self.contentView.transform = targetTransform
+      applyChanges()
+    } completion: { _ in
+      self.holdDebugLog(
+        "applyHold end(anim) held=\(self.isContextMenuHeld) strategy=\(strategy) cell=\(NSCoder.string(for: self.transform)) content=\(NSCoder.string(for: self.contentView.transform))"
+      )
+      if !self.isContextMenuHeld {
+        if strategy == "scaleCell" {
+          self.resetCellHoldAnchorIfNeeded()
+        } else {
+          self.resetContentViewHoldAnchorIfNeeded()
+        }
+      }
     }
   }
 
@@ -2233,6 +2402,9 @@ final class ChatListCell: UICollectionViewCell {
       return nil
     }
 
+    // Take snapshot without altering contentView.transform which cancels active hold animations
+    let frameInWindow = contentView.convert(captureRect, to: view)
+
     guard
       let snapshot = contentView.resizableSnapshotView(
         from: captureRect,
@@ -2243,10 +2415,7 @@ final class ChatListCell: UICollectionViewCell {
       return nil
     }
 
-    let currentTransform = contentView.transform
-    contentView.transform = .identity
-    snapshot.frame = contentView.convert(captureRect, to: view)
-    contentView.transform = currentTransform
+    snapshot.frame = frameInWindow
 
     snapshot.clipsToBounds = false
 

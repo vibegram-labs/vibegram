@@ -195,6 +195,8 @@ public final class ChatMainView: ExpoView,
   private var groupMemberOrder: [String] = []
   private var groupMemberCount: Int?
   private var groupTypingUserIds: [String] = []
+  private var directPeerTypingActive = false
+  private var agentProgressSubtitle: String?
   private var avatarUri: String = ""
   private var isChatMuted = false
   private var engineChatId: String = ""
@@ -311,6 +313,7 @@ public final class ChatMainView: ExpoView,
     engineChatId = value.trimmingCharacters(in: .whitespacesAndNewlines)
     chatListView.setEngineChatId(value)
     refreshTypingStateFromEngine(force: true)
+    refreshAgentProgressFromEngine(force: true)
     refreshProfileSummaryFromEngine(force: true)
     fetchAgentConfigForCurrentChat()
   }
@@ -880,6 +883,7 @@ public final class ChatMainView: ExpoView,
     }
     refreshPresenceStateFromEngine()
     refreshTypingStateFromEngine()
+    refreshAgentProgressFromEngine()
     guard !engineChatId.isEmpty else { return }
     if let changedChatIdRaw = notification.userInfo?["chatId"] as? String,
       !changedChatIdRaw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
@@ -909,26 +913,57 @@ public final class ChatMainView: ExpoView,
   }
 
   private func refreshTypingStateFromEngine(force: Bool = false) {
+    let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+
     guard isGroupOrChannel else {
-      guard force || !groupTypingUserIds.isEmpty else { return }
+      let nextDirectTyping =
+        !chatId.isEmpty
+        ? ChatEngine.shared.isTyping(["chatId": chatId])
+        : false
+      guard
+        force
+          || !groupTypingUserIds.isEmpty
+          || nextDirectTyping != directPeerTypingActive
+      else { return }
       groupTypingUserIds = []
+      directPeerTypingActive = nextDirectTyping
       updateHeaderTexts()
       updateProfileTexts()
       return
     }
-    let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !chatId.isEmpty else {
-      guard force || !groupTypingUserIds.isEmpty else { return }
+      guard force || !groupTypingUserIds.isEmpty || directPeerTypingActive else { return }
       groupTypingUserIds = []
+      directPeerTypingActive = false
       updateHeaderTexts()
       updateProfileTexts()
       return
     }
     let next = ChatEngine.shared.typingUserIds(chatId: chatId)
-    guard force || next != groupTypingUserIds else { return }
+    guard force || next != groupTypingUserIds || directPeerTypingActive else { return }
     groupTypingUserIds = next
+    directPeerTypingActive = false
     updateHeaderTexts()
     updateProfileTexts()
+  }
+
+  private func refreshAgentProgressFromEngine(force: Bool = false) {
+    let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !chatId.isEmpty else {
+      guard force || agentProgressSubtitle != nil else { return }
+      agentProgressSubtitle = nil
+      updateHeaderTexts()
+      return
+    }
+
+    let payload = ChatEngine.shared.agentProgress(chatId: chatId)
+    let isActive = (payload?["isActive"] as? Bool) ?? false
+    let rawLabel = (payload?["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+    let nextLabel = (isActive ? rawLabel : nil)?.isEmpty == false ? rawLabel : nil
+
+    guard force || nextLabel != agentProgressSubtitle else { return }
+    agentProgressSubtitle = nextLabel
+    updateHeaderTexts()
   }
 
   private func refreshProfileSummaryFromEngine(force: Bool = false) {
@@ -2068,13 +2103,19 @@ public final class ChatMainView: ExpoView,
 
   private func updateHeaderTexts() {
     let resolvedTitle = chatTitleText.isEmpty ? "Chat" : chatTitleText
+    let resolvedAgentProgress = resolvedAgentProgressSubtitle()
+    let resolvedDirectTyping = resolvedDirectTypingSubtitle()
     let groupTypingSubtitle = resolvedGroupTypingSubtitle()
     let connectionSubtitle = resolvedEngineConnectionSubtitle()
     let engineSubtitle = resolvedEnginePresenceSubtitle()
     let trimmedSubtitle = chatSubtitleText.trimmingCharacters(in: .whitespacesAndNewlines)
     let subtitleLower = trimmedSubtitle.lowercased()
     let resolvedSubtitle: String
-    if let groupTypingSubtitle {
+    if let resolvedAgentProgress {
+      resolvedSubtitle = resolvedAgentProgress
+    } else if let resolvedDirectTyping {
+      resolvedSubtitle = resolvedDirectTyping
+    } else if let groupTypingSubtitle {
       resolvedSubtitle = groupTypingSubtitle
     } else if let connectionSubtitle {
       resolvedSubtitle = connectionSubtitle
@@ -2094,7 +2135,11 @@ public final class ChatMainView: ExpoView,
     profileSubtitleLabel.text = isGroupOrChannel ? "Group Profile" : "Profile"
     chatSubtitleLabel.textColor =
       {
-        if groupTypingSubtitle != nil || (connectionSubtitle == nil && isOnline) {
+        if resolvedAgentProgress != nil
+          || resolvedDirectTyping != nil
+          || groupTypingSubtitle != nil
+          || (connectionSubtitle == nil && isOnline)
+        {
           return UIColor(red: 83.0 / 255.0, green: 224.0 / 255.0, blue: 138.0 / 255.0, alpha: 1.0)
         }
         if connectionSubtitle != nil {
@@ -2220,15 +2265,17 @@ public final class ChatMainView: ExpoView,
   private func resolvedGroupTypingSubtitle() -> String? {
     let normalizedTypingUsers = Array(Set(groupTypingUserIds.map { $0.uppercased() })).sorted()
     guard !normalizedTypingUsers.isEmpty else { return nil }
-    let names = normalizedTypingUsers.map { resolvedGroupMemberDisplayName($0) }
-    if names.count == 1 {
-      return "\(names[0]) typing..."
-    }
-    if names.count == 2 {
-      return "\(names[0]) and \(names[1]) typing..."
-    }
-    let head = names.prefix(2).joined(separator: ", ")
-    return "\(head) +\(names.count - 2) typing..."
+    return "typing..."
+  }
+
+  private func resolvedDirectTypingSubtitle() -> String? {
+    guard !isGroupOrChannel, directPeerTypingActive else { return nil }
+    return "typing..."
+  }
+
+  private func resolvedAgentProgressSubtitle() -> String? {
+    let trimmed = agentProgressSubtitle?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed.isEmpty ? nil : trimmed
   }
 
   private func resolvedGroupMembersRowSubtitle() -> String {
