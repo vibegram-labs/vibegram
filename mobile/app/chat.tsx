@@ -280,6 +280,17 @@ export default function ChatScreen() {
       return;
     }
 
+    if (type === 'pinnedBannerPressed') {
+      const rawUrl = typeof payload.url === 'string' ? payload.url : '';
+      const url = rawUrl ? normalizeOpenFileUrl(rawUrl) : '';
+      if (url && Platform.OS === 'android') {
+        Linking.openURL(url).catch((error) => {
+          console.warn('[chat/native-main] failed to open pinned file url', { url, error });
+        });
+      }
+      return;
+    }
+
     if (type === 'openFile') {
       const rawUrl = typeof payload.url === 'string' ? payload.url : '';
       const url = rawUrl ? normalizeOpenFileUrl(rawUrl) : '';

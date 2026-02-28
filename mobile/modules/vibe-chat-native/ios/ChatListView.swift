@@ -447,6 +447,26 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           String(oldSharedOrder[mismatchIdx].prefix(20)),
           String(newSharedOrder[mismatchIdx].prefix(20)))
       }
+
+      // Animate small reorders near the bottom (e.g. after completeTransition
+      // swaps the last 2 items). Capture pre-update screen positions BEFORE
+      // reloadData so we can apply mode2 additive animations afterward.
+      let reorderAnimMode = appearance.insertionAnimationMode
+      let shouldAnimateReorder =
+        wasNearBottom
+        && reorderAnimMode == 2
+        && insertedKeys.count + deletedKeys.count <= 3
+
+      var preReorderScreenY: [String: CGFloat] = [:]
+      var preReorderOffset: CGFloat = 0
+      if shouldAnimateReorder {
+        preReorderOffset = collectionView.contentOffset.y
+        for cell in collectionView.visibleCells {
+          guard let ip = collectionView.indexPath(for: cell), ip.item < rows.count else { continue }
+          preReorderScreenY[rows[ip.item].key] = cell.center.y - preReorderOffset
+        }
+      }
+
       applyDataSource()
       UIView.performWithoutAnimation {
         collectionView.reloadData()
@@ -457,6 +477,64 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         finalize(false)
         CATransaction.commit()
       }
+
+      // Apply mode2 additive animations after reloadData so the reorder
+      // appears smooth instead of an instant jump.
+      if shouldAnimateReorder, !preReorderScreenY.isEmpty {
+        collectionView.layoutIfNeeded()
+
+        // Strip UIKit implicit animations (same as the batch-update path).
+        for cell in collectionView.visibleCells {
+          cell.alpha = 1.0
+          cell.contentView.alpha = 1.0
+          cell.layer.removeAnimation(forKey: "opacity")
+          cell.layer.removeAnimation(forKey: "position")
+          cell.layer.removeAnimation(forKey: "bounds.size")
+          cell.layer.removeAnimation(forKey: "bounds.origin")
+          cell.layer.removeAnimation(forKey: "bounds")
+          cell.layer.removeAnimation(forKey: "transform")
+          cell.contentView.layer.removeAnimation(forKey: "opacity")
+          cell.contentView.layer.removeAnimation(forKey: "position")
+          cell.layer.opacity = 1.0
+          cell.contentView.layer.opacity = 1.0
+        }
+
+        let postReorderOffset = collectionView.contentOffset.y
+        let animDuration: CFTimeInterval = 0.3
+        let animTiming = chatListSendVerticalTiming
+        var reorderShifted = 0
+
+        for cell in collectionView.visibleCells {
+          guard let ip = collectionView.indexPath(for: cell), ip.item < rows.count else { continue }
+          let key = rows[ip.item].key
+          if let oldScreenY = preReorderScreenY[key] {
+            let currentScreenY = cell.center.y - postReorderOffset
+            let delta = pixelAlignedValue(oldScreenY - currentScreenY)
+            if abs(delta) > 0.5 {
+              let anim = CABasicAnimation(keyPath: "position.y")
+              anim.fromValue = delta as NSNumber
+              anim.toValue = 0.0 as NSNumber
+              anim.isAdditive = true
+              anim.duration = animDuration
+              anim.timingFunction = animTiming
+              anim.isRemovedOnCompletion = true
+              cell.layer.add(anim, forKey: "reorderShift")
+              reorderShifted += 1
+            }
+          } else {
+            // New cell that wasn't visible before — fade in.
+            let fadeAnim = CABasicAnimation(keyPath: "opacity")
+            fadeAnim.fromValue = 0.0 as NSNumber
+            fadeAnim.toValue = 1.0 as NSNumber
+            fadeAnim.duration = animDuration
+            fadeAnim.timingFunction = animTiming
+            fadeAnim.isRemovedOnCompletion = true
+            cell.layer.add(fadeAnim, forKey: "reorderFadeIn")
+          }
+        }
+        NSLog("[ChatListView] reorder animated — shifted:%d", reorderShifted)
+      }
+
       return
     }
 
@@ -671,11 +749,59 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // Force layout so cells are at their final post-update positions.
     collectionView.layoutIfNeeded()
 
-    // Finalize FIRST: settle layout + scroll to bottom instantly.
-    // This ensures cells are at their true final screen positions
-    // before we compute screen-space deltas for additive animations.
-    // Always scroll instantly here — the additive CA animations
-    // provide the smooth visual transition.
+    // For mode2 inserts (received messages): use ANIMATED scroll instead
+    // of instant scroll + additive animations. This gives a natural
+    // "push up" effect identical to one-on-one chats — the scroll
+    // animation itself moves existing cells up and reveals the new cell
+    // from below. The additive approach can't achieve this because the
+    // new cell starts off-screen (below the clip boundary) and "pops in".
+    // During send transitions we still use the additive path because
+    // the cell is hidden and the overlay handles the visual.
+    let useAnimatedScrollInsert =
+      shouldAnimateUpdate
+      && animMode == 2
+      && shouldAnimateScroll  // wasNearBottom + !hasPendingSend
+      && !insertions.isEmpty
+      && deletions.isEmpty
+
+    if useAnimatedScrollInsert {
+      // Finalize settles layout + inset but scrolls instantly.
+      finalize(false)
+
+      // Strip UIKit implicit animations (prevent opacity flicker).
+      for cell in collectionView.visibleCells {
+        cell.alpha = 1.0
+        cell.contentView.alpha = 1.0
+        cell.layer.removeAnimation(forKey: "opacity")
+        cell.layer.removeAnimation(forKey: "position")
+        cell.layer.removeAnimation(forKey: "bounds.size")
+        cell.layer.removeAnimation(forKey: "bounds.origin")
+        cell.layer.removeAnimation(forKey: "bounds")
+        cell.layer.removeAnimation(forKey: "transform")
+        cell.contentView.layer.removeAnimation(forKey: "opacity")
+        cell.contentView.layer.removeAnimation(forKey: "position")
+        cell.layer.opacity = 1.0
+        cell.contentView.layer.opacity = 1.0
+      }
+
+      // Undo the instant scroll, then animate it. The UIView spring
+      // scroll naturally pushes existing cells up and reveals the new
+      // cell from the bottom — no additive animations needed.
+      isInternalScrollAdjustment = true
+      collectionView.setContentOffset(
+        CGPoint(x: 0, y: preUpdateOffset), animated: false)
+      scrollToBottom(animated: true)
+
+      NSLog(
+        "[ChatListAnim] mode2 — animatedScroll from:%.1f ins:%d",
+        preUpdateOffset, insertions.count)
+      updateDebugStats(shifted: 0, newSlide: 0, maxDelta: 0, scrollDelta: 0)
+      return
+    }
+
+    // Finalize: settle layout + scroll to bottom instantly.
+    // Cells land at their true final screen positions so we can
+    // compute screen-space deltas for additive animations.
     finalize(false)
 
     // CRITICAL (Telegram approach): Strip ALL UIKit-implicit animations
@@ -809,6 +935,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
                 String(info.key.prefix(12)), info.delta)
             }
           } else if !info.isHiddenForSend {
+            // Additive path fallback (only reached during send transitions
+            // where shouldAnimateScroll is false). For normal receives, the
+            // animated-scroll path above handles the visual transition.
             let slideAnim = CABasicAnimation(keyPath: "position.y")
             slideAnim.fromValue = newCellSlideOffset as NSNumber
             slideAnim.toValue = 0.0 as NSNumber
@@ -1058,6 +1187,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     previousOffsetY = clampedOffset
     shouldAutoScroll = false
     emitViewport(force: true)
+  }
+
+  func openPinnedDocument(urlString: String) {
+    openDocumentInApp(urlString: urlString)
   }
 
   func startSendTransition(_ payload: [String: Any]) {

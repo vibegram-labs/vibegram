@@ -72,6 +72,15 @@ private struct ChatMainProfilePinnedItem: Equatable {
   let subtitle: String
 }
 
+private struct ChatMainPinnedBannerContent: Equatable {
+  let title: String
+  let body: String
+  let messageId: String?
+  let isFile: Bool
+  let mediaUrl: String?
+  let fileName: String?
+}
+
 public final class ChatMainView: ExpoView,
   UIGestureRecognizerDelegate,
   ChatMainProfileAgentPromptNodeDelegate
@@ -199,7 +208,11 @@ public final class ChatMainView: ExpoView,
   private var directPeerTypingActive = false
   private var agentProgressSubtitle: String?
   private var pinnedBannerMessageId: String?
+  private var pinnedBannerTitle: String?
   private var pinnedBannerBody: String?
+  private var pinnedBannerMediaUrl: String?
+  private var pinnedBannerFileName: String?
+  private var pinnedBannerIsFile = false
   private var avatarUri: String = ""
   private var isChatMuted = false
   private var engineChatId: String = ""
@@ -995,7 +1008,11 @@ public final class ChatMainView: ExpoView,
       guard force || pinnedBannerMessageId != nil || pinnedBannerBody != nil || !pinnedBannerView.isHidden else { return }
       NSLog("[ChatMainView][Pin] clear banner: empty engineChatId force=%@", force ? "true" : "false")
       pinnedBannerMessageId = nil
+      pinnedBannerTitle = nil
       pinnedBannerBody = nil
+      pinnedBannerMediaUrl = nil
+      pinnedBannerFileName = nil
+      pinnedBannerIsFile = false
       pinnedBannerView.isHidden = true
       pinnedBannerView.alpha = 0.0
       return
@@ -1004,21 +1021,33 @@ public final class ChatMainView: ExpoView,
     let payload = ChatEngine.shared.getPinnedMessages(["chatId": chatId])
     let pins = (payload["data"] as? [[String: Any]]) ?? []
     let topPin = pins.first
-    let nextMessageId = pinnedMessageId(from: topPin)
-    let nextBody = resolvePinnedBody(chatId: chatId, pin: topPin)
+    let nextContent = resolvePinnedBannerContent(chatId: chatId, pin: topPin)
+    let nextMessageId = nextContent?.messageId ?? pinnedMessageId(from: topPin)
+    let nextTitle = nextContent?.title
+    let nextBody = nextContent?.body
+    let nextMediaUrl = nextContent?.mediaUrl
+    let nextFileName = nextContent?.fileName
+    let nextIsFile = nextContent?.isFile == true
 
     let shouldHide = nextBody == nil
     let bannerChanged =
       nextMessageId != pinnedBannerMessageId
+      || nextTitle != pinnedBannerTitle
       || nextBody != pinnedBannerBody
+      || nextMediaUrl != pinnedBannerMediaUrl
+      || nextFileName != pinnedBannerFileName
+      || nextIsFile != pinnedBannerIsFile
       || pinnedBannerView.isHidden != shouldHide
     NSLog(
-      "[ChatMainView][Pin] refresh chatId=%@ force=%@ pins=%@ topMessageId=%@ nextBody=%@ currentHidden=%@ shouldHide=%@ changed=%@ loading=%@",
+      "[ChatMainView][Pin] refresh chatId=%@ force=%@ pins=%@ topMessageId=%@ title=%@ nextBody=%@ file=%@ url=%@ currentHidden=%@ shouldHide=%@ changed=%@ loading=%@",
       chatId,
       force ? "true" : "false",
       String(pins.count),
       nextMessageId ?? "(nil)",
+      nextTitle ?? "(nil)",
       nextBody ?? "(nil)",
+      nextIsFile ? "true" : "false",
+      nextMediaUrl ?? "(nil)",
       pinnedBannerView.isHidden ? "true" : "false",
       shouldHide ? "true" : "false",
       bannerChanged ? "true" : "false",
@@ -1027,10 +1056,19 @@ public final class ChatMainView: ExpoView,
     guard force || bannerChanged else { return }
 
     pinnedBannerMessageId = nextMessageId
+    pinnedBannerTitle = nextTitle
     pinnedBannerBody = nextBody
+    pinnedBannerMediaUrl = nextMediaUrl
+    pinnedBannerFileName = nextFileName
+    pinnedBannerIsFile = nextIsFile
 
     if let nextBody {
-      pinnedBannerView.configure(title: "Pinned Message", body: nextBody)
+      pinnedBannerView.configure(
+        title: nextTitle ?? "Pinned Message",
+        body: nextBody,
+        isFile: nextIsFile,
+        animateIcon: bannerChanged
+      )
       if pinnedBannerView.isHidden {
         NSLog(
           "[ChatMainView][Pin] show banner messageId=%@ alphaTarget=%@",
@@ -1082,54 +1120,122 @@ public final class ChatMainView: ExpoView,
     return nil
   }
 
-  private func resolvePinnedBody(chatId: String, pin: [String: Any]?) -> String? {
+  private func resolvePinnedBannerContent(chatId: String, pin: [String: Any]?) -> ChatMainPinnedBannerContent? {
     guard let pin else { return nil }
 
-    func normalizeString(_ value: Any?) -> String? {
-      if let str = value as? String {
-        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
-        return trimmed.isEmpty ? nil : trimmed
+    let messageId = pinnedMessageId(from: pin)
+    var type = normalizedPinnedString(pin["type"] ?? pin["messageType"] ?? pin["message_type"])?.lowercased()
+    var text = normalizedPinnedString(pin["text"] ?? pin["plainContent"] ?? pin["plain_content"])
+    var caption = normalizedPinnedString(pin["caption"])
+    var fileName = normalizedPinnedString(pin["fileName"] ?? pin["file_name"])
+    var mediaUrl = normalizedPinnedString(pin["mediaUrl"] ?? pin["media_url"])
+
+    if let messageId {
+      let rows = ChatEngine.shared.getChatRows(["chatId": chatId])
+      for row in rows.reversed() {
+        guard (row["kind"] as? String) == "message" else { continue }
+        guard let message = row["message"] as? [String: Any] else { continue }
+        guard normalizedPinnedString(message["id"]) == messageId else { continue }
+
+        type =
+          normalizedPinnedString(message["type"] ?? message["messageType"] ?? message["message_type"])?
+          .lowercased() ?? type
+        text = text ?? normalizedPinnedString(message["text"] ?? message["plainContent"] ?? message["plain_content"])
+        caption = caption ?? normalizedPinnedString(message["caption"])
+        fileName = fileName ?? normalizedPinnedString(message["fileName"] ?? message["file_name"])
+        mediaUrl = mediaUrl ?? normalizedPinnedString(message["mediaUrl"] ?? message["media_url"])
+        break
       }
-      if let num = value as? NSNumber {
-        return num.stringValue
+    }
+
+    let inferredName = inferredPinnedFileName(from: mediaUrl)
+    let resolvedFileName = fileName ?? inferredName
+    let isFile = isPinnedFileType(type) || resolvedFileName != nil || looksLikePinnedFileURL(mediaUrl)
+    let title = isFile ? "Pinned File" : "Pinned Message"
+    let resolvedBody: String
+    if isFile {
+      if let resolvedFileName {
+        resolvedBody = "File: \(resolvedFileName)"
+      } else if let caption {
+        resolvedBody = caption
+      } else if let text {
+        resolvedBody = text
+      } else {
+        resolvedBody = "Pinned file"
       }
+    } else if let text {
+      resolvedBody = text
+    } else if let caption {
+      resolvedBody = caption
+    } else if let mediaUrl {
+      resolvedBody = mediaUrl
+    } else {
+      resolvedBody = "Pinned message"
+    }
+
+    return ChatMainPinnedBannerContent(
+      title: title,
+      body: resolvedBody,
+      messageId: messageId,
+      isFile: isFile,
+      mediaUrl: mediaUrl,
+      fileName: resolvedFileName
+    )
+  }
+
+  private func normalizedPinnedString(_ value: Any?) -> String? {
+    if let str = value as? String {
+      let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    if let num = value as? NSNumber {
+      return num.stringValue
+    }
+    return nil
+  }
+
+  private func isPinnedFileType(_ value: String?) -> Bool {
+    guard let normalized = value?.lowercased() else { return false }
+    return normalized == "file" || normalized == "music"
+  }
+
+  private func looksLikePinnedFileURL(_ value: String?) -> Bool {
+    guard let value else { return false }
+    let normalized = value.lowercased()
+    if normalized.contains("/api/agent/document/") || normalized.contains("/uploads/agent-docs/") {
+      return true
+    }
+    let documentExtensions = [
+      ".pdf", ".doc", ".docx", ".xls", ".xlsx", ".csv", ".txt", ".rtf", ".ppt", ".pptx",
+      ".zip", ".json", ".md",
+    ]
+    return documentExtensions.contains { normalized.contains($0) }
+  }
+
+  private func inferredPinnedFileName(from value: String?) -> String? {
+    guard let raw = value?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
       return nil
     }
-
-    if let text = normalizeString(pin["text"] ?? pin["plainContent"] ?? pin["plain_content"]) {
-      return text
+    let parsedURL = URL(string: raw)
+    let componentRaw: String
+    if let parsedURL {
+      componentRaw = parsedURL.lastPathComponent
+    } else {
+      componentRaw =
+        raw
+        .components(separatedBy: "?")
+        .first?
+        .components(separatedBy: "#")
+        .first?
+        .components(separatedBy: "/")
+        .last ?? ""
     }
-    if let fileName = normalizeString(pin["fileName"] ?? pin["file_name"]) {
-      return "File: \(fileName)"
+    let component = componentRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !component.isEmpty else { return nil }
+    if component == "document" || component == "agent-docs" {
+      return nil
     }
-
-    guard let messageId = pinnedMessageId(from: pin) else { return "Pinned message" }
-    let rows = ChatEngine.shared.getChatRows(["chatId": chatId])
-    for row in rows.reversed() {
-      guard (row["kind"] as? String) == "message" else { continue }
-      guard let message = row["message"] as? [String: Any] else { continue }
-      guard normalizeString(message["id"]) == messageId else { continue }
-
-      if let text = normalizeString(message["text"] ?? message["plainContent"] ?? message["plain_content"]) {
-        return text
-      }
-      if let caption = normalizeString(message["caption"]) {
-        return caption
-      }
-      let type = normalizeString(message["type"])?.lowercased() ?? "text"
-      if type == "file" {
-        if let name = normalizeString(message["fileName"] ?? message["file_name"]) {
-          return "File: \(name)"
-        }
-        return "Pinned file"
-      }
-      if let mediaURL = normalizeString(message["mediaUrl"] ?? message["media_url"]) {
-        return mediaURL
-      }
-      return "Pinned message"
-    }
-
-    return "Pinned message"
+    return component.removingPercentEncoding ?? component
   }
 
   private func refreshProfileSummaryFromEngine(force: Bool = false) {
@@ -1708,10 +1814,50 @@ public final class ChatMainView: ExpoView,
     guard currentPage == .chat else { return }
     guard let messageId = pinnedBannerMessageId, !messageId.isEmpty else { return }
     chatListView.scrollToMessage(messageId: messageId, animated: true, viewPosition: 0.2)
-    onNativeEvent([
+
+    let targetTab: ChatMainProfileTab = {
+      if pinnedBannerIsFile, profileVisibleTabs.contains(.files) {
+        return .files
+      }
+      if profileVisibleTabs.contains(.pinned) {
+        return .pinned
+      }
+      return profileActiveTab
+    }()
+    if targetTab != profileActiveTab {
+      profileActiveTab = targetTab
+      profileTabContentNeedsReload = true
+    }
+    setPage("profile", animated: true)
+
+    if pinnedBannerIsFile,
+      let mediaUrl = pinnedBannerMediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !mediaUrl.isEmpty
+    {
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+        self?.chatListView.openPinnedDocument(urlString: mediaUrl)
+      }
+    }
+
+    var payload: [String: Any] = [
       "type": "pinnedBannerPressed",
       "messageId": messageId,
-    ])
+      "isFile": pinnedBannerIsFile,
+      "tab": targetTab.rawValue,
+    ]
+    if let title = pinnedBannerTitle {
+      payload["title"] = title
+    }
+    if let body = pinnedBannerBody {
+      payload["body"] = body
+    }
+    if let mediaUrl = pinnedBannerMediaUrl {
+      payload["url"] = mediaUrl
+    }
+    if let fileName = pinnedBannerFileName {
+      payload["fileName"] = fileName
+    }
+    onNativeEvent(payload)
   }
 
   private func refreshHeaderGlass() {
