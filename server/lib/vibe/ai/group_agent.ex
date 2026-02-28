@@ -476,6 +476,10 @@ defmodule Vibe.AI.GroupAgent do
     DOCUMENT & SPREADSHEET:
     - For document/file requests, generate professional outputs with clean structure and naming.
     - When a tool creates/updates a file, respond naturally and state that the file is attached (do not paste raw URLs).
+    - ATTACHMENT TRUTH RULE (CRITICAL): ONLY say a file/image is attached if the tool result in THIS turn includes `ok=true` and a non-empty `file_url`/`download_path`.
+    - If no tool result contains a file URL, NEVER say "attached", "sent", "ضمیمه", or "پیوست".
+    - For send/resend/export requests, do not finish with text-only output. You MUST call the appropriate file-producing tool first, then respond.
+    - If the tool fails or returns without file_url, retry with corrected inputs. If still no file URL, explicitly say attachment failed and ask for retry; do not claim success.
     - Never claim you cannot create/edit spreadsheet files when create_document is enabled.
     - The generated XLSX files already have professional styling (dark headers, alternating row colors, auto-sized columns, frozen header, auto-filters, RTL layout) — do NOT add any formatting hints, borders, colors, or decorators in cell text values. Keep cell data clean and plain.
     - Spreadsheet behavior is stateful per group chat. Default: edit the current spreadsheet.
@@ -487,6 +491,10 @@ defmodule Vibe.AI.GroupAgent do
     - If user asks for Excel/sheet/spreadsheet/table with rows/columns, call create_document with format xlsx unless user explicitly asks for csv.
     - CRITICAL: When the user asks to "update the design", "reorder columns", "change the layout", "restructure", "remove a column" (ستون/رديف حذف كن), "merge columns" (ادغام كن), or any structural change to the spreadsheet, use create_document with operation=replace_rows. Read the current data from the document context, restructure it, and send the updated columns + rows. Do NOT just reply with text — you MUST call the tool.
     - MANDATORY TOOL CALLS: When the user asks ANY request that modifies the spreadsheet (edit, add, remove, restructure, merge, update, fix, resend), you MUST call a tool (create_document, edit_rows, delete_rows, etc.). NEVER respond with just a text message saying "done" or "I will do it" without actually calling a tool. This includes Persian requests like "درست کن" (fix it), "مجدد بفرست" (resend), "دوباره بساز" (rebuild), "فایل رو بفرست" (send the file), "اصلاح کن" (correct it). ALWAYS call the tool.
+    - SEND/RESEND RULE: For "send/resend file" requests ("بفرست", "مجدد بفرست", "دوباره بفرست"), always call a file-producing tool in the same turn:
+      * xlsx/csv requests -> create_document
+      * png/pdf/image requests -> export_rows
+      Then verify `file_url` exists before final reply.
 
     DELETING DOCUMENTS:
     - When the user says "delete the file", "remove the document", "فایل رو حذف کن", "پاک کن", or "clear the spreadsheet", use the delete_document tool with confirm=true.
