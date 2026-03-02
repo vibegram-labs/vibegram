@@ -2,6 +2,8 @@ package expo.modules.vibechatnative
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
+import android.os.Looper
 import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
@@ -253,6 +255,8 @@ internal object ChatEngine {
   private val nativeTypingStateByChatId = linkedMapOf<String, Boolean>()
   private val peerTypingUserIdsByChatId = linkedMapOf<String, MutableSet<String>>()
   private val nativeRecordingStateByChatId = linkedMapOf<String, Boolean>()
+  private val pinnedMessagesByChatId = linkedMapOf<String, MutableList<Map<String, Any?>>>()
+  private val pinnedFetchInFlightChatIds = linkedSetOf<String>()
   private val historyRowsByChat = linkedMapOf<String, MutableList<Map<String, Any?>>>()
   private val historyLoadingChats = linkedSetOf<String>()
   private val liveMessageRowsByChat = linkedMapOf<String, MutableMap<String, Map<String, Any?>>>()
@@ -501,6 +505,8 @@ internal object ChatEngine {
         nativeTypingStateByChatId.clear()
         peerTypingUserIdsByChatId.clear()
         nativeRecordingStateByChatId.clear()
+        pinnedMessagesByChatId.clear()
+        pinnedFetchInFlightChatIds.clear()
         historyLoadingChats.clear()
         liveMessageRowsByChat.clear()
         deletedMessageIdsByChat.clear()
@@ -561,6 +567,8 @@ internal object ChatEngine {
       nativeTypingStateByChatId.clear()
       peerTypingUserIdsByChatId.clear()
       nativeRecordingStateByChatId.clear()
+      pinnedMessagesByChatId.clear()
+      pinnedFetchInFlightChatIds.clear()
       historyRowsByChat.clear()
       historyLoadingChats.clear()
       liveMessageRowsByChat.clear()
@@ -848,30 +856,14 @@ internal object ChatEngine {
       val effectivePayload = LinkedHashMap(payload)
       val isGroup = (payload["isGroup"] as? Boolean == true) || (payload["isGroupOrChannel"] as? Boolean == true)
       Log.i("ChatEngine", "sendMessage START chatId=$chatId messageId=$messageId isGroup=$isGroup")
-      
-      val peerUserId = peerUserIdHint ?: chatPeerUserIdsByChatId[chatId]
-      val friendPublicKey = if (isGroup) null else {
-        resolveFriendPublicKeyLocked(chatId, peerUserId)
-          ?: run {
-            Log.w(
-              "ChatEngine",
-              "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId",
-            )
-            pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
-            upsertLocalStatusLocked(chatId, messageId, "pending")
-            queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
-            emitChangeLocked("messageStatusChanged", chatId, messageId)
-            ensureNativeTransportAsync("send_missing_friend_key")
-            return@synchronized mapOf(
-              "accepted" to true,
-              "queued" to true,
-              "reason" to "missing_friend_key",
-              "messageId" to messageId,
-              "state" to "pending",
-            )
-          }
-      }
 
+      if (!peerUserIdHint.isNullOrBlank()) {
+        chatPeerUserIdsByChatId[chatId] = peerUserIdHint
+      }
+      val peerUserId = peerUserIdHint ?: chatPeerUserIdsByChatId[chatId]
+
+      // ── Build + emit optimistic row FIRST so message bubble appears instantly ──
+      val optimisticStartMs = System.currentTimeMillis()
       val decryptedFields = linkedMapOf<String, Any?>("text" to text)
       if (!mediaUrl.isNullOrBlank()) decryptedFields["mediaUrl"] = mediaUrl
       if (!localPlaybackMediaUrl.isNullOrBlank()) {
@@ -908,6 +900,33 @@ internal object ChatEngine {
       upsertLocalStatusLocked(chatId, messageId, "sending")
       emitChangeLocked("chatMessageInserted", chatId, messageId)
       emitChangeLocked("messageStatusChanged", chatId, messageId)
+      Log.i("ChatEngine", "sendMessage optimistic row emitted in ${System.currentTimeMillis() - optimisticStartMs}ms chatId=$chatId messageId=$messageId")
+
+      // ── Now resolve friend public key (may do synchronous HTTP — no longer blocks UI) ──
+      val keyResolveStartMs = System.currentTimeMillis()
+      val friendPublicKey = if (isGroup) null else {
+        resolveFriendPublicKeyLocked(chatId, peerUserId)
+          ?: run {
+            Log.w(
+              "ChatEngine",
+              "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId keyResolveMs=${System.currentTimeMillis() - keyResolveStartMs}",
+            )
+            pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
+            upsertLocalStatusLocked(chatId, messageId, "pending")
+            queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
+            emitChangeLocked("messageStatusChanged", chatId, messageId)
+            loadChatHistoryIfNeededLocked(chatId, force = true)
+            ensureNativeTransportAsync("send_missing_friend_key")
+            return@synchronized mapOf(
+              "accepted" to true,
+              "queued" to true,
+              "reason" to "missing_friend_key",
+              "messageId" to messageId,
+              "state" to "pending",
+            )
+          }
+      }
+      Log.i("ChatEngine", "sendMessage keyResolved in ${System.currentTimeMillis() - keyResolveStartMs}ms chatId=$chatId messageId=$messageId hasKey=${friendPublicKey != null}")
 
       val needsUpload =
         setOf("image", "gif", "file", "voice", "video", "music").contains(type) &&
@@ -997,6 +1016,7 @@ internal object ChatEngine {
         }
       }
 
+      val encryptStartMs = System.currentTimeMillis()
       val fullPayload = linkedMapOf<String, Any?>("text" to text)
       if (!mediaUrl.isNullOrBlank()) fullPayload["mediaUrl"] = mediaUrl
       if (!mediaKey.isNullOrBlank()) fullPayload["mediaKey"] = mediaKey
@@ -1016,10 +1036,15 @@ internal object ChatEngine {
       if (waveform != null) fullPayload["waveform"] = waveform
       val fullPayloadString = JSONObject(fullPayload).toString()
       val myPublicKeyPem = normalized(getConfigValueLocked("publicKeyPem") ?: getConfigValueLocked("publicKey"))
+      val recipientPublicKey = if (!isGroup) {
+        friendPublicKey ?: return@synchronized mapOf("accepted" to false, "reason" to "missing_friend_key", "messageId" to messageId)
+      } else {
+        null
+      }
 
       val encryptedContent = if (isGroup) fullPayloadString else {
         try {
-          chatEngineEncryptHybridMessage(friendPublicKey, fullPayloadString, myPublicKeyPem)
+          chatEngineEncryptHybridMessage(recipientPublicKey!!, fullPayloadString, myPublicKeyPem)
         } catch (e: Throwable) {
           upsertLocalStatusLocked(chatId, messageId, "error")
           appendJournalLocked(
@@ -1108,7 +1133,9 @@ internal object ChatEngine {
         }
       }, 15000L)
       
+      val totalSendMs = System.currentTimeMillis() - optimisticStartMs
       appendJournalLocked("native-send-message", mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref))
+      Log.i("ChatEngine", "sendMessage pushed chatId=$chatId messageId=$messageId ref=$ref encryptMs=${System.currentTimeMillis() - encryptStartMs} totalMs=$totalSendMs")
       emitChangeLocked("messageStatusChanged", chatId, messageId)
       mapOf("accepted" to true, "transport" to "native", "ref" to ref, "messageId" to messageId, "state" to "sending")
     }
@@ -1401,6 +1428,8 @@ internal object ChatEngine {
         nativeTypingStateByChatId.remove(chatId)
         peerTypingUserIdsByChatId.remove(chatId)
         nativeRecordingStateByChatId.remove(chatId)
+        pinnedMessagesByChatId.remove(chatId)
+        pinnedFetchInFlightChatIds.remove(chatId)
         chatPeerUserIdsByChatId.remove(chatId)
         openChatChannels.remove(chatId)
 
@@ -1733,6 +1762,128 @@ internal object ChatEngine {
     }
   }
 
+  fun getPinnedMessages(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"]).orEmpty()
+    val shouldRefresh = parseBooleanValue(payload["refresh"]) == true
+    if (chatId.isBlank()) {
+      return mapOf("chatId" to "", "loading" to false, "data" to emptyList<Map<String, Any?>>())
+    }
+
+    return synchronized(lock) {
+      val hasCache = pinnedMessagesByChatId.containsKey(chatId)
+      if (!hasCache) {
+        pinnedMessagesByChatId[chatId] = mutableListOf()
+      }
+      if ((shouldRefresh || !hasCache) && !pinnedFetchInFlightChatIds.contains(chatId)) {
+        fetchPinnedMessagesLocked(chatId, "on_demand")
+      }
+      mapOf(
+        "chatId" to chatId,
+        "loading" to pinnedFetchInFlightChatIds.contains(chatId),
+        "data" to pinnedMessagesByChatId[chatId].orEmpty(),
+      )
+    }
+  }
+
+  fun pinMessage(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("accepted" to false, "reason" to "invalid_chat")
+    val messageId = normalized(payload["messageId"] ?: payload["message_id"])
+      ?: return mapOf("accepted" to false, "reason" to "invalid_message")
+    val pinned = parseBooleanValue(payload["pinned"]) ?: true
+
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        applyPinnedUpdateLocked(
+          chatId = chatId,
+          messageId = messageId,
+          pinned = pinned,
+          payload = mapOf(
+            "messageId" to messageId,
+            "chatId" to chatId,
+            "timestamp" to System.currentTimeMillis(),
+          ),
+          trigger = "local_pin_request",
+          refreshRemote = false,
+        )
+        state["updatedAt"] = System.currentTimeMillis()
+        emitChangeLocked("chatPinnedUpdated", chatId, messageId)
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("accepted" to false, "reason" to "missing_config", "chatId" to chatId)
+
+    val body =
+      JSONObject(mapOf("pinned" to pinned)).toString().toRequestBody(
+        "application/json".toMediaTypeOrNull(),
+      )
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/chat/$chatId/messages/$messageId/pin")
+      .post(body)
+      .header("Accept", "application/json")
+      .header("Content-Type", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    historyHttpClient.newCall(requestBuilder.build()).enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        synchronized(lock) {
+          appendJournalLocked(
+            "native-pin-message-error",
+            mapOf(
+              "chatId" to chatId,
+              "messageId" to messageId,
+              "pinned" to pinned,
+              "error" to (e.message ?: "network_error"),
+            ),
+          )
+          fetchPinnedMessagesLocked(chatId, "pin_error_reconcile")
+        }
+      }
+
+      override fun onResponse(call: Call, response: Response) {
+        response.use { res ->
+          synchronized(lock) {
+            if (res.isSuccessful) {
+              appendJournalLocked(
+                "native-pin-message-ok",
+                mapOf(
+                  "chatId" to chatId,
+                  "messageId" to messageId,
+                  "pinned" to pinned,
+                  "status" to res.code,
+                ),
+              )
+            } else {
+              appendJournalLocked(
+                "native-pin-message-error",
+                mapOf(
+                  "chatId" to chatId,
+                  "messageId" to messageId,
+                  "pinned" to pinned,
+                  "status" to res.code,
+                ),
+              )
+            }
+            fetchPinnedMessagesLocked(chatId, "pin_request_complete")
+          }
+        }
+      }
+    })
+
+    return mapOf(
+      "accepted" to true,
+      "queued" to true,
+      "chatId" to chatId,
+      "messageId" to messageId,
+      "pinned" to pinned,
+    )
+  }
+
   fun getChatProfileSummary(payload: Map<String, Any?>): Map<String, Any?> {
     val chatId = normalized(payload["chatId"] ?: payload["chat_id"]).orEmpty()
     if (chatId.isBlank()) {
@@ -1819,6 +1970,13 @@ internal object ChatEngine {
     val chatId = normalized(payload["chatId"] ?: payload["chat_id"]) ?: return emptyList()
     synchronized(lock) {
       return historyRowsByChat[chatId]?.toList() ?: emptyList()
+    }
+  }
+
+  fun getLiveMessageRows(payload: Map<String, Any?>): Map<String, Map<String, Any?>> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"]) ?: return emptyMap()
+    synchronized(lock) {
+      return liveMessageRowsByChat[chatId]?.toMap() ?: emptyMap()
     }
   }
 
@@ -2207,6 +2365,17 @@ internal object ChatEngine {
     }
   }
 
+  private fun isLikelyHybridCiphertext(raw: String?): Boolean {
+    val trimmed = raw?.trim() ?: return false
+    if (!trimmed.startsWith("{")) return false
+    return try {
+      val json = JSONObject(trimmed)
+      json.has("iv") && json.has("c") && json.has("k")
+    } catch (_: Throwable) {
+      false
+    }
+  }
+
   private fun parseJsonToMap(raw: String): Map<String, Any?> {
     val trimmed = raw.trim()
     if (trimmed.isEmpty()) return emptyMap()
@@ -2380,10 +2549,21 @@ internal object ChatEngine {
     val type = normalized(payload["type"]) ?: "text"
     val timestampMs = parseLongValue(payload["timestamp"]) ?: System.currentTimeMillis()
     val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
+    val rawMediaUrl = normalized(payload["mediaUrl"] ?: payload["media_url"])
+    val rawFileName = normalized(payload["fileName"] ?: payload["file_name"])
+    val derivedFileName =
+      rawMediaUrl
+        ?.substringBefore('?')
+        ?.substringAfterLast('/')
+        ?.trim()
+        ?.takeIf { it.isNotEmpty() }
+    val encryptedLooksHybrid = isLikelyHybridCiphertext(encryptedContent)
 
     // Detect agent messages by fromId or explicit flag
     val isAgentMessage = (payload["isAgentMessage"] as? Boolean == true)
       || (normalized(fromId)?.lowercase() == AGENT_USER_ID)
+      || (rawMediaUrl?.lowercase()?.contains("/uploads/agent-docs/") == true)
+      || (rawMediaUrl?.lowercase()?.contains("/api/agent/document/") == true)
     val plainContent = normalized(payload["plainContent"] ?: payload["plain_content"])
     val agentName = normalized(payload["agentName"] ?: payload["agent_name"])
 
@@ -2392,12 +2572,23 @@ internal object ChatEngine {
       // Agent messages use plainContent instead of encryption
       plainContent
     } else if (hadEncryptedContent) {
-      decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
+      if (!encryptedLooksHybrid) {
+        encryptedContent!!
+      } else {
+        decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
+      }
     } else {
       ""
     }
-    val decryptionFailed = !isAgentMessage && hadEncryptedContent && decryptedText.isEmpty()
-    val decryptedFields = parseDecryptedMessagePayload(decryptedText)
+    val decryptionFailed = !isAgentMessage && hadEncryptedContent && encryptedLooksHybrid && decryptedText.isEmpty()
+    val decryptedFields = LinkedHashMap<String, Any?>(parseDecryptedMessagePayload(decryptedText))
+    if (!rawMediaUrl.isNullOrBlank() && normalized(decryptedFields["mediaUrl"]).isNullOrBlank()) {
+      decryptedFields["mediaUrl"] = rawMediaUrl
+    }
+    val fileNameForRow = rawFileName ?: if (type.equals("file", ignoreCase = true)) derivedFileName else null
+    if (!fileNameForRow.isNullOrBlank() && normalized(decryptedFields["fileName"]).isNullOrBlank()) {
+      decryptedFields["fileName"] = fileNameForRow
+    }
     var row = buildLiveRowPayloadLocked(
       chatId = chatId,
       messageId = messageId,
@@ -2841,8 +3032,11 @@ internal object ChatEngine {
           ?.trim()
           ?.takeIf { it.isNotEmpty() }
       val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
+      val encryptedLooksHybrid = isLikelyHybridCiphertext(encryptedContent)
       val historyIsAgent = (raw.opt("isAgentMessage") as? Boolean == true)
         || (normalized(fromId)?.lowercase() == AGENT_USER_ID)
+        || (rawMediaUrl?.lowercase()?.contains("/uploads/agent-docs/") == true)
+        || (rawMediaUrl?.lowercase()?.contains("/api/agent/document/") == true)
       val agentPlainContent = normalized(raw.opt("plainContent") ?: raw.opt("plain_content"))
         ?: normalized(encryptedContent)
 
@@ -2855,24 +3049,28 @@ internal object ChatEngine {
           emptyMap()
         }
       } else if (hadEncryptedContent) {
-        val privateKey = decryptPrivateKeyLocked()
-        val decrypted = privateKey?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
-        if (decrypted.trim().isEmpty() && plaintextFallback.isNotBlank()) {
-          historyDecryptionFailed = true
-          mapOf("text" to plaintextFallback)
-        } else if (decrypted.trim().isEmpty()) {
-          historyDecryptionFailed = true
-          emptyMap()
+        if (!encryptedLooksHybrid) {
+          parseDecryptedMessagePayload(encryptedContent!!)
         } else {
-          val parsed = parseDecryptedMessagePayload(decrypted)
-          if (parsed.isEmpty() && plaintextFallback.isNotBlank()) {
+          val privateKey = decryptPrivateKeyLocked()
+          val decrypted = privateKey?.let { chatEngineDecryptHybridMessage(it, encryptedContent!!, isMe) }.orEmpty()
+          if (decrypted.trim().isEmpty() && plaintextFallback.isNotBlank()) {
             historyDecryptionFailed = true
             mapOf("text" to plaintextFallback)
-          } else if (parsed.isEmpty()) {
+          } else if (decrypted.trim().isEmpty()) {
             historyDecryptionFailed = true
             emptyMap()
           } else {
-            parsed
+            val parsed = parseDecryptedMessagePayload(decrypted)
+            if (parsed.isEmpty() && plaintextFallback.isNotBlank()) {
+              historyDecryptionFailed = true
+              mapOf("text" to plaintextFallback)
+            } else if (parsed.isEmpty()) {
+              historyDecryptionFailed = true
+              emptyMap()
+            } else {
+              parsed
+            }
           }
         }
       } else if (plaintextFallback.isNotBlank()) {
@@ -2915,7 +3113,7 @@ internal object ChatEngine {
       if (!serverStatus.isNullOrBlank()) message["status"] = serverStatus
       val reactionEmoji = normalized(raw.opt("reactionEmoji") ?: raw.opt("reaction_emoji"))
       if (!reactionEmoji.isNullOrBlank()) message["reactionEmoji"] = reactionEmoji
-      if (!historyIsAgent && hadEncryptedContent && historyDecryptionFailed) {
+      if (!historyIsAgent && hadEncryptedContent && encryptedLooksHybrid && historyDecryptionFailed) {
         message["decryptionFailed"] = true
       }
       row["message"] = message
@@ -2942,6 +3140,8 @@ internal object ChatEngine {
       nativeTypingStateByChatId.clear()
       peerTypingUserIdsByChatId.clear()
       nativeRecordingStateByChatId.clear()
+      pinnedMessagesByChatId.clear()
+      pinnedFetchInFlightChatIds.clear()
       historyLoadingChats.clear()
       liveMessageRowsByChat.clear()
       deletedMessageIdsByChat.clear()
@@ -2969,6 +3169,8 @@ internal object ChatEngine {
       nativeTypingStateByChatId.clear()
       peerTypingUserIdsByChatId.clear()
       nativeRecordingStateByChatId.clear()
+      pinnedMessagesByChatId.clear()
+      pinnedFetchInFlightChatIds.clear()
       historyLoadingChats.clear()
       liveMessageRowsByChat.clear()
       deletedMessageIdsByChat.clear()
@@ -3100,6 +3302,20 @@ internal object ChatEngine {
           emitChangeLocked("peerTyping", chatId, if (isAnyTyping) "true" else "false")
           return
         }
+        if (event == "pinned-updated") {
+          val messageId = normalized(payload["messageId"] ?: payload["message_id"]) ?: return
+          val pinned = parseBooleanValue(payload["pinned"]) ?: true
+          applyPinnedUpdateLocked(
+            chatId = chatId,
+            messageId = messageId,
+            pinned = pinned,
+            payload = payload,
+            trigger = "socket_pinned_updated",
+            refreshRemote = true,
+          )
+          emitChangeLocked("chatPinnedUpdated", chatId, messageId)
+          return
+        }
         if (event == "message") {
           val insertedMessageId = applyNativeIncomingMessageEventLocked(chatId, payload)
           if (!insertedMessageId.isNullOrBlank()) {
@@ -3221,8 +3437,12 @@ internal object ChatEngine {
             ?: System.currentTimeMillis()
         val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserIdLocked()
         val decryptedFields = if (!encryptedContent.isNullOrBlank()) {
-          val decrypted = decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent, isMe) }.orEmpty()
-          parseDecryptedMessagePayload(decrypted)
+          if (!isLikelyHybridCiphertext(encryptedContent)) {
+            parseDecryptedMessagePayload(encryptedContent)
+          } else {
+            val decrypted = decryptPrivateKeyLocked()?.let { chatEngineDecryptHybridMessage(it, encryptedContent, isMe) }.orEmpty()
+            parseDecryptedMessagePayload(decrypted)
+          }
         } else {
           emptyMap()
         }
@@ -3253,6 +3473,14 @@ internal object ChatEngine {
       "message-deleted" -> {
         removeMessageIndicesLocked(chatId, messageId)
         markLiveMessageDeletedLocked(chatId, messageId)
+        applyPinnedUpdateLocked(
+          chatId = chatId,
+          messageId = messageId,
+          pinned = false,
+          payload = emptyMap(),
+          trigger = "message_deleted",
+          refreshRemote = false,
+        )
         state["updatedAt"] = System.currentTimeMillis()
         appendJournalLocked("native-message-deleted", mapOf("chatId" to chatId, "messageId" to messageId))
         messageId to "deleted"
@@ -3292,6 +3520,199 @@ internal object ChatEngine {
     }
   }
 
+  private fun fetchPinnedMessagesLocked(chatId: String, trigger: String) {
+    if (chatId.isBlank()) return
+    if (pinnedFetchInFlightChatIds.contains(chatId)) return
+    val apiBaseUrl = apiBaseUrlLocked() ?: return
+    val token = authHeaderTokenLocked()
+
+    pinnedFetchInFlightChatIds.add(chatId)
+    appendJournalLocked(
+      "native-pinned-load-start",
+      mapOf("chatId" to chatId, "trigger" to trigger),
+    )
+
+    val requestBuilder = Request.Builder()
+      .url("$apiBaseUrl/api/chat/$chatId/pinned_messages")
+      .get()
+      .header("Accept", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    token?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    historyHttpClient.newCall(requestBuilder.build()).enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        synchronized(lock) {
+          pinnedFetchInFlightChatIds.remove(chatId)
+          appendJournalLocked(
+            "native-pinned-load-error",
+            mapOf(
+              "chatId" to chatId,
+              "trigger" to trigger,
+              "error" to (e.message ?: "network_error"),
+            ),
+          )
+          emitChangeLocked("chatPinnedUpdated", chatId, null)
+        }
+      }
+
+      override fun onResponse(call: Call, response: Response) {
+        response.use { res ->
+          synchronized(lock) {
+            pinnedFetchInFlightChatIds.remove(chatId)
+            val body = res.body?.string().orEmpty()
+            if (!res.isSuccessful) {
+              appendJournalLocked(
+                "native-pinned-load-error",
+                mapOf(
+                  "chatId" to chatId,
+                  "trigger" to trigger,
+                  "status" to res.code,
+                ),
+              )
+              emitChangeLocked("chatPinnedUpdated", chatId, null)
+              return@synchronized
+            }
+
+            val nextPins = parsePinnedEntriesFromBody(body, chatId)
+            val previousPins = pinnedMessagesByChatId[chatId].orEmpty()
+            val previousIds = previousPins.mapNotNull {
+              normalized(it["messageId"] ?: it["message_id"])
+            }.toSet()
+            val nextIds = nextPins.mapNotNull {
+              normalized(it["messageId"] ?: it["message_id"])
+            }.toSet()
+            previousIds.union(nextIds).forEach { messageId ->
+              setMessagePinnedStateLocked(
+                chatId = chatId,
+                messageId = messageId,
+                pinned = nextIds.contains(messageId),
+              )
+            }
+            pinnedMessagesByChatId[chatId] = nextPins.toMutableList()
+            state["updatedAt"] = System.currentTimeMillis()
+            appendJournalLocked(
+              "native-pinned-load-ok",
+              mapOf(
+                "chatId" to chatId,
+                "trigger" to trigger,
+                "count" to nextPins.size,
+                "status" to res.code,
+              ),
+            )
+            emitChangeLocked("chatPinnedUpdated", chatId, null)
+          }
+        }
+      }
+    })
+  }
+
+  private fun parsePinnedEntriesFromBody(body: String, chatId: String): List<Map<String, Any?>> {
+    val parsed = parseJsonToMap(body)
+    val data = parsed["data"] as? List<*> ?: return emptyList()
+    return data.mapNotNull { raw ->
+      val map =
+        (raw as? Map<*, *>)?.entries?.associate { (key, value) -> key.toString() to value }
+          ?: return@mapNotNull null
+      normalizePinnedEntry(map, chatId, fallbackMessageId = null)
+    }
+  }
+
+  private fun normalizePinnedEntry(
+    raw: Map<String, Any?>,
+    chatId: String,
+    fallbackMessageId: String?,
+  ): Map<String, Any?>? {
+    val messageId = normalized(raw["messageId"] ?: raw["message_id"] ?: raw["id"] ?: fallbackMessageId)
+      ?: return null
+    val entry = linkedMapOf<String, Any?>(
+      "messageId" to messageId,
+      "chatId" to chatId,
+      "pinnedAt" to (raw["pinnedAt"] ?: raw["pinned_at"] ?: System.currentTimeMillis()),
+    )
+    raw["timestamp"]?.let { entry["timestamp"] = it }
+    normalized(raw["type"] ?: raw["messageType"] ?: raw["message_type"])?.let { entry["type"] = it }
+    normalized(raw["mediaUrl"] ?: raw["media_url"])?.let { entry["mediaUrl"] = it }
+    normalized(raw["fileName"] ?: raw["file_name"])?.let { entry["fileName"] = it }
+    normalized(raw["text"] ?: raw["plainContent"] ?: raw["plain_content"])?.let { entry["text"] = it }
+    return entry
+  }
+
+  private fun applyPinnedUpdateLocked(
+    chatId: String,
+    messageId: String,
+    pinned: Boolean,
+    payload: Map<String, Any?>,
+    trigger: String,
+    refreshRemote: Boolean,
+  ) {
+    setMessagePinnedStateLocked(chatId, messageId, pinned)
+
+    val pins = pinnedMessagesByChatId.getOrPut(chatId) { mutableListOf() }
+    pins.removeAll {
+      normalized(it["messageId"] ?: it["message_id"]) == messageId
+    }
+    if (pinned) {
+      val nextEntry =
+        normalizePinnedEntry(payload, chatId, fallbackMessageId = messageId)
+          ?: mapOf(
+            "messageId" to messageId,
+            "chatId" to chatId,
+            "pinnedAt" to System.currentTimeMillis(),
+          )
+      pins.add(0, nextEntry)
+    }
+    state["updatedAt"] = System.currentTimeMillis()
+    appendJournalLocked(
+      "native-pinned-updated",
+      mapOf(
+        "chatId" to chatId,
+        "messageId" to messageId,
+        "pinned" to pinned,
+        "trigger" to trigger,
+      ),
+    )
+    if (refreshRemote) {
+      fetchPinnedMessagesLocked(chatId, trigger)
+    }
+  }
+
+  private fun setMessagePinnedStateLocked(chatId: String, messageId: String, pinned: Boolean) {
+    liveMessageRowsByChat[chatId]?.let { perChat ->
+      val row = perChat[messageId] ?: return@let
+      val message = (row["message"] as? Map<*, *>)?.entries?.associate { (key, value) ->
+        key.toString() to value
+      }?.toMutableMap() ?: return@let
+      message["isPinned"] = pinned
+      message["pinned"] = pinned
+      val updatedRow = row.toMutableMap()
+      updatedRow["message"] = message
+      perChat[messageId] = updatedRow
+    }
+
+    historyRowsByChat[chatId]?.let { rows ->
+      var changed = false
+      for (index in rows.indices) {
+        val row = rows[index].toMutableMap()
+        if (normalized(row["kind"]) != "message") continue
+        val message =
+          (row["message"] as? Map<*, *>)?.entries?.associate { (key, value) ->
+            key.toString() to value
+          }?.toMutableMap() ?: continue
+        if (normalized(message["id"]) != messageId) continue
+        message["isPinned"] = pinned
+        message["pinned"] = pinned
+        row["message"] = message
+        rows[index] = row
+        changed = true
+      }
+      if (changed) {
+        historyRowsByChat[chatId] = rows
+      }
+    }
+  }
+
   private fun statusSnapshotLocked(): Map<String, Any?> {
     val ctx = appContextRef
     val out = LinkedHashMap<String, Any?>(state)
@@ -3309,6 +3730,8 @@ internal object ChatEngine {
     out["outboundQueuedCount"] = pendingOutboundQueueByChat.values.sumOf { it.size }
     out["typingChatCount"] = peerTypingUserIdsByChatId.size
     out["typingUserCount"] = peerTypingUserIdsByChatId.values.sumOf { it.size }
+    out["pinnedChatCount"] = pinnedMessagesByChatId.size
+    out["pinnedMessageCount"] = pinnedMessagesByChatId.values.sumOf { it.size }
     out["journalCount"] = if (ctx != null) ChatEngineStore.getJournal(ctx).size else 0
     return out
   }

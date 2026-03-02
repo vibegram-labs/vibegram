@@ -2319,20 +2319,24 @@ final class ChatListCell: UICollectionViewCell {
         UIView.animate(
           withDuration: 0.18,
           delay: 0,
-          options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
-        ) {
-          applyChanges()
-        } completion: completion
+          options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut],
+          animations: {
+            applyChanges()
+          },
+          completion: completion
+        )
       } else {
         UIView.animate(
           withDuration: 0.24,
           delay: 0,
           usingSpringWithDamping: 0.90,
           initialSpringVelocity: 0,
-          options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut]
-        ) {
-          applyChanges()
-        } completion: completion
+          options: [.beginFromCurrentState, .allowUserInteraction, .curveEaseOut],
+          animations: {
+            applyChanges()
+          },
+          completion: completion
+        )
       }
       return
     }

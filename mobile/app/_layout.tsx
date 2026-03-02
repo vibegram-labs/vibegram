@@ -645,11 +645,14 @@ export default function RootLayout() {
           loginToken: session.loginToken || '',
         });
       }
-      // Initialize socket after auth is ready
+      // Initialize socket and start loading chats as early as possible.
+      // loadChats runs an HTTP fetch in parallel with the socket connection
+      // so fresh data arrives without waiting for WebSocket onOpen.
       if (session) {
         if (!useChatStore.getState().isConnected) {
           useChatStore.getState().initSocket()
         }
+        Promise.resolve(useChatStore.getState().loadChats()).catch(() => {})
         // Register for Push Notifications even if socket is already connected.
         // This guarantees iOS permission/token sync on cold starts.
         useNotificationStore.getState().initNotifications({
@@ -720,7 +723,7 @@ export default function RootLayout() {
             <Stack.Screen name="index" />
             <Stack.Screen name="(auth)" />
             <Stack.Screen name="(tabs)" />
-            <Stack.Screen name="chat" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
+            <Stack.Screen name="chat" options={{ animation: 'ios_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
             <Stack.Screen name="chat-profile" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
             <Stack.Screen name="agent" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />
             <Stack.Screen name="profile" options={{ animation: 'slide_from_right', contentStyle: { backgroundColor: 'transparent' }, presentation: 'card' }} />

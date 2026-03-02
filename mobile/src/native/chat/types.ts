@@ -199,6 +199,8 @@ export interface NativeChatEngineModule {
   clearChat?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   blockUser?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   getChatProfileSummary?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  getPinnedMessages?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  pinMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   getChatJournal?: () => Promise<Record<string, unknown>[]> | Record<string, unknown>[];
   clearChatJournal?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   isTyping?: (payload: Record<string, unknown>) => Promise<boolean> | boolean;

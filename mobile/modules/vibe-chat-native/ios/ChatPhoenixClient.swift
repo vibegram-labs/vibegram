@@ -38,8 +38,8 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   private let authToken: String?
   private let callbacks: Callbacks
   private let queue = DispatchQueue(label: "vibe.chat.phoenix.client")
-  private let connectRequestTimeout: TimeInterval = 12.0
-  private let heartbeatInterval: TimeInterval = 15.0
+  private let connectRequestTimeout: TimeInterval = 8.0
+  private let heartbeatInterval: TimeInterval = 10.0
   private var session: URLSession?
   private var task: URLSessionWebSocketTask?
   private var heartbeatTimer: DispatchSourceTimer?

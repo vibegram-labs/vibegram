@@ -108,6 +108,14 @@ public final class ChatEngineModule: Module {
       ChatEngine.shared.getChatProfileSummary(payload)
     }
 
+    Function("getPinnedMessages") { (payload: [String: Any]) in
+      ChatEngine.shared.getPinnedMessages(payload)
+    }
+
+    Function("pinMessage") { (payload: [String: Any]) in
+      ChatEngine.shared.pinMessage(payload)
+    }
+
     Function("getChatJournal") {
       ChatEngine.shared.getJournal()
     }

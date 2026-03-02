@@ -657,7 +657,6 @@ final class ChatInputBar: UIView {
 
   private let pillContainer = UIView()
   private let pillGlass = UIVisualEffectView(effect: nil)
-  private let pillTapOverlay = UIView()
   private let textView = ChatComposerTextView()
   private let placeholderLabel = UILabel()
   private let gifButton = UIButton(type: .system)
@@ -708,7 +707,6 @@ final class ChatInputBar: UIView {
 
   // Attachment sheet
   private var attachmentSheet: ChatAttachmentMenuController?
-  private let glassPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
 
   // Background Mask (for fade-out blur behind input)
   private let backgroundMaskView = UIView()
@@ -749,12 +747,11 @@ final class ChatInputBar: UIView {
 
   // Mention suggestion banner (inside pill, above text row — like reply banner)
   private let mentionBanner = UIView()
-  private let mentionIconContainer = UIView()
-  private let mentionIconLabel = UILabel()
+  private let mentionAccentBar = UIView()
   private let mentionNameLabel = UILabel()
   private let mentionDescLabel = UILabel()
   private var mentionBannerVisible = false
-  private let mentionBannerContentH: CGFloat = 40
+  private let mentionBannerContentH: CGFloat = 36
   private let mentionBannerGap: CGFloat = 4
   private var mentionActive = false  // true when @vibe is confirmed in text
   private let mentionBorderGlowLayer = CALayer()
@@ -791,7 +788,6 @@ final class ChatInputBar: UIView {
   private weak var videoNoteRecorderController: VideoNoteRecorderViewController?
   private let feedback = UIImpactFeedbackGenerator(style: .medium)
   private let notificationFeedback = UINotificationFeedbackGenerator()
-  private let inputTapFeedback = UISelectionFeedbackGenerator()
 
   private func recordingModeString(_ mode: RecordingMode? = nil) -> String {
     switch mode ?? recordingMode {
@@ -894,7 +890,6 @@ final class ChatInputBar: UIView {
 
     pillGlass.isHidden = false
     pillGlass.alpha = 1
-    pillTapOverlay.alpha = 0
     refreshGlass()
   }
 
@@ -962,16 +957,15 @@ final class ChatInputBar: UIView {
     addSubview(contentRow)
 
     // ── Attachment button (glass pill) ────────────────────────────────────
-    attachGlass.isUserInteractionEnabled = false
+    attachGlass.isUserInteractionEnabled = true
     attachGlass.clipsToBounds = true
     attachButton.clipsToBounds = false
     attachButton.backgroundColor = .clear
-    attachButton.addSubview(attachGlass)
-    attachButton.sendSubviewToBack(attachGlass)
+    attachGlass.contentView.addSubview(attachButton)
     let plusCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
     attachButton.setImage(UIImage(systemName: "plus", withConfiguration: plusCfg), for: .normal)
     attachButton.addTarget(self, action: #selector(attachTapped), for: .touchUpInside)
-    contentRow.addSubview(attachButton)
+    contentRow.addSubview(attachGlass)
 
     // ── Pill container ────────────────────────────────────────────────────
     pillContainer.backgroundColor = .clear
@@ -985,12 +979,6 @@ final class ChatInputBar: UIView {
     pillGlass.clipsToBounds = true
     pillContainer.addSubview(pillGlass)
     pillContainer.sendSubviewToBack(pillGlass)
-
-    pillTapOverlay.isUserInteractionEnabled = false
-    pillTapOverlay.backgroundColor = glassPressedOverlayColor
-    pillTapOverlay.alpha = 0
-    pillTapOverlay.layer.cornerCurve = .continuous
-    pillContainer.addSubview(pillTapOverlay)
 
     // placeholder
     placeholderLabel.text = placeholder
@@ -1046,7 +1034,7 @@ final class ChatInputBar: UIView {
     replyBanner.addSubview(replyDismissButton)
 
     // ── Mention suggestion banner (INSIDE pill, above text row — like reply banner) ──
-    mentionBanner.backgroundColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 0.10)
+    mentionBanner.backgroundColor = .clear
     mentionBanner.clipsToBounds = true
     mentionBanner.isHidden = true
     mentionBanner.alpha = 0
@@ -1055,25 +1043,21 @@ final class ChatInputBar: UIView {
     mentionBanner.addGestureRecognizer(mentionTap)
     pillContainer.addSubview(mentionBanner)
 
-    mentionIconContainer.backgroundColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 0.18)
-    mentionIconContainer.layer.cornerRadius = 8
-    mentionIconContainer.layer.cornerCurve = .continuous
-    mentionBanner.addSubview(mentionIconContainer)
-
-    mentionIconLabel.text = "\u{2726}"
-    mentionIconLabel.font = UIFont.systemFont(ofSize: 14, weight: .bold)
-    mentionIconLabel.textColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
-    mentionIconLabel.textAlignment = .center
-    mentionIconContainer.addSubview(mentionIconLabel)
+    mentionAccentBar.backgroundColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    mentionAccentBar.layer.cornerRadius = 1.5
+    mentionAccentBar.layer.cornerCurve = .continuous
+    mentionBanner.addSubview(mentionAccentBar)
 
     mentionNameLabel.text = "@vibe"
-    mentionNameLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-    mentionNameLabel.textColor = UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
+    mentionNameLabel.font = .systemFont(ofSize: 12, weight: .bold)
+    mentionNameLabel.textColor = UIColor(white: 0.92, alpha: 1.0)
+    mentionNameLabel.lineBreakMode = .byTruncatingTail
     mentionBanner.addSubview(mentionNameLabel)
 
     mentionDescLabel.text = "Ask AI"
-    mentionDescLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
-    mentionDescLabel.textColor = UIColor(white: 0.7, alpha: 1.0)
+    mentionDescLabel.font = .systemFont(ofSize: 12, weight: .regular)
+    mentionDescLabel.textColor = UIColor(white: 0.87, alpha: 0.72)
+    mentionDescLabel.lineBreakMode = .byTruncatingTail
     mentionBanner.addSubview(mentionDescLabel)
 
     // send button
@@ -1102,15 +1086,14 @@ final class ChatInputBar: UIView {
     micVADView.alpha = 0
     contentRow.addSubview(micVADView)
 
-    micGlass.isUserInteractionEnabled = false
+    micGlass.isUserInteractionEnabled = true
     micGlass.clipsToBounds = true
     micButton.clipsToBounds = false
-    micButton.addSubview(micGlass)
-    micButton.sendSubviewToBack(micGlass)
+    micGlass.contentView.addSubview(micButton)
     let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
     micButton.setImage(UIImage(systemName: "mic", withConfiguration: micCfg), for: .normal)
     micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
-    contentRow.addSubview(micButton)
+    contentRow.addSubview(micGlass)
 
     gifPanel.delegate = self
     gifPanel.isHidden = true
@@ -1135,12 +1118,10 @@ final class ChatInputBar: UIView {
     // Initial button state (no text → mic visible, send hidden)
     sendButton.alpha = 0
     sendProgress = 0
-    micButton.alpha = 1
+    micGlass.alpha = 1
     sendButton.isHidden = true
-    micButton.isHidden = false
+    micGlass.isHidden = false
 
-    configureGlassButtonPressFeedback()
-    configureInputTapFeedback()
     applyPlaceholder()
     refreshGlass()
   }
@@ -1192,17 +1173,11 @@ final class ChatInputBar: UIView {
     backgroundOverlayView.backgroundColor = baseColor.withAlphaComponent(0.88)
 
     // Mention suggestion banner (inside pill)
-    mentionBanner.backgroundColor =
-      (a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0))
-      .withAlphaComponent(0.10)
-    mentionDescLabel.textColor = a.textColorThem.withAlphaComponent(0.5)
-    mentionNameLabel.textColor =
+    mentionBanner.backgroundColor = .clear
+    mentionAccentBar.backgroundColor =
       a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
-    mentionIconLabel.textColor =
-      a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
-    mentionIconContainer.backgroundColor =
-      (a.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0))
-      .withAlphaComponent(0.18)
+    mentionNameLabel.textColor = a.textColorThem.withAlphaComponent(0.92)
+    mentionDescLabel.textColor = a.textColorThem.withAlphaComponent(0.72)
 
     refreshGlass()
     CATransaction.commit()
@@ -1451,20 +1426,22 @@ final class ChatInputBar: UIView {
     let btnCenterY = pillH - (textRowH / 2)
     let squareBounds = CGRect(origin: .zero, size: CGSize(width: sideSize, height: sideSize))
 
-    attachButton.bounds = squareBounds
-    attachButton.center = CGPoint(
+    attachGlass.bounds = squareBounds
+    attachGlass.center = CGPoint(
       x: dynamicHPad + (sideSize / 2) - (recordingLeftExpansion * 0.85),
       y: btnCenterY
     )
+    attachButton.frame = attachGlass.contentView.bounds
 
     let micBaseCenterX = w - dynamicHPad - (sideSize / 2)
     let micPushOutX = (sideSize + sideGap) * clampedSendProgress
 
     // Position Mic Button (use center/bounds to preserve transforms)
-    micButton.bounds = squareBounds
-    micButton.center = CGPoint(x: micBaseCenterX + micPushOutX, y: btnCenterY)
+    micGlass.bounds = squareBounds
+    micGlass.center = CGPoint(x: micBaseCenterX + micPushOutX, y: btnCenterY)
+    micButton.frame = micGlass.contentView.bounds
     micVADView.bounds = squareBounds
-    micVADView.center = micButton.center
+    micVADView.center = micGlass.center
     // Layout check: Initial visibility handled by updateButtonStates
 
     let actualPillW = max(1, pillRight - pillX)
@@ -1542,7 +1519,7 @@ final class ChatInputBar: UIView {
       )
 
       if !isLocked {
-        let micCenter = contentRow.convert(micButton.center, to: self)
+        let micCenter = contentRow.convert(micGlass.center, to: self)
         let lockW: CGFloat = 46
         let lockH: CGFloat = 86
         lockPill.frame = CGRect(
@@ -1582,10 +1559,9 @@ final class ChatInputBar: UIView {
     updateMentionBorderGlow(pillFrame: pillContainer.frame)
 
     // ── View frame updates that should inherit UIView animations ──
-    attachGlass.frame = attachButton.bounds
-    micGlass.frame = micButton.bounds
+    attachButton.frame = attachGlass.contentView.bounds
+    micButton.frame = micGlass.contentView.bounds
     pillGlass.frame = pillContainer.bounds
-    pillTapOverlay.frame = pillContainer.bounds
 
     if #available(iOS 26.0, *) {
       // Use native cornerConfiguration for liquid glass shapes
@@ -1594,15 +1570,12 @@ final class ChatInputBar: UIView {
       // Use border radius for the pill instead of capsule, so it doesn't break banner layout
       pillGlass.layer.cornerRadius = pillContainer.layer.cornerRadius
       pillGlass.layer.cornerCurve = .continuous
-      pillTapOverlay.layer.cornerRadius = pillContainer.layer.cornerRadius
-      pillTapOverlay.layer.cornerCurve = .continuous
       pillContainer.layer.cornerCurve = .continuous
       lockPill.cornerConfiguration = .capsule()
     } else {
       attachGlass.layer.cornerRadius = sideSize / 2
       micGlass.layer.cornerRadius = sideSize / 2
       pillGlass.layer.cornerRadius = pillContainer.layer.cornerRadius
-      pillTapOverlay.layer.cornerRadius = pillContainer.layer.cornerRadius
       lockPill.layer.cornerRadius = lockPill.bounds.width / 2
     }
 
@@ -1660,111 +1633,6 @@ final class ChatInputBar: UIView {
     }
   }
 
-  private func configureGlassButtonPressFeedback() {
-    let buttons: [UIButton] = [attachButton, gifButton, sendButton, micButton]
-    buttons.forEach { button in
-      button.addTarget(
-        self, action: #selector(handleButtonPressDown(_:)), for: [.touchDown, .touchDragEnter])
-      button.addTarget(
-        self, action: #selector(handleButtonPressUp(_:)),
-        for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit, .touchDragOutside])
-    }
-  }
-
-  private func configureInputTapFeedback() {
-    let tap = UITapGestureRecognizer(target: self, action: #selector(handleInputTap(_:)))
-    tap.cancelsTouchesInView = false
-    tap.delaysTouchesBegan = false
-    tap.delegate = self
-    pillContainer.addGestureRecognizer(tap)
-    inputTapFeedback.prepare()
-  }
-
-  @objc private func handleInputTap(_ recognizer: UITapGestureRecognizer) {
-    guard recognizer.state == .ended else { return }
-    guard !isRecording else { return }
-    animateInputTapFeedback()
-  }
-
-  private func animateInputTapFeedback() {
-    let scale: CGFloat = 0.992
-    inputTapFeedback.selectionChanged()
-    inputTapFeedback.prepare()
-
-    UIView.animate(
-      withDuration: 0.1,
-      delay: 0,
-      usingSpringWithDamping: 1.0,
-      initialSpringVelocity: 0.25,
-      options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
-    ) {
-      self.pillContainer.transform = CGAffineTransform(scaleX: scale, y: scale)
-      self.pillTapOverlay.alpha = 1
-    } completion: { _ in
-      UIView.animate(
-        withDuration: 0.22,
-        delay: 0,
-        usingSpringWithDamping: 0.72,
-        initialSpringVelocity: 0.25,
-        options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
-      ) {
-        self.pillContainer.transform = .identity
-        self.pillTapOverlay.alpha = 0
-      }
-    }
-  }
-
-  @objc private func handleButtonPressDown(_ sender: UIButton) {
-    setButtonPressed(sender, isPressed: true)
-  }
-
-  @objc private func handleButtonPressUp(_ sender: UIButton) {
-    setButtonPressed(sender, isPressed: false)
-  }
-
-  private func setButtonPressed(_ button: UIButton, isPressed: Bool) {
-    if button === micButton, isRecording { return }
-    if button === sendButton, !sendButton.isUserInteractionEnabled { return }
-
-    let duration: TimeInterval = isPressed ? 0.1 : 0.22
-    let damping: CGFloat = isPressed ? 1.0 : 0.72
-    let standardTabScale: CGFloat = isPressed ? 0.96 : 1.0
-    let iconScale: CGFloat = isPressed ? 0.9 : 1.0
-    let iconY: CGFloat = isPressed ? 0.6 : 0
-    let iconTransform = CGAffineTransform(translationX: 0, y: iconY).scaledBy(
-      x: iconScale, y: iconScale)
-
-    UIView.animate(
-      withDuration: duration,
-      delay: 0,
-      usingSpringWithDamping: damping,
-      initialSpringVelocity: 0.25,
-      options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
-    ) {
-      if button === self.attachButton || button === self.micButton {
-        button.imageView?.transform = CGAffineTransform(
-          scaleX: standardTabScale, y: standardTabScale)
-      } else {
-        button.imageView?.transform = isPressed ? iconTransform : .identity
-      }
-
-      if button === self.attachButton {
-        self.attachGlass.alpha = isPressed ? 0.92 : 1.0
-        self.attachGlass.backgroundColor = isPressed ? self.glassPressedOverlayColor : .clear
-      } else if button === self.micButton {
-        self.micGlass.alpha = isPressed ? 0.92 : 1.0
-        self.micGlass.backgroundColor = isPressed ? self.glassPressedOverlayColor : .clear
-      } else if button === self.gifButton {
-        let baseAlpha: CGFloat = self.sendButton.isUserInteractionEnabled ? 0.9 : 1.0
-        self.gifButton.alpha = isPressed ? max(0.65, baseAlpha - 0.24) : baseAlpha
-      } else if button === self.sendButton {
-        let baseAlpha: CGFloat = self.sendButton.isUserInteractionEnabled ? 1.0 : 0.0
-        self.sendButton.alpha = isPressed ? max(0.76, baseAlpha - 0.16) : baseAlpha
-        self.sendGradient.opacity = isPressed ? 0.9 : 1.0
-      }
-    }
-  }
-
   // MARK: - Button states
 
   private func updateButtonStates(animated: Bool = false) {
@@ -1779,11 +1647,12 @@ final class ChatInputBar: UIView {
       self.sendProgress = targetProgress
 
       // Mic State
-      self.micButton.alpha = showSend ? 0 : 1
-      self.micButton.transform =
+      self.micGlass.alpha = showSend ? 0 : 1
+      self.micGlass.transform =
         showSend
         ? CGAffineTransform(translationX: 8, y: 0).scaledBy(x: 0.88, y: 0.88)
         : .identity
+      self.micGlass.isUserInteractionEnabled = !showSend
       self.micButton.isUserInteractionEnabled = !showSend
 
       // GIF State (moves in toward Send area while Send expands)
@@ -1801,7 +1670,7 @@ final class ChatInputBar: UIView {
         : hiddenSendTransform
       self.sendButton.isUserInteractionEnabled = showSend
 
-      self.micButton.isHidden = false
+      self.micGlass.isHidden = false
       self.sendButton.isHidden = false
       self.setNeedsLayout()
       self.layoutIfNeeded()
@@ -1894,11 +1763,11 @@ final class ChatInputBar: UIView {
       return
     }
     let sheet = ChatAttachmentMenuController(appearance: appearance)
-    sheet.sourceButtonView = attachButton
+    sheet.sourceButtonView = attachGlass
     if let window = vc.view.window {
-      sheet.sourceButtonFrameInWindow = attachButton.convert(attachButton.bounds, to: window)
+      sheet.sourceButtonFrameInWindow = attachGlass.convert(attachGlass.bounds, to: window)
     } else {
-      sheet.sourceButtonFrameInWindow = attachButton.convert(attachButton.bounds, to: nil)
+      sheet.sourceButtonFrameInWindow = attachGlass.convert(attachGlass.bounds, to: nil)
     }
     sheet.onSelectImage = { [weak self] uri in self?.delegate?.inputBarDidSelectImage(uri: uri) }
     sheet.onSelectFile = { [weak self] uri, name in
@@ -2033,15 +1902,14 @@ final class ChatInputBar: UIView {
   private func layoutMentionBannerContents() {
     let b = mentionBanner.bounds
     guard b.width > 0, b.height > 0 else { return }
-    let pad: CGFloat = 10
-    let iconSize: CGFloat = 26
-    mentionIconContainer.frame = CGRect(
-      x: pad, y: (b.height - iconSize) / 2, width: iconSize, height: iconSize)
-    mentionIconLabel.frame = mentionIconContainer.bounds
-    let textX = mentionIconContainer.frame.maxX + 8
-    mentionNameLabel.frame = CGRect(x: textX, y: (b.height - 16) / 2, width: 46, height: 16)
+    let pad: CGFloat = 8
+    let accentW: CGFloat = 3
+    mentionAccentBar.frame = CGRect(x: pad, y: (b.height - 28) / 2, width: accentW, height: 28)
+    let textX = mentionAccentBar.frame.maxX + 8
+    let textW = max(1, b.width - textX - pad)
+    mentionNameLabel.frame = CGRect(x: textX, y: (b.height - 28) / 2, width: textW, height: 14)
     mentionDescLabel.frame = CGRect(
-      x: mentionNameLabel.frame.maxX + 6, y: (b.height - 14) / 2, width: 50, height: 14)
+      x: textX, y: mentionNameLabel.frame.maxY + 1, width: textW, height: 14)
   }
 
   private func setMentionActive(_ active: Bool) {
@@ -2245,7 +2113,6 @@ final class ChatInputBar: UIView {
   private func startRecording() {
     guard !isRecording else { return }
     setGifPanelVisible(false, animated: false)
-    setButtonPressed(micButton, isPressed: false)
     isRecording = true
     isLocked = false
     feedback.impactOccurred()
@@ -2290,9 +2157,9 @@ final class ChatInputBar: UIView {
       options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
       self.recordingExpandProgress = 1
-      self.attachButton.transform = CGAffineTransform(translationX: -20, y: 0).scaledBy(
+      self.attachGlass.transform = CGAffineTransform(translationX: -20, y: 0).scaledBy(
         x: 0.84, y: 0.84)
-      self.attachButton.alpha = 0.18
+      self.attachGlass.alpha = 0.18
       self.setNeedsLayout()
       self.layoutIfNeeded()
       self.superview?.setNeedsLayout()
@@ -2301,10 +2168,9 @@ final class ChatInputBar: UIView {
 
     // Mic Pulse / Scale
     UIView.animate(withDuration: 0.2) {
-      self.micButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
       self.micGlass.transform = CGAffineTransform(scaleX: 2.8, y: 2.8)
       self.micVADView.transform = CGAffineTransform(scaleX: 2.8, y: 2.8)
-      self.micButton.alpha = 1
+      self.micGlass.alpha = 1
     }
 
     if recordingMode == .video {
@@ -2430,8 +2296,8 @@ final class ChatInputBar: UIView {
       self.micButton.tintColor =
         self.appearance.bubbleMeGradient.first
         ?? self.appearance.textColorThem.withAlphaComponent(0.9)
-      self.micButton.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
     }
+    micGlass.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
 
     stopRecordingHintAnimations()
     slideToCancelLabel.transform = .identity
@@ -2473,8 +2339,8 @@ final class ChatInputBar: UIView {
     layoutIfNeeded()
 
     // The dot end is the normal untranslated position of attachButton
-    let attachHeight = attachButton.bounds.height
-    let dotEndX = attachButton.frame.minX + sideSize / 2
+    let attachHeight = attachGlass.bounds.height
+    let dotEndX = attachGlass.frame.minX + sideSize / 2
     let dotEndY = contentRow.frame.minY + attachHeight / 2
     let dotEnd = CGPoint(x: dotEndX, y: dotEndY)
 
@@ -2575,7 +2441,7 @@ final class ChatInputBar: UIView {
             UIView.animate(withDuration: 0.2, delay: 0.2, options: .curveEaseInOut) {
               trashContainer.alpha = 0
               trashContainer.transform = CGAffineTransform(scaleX: 0.5, y: 0.5)
-              self.attachButton.alpha = 1
+              self.attachGlass.alpha = 1
             } completion: { _ in
               trashContainer.removeFromSuperview()
             }
@@ -2671,13 +2537,11 @@ final class ChatInputBar: UIView {
       options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
       self.recordingExpandProgress = 0
-      self.attachButton.transform = .identity
-      self.attachButton.alpha = revealAttach ? 1 : 0
-      self.micButton.transform = .identity
+      self.attachGlass.transform = .identity
+      self.attachGlass.alpha = revealAttach ? 1 : 0
       self.micGlass.transform = .identity
       self.micVADView.transform = .identity
-      self.micButton.alpha = 1
-      self.micGlass.backgroundColor = .clear
+      self.micGlass.alpha = 1
 
       let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
       let iconName = self.isVideoMode ? "video" : "mic"
@@ -2854,36 +2718,6 @@ extension ChatInputBar: UITextViewDelegate {
   {
     // Allow newline insertion from keyboard return key.
     return true
-  }
-}
-
-extension ChatInputBar: UIGestureRecognizerDelegate {
-  func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch)
-    -> Bool
-  {
-    guard gestureRecognizer.view === pillContainer else { return true }
-    guard let touchedView = touch.view else { return true }
-
-    if touchedView.isDescendant(of: textView) {
-      // Do not intercept UITextView touches; keep native select/copy/paste menu behavior.
-      return false
-    }
-
-    if touchedView.isDescendant(of: gifButton)
-      || touchedView.isDescendant(of: sendButton)
-      || touchedView.isDescendant(of: replyDismissButton)
-      || touchedView.isDescendant(of: cancelOverlayButton)
-    {
-      return false
-    }
-    return true
-  }
-
-  func gestureRecognizer(
-    _ gestureRecognizer: UIGestureRecognizer,
-    shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
-  ) -> Bool {
-    true
   }
 }
 

@@ -7,6 +7,7 @@ import android.graphics.PorterDuff
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.net.Uri
+import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.MotionEvent
@@ -25,12 +26,23 @@ import java.net.URL
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 import kotlin.math.max
 
 class ChatMainView(
   context: Context,
   appContext: AppContext,
 ) : ExpoView(context, appContext) {
+  // Enable Android's native layout system so child views (RecyclerView, input bar, etc.)
+  // are measured/laid out even when React Native Fabric suppresses requestLayout().
+  override val shouldUseAndroidLayout: Boolean = true
+
+  companion object {
+    private const val TAG = "ChatMainView"
+    private const val PAGE_ANIMATION_DURATION_MS = 260L
+    private const val PAGE_STATE_WATCHDOG_DELAY_MS = 360L
+  }
+
   private val onViewportChanged by EventDispatcher<Map<String, Any>>()
   private val onNativeEvent by EventDispatcher<Map<String, Any>>()
 
@@ -38,6 +50,7 @@ class ChatMainView(
 
   private val pagesHost = FrameLayout(context)
   private val chatPage = LinearLayout(context)
+  private val pinnedBannerView = ChatPinnedBannerView(context)
   private val profilePage = LinearLayout(context)
 
   private val chatHeader = LinearLayout(context)
@@ -86,6 +99,9 @@ class ChatMainView(
   private var groupMemberOrder: MutableList<String> = mutableListOf()
   private var groupMemberCount: Int? = null
   private var groupTypingUserIds: List<String> = emptyList()
+  private var directPeerTypingActive: Boolean = false
+  private var pinnedBannerMessageId: String? = null
+  private var pinnedBannerBody: String? = null
   private var avatarUri: String = ""
   private var isOnline: Boolean = false
   private var isChatMuted: Boolean = false
@@ -103,6 +119,7 @@ class ChatMainView(
   private var pendingNativePageLockUntilMs: Long = 0L
   private var standaloneProfileMode = false
   private var avatarLoadToken = 0
+  private var rowsUpdateCount = 0
   private val engineListenerId = "chat-main-view-${System.identityHashCode(this)}"
 
   private var textColor: Int = Color.WHITE
@@ -121,9 +138,14 @@ class ChatMainView(
     updateProfileTexts()
     updateAvatarViews()
     applyPageState(animated = false, emitEvent = false)
+    Log.i(TAG, "init complete page=$currentPage attached=$isAttachedToWindow")
   }
 
   override fun onDetachedFromWindow() {
+    Log.i(
+      TAG,
+      "onDetachedFromWindow surfaceId=$surfaceId chatId=$engineChatId peerUserId=$enginePeerUserId page=$currentPage",
+    )
     ChatEngine.setListener(engineListenerId, null)
     if (surfaceId.isNotBlank()) {
       ChatMainRegistry.unregister(surfaceId)
@@ -133,9 +155,23 @@ class ChatMainView(
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()
+    Log.i(
+      TAG,
+      "onAttachedToWindow surfaceId=$surfaceId chatId=$engineChatId peerUserId=$enginePeerUserId page=$currentPage",
+    )
     registerChatEngineListener()
     refreshPresenceFromEngine(force = true)
     refreshTypingStateFromEngine(force = true)
+    refreshPinnedBannerFromEngine(force = true)
+    post { ensureVisiblePageState("attach-post") }
+  }
+
+  override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+    super.onSizeChanged(w, h, oldw, oldh)
+    Log.d(TAG, "onSizeChanged w=$w h=$h oldw=$oldw oldh=$oldh page=$currentPage")
+    if (w > 0 && h > 0) {
+      post { ensureVisiblePageState("size-changed") }
+    }
   }
 
   fun setSurfaceId(value: String) {
@@ -149,21 +185,34 @@ class ChatMainView(
       ChatMainRegistry.register(surfaceId, this)
       chatListView.setSurfaceId("${surfaceId}#list")
     }
+    Log.i(TAG, "setSurfaceId surfaceId=$surfaceId")
   }
 
   fun setRows(rows: List<Map<String, Any?>>) {
+    rowsUpdateCount += 1
+    val shouldLog = rowsUpdateCount <= 6 || rows.isEmpty() || rowsUpdateCount % 20 == 0
+    if (shouldLog) {
+      val firstKind = normalized(rows.firstOrNull()?.get("kind")) ?: "-"
+      Log.i(
+        TAG,
+        "setRows count=${rows.size} update=$rowsUpdateCount firstKind=$firstKind chatId=$engineChatId surfaceId=$surfaceId",
+      )
+    }
     chatListView.setRows(rows)
   }
 
   fun setEngineSurfaceId(value: String) {
+    Log.i(TAG, "setEngineSurfaceId surfaceId=${value.trim()}")
     chatListView.setEngineSurfaceId(value)
   }
 
   fun setEngineChatId(value: String) {
     engineChatId = value.trim()
+    Log.i(TAG, "setEngineChatId chatId=$engineChatId")
     chatListView.setEngineChatId(value)
     registerChatEngineListener()
     refreshTypingStateFromEngine(force = true)
+    refreshPinnedBannerFromEngine(force = true)
     refreshProfileSummaryFromEngine(force = true)
   }
 
@@ -173,6 +222,7 @@ class ChatMainView(
 
   fun setEnginePeerUserId(value: String) {
     enginePeerUserId = value.trim().uppercase(Locale.ROOT)
+    Log.i(TAG, "setEnginePeerUserId peerUserId=$enginePeerUserId")
     chatListView.setEnginePeerUserId(value)
     if (enginePeerUserId.isBlank()) {
       engineLastSeenTimestampMs = null
@@ -253,6 +303,7 @@ class ChatMainView(
 
   fun setIsGroupOrChannel(value: Boolean) {
     isGroupOrChannel = value
+    chatListView.setEngineIsGroupOrChannel(value)
     refreshTypingStateFromEngine(force = true)
     updateHeaderTexts()
     updateProfileTexts()
@@ -316,6 +367,7 @@ class ChatMainView(
   fun setStandaloneProfileMode(value: Boolean) {
     if (standaloneProfileMode == value) return
     standaloneProfileMode = value
+    Log.i(TAG, "setStandaloneProfileMode enabled=$value")
     if (value) {
       chatListView.setInputBarEnabled(false)
       chatListView.setNativeSendEnabled(false)
@@ -328,6 +380,10 @@ class ChatMainView(
 
   fun setPage(value: String, animated: Boolean) {
     val normalized = value.trim().lowercase()
+    Log.i(
+      TAG,
+      "setPage request=$normalized animated=$animated current=$currentPage standalone=$standaloneProfileMode pending=$pendingNativePageTarget",
+    )
     if (normalized == "profile") {
       if (standaloneProfileMode) {
         if (currentPage != "profile") {
@@ -401,13 +457,22 @@ class ChatMainView(
 
   private fun registerChatEngineListener() {
     if (!isAttachedToWindow || (enginePeerUserId.isBlank() && engineChatId.isBlank())) {
+      Log.d(
+        TAG,
+        "registerChatEngineListener detachedOrMissingIds attached=$isAttachedToWindow chatId=$engineChatId peerUserId=$enginePeerUserId",
+      )
       ChatEngine.setListener(engineListenerId, null)
       return
     }
-    ChatEngine.setListener(engineListenerId) { _, _, _ ->
+    Log.d(TAG, "registerChatEngineListener chatId=$engineChatId peerUserId=$enginePeerUserId")
+    ChatEngine.setListener(engineListenerId) { _, changedChatId, _ ->
       post {
         refreshPresenceFromEngine()
         refreshTypingStateFromEngine()
+        val normalizedChangedChatId = changedChatId?.trim().orEmpty()
+        if (engineChatId.isBlank() || normalizedChangedChatId.isBlank() || normalizedChangedChatId == engineChatId) {
+          refreshPinnedBannerFromEngine()
+        }
         refreshProfileSummaryFromEngine()
       }
     }
@@ -428,8 +493,9 @@ class ChatMainView(
 
   private fun refreshTypingStateFromEngine(force: Boolean = false) {
     if (!isGroupOrChannel) {
-      if (!force && groupTypingUserIds.isEmpty()) return
-      groupTypingUserIds = emptyList()
+      val isPeerTyping = ChatEngine.typingUserIds(engineChatId).isNotEmpty()
+      if (!force && directPeerTypingActive == isPeerTyping) return
+      directPeerTypingActive = isPeerTyping
       updateHeaderTexts()
       updateProfileTexts()
       return
@@ -501,6 +567,114 @@ class ChatMainView(
     profileSummaryRecentFiles = nextRecentFiles
     profileSummaryHistoryLoaded = nextHistoryLoaded
     updateProfileTexts()
+  }
+
+  private fun refreshPinnedBannerFromEngine(force: Boolean = false) {
+    val chatId = engineChatId.trim()
+    if (chatId.isBlank()) {
+      if (
+        force
+          || pinnedBannerMessageId != null
+          || pinnedBannerBody != null
+          || pinnedBannerView.visibility != View.GONE
+      ) {
+        pinnedBannerMessageId = null
+        pinnedBannerBody = null
+        pinnedBannerView.alpha = 0f
+        pinnedBannerView.visibility = View.GONE
+      }
+      return
+    }
+
+    val payload = ChatEngine.getPinnedMessages(mapOf("chatId" to chatId))
+    val pins = (payload["data"] as? List<*>) ?: emptyList<Any?>()
+    val topPin = pins.firstOrNull() as? Map<*, *>
+    val nextMessageId = pinnedMessageId(topPin)
+    val nextBody = resolvePinnedBody(chatId, topPin)
+    val shouldHide = nextBody.isNullOrBlank()
+    val changed =
+      nextMessageId != pinnedBannerMessageId
+        || nextBody != pinnedBannerBody
+        || (pinnedBannerView.visibility == View.GONE) != shouldHide
+    if (!force && !changed) return
+
+    pinnedBannerMessageId = nextMessageId
+    pinnedBannerBody = nextBody
+
+    if (shouldHide) {
+      if (pinnedBannerView.visibility == View.GONE) {
+        pinnedBannerView.alpha = 0f
+      } else {
+        pinnedBannerView.animate().cancel()
+        pinnedBannerView.animate()
+          .alpha(0f)
+          .setDuration(180L)
+          .withEndAction {
+            pinnedBannerView.visibility = View.GONE
+          }
+          .start()
+      }
+      return
+    }
+
+    pinnedBannerView.configure("Pinned Message", nextBody.orEmpty())
+    if (pinnedBannerView.visibility != View.VISIBLE) {
+      pinnedBannerView.visibility = View.VISIBLE
+      pinnedBannerView.alpha = 0f
+      pinnedBannerView.animate().cancel()
+      pinnedBannerView.animate().alpha(1f).setDuration(200L).start()
+    } else {
+      pinnedBannerView.alpha = 1f
+    }
+  }
+
+  private fun pinnedMessageId(pin: Map<*, *>?): String? {
+    val raw = pin?.get("messageId") ?: pin?.get("message_id") ?: pin?.get("id")
+    return normalized(raw)
+  }
+
+  private fun resolvePinnedBody(chatId: String, pin: Map<*, *>?): String? {
+    if (pin == null) return null
+    val pinText = normalized(pin["text"] ?: pin["plainContent"] ?: pin["plain_content"])
+    if (!pinText.isNullOrBlank()) return pinText
+    val fileName = normalized(pin["fileName"] ?: pin["file_name"])
+    if (!fileName.isNullOrBlank()) return "File: $fileName"
+
+    val targetMessageId = pinnedMessageId(pin) ?: return "Pinned message"
+    val rows = ChatEngine.getChatRows(mapOf("chatId" to chatId))
+    for (index in rows.size - 1 downTo 0) {
+      val row = rows[index]
+      if (normalized(row["kind"]) != "message") continue
+      val message = row["message"] as? Map<*, *> ?: continue
+      if (normalized(message["id"]) != targetMessageId) continue
+
+      val text = normalized(message["text"] ?: message["plainContent"] ?: message["plain_content"])
+      if (!text.isNullOrBlank()) return text
+      val caption = normalized(message["caption"])
+      if (!caption.isNullOrBlank()) return caption
+      val type = normalized(message["type"])?.lowercase(Locale.ROOT) ?: "text"
+      if (type == "file") {
+        val name = normalized(message["fileName"] ?: message["file_name"])
+        return if (!name.isNullOrBlank()) "File: $name" else "Pinned file"
+      }
+      val mediaUrl = normalized(message["mediaUrl"] ?: message["media_url"])
+      if (!mediaUrl.isNullOrBlank()) return mediaUrl
+      return "Pinned message"
+    }
+    return "Pinned message"
+  }
+
+  private fun handlePinnedBannerPressed() {
+    val messageId = pinnedBannerMessageId ?: return
+    if (messageId.isBlank()) return
+    if (currentPage != "chat") return
+    chatListView.scrollToMessage(messageId, animated = true, viewPosition = 0.2)
+    onNativeEvent(
+      mapOf(
+        "type" to "pinnedBannerPressed",
+        "messageId" to messageId,
+      ),
+    )
   }
 
   private fun setupChatPage() {
@@ -647,6 +821,22 @@ class ChatMainView(
     chatHeaderRight.addView(
       chatPhoneButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
+    )
+
+    pinnedBannerView.visibility = View.GONE
+    pinnedBannerView.alpha = 0f
+    pinnedBannerView.setOnClickListener { handlePinnedBannerPressed() }
+    chatPage.addView(
+      pinnedBannerView,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        dp(ChatPinnedBannerView.PREFERRED_HEIGHT_DP),
+      ).apply {
+        marginStart = dp(16)
+        marginEnd = dp(16)
+        topMargin = dp(6)
+        bottomMargin = dp(6)
+      },
     )
 
     chatPage.addView(
@@ -904,7 +1094,7 @@ class ChatMainView(
   private fun applyTheme() {
     val hasGroupTyping = isGroupOrChannel && groupTypingUserIds.isNotEmpty()
     val shouldHighlightStatus = hasGroupTyping || isOnline
-    val headerActionColor = contrastForegroundFor(headerBackgroundColor)
+    val headerActionColor = resolveHeaderActionColor()
     chatHeader.setBackgroundColor(withAlpha(headerBackgroundColor, 0.95f))
     profileHeader.background = roundedShape(withAlpha(surfaceColor, 0.84f), dp(20))
     profilePage.setBackgroundColor(profileBackgroundColor)
@@ -921,6 +1111,11 @@ class ChatMainView(
     profileBackButton.setTextColor(headerActionColor)
     chatTitleView.setTextColor(textColor)
     chatSubtitleView.setTextColor(if (shouldHighlightStatus) Color.parseColor("#53E08A") else secondaryTextColor)
+    pinnedBannerView.applyTheme(
+      textColor = textColor,
+      surfaceColor = headerBackgroundColor,
+      isDark = contrastForegroundFor(headerBackgroundColor) == Color.WHITE,
+    )
     profileHeaderTitle.setTextColor(textColor)
     chatAvatarFallback.setTextColor(textColor)
     profileAvatarFallback.setTextColor(textColor)
@@ -1096,6 +1291,7 @@ class ChatMainView(
   private fun updateAvatarViews() {
     updateProfileTexts()
     if (avatarUri.isBlank()) {
+      Log.d(TAG, "updateAvatarViews avatarUri empty -> fallback")
       chatAvatarImage.setImageDrawable(null)
       profileAvatarImage.setImageDrawable(null)
       chatAvatarImage.visibility = View.GONE
@@ -1136,6 +1332,10 @@ class ChatMainView(
   private fun applyPageState(animated: Boolean, emitEvent: Boolean) {
     val widthF = max(width.toFloat(), resources.displayMetrics.widthPixels.toFloat())
     val goingProfile = currentPage == "profile"
+    Log.i(
+      TAG,
+      "applyPageState page=$currentPage animated=$animated width=$width height=$height resolvedWidth=$widthF",
+    )
     val chatTargetX = if (goingProfile) -widthF * 0.18f else 0f
     val chatTargetAlpha = if (goingProfile) 0f else 1f
     val profileTargetX = 0f
@@ -1161,12 +1361,12 @@ class ChatMainView(
       chatPage.animate()
         .translationX(chatTargetX)
         .alpha(chatTargetAlpha)
-        .setDuration(260L)
+        .setDuration(PAGE_ANIMATION_DURATION_MS)
         .start()
       profilePage.animate()
         .translationX(profileTargetX)
         .alpha(profileTargetAlpha)
-        .setDuration(260L)
+        .setDuration(PAGE_ANIMATION_DURATION_MS)
         .withEndAction {
           if (currentPage == "chat") {
             profilePage.visibility = View.GONE
@@ -1175,8 +1375,10 @@ class ChatMainView(
             chatPage.visibility = View.INVISIBLE
             profilePage.visibility = View.VISIBLE
           }
+          ensureVisiblePageState("animation-end")
         }
         .start()
+      postDelayed({ ensureVisiblePageState("animation-watchdog") }, PAGE_STATE_WATCHDOG_DELAY_MS)
     } else {
       applyFinalState()
       if (currentPage == "chat") {
@@ -1186,6 +1388,7 @@ class ChatMainView(
         chatPage.visibility = View.INVISIBLE
         profilePage.visibility = View.VISIBLE
       }
+      ensureVisiblePageState("no-animation")
     }
 
     if (emitEvent) {
@@ -1194,6 +1397,58 @@ class ChatMainView(
           "type" to "mainPageChanged",
           "page" to currentPage,
         ),
+      )
+    }
+  }
+
+  private fun ensureVisiblePageState(reason: String) {
+    val shouldShowProfile = currentPage == "profile"
+    val expectedChatVisibility = if (shouldShowProfile) View.INVISIBLE else View.VISIBLE
+    val expectedProfileVisibility = if (shouldShowProfile) View.VISIBLE else View.GONE
+    val expectedChatAlpha = if (shouldShowProfile) 0f else 1f
+    val expectedProfileAlpha = if (shouldShowProfile) 1f else 0f
+    val expectedChatTranslationX = if (shouldShowProfile) -max(width.toFloat(), resources.displayMetrics.widthPixels.toFloat()) * 0.18f else 0f
+    val expectedProfileTranslationX = 0f
+
+    var repaired = false
+
+    if (chatPage.visibility != expectedChatVisibility) {
+      chatPage.visibility = expectedChatVisibility
+      repaired = true
+    }
+    if (profilePage.visibility != expectedProfileVisibility) {
+      profilePage.visibility = expectedProfileVisibility
+      repaired = true
+    }
+    if (abs(chatPage.alpha - expectedChatAlpha) > 0.02f) {
+      chatPage.alpha = expectedChatAlpha
+      repaired = true
+    }
+    if (abs(profilePage.alpha - expectedProfileAlpha) > 0.02f) {
+      profilePage.alpha = expectedProfileAlpha
+      repaired = true
+    }
+    if (abs(chatPage.translationX - expectedChatTranslationX) > 1f) {
+      chatPage.translationX = expectedChatTranslationX
+      repaired = true
+    }
+    if (abs(profilePage.translationX - expectedProfileTranslationX) > 1f) {
+      profilePage.translationX = expectedProfileTranslationX
+      repaired = true
+    }
+
+    if (repaired) {
+      Log.w(
+        TAG,
+        "ensureVisiblePageState repaired reason=$reason page=$currentPage chatVisible=${chatPage.visibility} chatAlpha=${"%.2f".format(chatPage.alpha)} profileVisible=${profilePage.visibility} profileAlpha=${"%.2f".format(profilePage.alpha)}",
+      )
+      return
+    }
+
+    if (reason == "attach-post" || reason == "animation-watchdog") {
+      Log.d(
+        TAG,
+        "ensureVisiblePageState ok reason=$reason page=$currentPage chatVisible=${chatPage.visibility} profileVisible=${profilePage.visibility}",
       )
     }
   }
@@ -1237,8 +1492,13 @@ class ChatMainView(
       is String -> {
         val trimmed = raw.trim()
         if (trimmed.isBlank()) return null
+        val hexFormat = if (trimmed.startsWith("#") && trimmed.length == 4) {
+          "#" + trimmed[1] + trimmed[1] + trimmed[2] + trimmed[2] + trimmed[3] + trimmed[3]
+        } else {
+          trimmed
+        }
         try {
-          Color.parseColor(trimmed)
+          Color.parseColor(hexFormat)
         } catch (_: Throwable) {
           null
         }
@@ -1251,6 +1511,10 @@ class ChatMainView(
     val luminance =
       (0.299 * Color.red(background) + 0.587 * Color.green(background) + 0.114 * Color.blue(background)) / 255.0
     return if (luminance > 0.62) Color.BLACK else Color.WHITE
+  }
+
+  private fun resolveHeaderActionColor(): Int {
+    return textColor
   }
 
   private fun withAlpha(color: Int, alpha: Float): Int {

@@ -5,8 +5,8 @@ class LiquidGlassView: ExpoView {
   private let visualEffectView: UIVisualEffectView
   private var currentBlurStyle: UIBlurEffect.Style?
   private var glassStyle: String = "clear"
-  private var glassInteractive: Bool = false
-  private var pressFeedbackEnabled: Bool = true
+  private var glassInteractive: Bool = true
+  private var pressFeedbackEnabled: Bool = false
   private var isPressFeedbackActive: Bool = false
   private let glassPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
   private var glassTintColor: UIColor?
@@ -99,47 +99,36 @@ class LiquidGlassView: ExpoView {
   }
 
   private func ensureEffectViewLayering() {
-    if visualEffectView.superview === self {
-      bringSubviewToFront(visualEffectView)
-    }
+    guard visualEffectView.superview === self else { return }
+    sendSubviewToBack(visualEffectView)
   }
 
   private func animatePressFeedback(isPressed: Bool) {
     guard pressFeedbackEnabled else { return }
+    guard #unavailable(iOS 26.0) else { return }
     guard isPressFeedbackActive != isPressed else { return }
     isPressFeedbackActive = isPressed
 
-    let scale: CGFloat = isPressed ? 0.96 : 1.0
-    let duration: TimeInterval = isPressed ? 0.1 : 0.22
-    let damping: CGFloat = isPressed ? 1.0 : 0.72
+    let duration: TimeInterval = isPressed ? 0.1 : 0.25
+    let damping: CGFloat = isPressed ? 1.0 : 0.6
+    let velocity: CGFloat = isPressed ? 0.0 : 0.4
 
     UIView.animate(
       withDuration: duration,
       delay: 0,
       usingSpringWithDamping: damping,
-      initialSpringVelocity: 0.25,
-      options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+      initialSpringVelocity: velocity,
+      options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState]
     ) {
-      self.transform = CGAffineTransform(scaleX: scale, y: scale)
-
-      let defaultColor: UIColor = {
-        if #available(iOS 26.0, *) {
-          return self.resolvedGlassTintColor() ?? .clear
-        } else {
-          return .clear
-        }
-      }()
-
       self.visualEffectView.contentView.backgroundColor =
         isPressed
         ? self.glassPressedOverlayColor
-        : defaultColor
+        : .clear
     }
   }
 
   private func resetPressFeedbackAppearance() {
     isPressFeedbackActive = false
-    transform = .identity
     if #available(iOS 26.0, *) {
       visualEffectView.contentView.backgroundColor = resolvedGlassTintColor()
     } else {
@@ -177,7 +166,10 @@ class LiquidGlassView: ExpoView {
     guard #available(iOS 26.0, *) else {
       return nil
     }
-    let tint = glassTint ?? "default"
+    guard let tint = glassTint, !tint.isEmpty else {
+      // No explicit tint -> keep native system material appearance.
+      return nil
+    }
 
     let isDarkMode = traitCollection.userInterfaceStyle == .dark
     let styleMultiplier: CGFloat = glassStyle == "regular" ? 1.3 : 1.0
@@ -201,11 +193,11 @@ class LiquidGlassView: ExpoView {
         ? UIColor.white.withAlphaComponent(scaledAlpha(0.095))
         : UIColor.black.withAlphaComponent(scaledAlpha(0.08))
     case "default":
-      fallthrough
-    default:
       return isDarkMode
         ? UIColor.white.withAlphaComponent(scaledAlpha(0.085))
         : UIColor.black.withAlphaComponent(scaledAlpha(0.07))
+    default:
+      return nil
     }
   }
 
@@ -238,7 +230,7 @@ class LiquidGlassView: ExpoView {
   }
 
   func setInteractive(_ interactive: Bool?) {
-    let resolvedInteractive = interactive ?? false
+    let resolvedInteractive = interactive ?? true
     glassInteractive = resolvedInteractive
     if !resolvedInteractive {
       resetPressFeedbackAppearance()
@@ -247,7 +239,7 @@ class LiquidGlassView: ExpoView {
   }
 
   func setPressFeedbackEnabled(_ enabled: Bool?) {
-    pressFeedbackEnabled = enabled ?? true
+    pressFeedbackEnabled = enabled ?? false
     if !pressFeedbackEnabled {
       resetPressFeedbackAppearance()
     }

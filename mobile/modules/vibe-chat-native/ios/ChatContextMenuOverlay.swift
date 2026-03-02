@@ -1,4 +1,5 @@
 import UIKit
+
 private let chatContextHoldDebugLogs = true
 
 public protocol ChatContextMenuOverlayDelegate: AnyObject {
@@ -212,6 +213,7 @@ public final class ChatContextMenuOverlay: UIView {
     var menuY = bubbleY + originalBubbleFrame.height + menuGap
 
     let totalBottom = menuY + menuHeight
+    // First, shift UP to ensure the context menu stays fully inside the safe area.
     if totalBottom > safeBottom {
       let shiftUp = totalBottom - safeBottom
       bubbleY -= shiftUp
@@ -219,16 +221,22 @@ public final class ChatContextMenuOverlay: UIView {
       menuY -= shiftUp
     }
 
+    // Next, shift DOWN to ensure the reaction picker stays fully inside the safe area.
+    // However, if we shift down too much, we will push the context menu back out of bounds,
+    // which results in overlapping the bubble. Limit the shift down to the available space.
     if pickerY < safeTop {
-      let shiftDown = safeTop - pickerY
-      bubbleY += shiftDown
-      pickerY += shiftDown
-      menuY += shiftDown
+      let desiredShiftDown = safeTop - pickerY
+      let availableBottomSpace = max(0, safeBottom - (menuY + menuHeight))
+      let allowedShiftDown = min(desiredShiftDown, availableBottomSpace)
+
+      bubbleY += allowedShiftDown
+      pickerY += allowedShiftDown
+      menuY += allowedShiftDown
     }
 
     reactionPicker.frame = CGRect(
       x: pickerX,
-      y: pickerY,
+      y: max(safeTop, pickerY),  // Ensure picker doesn't go off-screen even if bubble is huge
       width: pickerWidth,
       height: pickerHeight
     )
@@ -310,12 +318,12 @@ public final class ChatContextMenuOverlay: UIView {
       self.backgroundGlassView.alpha = 1
     }
 
-    // --- Bubble: keep identity on open; hold pulse happens on the real cell pre-menu ---
+    // --- Bubble: start from the cell's scaled down state and expand it smoothly ---
     let startCenter = CGPoint(x: originalBubbleFrame.midX, y: originalBubbleFrame.midY)
     let endCenter = CGPoint(x: finalBubbleFrame.midX, y: finalBubbleFrame.midY)
     bubbleSnapshot.bounds = CGRect(origin: .zero, size: originalBubbleFrame.size)
     bubbleSnapshot.center = startCenter
-    bubbleSnapshot.transform = .identity
+    bubbleSnapshot.transform = CGAffineTransform(scaleX: 0.965, y: 0.965)
     holdDebugLog(
       "animateIn start frame=\(NSCoder.string(for: originalBubbleFrame)) startCenter=\(NSCoder.string(for: startCenter)) endCenter=\(NSCoder.string(for: endCenter))"
     )

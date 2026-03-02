@@ -272,6 +272,15 @@ private func decryptHybridMessage(
     return "[Decryption Failed - Format]"
   }
 
+  // Check if this is hybrid ciphertext (has iv + c). Group messages are plain JSON
+  // (e.g. {"text":"hello"}) and should be returned as-is without decryption.
+  if let probeData = trimmed.data(using: .utf8),
+    let probeJson = try? JSONSerialization.jsonObject(with: probeData) as? [String: Any],
+    probeJson["iv"] == nil || probeJson["c"] == nil
+  {
+    return trimmed
+  }
+
   do {
     let payloadData = Data(trimmed.utf8)
     let payload = try JSONDecoder().decode(HybridPayload.self, from: payloadData)

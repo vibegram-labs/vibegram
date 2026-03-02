@@ -363,6 +363,366 @@ final class ChatMainProfileMediaCellNode: UIControl {
   }
 }
 
+struct ChatMainProfileMembersItem: Equatable {
+  let userId: String
+  let name: String
+  let roleLabel: String
+  let isAdmin: Bool
+}
+
+final class ChatMainProfileMembersNode: UIView, UITableViewDataSource, UITableViewDelegate {
+  var onBackTap: (() -> Void)?
+
+  private let headerContainer = UIView()
+  private let headerMaskView = UIView()
+  private let headerBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+  private let headerOverlayView = UIView()
+  private let headerMaskGradientLayer = CAGradientLayer()
+  private let headerContentView = UIView()
+  private let backButton = UIButton(type: .system)
+  private let backGlassView = UIVisualEffectView(effect: nil)
+  private let backPressedOverlayView = UIView()
+  private let titleLabel = UILabel()
+  private let subtitleLabel = UILabel()
+
+  private let tableView = UITableView(frame: .zero, style: .insetGrouped)
+  private let emptyLabel = UILabel()
+  private var members: [ChatMainProfileMembersItem] = []
+  private var presented = false
+  private var topInset: CGFloat = 0.0
+  private var bgColor: UIColor = .systemBackground
+  private var textColor: UIColor = .label
+  private var secondaryTextColor: UIColor = .secondaryLabel
+  private var isDarkTheme = false
+  private static let cellId = "profile_member_cell"
+
+  var isPresented: Bool { presented }
+  var memberCount: Int { members.count }
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    setup()
+  }
+
+  required init?(coder: NSCoder) {
+    super.init(coder: coder)
+    setup()
+  }
+
+  private func setup() {
+    isHidden = true
+    alpha = 0.0
+    clipsToBounds = true
+    layer.zPosition = 90
+    isUserInteractionEnabled = false
+
+    headerContainer.clipsToBounds = false
+    headerMaskView.isUserInteractionEnabled = false
+    headerContainer.addSubview(headerMaskView)
+    headerMaskView.addSubview(headerBlurView)
+    headerBlurView.contentView.addSubview(headerOverlayView)
+    headerMaskGradientLayer.colors = [
+      UIColor.black.withAlphaComponent(0.95).cgColor,
+      UIColor.black.withAlphaComponent(0.82).cgColor,
+      UIColor.black.withAlphaComponent(0.36).cgColor,
+      UIColor.clear.cgColor,
+    ]
+    headerMaskGradientLayer.locations = [0.0, 0.54, 0.84, 1.0]
+    headerMaskView.layer.mask = headerMaskGradientLayer
+    headerContainer.addSubview(headerContentView)
+    addSubview(headerContainer)
+
+    let symbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+    backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
+    backButton.setPreferredSymbolConfiguration(symbolConfig, forImageIn: .normal)
+    backButton.backgroundColor = .clear
+    backButton.contentHorizontalAlignment = .center
+    backButton.contentVerticalAlignment = .center
+    backButton.clipsToBounds = true
+    backButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
+    backButton.addTarget(
+      self, action: #selector(handleBackPressDown), for: [.touchDown, .touchDragEnter])
+    backButton.addTarget(
+      self,
+      action: #selector(handleBackPressUp),
+      for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit, .touchDragOutside]
+    )
+    headerContentView.addSubview(backButton)
+
+    backGlassView.isUserInteractionEnabled = false
+    backGlassView.clipsToBounds = true
+    backButton.addSubview(backGlassView)
+    backButton.sendSubviewToBack(backGlassView)
+
+    backPressedOverlayView.isUserInteractionEnabled = false
+    backPressedOverlayView.backgroundColor = UIColor(white: 1.0, alpha: 0.08)
+    backPressedOverlayView.alpha = 0.0
+    backButton.addSubview(backPressedOverlayView)
+
+    titleLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+    titleLabel.textAlignment = .center
+    titleLabel.lineBreakMode = .byTruncatingTail
+    titleLabel.text = "Members"
+    headerContentView.addSubview(titleLabel)
+
+    subtitleLabel.font = UIFont.systemFont(ofSize: 12, weight: .medium)
+    subtitleLabel.textAlignment = .center
+    subtitleLabel.lineBreakMode = .byTruncatingTail
+    headerContentView.addSubview(subtitleLabel)
+
+    tableView.dataSource = self
+    tableView.delegate = self
+    tableView.backgroundColor = .clear
+    tableView.separatorStyle = .none
+    if #available(iOS 11.0, *) {
+      tableView.contentInsetAdjustmentBehavior = .never
+    }
+    if #available(iOS 15.0, *) {
+      tableView.sectionHeaderTopPadding = 0.0
+    }
+    tableView.register(UITableViewCell.self, forCellReuseIdentifier: Self.cellId)
+    addSubview(tableView)
+
+    emptyLabel.textAlignment = .center
+    emptyLabel.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+    emptyLabel.textColor = .secondaryLabel
+    emptyLabel.text = "No members available"
+    addSubview(emptyLabel)
+
+    // Keep header controls above the list so the back button receives touches.
+    bringSubviewToFront(headerContainer)
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+
+    let headerHeight = topInset + 60.0
+    headerContainer.frame = CGRect(x: 0.0, y: 0.0, width: bounds.width, height: headerHeight)
+    headerMaskView.frame = headerContainer.bounds
+    headerBlurView.frame = headerMaskView.bounds
+    headerOverlayView.frame = headerBlurView.bounds
+    headerMaskGradientLayer.frame = headerMaskView.bounds
+    headerContainer.bringSubviewToFront(headerContentView)
+    bringSubviewToFront(headerContainer)
+
+    headerContentView.frame = CGRect(
+      x: 12.0, y: topInset + 8.0, width: max(0.0, bounds.width - 24.0), height: 44.0)
+    backButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
+    backButton.layer.cornerRadius = 22.0
+    backGlassView.frame = backButton.bounds
+    backGlassView.layer.cornerRadius = 22.0
+    backPressedOverlayView.frame = backButton.bounds
+    backPressedOverlayView.layer.cornerRadius = 22.0
+    if let imageView = backButton.imageView {
+      backButton.bringSubviewToFront(imageView)
+    }
+    backButton.bringSubviewToFront(backPressedOverlayView)
+
+    let centerWidth = max(0.0, headerContentView.bounds.width - 88.0)
+    let centerX = (headerContentView.bounds.width - centerWidth) * 0.5
+    titleLabel.frame = CGRect(x: centerX + 12.0, y: 2.0, width: centerWidth - 24.0, height: 22.0)
+    subtitleLabel.frame = CGRect(
+      x: centerX + 12.0, y: titleLabel.frame.maxY - 1.0, width: centerWidth - 24.0, height: 18.0)
+
+    tableView.frame = bounds
+    let topPadding = headerHeight + 12.0
+    if abs(tableView.contentInset.top - topPadding) > 0.5 {
+      tableView.contentInset = UIEdgeInsets(top: topPadding, left: 0.0, bottom: 24.0, right: 0.0)
+      tableView.scrollIndicatorInsets = UIEdgeInsets(top: headerHeight, left: 0.0, bottom: 0.0, right: 0.0)
+    }
+    emptyLabel.frame = CGRect(
+      x: 24.0, y: headerHeight + 56.0, width: max(0.0, bounds.width - 48.0), height: 28.0)
+  }
+
+  func setMembers(_ nextMembers: [ChatMainProfileMembersItem]) {
+    members = nextMembers
+    tableView.reloadData()
+    emptyLabel.isHidden = !members.isEmpty
+    subtitleLabel.text = members.count == 1 ? "1 member" : "\(members.count) members"
+  }
+
+  func setTopInset(_ value: CGFloat) {
+    let next = max(0.0, value)
+    if abs(next - topInset) < 0.5 { return }
+    topInset = next
+    setNeedsLayout()
+  }
+
+  func applyTheme(backgroundColor: UIColor) {
+    bgColor = backgroundColor
+    var white: CGFloat = 0
+    if backgroundColor.getWhite(&white, alpha: nil) {
+      isDarkTheme = white < 0.5
+    } else {
+      isDarkTheme = traitCollection.userInterfaceStyle == .dark
+    }
+    textColor = isDarkTheme ? .white : .black
+    secondaryTextColor = textColor.withAlphaComponent(0.7)
+
+    self.backgroundColor = backgroundColor.withAlphaComponent(0.96)
+    tableView.backgroundColor = .clear
+    titleLabel.textColor = textColor
+    subtitleLabel.textColor = secondaryTextColor
+    backButton.tintColor = textColor
+    headerBlurView.effect =
+      UIBlurEffect(style: isDarkTheme ? .systemThinMaterialDark : .systemThinMaterialLight)
+    headerOverlayView.backgroundColor = backgroundColor.withAlphaComponent(isDarkTheme ? 0.42 : 0.72)
+
+    if #available(iOS 26.0, *) {
+      let effect = UIGlassEffect()
+      effect.isInteractive = true
+      backGlassView.effect = effect
+    } else {
+      backGlassView.effect = UIBlurEffect(style: .systemMaterial)
+    }
+  }
+
+  private func parentShiftX() -> CGFloat {
+    let width = max(1.0, bounds.width)
+    return min(max(52.0, width * 0.24), 120.0)
+  }
+
+  func syncPresentation(hostScrollView: UIScrollView) {
+    let width = max(1.0, bounds.width)
+    let hiddenTransform = CGAffineTransform(translationX: width, y: 0.0)
+    if presented {
+      isHidden = false
+      alpha = 1.0
+      transform = .identity
+      isUserInteractionEnabled = true
+      headerContentView.alpha = 1.0
+      headerContentView.transform = .identity
+      hostScrollView.transform = CGAffineTransform(translationX: -parentShiftX(), y: 0.0)
+      hostScrollView.alpha = 0.72
+    } else {
+      transform = hiddenTransform
+      alpha = 0.0
+      isHidden = true
+      isUserInteractionEnabled = false
+      headerContentView.alpha = 0.0
+      headerContentView.transform = CGAffineTransform(translationX: 18.0, y: 0.0)
+      hostScrollView.transform = .identity
+      hostScrollView.alpha = 1.0
+    }
+  }
+
+  func setPresented(_ nextPresented: Bool, animated: Bool, hostScrollView: UIScrollView) {
+    if presented == nextPresented {
+      syncPresentation(hostScrollView: hostScrollView)
+      return
+    }
+    presented = nextPresented
+
+    let width = max(1.0, bounds.width)
+    let hiddenTransform = CGAffineTransform(translationX: width, y: 0.0)
+    let shift = parentShiftX()
+
+    if nextPresented {
+      isHidden = false
+      alpha = 1.0
+      transform = hiddenTransform
+      isUserInteractionEnabled = true
+      headerContentView.alpha = 0.0
+      headerContentView.transform = CGAffineTransform(translationX: 18.0, y: 0.0)
+    }
+
+    let apply = {
+      hostScrollView.transform =
+        nextPresented ? CGAffineTransform(translationX: -shift, y: 0.0) : .identity
+      hostScrollView.alpha = nextPresented ? 0.72 : 1.0
+      self.transform = nextPresented ? .identity : hiddenTransform
+      self.alpha = nextPresented ? 1.0 : 0.0
+      self.headerContentView.transform =
+        nextPresented ? .identity : CGAffineTransform(translationX: 18.0, y: 0.0)
+      self.headerContentView.alpha = nextPresented ? 1.0 : 0.0
+    }
+
+    let finalize = {
+      if !nextPresented {
+        self.isHidden = true
+        self.isUserInteractionEnabled = false
+      }
+    }
+
+    if animated {
+      UIView.animate(
+        withDuration: 0.28,
+        delay: 0.0,
+        options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
+        animations: apply
+      ) { _ in
+        finalize()
+      }
+    } else {
+      apply()
+      finalize()
+    }
+  }
+
+  func tableView(_ tableView: UITableView, numberOfRowsInSection section: Int) -> Int {
+    members.count
+  }
+
+  func tableView(_ tableView: UITableView, cellForRowAt indexPath: IndexPath) -> UITableViewCell {
+    let cell = tableView.dequeueReusableCell(withIdentifier: Self.cellId, for: indexPath)
+    let item = members[indexPath.row]
+    var content = UIListContentConfiguration.subtitleCell()
+    content.text = item.name
+    content.secondaryText =
+      item.isAdmin ? "\(item.roleLabel) • \(item.userId.prefix(8))" : item.roleLabel
+    content.textProperties.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+    content.secondaryTextProperties.font = UIFont.systemFont(ofSize: 13, weight: .medium)
+    content.secondaryTextProperties.color = .secondaryLabel
+    content.image = UIImage(systemName: item.isAdmin ? "star.circle.fill" : "person.circle")
+    content.imageProperties.tintColor = item.isAdmin ? .systemYellow : .secondaryLabel
+    content.imageToTextPadding = 12
+    cell.contentConfiguration = content
+    cell.backgroundColor = .clear
+    var bg = UIBackgroundConfiguration.listGroupedCell()
+    bg.backgroundColor = UIColor.secondarySystemGroupedBackground.withAlphaComponent(0.55)
+    bg.cornerRadius = 14
+    cell.backgroundConfiguration = bg
+    cell.selectionStyle = .none
+    return cell
+  }
+
+  func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
+    62.0
+  }
+
+  func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
+    tableView.deselectRow(at: indexPath, animated: true)
+  }
+
+  @objc private func handleBackPressed() {
+    onBackTap?()
+  }
+
+  @objc private func handleBackPressDown() {
+    UIView.animate(
+      withDuration: 0.1, delay: 0.0, options: [.curveEaseOut, .allowUserInteraction]
+    ) {
+      self.backButton.imageView?.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+      self.backPressedOverlayView.alpha = 1.0
+      self.backGlassView.alpha = 0.92
+    }
+  }
+
+  @objc private func handleBackPressUp() {
+    UIView.animate(
+      withDuration: 0.22,
+      delay: 0.0,
+      usingSpringWithDamping: 0.72,
+      initialSpringVelocity: 0.25,
+      options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
+    ) {
+      self.backButton.imageView?.transform = .identity
+      self.backPressedOverlayView.alpha = 0.0
+      self.backGlassView.alpha = 1.0
+    }
+  }
+}
+
 // MARK: - Agent Prompt Control Node
 
 protocol ChatMainProfileAgentPromptNodeDelegate: AnyObject {

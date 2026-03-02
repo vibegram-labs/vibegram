@@ -13,7 +13,6 @@ import android.graphics.Paint
 import android.graphics.Path
 import android.graphics.PorterDuff
 import android.graphics.PorterDuffXfermode
-import android.graphics.Rect
 import android.graphics.RectF
 import android.graphics.Shader
 import android.graphics.drawable.ColorDrawable
@@ -22,10 +21,8 @@ import android.graphics.Typeface
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
-import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
-import android.view.WindowManager
 import android.view.animation.PathInterpolator
 import android.animation.Animator
 import android.animation.AnimatorListenerAdapter
@@ -43,7 +40,6 @@ import android.widget.FrameLayout
 import android.widget.EditText
 import android.widget.ImageView
 import android.widget.LinearLayout
-import android.widget.PopupWindow
 import android.widget.TextView
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
@@ -156,14 +152,20 @@ private class BubbleTailView(context: Context) : View(context) {
     path.moveTo(0f, 0f)
     path.quadTo(-5f, 22f, 14f, 25f)
     path.quadTo(10.5f, 29f, 0f, 29f)
+    // Extend geometry deep "into" the bubble body before closing.
+    // Since the tail is now drawn behind the bubble, this perfectly cleanly
+    // hides the geometric rotation seam of the rotated tail's left boundary line.
+    path.lineTo(-20f, 29f)
+    path.lineTo(-20f, 0f)
     path.close()
 
     canvas.save()
     val sx = width / 29f
     val sy = height / 29f
     canvas.scale(sx, sy)
-    // Match iOS tail mask clipping to avoid the tiny top closing-path seam line.
-    canvas.clipRect(-5f, 29f * 0.4f, 34f, 34f)
+    // Widen clip to accommodate the extended baseline hide-geometry,
+    // retaining the top seam clip (0.4f) to hide the bezier intersection.
+    canvas.clipRect(-25f, 29f * 0.4f, 34f, 34f)
     canvas.drawPath(path, paint)
     canvas.restore()
   }
@@ -192,11 +194,18 @@ private class BubbleStatusIndicatorView(context: Context) : View(context) {
     if (status == normalized && baseColor == color) return
     status = normalized
     baseColor = color
+    requestLayout()
     invalidate()
   }
 
   override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-    val w = resolveSize(dp(16), widthMeasureSpec)
+    val s = status
+    val baseWidthDp = when (s) {
+      "sent" -> 16
+      "delivered", "read" -> 22
+      else -> 16
+    }
+    val w = resolveSize(dp(baseWidthDp), widthMeasureSpec)
     val h = resolveSize(dp(14), heightMeasureSpec)
     setMeasuredDimension(w, h)
   }
@@ -228,9 +237,22 @@ private class BubbleStatusIndicatorView(context: Context) : View(context) {
 
   private fun drawChecks(canvas: Canvas, w: Float, h: Float, doubleCheck: Boolean, color: Int) {
     strokePaint.color = color
-    val sx = w / 24f
-    val sy = h / 24f
-    fun p(x: Float, y: Float): Pair<Float, Float> = Pair(x * sx, y * sy)
+    // Determine a base scale from the height to keep aspect ratio consistent
+    val s = h / 24f
+    
+    // For single check, we center it. For double check, we right-align the entire glyph set.
+    // Native double check typically has bounding box ~22x14, single check ~16x14.
+    // The design paths here are from a 24x24 unit grid.
+    
+    // Calculate right bound of the path (the double check's right-most point is ~20 on the 24 grid)
+    // If not double check, the right-most point is ~15 on the 24 grid.
+    val pathWidthUnits = if (doubleCheck) 20f else 15f
+    val pathWidth = pathWidthUnits * s
+    
+    // Offset x to right-align the icon block, preserving exactly 1x scale logic
+    val offsetX = max(0f, (w - pathWidth) - (2f * s)) // small constant padding
+    
+    fun p(x: Float, y: Float): Pair<Float, Float> = Pair(offsetX + x * s, y * s)
 
     tmpPath.reset()
     p(4f, 12.9f).let { (x, y) -> tmpPath.moveTo(x, y) }
@@ -451,7 +473,6 @@ private const val VIEW_TYPE_TYPING = 1
 
 private class NativeRowsAdapter(
   private val context: Context,
-  private val appContext: AppContext? = null,
   private val emitNativeEvent: (Map<String, Any>) -> Unit,
 ) : RecyclerView.Adapter<RecyclerView.ViewHolder>() {
   private val rows = mutableListOf<NativeRowItem>()
@@ -463,14 +484,7 @@ private class NativeRowsAdapter(
   private var externalVoiceMessageId: String? = null
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress = 0f
-  private data class ActiveContextMenuOverlay(
-    val popup: PopupWindow,
-    val backdropView: View,
-    val sheetWrap: View,
-    var closing: Boolean = false,
-  )
-
-  private var activeContextMenu: ActiveContextMenuOverlay? = null
+  private val contextMenuOverlay = ChatContextMenuOverlay(context)
 
   init {
     setHasStableIds(true)
@@ -889,7 +903,7 @@ private class NativeRowsAdapter(
       isFocusable = true
     }
     val inlineAttachmentIcon = TextView(context).apply {
-      text = "\uD83D\uDCC4"
+      setText("\uD83D\uDCC4")
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
       includeFontPadding = false
     }
@@ -902,7 +916,7 @@ private class NativeRowsAdapter(
     val inlineAttachmentSubtitle = TextView(context).apply {
       setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
       includeFontPadding = false
-      text = "Tap to open"
+      setText("Tap to open")
       maxLines = 1
     }
     inlineAttachment.addView(
@@ -1045,11 +1059,11 @@ private class NativeRowsAdapter(
         bottomMargin = 0
       },
     )
-    root.addView(bubble)
     root.addView(
       tail,
       FrameLayout.LayoutParams(dp(29), dp(29)),
     )
+    root.addView(bubble)
     root.addView(
       day,
       FrameLayout.LayoutParams(
@@ -1266,9 +1280,15 @@ private class NativeRowsAdapter(
     statusLp.bottomMargin = 0
     statusView.layoutParams = statusLp
 
+    val baseStatusWidth = when(displayStatus?.lowercase()) {
+      "sent" -> 16
+      "delivered", "read" -> 22
+      else -> 16
+    }
+    
     val timeLp = timeView.layoutParams as FrameLayout.LayoutParams
     timeLp.gravity = Gravity.END or Gravity.BOTTOM
-    timeLp.rightMargin = if (showStatus) dp(16 + 3) else 0
+    timeLp.rightMargin = if (showStatus) dp(baseStatusWidth + 3) else 0
     timeLp.bottomMargin = 0
     timeView.layoutParams = timeLp
 
@@ -1381,7 +1401,13 @@ private class NativeRowsAdapter(
       if (hidden) return@setOnLongClickListener false
       val messageId = item.messageId?.takeIf { it.isNotBlank() } ?: return@setOnLongClickListener false
       container.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-      showContextMenu(anchor = bubbleContainer, item = item, messageId = messageId)
+      animateHoldAndOpenContextMenu(
+        anchor = bubbleContainer,
+        holdView = container,
+        tailView = if (tailView.visibility == View.VISIBLE && tailView.width > 0 && tailView.height > 0) tailView else null,
+        item = item,
+        messageId = messageId,
+      )
       true
     }
 
@@ -1404,32 +1430,41 @@ private class NativeRowsAdapter(
   }
 
   private fun dismissContextMenu(animated: Boolean = true) {
-    val active = activeContextMenu ?: return
-    if (active.closing) return
-    if (!animated) {
-      active.popup.dismiss()
-      return
-    }
-    active.closing = true
-    active.backdropView.animate()
-      .alpha(0f)
-      .setDuration(170L)
-      .start()
-    active.sheetWrap.animate()
-      .alpha(0f)
-      .translationY(dpF(36f))
-      .setDuration(220L)
-      .setInterpolator(PathInterpolator(0.2f, 0f, 0f, 1f))
-      .setListener(object : AnimatorListenerAdapter() {
-        override fun onAnimationEnd(animation: Animator) {
-          active.popup.dismiss()
-        }
-      })
-      .start()
+    contextMenuOverlay.dismiss(animated = animated)
   }
 
-  private fun showContextMenu(anchor: View, item: NativeRowItem, messageId: String) {
-    dismissContextMenu(animated = false)
+  private fun animateHoldAndOpenContextMenu(
+    anchor: View,
+    holdView: View,
+    tailView: View?,
+    item: NativeRowItem,
+    messageId: String,
+  ) {
+    showContextMenu(
+      anchor = anchor,
+      holdView = holdView,
+      tailView = tailView,
+      item = item,
+      messageId = messageId,
+      animateHold = true,
+    )
+  }
+
+  private fun showContextMenu(
+    anchor: View,
+    holdView: View = anchor,
+    tailView: View? = null,
+    item: NativeRowItem,
+    messageId: String,
+    animateHold: Boolean = false,
+  ) {
+    val actions = ArrayList<Pair<String, String>>()
+    actions.add("reply" to "Reply")
+    if (item.text.isNotBlank()) actions.add("copy" to "Copy")
+    if (item.isMe && item.text.isNotBlank()) actions.add("edit" to "Edit")
+    actions.add("pin" to "Pin")
+    if (item.isMe && item.status?.lowercase() == "error") actions.add("resend" to "Resend")
+    actions.add("delete" to "Delete")
 
     emitNativeEvent(
       mapOf(
@@ -1438,380 +1473,37 @@ private class NativeRowsAdapter(
       ),
     )
 
-    val reactionSource = IntArray(2).also { anchor.getLocationInWindow(it) }
-    val reactionSourceX = reactionSource[0] + (anchor.width / 2f)
-    val reactionSourceY = reactionSource[1] + (anchor.height * 0.20f)
-
-    val actions = ArrayList<Pair<String, String>>()
-    actions.add("reply" to "Reply")
-    if (item.text.isNotBlank()) {
-      actions.add("copy" to "Copy")
-    }
-    if (item.isMe && item.text.isNotBlank()) {
-      actions.add("edit" to "Edit")
-    }
-    actions.add("pin" to "Pin")
-    if (item.isMe && item.status?.lowercase() == "error") {
-      actions.add("resend" to "Resend")
-    }
-    actions.add("delete" to "Delete")
-
-    fun luminance(color: Int): Float {
-      fun channel(v: Int): Float {
-        val s = (v / 255f)
-        return if (s <= 0.03928f) s / 12.92f else ((s + 0.055f) / 1.055f).pow(2.4f)
-      }
-      return 0.2126f * channel(Color.red(color)) + 0.7152f * channel(Color.green(color)) + 0.0722f * channel(Color.blue(color))
-    }
-
-    val isLightTheme = luminance(appearance.bubbleThemColor) > 0.45f
-    val cardFill = if (isLightTheme) Color.argb(236, 248, 251, 255) else Color.argb(236, 18, 22, 29)
-    val cardStroke = if (isLightTheme) Color.argb(64, 255, 255, 255) else Color.argb(30, 255, 255, 255)
-    val textColor = if (isLightTheme) Color.argb(240, 20, 24, 32) else Color.argb(236, 255, 255, 255)
-    val secondaryText = if (isLightTheme) Color.argb(190, 36, 42, 52) else Color.argb(190, 245, 247, 255)
-    val dividerColor = if (isLightTheme) Color.argb(24, 16, 24, 32) else Color.argb(26, 255, 255, 255)
-    val chipFill = if (isLightTheme) Color.argb(34, 18, 26, 38) else Color.argb(22, 255, 255, 255)
-    val rowFill = if (isLightTheme) Color.argb(18, 16, 24, 32) else Color.argb(10, 255, 255, 255)
-    val scrimColor = if (isLightTheme) Color.argb(64, 8, 12, 20) else Color.argb(92, 0, 0, 0)
-
-    fun makeCardContainer(cornerDp: Float): FrameLayout {
-      val card = FrameLayout(context).apply {
-        clipChildren = true
-        clipToPadding = true
-        background = GradientDrawable().apply {
-          shape = GradientDrawable.RECTANGLE
-          cornerRadius = dpF(cornerDp)
-          setColor(cardFill)
-          setStroke(max(1, dp(1)), cardStroke)
-        }
-        elevation = dpF(12f)
-      }
-      if (appContext != null) {
-        val glass = LiquidGlassView(context, appContext).apply {
-          layoutParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-          )
-          setCornerRadius(cornerDp.toDouble())
-          setBlurIntensity(18.0)
-          setBlurReductionFactor(4.0)
-          setInteractive(false)
-          setPressFeedbackEnabled(false)
-          setTint(if (isLightTheme) "light" else "dark")
-          alpha = 0.92f
-        }
-        card.addView(glass)
-      }
-      return card
-    }
-
-    val overlayRoot = FrameLayout(context).apply {
-      layoutParams = ViewGroup.LayoutParams(
-        ViewGroup.LayoutParams.MATCH_PARENT,
-        ViewGroup.LayoutParams.MATCH_PARENT,
-      )
-      isClickable = true
-      isFocusable = true
-      isFocusableInTouchMode = true
-      setBackgroundColor(Color.TRANSPARENT)
-    }
-
-    val backdropWrap = FrameLayout(context).apply {
-      layoutParams = FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.MATCH_PARENT,
-      )
-      alpha = 0f
-    }
-    if (appContext != null) {
-      backdropWrap.addView(
-        LiquidGlassView(context, appContext).apply {
-          layoutParams = FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT,
-          )
-          setCornerRadius(0.0)
-          setBlurIntensity(22.0)
-          setBlurReductionFactor(4.0)
-          setInteractive(false)
-          setPressFeedbackEnabled(false)
-          setEffect("clear")
-          setTint(if (isLightTheme) "light" else "dark")
-          alpha = 0.36f
-        },
-      )
-    }
-    val scrimView = View(context).apply {
-      layoutParams = FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.MATCH_PARENT,
-      )
-      background = ColorDrawable(scrimColor)
-    }
-    backdropWrap.addView(scrimView)
-    overlayRoot.addView(backdropWrap)
-
-    val sheetWrap = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      alpha = 0f
-      translationY = dpF(40f)
-      setPadding(dp(14), dp(14), dp(14), dp(14))
-      layoutParams = FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.BOTTOM,
-      )
-      setOnClickListener { }
-      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-        isForceDarkAllowed = false
-      }
-    }
-    overlayRoot.addView(sheetWrap)
-
-    val reactionCard = makeCardContainer(20f)
-    val reactionContent = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      setPadding(dp(10), dp(8), dp(10), dp(10))
-    }
-    reactionContent.addView(
-      TextView(context).apply {
-        text = "React"
-        setTextColor(secondaryText)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setPadding(dp(4), dp(2), dp(4), dp(6))
-      },
-      LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
+    contextMenuOverlay.show(
+      anchor = anchor,
+      config = ChatContextMenuOverlay.Config(
+        appearance = appearance,
+        isMe = item.isMe,
+        actions = actions,
       ),
-    )
-    val reactionRow = LinearLayout(context).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.CENTER
-    }
-    reactionContent.addView(
-      reactionRow,
-      LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-      ),
-    )
-    reactionCard.addView(
-      reactionContent,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-      ),
-    )
-    sheetWrap.addView(
-      reactionCard,
-      LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-      ).apply {
-        gravity = Gravity.CENTER_HORIZONTAL
-      },
-    )
-
-    val reactions = listOf("👍", "👎", "❤️", "🔥", "🎉", "💩")
-    for ((index, emoji) in reactions.withIndex()) {
-      val chip = TextView(context).apply {
-        text = emoji
-        gravity = Gravity.CENTER
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 20f)
-        setPadding(dp(9), dp(7), dp(9), dp(7))
-        background = GradientDrawable().apply {
-          shape = GradientDrawable.RECTANGLE
-          cornerRadius = dpF(14f)
-          setColor(chipFill)
-        }
-        setOnClickListener {
-          emitNativeEvent(
-            mapOf(
-              "type" to "contextMenuReaction",
-              "emoji" to emoji,
-              "messageId" to messageId,
-              "sourceX" to reactionSourceX.toDouble(),
-              "sourceY" to reactionSourceY.toDouble(),
-            ),
-          )
-          dismissContextMenu()
-        }
-      }
-      reactionRow.addView(
-        chip,
-        LinearLayout.LayoutParams(
-          LinearLayout.LayoutParams.WRAP_CONTENT,
-          LinearLayout.LayoutParams.WRAP_CONTENT,
-        ).apply {
-          if (index > 0) marginStart = dp(6)
-        },
-      )
-    }
-
-    val actionsCard = makeCardContainer(20f)
-    val actionsContent = LinearLayout(context).apply {
-      orientation = LinearLayout.VERTICAL
-      setPadding(dp(8), dp(8), dp(8), dp(8))
-    }
-    actionsContent.addView(
-      TextView(context).apply {
-        text = "Message"
-        setTextColor(secondaryText)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        setPadding(dp(8), dp(4), dp(8), dp(8))
-      },
-      LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-      ),
-    )
-
-    for ((i, action) in actions.withIndex()) {
-      val (actionId, label) = action
-      if (i > 0) {
-        actionsContent.addView(
-          View(context).apply { background = ColorDrawable(dividerColor) },
-          LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            max(1, dp(1)),
-          ).apply {
-            marginStart = dp(8)
-            marginEnd = dp(8)
-          },
+      animateHold = animateHold,
+      holdView = holdView,
+      tailView = tailView,
+      onReaction = { emoji, sourceX, sourceY ->
+        emitNativeEvent(
+          mapOf(
+            "type" to "contextMenuReaction",
+            "emoji" to emoji,
+            "messageId" to messageId,
+            "sourceX" to sourceX,
+            "sourceY" to sourceY,
+          ),
         )
-      }
-      val rowButton = TextView(context).apply {
-        text = label
-        gravity = Gravity.CENTER_VERTICAL
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-        setTextColor(
-          if (actionId == "delete") {
-            if (isLightTheme) Color.argb(255, 217, 59, 59) else Color.argb(255, 255, 123, 123)
-          } else textColor
+      },
+      onAction = { actionId ->
+        emitNativeEvent(
+          mapOf(
+            "type" to "contextMenuAction",
+            "action" to actionId,
+            "messageId" to messageId,
+          ),
         )
-        setPadding(dp(12), dp(12), dp(12), dp(12))
-        background = GradientDrawable().apply {
-          shape = GradientDrawable.RECTANGLE
-          cornerRadius = dpF(14f)
-          setColor(Color.TRANSPARENT)
-        }
-        setOnClickListener {
-          emitNativeEvent(
-            mapOf(
-              "type" to "contextMenuAction",
-              "action" to actionId,
-              "messageId" to messageId,
-            ),
-          )
-          dismissContextMenu()
-        }
-        setOnTouchListener { v, event ->
-          when (event.actionMasked) {
-            MotionEvent.ACTION_DOWN -> v.background = GradientDrawable().apply {
-              shape = GradientDrawable.RECTANGLE
-              cornerRadius = dpF(14f)
-              setColor(rowFill)
-            }
-            MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> v.background = GradientDrawable().apply {
-              shape = GradientDrawable.RECTANGLE
-              cornerRadius = dpF(14f)
-              setColor(Color.TRANSPARENT)
-            }
-          }
-          false
-        }
-      }
-      actionsContent.addView(
-        rowButton,
-        LinearLayout.LayoutParams(
-          LinearLayout.LayoutParams.MATCH_PARENT,
-          LinearLayout.LayoutParams.WRAP_CONTENT,
-        ),
-      )
-    }
-    actionsCard.addView(
-      actionsContent,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-      ),
-    )
-    sheetWrap.addView(
-      actionsCard,
-      LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LinearLayout.LayoutParams.WRAP_CONTENT,
-      ).apply {
-        topMargin = dp(10)
       },
     )
-
-    val popup = PopupWindow(
-      overlayRoot,
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      ViewGroup.LayoutParams.MATCH_PARENT,
-      true,
-    ).apply {
-      isOutsideTouchable = false
-      isClippingEnabled = true
-      setBackgroundDrawable(ColorDrawable(Color.TRANSPARENT))
-      elevation = dpF(20f)
-      setOnDismissListener {
-        if (activeContextMenu?.popup === this) {
-          activeContextMenu = null
-        }
-      }
-    }
-    val activeOverlay = ActiveContextMenuOverlay(
-      popup = popup,
-      backdropView = backdropWrap,
-      sheetWrap = sheetWrap,
-    )
-    activeContextMenu = activeOverlay
-
-    overlayRoot.setOnClickListener { dismissContextMenu() }
-    overlayRoot.setOnKeyListener { _, keyCode, event ->
-      if (keyCode == KeyEvent.KEYCODE_BACK && event.action == KeyEvent.ACTION_UP) {
-        dismissContextMenu()
-        true
-      } else {
-        false
-      }
-    }
-
-    popup.showAtLocation(anchor.rootView, Gravity.NO_GRAVITY, 0, 0)
-    overlayRoot.post {
-      overlayRoot.requestFocus()
-      backdropWrap.animate()
-        .alpha(1f)
-        .setDuration(220L)
-        .setInterpolator(PathInterpolator(0.22f, 0f, 0f, 1f))
-        .start()
-      sheetWrap.animate()
-        .alpha(1f)
-        .translationY(0f)
-        .setDuration(280L)
-        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
-        .start()
-      reactionCard.scaleX = 0.985f
-      reactionCard.scaleY = 0.985f
-      reactionCard.animate()
-        .scaleX(1f)
-        .scaleY(1f)
-        .setDuration(250L)
-        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
-        .start()
-      actionsCard.scaleX = 0.985f
-      actionsCard.scaleY = 0.985f
-      actionsCard.animate()
-        .scaleX(1f)
-        .scaleY(1f)
-        .setStartDelay(20L)
-        .setDuration(260L)
-        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
-        .start()
-    }
   }
 
   fun bubbleRectInParent(position: Int, parent: View): RectF? {
@@ -2166,7 +1858,7 @@ private class NativeChatInputBar(
   private fun sendCurrentText() {
     val text = input.text?.toString()?.trim().orEmpty()
     if (text.isEmpty()) return
-    val messageId = "android-native-${UUID.randomUUID()}"
+    val messageId = UUID.randomUUID().toString().lowercase()
     listener?.onSendText(text, messageId)
     input.setText("")
   }
@@ -2509,6 +2201,10 @@ class ChatListView(
   context: Context,
   appContext: AppContext,
 ) : ExpoView(context, appContext) {
+  // Enable Android's native layout system so RecyclerView children are measured/laid out
+  // even when React Native Fabric suppresses the standard requestLayout() traversal.
+  override val shouldUseAndroidLayout: Boolean = true
+
   private val onViewportChanged by EventDispatcher<Map<String, Any>>()
   private val onNativeEvent by EventDispatcher<Map<String, Any>>()
   internal var nativeEventListener: ((Map<String, Any>) -> Unit)? = null
@@ -2522,7 +2218,7 @@ class ChatListView(
   private val overlayHost = FrameLayout(context)
   private val inputBar = ChatNativeInputBar(context, appContext)
   private val layoutManager = LinearLayoutManager(context)
-  private val adapter = NativeRowsAdapter(context, appContext) { payload -> emitNativeEvent(payload) }
+  private val adapter = NativeRowsAdapter(context) { payload -> emitNativeEvent(payload) }
   private var appearance = ChatListAppearance()
   private var queuedAppearanceAfterSendTransition: ChatListAppearance? = null
   private val baseHorizontalPadding = dp(16)
@@ -2550,6 +2246,7 @@ class ChatListView(
   private var engineChatId: String = ""
   private var engineMyUserId: String = ""
   private var enginePeerUserId: String = ""
+  private var engineIsGroupOrChannel: Boolean = false
   private var engineOpenedChatId: String = ""
   private var statusAuthorityEnabled: Boolean = false
   private val engineListenerId = "chat-list-view-${System.identityHashCode(this)}"
@@ -2557,6 +2254,8 @@ class ChatListView(
   private val nativeEngineRowsById = linkedMapOf<String, Map<String, Any?>>()
   private val nativeEngineOrder = mutableListOf<String>()
   private val nativeDeletedMessageIds = linkedSetOf<String>()
+  private var mergedRowsLogCount = 0
+  private var lastMergedRowsUseNative: Boolean? = null
 
   companion object {
     private const val PREFS_NAME = "vibe_chat_native"
@@ -2657,7 +2356,11 @@ class ChatListView(
 
 
 
-    inputBar.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
+    inputBar.layoutParams = FrameLayout.LayoutParams(
+      LayoutParams.MATCH_PARENT,
+      LayoutParams.WRAP_CONTENT,
+      Gravity.BOTTOM,
+    )
     inputBar.visibility = View.GONE
     inputBar.setPlaceholder(inputPlaceholder)
     val initBg = appearance.wallpaperGradient.firstOrNull() ?: appearance.bubbleThemColor
@@ -2685,6 +2388,59 @@ class ChatListView(
         emitNativeEvent(mapOf("type" to "attachmentPressed"))
       }
 
+      override fun onAttachmentImage(uri: String, caption: String?) {
+        val normalized = uri.trim()
+        if (normalized.isEmpty()) return
+        val payload = mutableMapOf<String, Any>(
+          "type" to "attachmentImage",
+          "uri" to normalized,
+        )
+        val captionText = caption?.trim().orEmpty()
+        if (captionText.isNotEmpty()) {
+          payload["caption"] = captionText
+        }
+        Log.i("ChatListView", "onAttachmentImage uri=$normalized captionLen=${captionText.length}")
+        emitNativeEvent(payload)
+      }
+
+      override fun onAttachmentFile(uri: String, name: String, size: Long?, mimeType: String?, caption: String?) {
+        val normalized = uri.trim()
+        if (normalized.isEmpty()) return
+        val resolvedName = name.trim().ifBlank { "File" }
+        val captionText = caption?.trim().orEmpty()
+        Log.i(
+          "ChatListView",
+          "onAttachmentFile uri=$normalized name=$resolvedName size=${size ?: -1L} mimeType=${mimeType.orEmpty()} captionLen=${captionText.length}",
+        )
+        val payload = mutableMapOf<String, Any>(
+          "type" to "attachmentFile",
+          "uri" to normalized,
+          "name" to resolvedName,
+        )
+        size?.let { payload["size"] = it.toDouble() }
+        if (!mimeType.isNullOrBlank()) {
+          payload["mimeType"] = mimeType
+        }
+        if (captionText.isNotEmpty()) {
+          payload["caption"] = captionText
+        }
+        emitNativeEvent(payload)
+      }
+
+      override fun onAttachmentLocation(latitude: Double, longitude: Double, caption: String?) {
+        val payload = mutableMapOf<String, Any>(
+          "type" to "attachmentLocation",
+          "latitude" to latitude,
+          "longitude" to longitude,
+        )
+        val captionText = caption?.trim().orEmpty()
+        if (captionText.isNotEmpty()) {
+          payload["caption"] = captionText
+        }
+        Log.i("ChatListView", "onAttachmentLocation latitude=$latitude longitude=$longitude captionLen=${captionText.length}")
+        emitNativeEvent(payload)
+      }
+
       override fun onSendText(text: String, messageId: String) {
         val trimmed = text.trim()
         if (trimmed.isEmpty()) return
@@ -2697,9 +2453,10 @@ class ChatListView(
           val myUserId = engineMyUserId.trim()
           val peerUserId = enginePeerUserId.trim()
           if (chatId.isEmpty()) {
+            val statusSnapshot = ChatEngine.getStatus()
             Log.w(
               "ChatListView",
-              "native ChatEngine send blocked: empty chatId messageId=$messageId myUserId=$myUserId peerUserId=$peerUserId",
+              "native ChatEngine send blocked: empty chatId messageId=$messageId myUserId=$myUserId peerUserId=$peerUserId surfaceId=$engineSurfaceId status=$statusSnapshot",
             )
             return
           }
@@ -2712,7 +2469,7 @@ class ChatListView(
                 "text" to trimmed,
                 "myUserId" to myUserId,
                 "peerUserId" to peerUserId,
-                "isGroup" to isGroupOrChannel,
+                "isGroup" to engineIsGroupOrChannel,
               ),
             )
             val accepted = (result["accepted"] as? Boolean) == true
@@ -2728,7 +2485,7 @@ class ChatListView(
               val journalTail = ChatEngine.getJournal().takeLast(6)
               Log.w(
                 "ChatListView",
-                "native ChatEngine sendMessage rejected: result=$result status=$statusSnapshot journalTail=$journalTail",
+                "native ChatEngine sendMessage rejected: result=$result chatId=$chatId messageId=$messageId myUserId=$myUserId peerUserId=$peerUserId isGroup=$engineIsGroupOrChannel status=$statusSnapshot journalTail=$journalTail",
               )
               return@execute
             }
@@ -2774,7 +2531,7 @@ class ChatListView(
                 "text" to trimmed,
                 "myUserId" to myUserId,
                 "peerUserId" to peerUserId,
-                "isGroup" to isGroupOrChannel,
+                "isGroup" to engineIsGroupOrChannel,
                 "agentMention" to true,
                 "agentText" to agentText,
               ),
@@ -2898,7 +2655,20 @@ class ChatListView(
       }
 
     }
-    addView(inputBar)
+    contentFrame.addView(inputBar)
+
+    inputBar.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+      if (!inputBarEnabled) return@addOnLayoutChangeListener
+      val oldHeight = oldBottom - oldTop
+      val newHeight = bottom - top
+      if (oldHeight == newHeight) return@addOnLayoutChangeListener
+      applyBottomAnchorPadding()
+      if (shouldAutoScroll) {
+        scrollToBottom(false)
+      } else {
+        emitViewport()
+      }
+    }
 
     addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
       val oldHeight = oldBottom - oldTop
@@ -3021,6 +2791,10 @@ class ChatListView(
     nativeDeletedMessageIds.clear()
     updateChatEngineBinding()
     updateChatEngineChannelBinding()
+    if (statusAuthorityEnabled) {
+      registerChatEngineListener()
+      hydrateRowsFromNativeHistoryIfReady("chatId")
+    }
     refreshStatusDecorations("chatId")
   }
 
@@ -3039,6 +2813,12 @@ class ChatListView(
     Log.i("ChatListView", "setEnginePeerUserId peerUserId=$enginePeerUserId")
     updateChatEngineBinding()
     refreshStatusDecorations("peerUserId")
+  }
+
+  fun setEngineIsGroupOrChannel(value: Boolean) {
+    if (engineIsGroupOrChannel == value) return
+    engineIsGroupOrChannel = value
+    Log.i("ChatListView", "setEngineIsGroupOrChannel isGroupOrChannel=$engineIsGroupOrChannel")
   }
 
   fun setStatusAuthorityEnabled(enabled: Boolean) {
@@ -3061,12 +2841,38 @@ class ChatListView(
     // Parse rows on background thread to avoid blocking the UI during navigation
     val generation = ++parseGeneration
     diffExecutor.execute {
-      val next = parseRows(mergedRowsPayload(input))
+      val mergedPayload = mergedRowsPayload(input)
+      val next = parseRows(mergedPayload)
+      if (next.isEmpty() && input.isNotEmpty()) {
+        val firstInputKind = (input.firstOrNull()?.get("kind") as? String) ?: "-"
+        val firstMergedKind = (mergedPayload.firstOrNull()?.get("kind") as? String) ?: "-"
+        Log.w(
+          "ChatListView",
+          "setRows parsed-empty input=${input.size} merged=${mergedPayload.size} firstInputKind=$firstInputKind firstMergedKind=$firstMergedKind chatId=$engineChatId surfaceId=$engineSurfaceId",
+        )
+      }
       mainHandler.post {
         if (generation != parseGeneration) return@post // stale, skip
         rows.clear()
         rows.addAll(next)
         adapter.setRows(next)
+        val shouldLog =
+          input.isEmpty() ||
+            next.isEmpty() ||
+            generation <= 6 ||
+            generation % 20 == 0
+        if (shouldLog) {
+          Log.i(
+            "ChatListView",
+            "setRows applied generation=$generation input=${input.size} merged=${mergedPayload.size} parsed=${next.size} attached=$isAttachedToWindow recycler=${recyclerView.width}x${recyclerView.height}",
+          )
+          logRowDiagnostics(
+            generation = generation,
+            input = input,
+            mergedPayload = mergedPayload,
+            parsedRows = next,
+          )
+        }
         recyclerView.post {
           applyBottomAnchorPadding()
           if (wasNearBottom) {
@@ -3077,9 +2883,68 @@ class ChatListView(
           prevScrollOffset = recyclerView.computeVerticalScrollOffset()
           emitViewport()
           maybeStartPendingTransition()
+          if (shouldLog) {
+            val firstVisible = layoutManager.findFirstVisibleItemPosition()
+            val lastVisible = layoutManager.findLastVisibleItemPosition()
+            Log.d(
+              "ChatListView",
+              "setRows viewport generation=$generation itemCount=${adapter.itemCount} childCount=${recyclerView.childCount} firstVisible=$firstVisible lastVisible=$lastVisible offset=${recyclerView.computeVerticalScrollOffset()} extent=${recyclerView.computeVerticalScrollExtent()} range=${recyclerView.computeVerticalScrollRange()}",
+            )
+          }
         }
       }
     }
+  }
+
+  private fun logRowDiagnostics(
+    generation: Int,
+    input: List<Map<String, Any?>>,
+    mergedPayload: List<Map<String, Any?>>,
+    parsedRows: List<NativeRowItem>,
+  ) {
+    if (parsedRows.isEmpty()) {
+      val inputKinds = input.take(4).joinToString(",") { ((it["kind"] as? String) ?: "-") }
+      val mergedKinds = mergedPayload.take(4).joinToString(",") { ((it["kind"] as? String) ?: "-") }
+      Log.w(
+        "ChatListView",
+        "setRows diagnostics generation=$generation parsed=0 inputKinds=[$inputKinds] mergedKinds=[$mergedKinds]",
+      )
+      return
+    }
+
+    var dayCount = 0
+    var messageCount = 0
+    var typingCount = 0
+    var nonEmptyTextCount = 0
+    var mediaCount = 0
+    var fileCount = 0
+    var voiceCount = 0
+    val typeCounts = linkedMapOf<String, Int>()
+
+    for (row in parsedRows) {
+      when (row.kind) {
+        "day" -> dayCount += 1
+        "message" -> messageCount += 1
+      }
+      if (row.messageType == "typing") typingCount += 1
+      if (row.text.trim().isNotEmpty()) nonEmptyTextCount += 1
+      if (!row.mediaUrl.isNullOrBlank()) mediaCount += 1
+      if (!row.fileName.isNullOrBlank()) fileCount += 1
+      if (row.messageType == "voice" || row.messageType == "music") voiceCount += 1
+      val nextCount = (typeCounts[row.messageType] ?: 0) + 1
+      typeCounts[row.messageType] = nextCount
+    }
+
+    val typeSummary = typeCounts.entries.joinToString(",") { (type, count) -> "$type=$count" }
+    val preview = parsedRows.take(4).joinToString(" | ") { row ->
+      val previewText = row.text.replace("\n", " ").take(32)
+      val mediaTail = row.mediaUrl?.takeLast(28) ?: "-"
+      "${row.kind}/${row.messageType} id=${row.messageId ?: "-"} textLen=${row.text.length} text='$previewText' media='$mediaTail'"
+    }
+    Log.d(
+      "ChatListView",
+      "setRows diagnostics generation=$generation rows=${parsedRows.size} day=$dayCount message=$messageCount typing=$typingCount nonEmptyText=$nonEmptyTextCount media=$mediaCount file=$fileCount voice=$voiceCount types=[$typeSummary] preview=$preview",
+    )
   }
 
   private fun updateChatEngineBinding() {
@@ -3145,11 +3010,31 @@ class ChatListView(
     if (!statusAuthorityEnabled) return
     val resolvedChatId = engineChatId.trim()
     if (resolvedChatId.isEmpty()) return
+
+    // Restore the native overlay from ChatEngine's live message index so that
+    // messages sent/received while the view was detached appear immediately
+    // without waiting for the JS store to push updated rows.
+    if (nativeEngineRowsById.isEmpty()) {
+      val liveRows = ChatEngine.getLiveMessageRows(mapOf("chatId" to resolvedChatId))
+      if (liveRows.isNotEmpty()) {
+        for ((messageId, row) in liveRows) {
+          nativeEngineRowsById[messageId] = row
+          if (!nativeEngineOrder.contains(messageId)) {
+            nativeEngineOrder.add(messageId)
+          }
+        }
+        Log.i(
+          "ChatListView",
+          "hydrateRowsFromNativeHistoryIfReady restored overlay from live rows trigger=$trigger chatId=$resolvedChatId count=${liveRows.size}",
+        )
+      }
+    }
+
     val historyLoaded = ChatEngine.isChatHistoryLoaded(mapOf("chatId" to resolvedChatId))
-    if (!historyLoaded) return
+    if (!historyLoaded && nativeEngineRowsById.isEmpty()) return
     Log.i(
       "ChatListView",
-      "hydrateRowsFromNativeHistoryIfReady trigger=$trigger chatId=$resolvedChatId sourceRows=${sourceRowsPayload.size}",
+      "hydrateRowsFromNativeHistoryIfReady trigger=$trigger chatId=$resolvedChatId sourceRows=${sourceRowsPayload.size} overlay=${nativeEngineRowsById.size} historyLoaded=$historyLoaded",
     )
     setRows(sourceRowsPayload)
   }
@@ -3366,20 +3251,39 @@ class ChatListView(
   }
 
   private fun mergedRowsPayload(baseRows: List<Map<String, Any?>>): List<Map<String, Any?>> {
-    val effectiveBaseRows: List<Map<String, Any?>> = if (statusAuthorityEnabled && engineChatId.isNotBlank()) {
-      val historyLoaded = ChatEngine.isChatHistoryLoaded(mapOf("chatId" to engineChatId))
-      if (historyLoaded) {
-        val nativeRows = ChatEngine.getChatRows(mapOf("chatId" to engineChatId))
-        if ((nativeRows.isNotEmpty() && nativeRows.size >= baseRows.size) || baseRows.isEmpty()) {
-          nativeRows
+    var usedNativeRows = false
+    val effectiveBaseRows: List<Map<String, Any?>> =
+      if (statusAuthorityEnabled && engineChatId.isNotBlank()) {
+        val historyLoaded = ChatEngine.isChatHistoryLoaded(mapOf("chatId" to engineChatId))
+        if (historyLoaded) {
+          val nativeRows = ChatEngine.getChatRows(mapOf("chatId" to engineChatId))
+          val shouldUseNative = (nativeRows.isNotEmpty() && nativeRows.size >= baseRows.size) || baseRows.isEmpty()
+          usedNativeRows = shouldUseNative
+          if (shouldUseNative) {
+            nativeRows
+          } else {
+            baseRows
+          }
         } else {
           baseRows
         }
       } else {
         baseRows
       }
-    } else {
-      baseRows
+
+    if (statusAuthorityEnabled && engineChatId.isNotBlank()) {
+      val shouldLog =
+        mergedRowsLogCount < 12 ||
+          lastMergedRowsUseNative != usedNativeRows ||
+          (effectiveBaseRows.isEmpty() && baseRows.isNotEmpty())
+      if (shouldLog) {
+        Log.i(
+          "ChatListView",
+          "mergedRowsPayload chatId=$engineChatId useNative=$usedNativeRows baseRows=${baseRows.size} effectiveRows=${effectiveBaseRows.size} nativeOverlay=${nativeEngineRowsById.size} deleted=${nativeDeletedMessageIds.size}",
+        )
+      }
+      mergedRowsLogCount += 1
+      lastMergedRowsUseNative = usedNativeRows
     }
 
     if (nativeEngineRowsById.isEmpty() && nativeDeletedMessageIds.isEmpty()) {
@@ -3500,6 +3404,9 @@ class ChatListView(
       val isMe = (message["isMe"] as? Boolean) ?: false
       val messageId = message["id"] as? String
       val messageType = ((message["type"] as? String) ?: "text").lowercase()
+      if (messageType == "typing") {
+        continue
+      }
       val metadata = message["metadata"] as? Map<*, *>
       val localMediaUrl1 = message["localMediaUrl"] as? String
       val localMediaUrl2 = message["local_media_url"] as? String
@@ -3583,26 +3490,6 @@ class ChatListView(
           )
         }
       }
-    }
-
-    if (isPeerTyping) {
-      output.add(
-        NativeRowItem(
-          kind = "message",
-          key = "peer-typing-indicator",
-          text = "Typing...",
-          timestamp = "",
-          status = null,
-          isMe = false,
-          messageId = "peer-typing-indicator",
-          shape = NativeBubbleShape(false, 18f, 18f, 18f, 4f),
-          messageType = "typing",
-          mediaUrl = null,
-          fileName = null,
-          duration = null,
-          waveform = null,
-        )
-      )
     }
 
     return output
@@ -3866,7 +3753,7 @@ class ChatListView(
   }
 
   private fun applyBottomAnchorPadding() {
-    val targetBottom = contentPaddingBottom
+    val targetBottom = contentPaddingBottom + inputBarOverlayHeightPx()
     val targetTop = computeBottomAnchoredTopPadding(targetBottom)
     if (
       recyclerView.paddingTop == targetTop &&
@@ -3877,6 +3764,11 @@ class ChatListView(
       return
     }
     recyclerView.setPadding(baseHorizontalPadding, targetTop, baseHorizontalPadding, targetBottom)
+  }
+
+  private fun inputBarOverlayHeightPx(): Int {
+    if (!inputBarEnabled || inputBar.visibility != View.VISIBLE) return 0
+    return max(0, max(inputBar.height, inputBar.measuredHeight))
   }
 
   private fun applyAppearanceToView() {
@@ -3899,6 +3791,9 @@ class ChatListView(
       bitmap = patternBitmap,
     )
     val bgColor = appearance.wallpaperGradient.firstOrNull() ?: appearance.bubbleThemColor
+    // Keep host backgrounds transparent so no extra block appears behind the input bar.
+    setBackgroundColor(Color.TRANSPARENT)
+    contentFrame.setBackgroundColor(Color.TRANSPARENT)
     val isDarkTheme = Color.luminance(bgColor) < 0.42f
     inputBar.applyAppearance(appearance, isDarkTheme, bgColor)
   }

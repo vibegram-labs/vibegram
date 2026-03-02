@@ -2,10 +2,61 @@ import UIKit
 
 private let swipeReplyTrigger: CGFloat = 28.0
 private let swipeReplyMaxOffset: CGFloat = 88.0
-private let contextMenuOverlayWindowLevel: CGFloat = 1_000_000_000.0 - 0.001
 private let chatHoldDebugLogs = true
-private let contextMenuPreHoldReleaseDelay: TimeInterval = 0.14
-private let contextMenuOpenAfterHoldDelay: TimeInterval = 0.40
+
+private func isKeyboardHostWindow(_ window: UIWindow) -> Bool {
+  let typeName = String(describing: type(of: window))
+  return typeName.contains("UIRemoteKeyboardWindow") || typeName.contains("UITextEffectsWindow")
+}
+
+private final class ChatKeyboardWindowObserver: NSObject {
+  static let shared = ChatKeyboardWindowObserver()
+
+  private weak var keyboardWindow: UIWindow?
+
+  private override init() {
+    super.init()
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(windowDidBecomeVisible(_:)),
+      name: UIWindow.didBecomeVisibleNotification,
+      object: nil
+    )
+  }
+
+  @objc private func windowDidBecomeVisible(_ notification: Notification) {
+    guard let window = notification.object as? UIWindow else { return }
+    guard isKeyboardHostWindow(window) else { return }
+    keyboardWindow = window
+  }
+
+  private func discoverKeyboardWindow() -> UIWindow? {
+    // iOS can keep the keyboard in a separate window that may not always be exposed
+    // through the current scene's window list. Scan UIApplication windows first.
+    for window in UIApplication.shared.windows.reversed() {
+      guard isKeyboardHostWindow(window) else { continue }
+      return window
+    }
+
+    for scene in UIApplication.shared.connectedScenes {
+      guard let windowScene = scene as? UIWindowScene else { continue }
+      for window in windowScene.windows.reversed() {
+        guard isKeyboardHostWindow(window) else { continue }
+        return window
+      }
+    }
+    return nil
+  }
+
+  func currentKeyboardWindow() -> UIWindow? {
+    if keyboardWindow == nil {
+      keyboardWindow = discoverKeyboardWindow()
+    }
+    guard let keyboardWindow else { return nil }
+    guard !keyboardWindow.isHidden, keyboardWindow.alpha > 0.01 else { return nil }
+    return keyboardWindow
+  }
+}
 
 extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDelegate {
   private func holdDebugLog(_ message: String) {
@@ -13,7 +64,19 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     NSLog("[ChatHold] %@", message)
   }
 
+  private func resolveContextMenuHostWindow(appWindow: UIWindow) -> UIWindow {
+    _ = ChatKeyboardWindowObserver.shared
+
+    if let keyboardWindow = ChatKeyboardWindowObserver.shared.currentKeyboardWindow() {
+      return keyboardWindow
+    }
+    return appWindow
+  }
+
   func installInteractionGestures() {
+    // Start observing keyboard windows as early as possible so first open is stable.
+    _ = ChatKeyboardWindowObserver.shared
+
     let tap = UITapGestureRecognizer(
       target: self, action: #selector(handleDismissInputTap(_:)))
     tap.delegate = self
@@ -37,11 +100,24 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     // Telegram-like cadence: fast enough for real-time feel without accidental triggers.
     longPress.minimumPressDuration = 0.24
     longPress.allowableMovement = 10.0
+    // Prevent a long-press from also being treated as a tap that dismisses keyboard.
+    tap.require(toFail: longPress)
     collectionView.addGestureRecognizer(longPress)
+    contextMenuLongPressGesture = longPress
   }
 
   @objc private func handleDismissInputTap(_ gesture: UITapGestureRecognizer) {
     guard gesture.state == .ended else { return }
+    // Ignore dismiss taps that are part of a context-menu hold/open sequence.
+    if let longPress = contextMenuLongPressGesture {
+      switch longPress.state {
+      case .began, .changed, .ended:
+        return
+      default:
+        break
+      }
+    }
+    guard customContextMenuOverlay == nil else { return }
     guard inputBar != nil else { return }
     _ = endEditing(true)
   }
@@ -75,6 +151,14 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     _ gestureRecognizer: UIGestureRecognizer,
     shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
   ) -> Bool {
+    // Tap-to-dismiss must not run with context-menu long-press.
+    if (gestureRecognizer === dismissInputTapGesture
+      && otherGestureRecognizer === contextMenuLongPressGesture)
+      || (gestureRecognizer === contextMenuLongPressGesture
+        && otherGestureRecognizer === dismissInputTapGesture)
+    {
+      return false
+    }
     // Don't allow our swipe-reply pan to run simultaneously with the long-press
     // context menu gesture — this prevents unwanted X movement during hold.
     if (gestureRecognizer === swipeReplyPanGesture
@@ -219,49 +303,35 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
       "openContextMenu snapshot mid=\(messageId) bubbleFrame=\(NSCoder.string(for: bubbleFrame))"
     )
 
+    let hostWindow = resolveContextMenuHostWindow(appWindow: window)
+    let bubbleFrameInHost =
+      hostWindow === window
+      ? bubbleFrame
+      : hostWindow.convert(bubbleFrame, from: window)
+    bubbleSnapshot.frame = bubbleFrameInHost
+
     let overlay = ChatContextMenuOverlay(
       messageId: messageId,
       bubbleSnapshot: bubbleSnapshot,
-      bubbleFrame: bubbleFrame,
+      bubbleFrame: bubbleFrameInHost,
       bubbleIsMe: isMe,
       appearance: self.resolvedAppearance(),
       showResendAction: showResendAction
     )
     overlay.delegate = self
 
-    if let windowScene = window.windowScene {
-      let contextWindow = UIWindow(windowScene: windowScene)
-      // Telegram-style very high overlay window level.
-      let targetLevel = contextMenuOverlayWindowLevel
-      contextWindow.windowLevel = UIWindow.Level(rawValue: targetLevel)
-      contextWindow.backgroundColor = .clear
-      contextWindow.frame = windowScene.coordinateSpace.bounds
+    overlay.frame = hostWindow.bounds
+    overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    hostWindow.addSubview(overlay)
+    self.customContextMenuWindow = nil
 
-      let rootVC = UIViewController()
-      rootVC.view.backgroundColor = .clear
-      rootVC.view.frame = contextWindow.bounds
-      rootVC.view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-
-      overlay.frame = rootVC.view.bounds
-      overlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-      rootVC.view.addSubview(overlay)
-      contextWindow.rootViewController = rootVC
-
-      contextWindow.isHidden = false
-      let windowDebug = windowScene.windows
-        .map { win in
-          "\(NSStringFromClass(type(of: win)))@\(String(format: "%.1f", win.windowLevel.rawValue)) hidden=\(win.isHidden)"
-        }
-        .joined(separator: " | ")
-      NSLog(
-        "[ChatListView] contextMenu windowLevel target=%.1f windows=%@",
-        targetLevel,
-        windowDebug
-      )
-      self.customContextMenuWindow = contextWindow
-    } else {
-      window.addSubview(overlay)
-    }
+    let hostClass = NSStringFromClass(type(of: hostWindow))
+    NSLog(
+      "[ChatListView] contextMenu hostWindow=%@ level=%.1f keyboardHost=%@",
+      hostClass,
+      hostWindow.windowLevel.rawValue,
+      hostWindow === window ? "N" : "Y"
+    )
 
     // Clear any conflicting swipe reply state when context menu opens
     if customContextMenuOverlay == nil {
@@ -305,16 +375,9 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
       UIImpactFeedbackGenerator(style: .medium).impactOccurred()
       cell.setContextMenuHeld(true, animated: true, strategy: "scaleCell")
 
-      // Pre-menu pulse: down first, then up before menu opens.
-      DispatchQueue.main.asyncAfter(deadline: .now() + contextMenuPreHoldReleaseDelay) { [weak self, weak cell] in
-        guard let self = self else { return }
-        guard gesture.state == .began || gesture.state == .changed else { return }
-        if self.customContextMenuOverlay != nil { return }
-        self.holdDebugLog("longPress pre-open release state=\(gesture.state.rawValue)")
-        cell?.setContextMenuHeld(false, animated: true, strategy: "scaleCell")
-      }
-
-      DispatchQueue.main.asyncAfter(deadline: .now() + contextMenuOpenAfterHoldDelay) { [weak self, weak cell] in
+      // The scale down animation takes 0.18s. We wait exactly that long so the cell
+      // reaches its scaled state smoothly, then synchronously pop open the menu.
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.18) { [weak self, weak cell] in
         guard let self = self else { return }
         guard gesture.state == .began || gesture.state == .changed else {
           self.holdDebugLog("longPress delayed cancel state=\(gesture.state.rawValue)")
@@ -335,7 +398,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
       }
 
     case .ended, .cancelled, .failed:
-      holdDebugLog("longPress end state=\(gesture.state.rawValue) overlay=\(customContextMenuOverlay != nil)")
+      holdDebugLog(
+        "longPress end state=\(gesture.state.rawValue) overlay=\(customContextMenuOverlay != nil)")
       if customContextMenuOverlay == nil {
         let point = gesture.location(in: collectionView)
         if let indexPath = collectionView.indexPathForItem(at: point),

@@ -21,6 +21,8 @@ class ChatNativeHomeListView(
   context: Context,
   appContext: AppContext,
 ) : ExpoView(context, appContext) {
+  override val shouldUseAndroidLayout: Boolean = true
+
   private val onNativeEvent by EventDispatcher<Map<String, Any>>()
   private var isShowingNativePreview = false
   private var previewAppearance: Map<String, Any?> = emptyMap()

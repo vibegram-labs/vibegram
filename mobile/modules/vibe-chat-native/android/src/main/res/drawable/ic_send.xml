@@ -5,8 +5,5 @@
     android:viewportHeight="24">
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M12,4l-1.41,1.41L16.17,11H4v2h12.17l-5.58,5.59L12,20l8,-8L12,4z"
-        android:rotation="-90"
-        android:pivotX="12"
-        android:pivotY="12"/>
+        android:pathData="M2,21L23,12L2,3V10L17,12L2,14V21Z" />
 </vector>

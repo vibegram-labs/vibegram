@@ -66,7 +66,7 @@ const fetchWithRetry = async (endpoint: string, options: RequestInit = {}) => {
 
     for (const url of getOrderedBaseUrls()) {
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 40000);
+        const timeoutId = setTimeout(() => controller.abort(), 12000);
         try {
             if (endpoint.startsWith('http')) {
                 // If it's a full URL, don't use the loop prefix
@@ -440,8 +440,19 @@ export const apiClient = {
     getChats: async (userId: string) => {
         try {
             const res = await fetchWithRetry(`/chats/${userId}`)
-            const json = await res.json()
-            if (!Array.isArray(json)) throw new Error('Invalid response format')
+            const text = await res.text()
+            let json;
+            try {
+                json = JSON.parse(text);
+            } catch (e) {
+                if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                throw new Error('Invalid JSON response');
+            }
+            if (!res.ok) throw new Error(json?.errors?.detail || json?.error || `HTTP ${res.status}`)
+            if (!Array.isArray(json)) {
+                if (json?.data && Array.isArray(json.data)) return json.data;
+                throw new Error(json?.errors?.detail || 'Invalid response format');
+            }
             return json
         } catch (e: unknown) {
             if (isNetworkErrorLike(e)) {

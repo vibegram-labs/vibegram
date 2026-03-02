@@ -388,6 +388,16 @@ final class ChatEngine {
     ) { [weak self] _ in
       self?.clearCachedKeyOnBackground()
     }
+    // Reconnect immediately when the app returns to the foreground.
+    // Without this, the reconnect backoff timer (up to 8s) plus the
+    // WebSocket connect timeout (8s) can delay reconnection by 10-13s.
+    NotificationCenter.default.addObserver(
+      forName: UIApplication.willEnterForegroundNotification,
+      object: nil,
+      queue: nil
+    ) { [weak self] _ in
+      self?.reconnectOnForeground()
+    }
     // Native-owned transport bootstrap:
     // if config already exists (or can be reconstructed from native session),
     // connect without waiting for any JS route lifecycle.
@@ -401,6 +411,24 @@ final class ChatEngine {
       self.cachedDecryptPrivateKey = nil
       self.cachedDecryptPrivateKeyPem = nil
       self.cachedDecryptKeyTimestamp = nil
+    }
+  }
+
+  private func reconnectOnForeground() {
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self else { return }
+      // Reset backoff and cancel pending reconnect timer so we connect
+      // immediately instead of waiting for the next backoff tick.
+      self.queue.sync {
+        self.reconnectAttempt = 0
+        self.cancelReconnectLocked()
+        self.appendJournalLocked(
+          event: "foreground-reconnect",
+          payload: ["state": self.normalizedString(self.state["state"]) ?? "unknown"])
+      }
+      // ensureNativeTransport checks connected/connecting state internally
+      // and only initiates a connection when actually needed.
+      self.ensureNativeTransport(trigger: "app_foreground")
     }
   }
 
@@ -1140,47 +1168,8 @@ final class ChatEngine {
       }
       let peerUserId = peerUserIdHint ?? chatPeerUserIdsByChatId[chatId]
 
-      let friendPublicKey: String?
-      if isGroup {
-        friendPublicKey = nil
-      } else {
-        guard
-          let key = resolveFriendPublicKeyLocked(
-            chatId: chatId, peerUserIdHint: peerUserId)
-        else {
-          upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
-          pendingOutboundDraftsByMessageId[messageId] = effectivePayload
-          queueOutboundDraftLocked(
-            chatId: chatId, messageId: messageId, payload: effectivePayload,
-            reason: "missing_friend_key")
-          scheduleFriendPublicKeyFetchLocked(
-            chatId: chatId,
-            peerUserIdHint: peerUserId,
-            trigger: "send_missing_friend_key"
-          )
-          loadChatHistoryIfNeededLocked(chatId: chatId, force: true)
-          DispatchQueue.global(qos: .utility).async { [weak self] in
-            self?.ensureNativeTransport(trigger: "send_missing_friend_key")
-          }
-          appendJournalLocked(
-            event: "native-send-message-error",
-            payload: [
-              "chatId": chatId,
-              "messageId": messageId,
-              "reason": "missing_friend_key",
-            ])
-          postChangeLocked(
-            reason: "messageStatusChanged",
-            userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
-          return [
-            "accepted": true, "queued": true, "reason": "missing_friend_key",
-            "messageId": messageId,
-            "state": "pending",
-          ]
-        }
-        friendPublicKey = key
-      }
-
+      // ── Build + emit optimistic row FIRST so message bubble appears instantly ──
+      let optimisticStartMs = nowMs()
       var decryptedFields: [String: Any] = ["text": text]
       if let mediaUrl { decryptedFields["mediaUrl"] = mediaUrl }
       if let localPlaybackMediaUrl { decryptedFields["localMediaUrl"] = localPlaybackMediaUrl }
@@ -1220,6 +1209,59 @@ final class ChatEngine {
       postChangeLocked(
         reason: "messageStatusChanged",
         userInfo: ["chatId": chatId, "messageId": messageId, "status": "sending"])
+      NSLog(
+        "[ChatEngine] sendMessage optimistic row emitted in %dms chatId=%@ messageId=%@",
+        Int(nowMs() - optimisticStartMs), chatId, messageId)
+
+      // ── Now resolve friend public key (may do synchronous HTTP — no longer blocks UI) ──
+      let keyResolveStartMs = nowMs()
+      let friendPublicKey: String?
+      if isGroup {
+        friendPublicKey = nil
+      } else {
+        guard
+          let key = resolveFriendPublicKeyLocked(
+            chatId: chatId, peerUserIdHint: peerUserId)
+        else {
+          NSLog(
+            "[ChatEngine] sendMessage queued reason=missing_friend_key chatId=%@ messageId=%@ keyResolveMs=%d",
+            chatId, messageId, Int(nowMs() - keyResolveStartMs))
+          upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
+          pendingOutboundDraftsByMessageId[messageId] = effectivePayload
+          queueOutboundDraftLocked(
+            chatId: chatId, messageId: messageId, payload: effectivePayload,
+            reason: "missing_friend_key")
+          scheduleFriendPublicKeyFetchLocked(
+            chatId: chatId,
+            peerUserIdHint: peerUserId,
+            trigger: "send_missing_friend_key"
+          )
+          loadChatHistoryIfNeededLocked(chatId: chatId, force: true)
+          DispatchQueue.global(qos: .utility).async { [weak self] in
+            self?.ensureNativeTransport(trigger: "send_missing_friend_key")
+          }
+          appendJournalLocked(
+            event: "native-send-message-error",
+            payload: [
+              "chatId": chatId,
+              "messageId": messageId,
+              "reason": "missing_friend_key",
+            ])
+          postChangeLocked(
+            reason: "messageStatusChanged",
+            userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
+          return [
+            "accepted": true, "queued": true, "reason": "missing_friend_key",
+            "messageId": messageId,
+            "state": "pending",
+          ]
+        }
+        friendPublicKey = key
+      }
+      NSLog(
+        "[ChatEngine] sendMessage keyResolved in %dms chatId=%@ messageId=%@ hasKey=%@",
+        Int(nowMs() - keyResolveStartMs), chatId, messageId,
+        friendPublicKey != nil ? "true" : "false")
 
       let needsUpload =
         ["image", "gif", "file", "voice", "video", "music"].contains(type)

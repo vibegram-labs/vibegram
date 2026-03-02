@@ -140,6 +140,8 @@ public final class ChatNativeTabBarView: ExpoView {
       selectionFeedback.selectionChanged()
       selectionFeedback.prepare()
     }
+    currentIndex = tabIndex
+    applySelection()
     onIndexChange(["index": tabIndex])
   }
 
@@ -159,11 +161,8 @@ public final class ChatNativeTabBarView: ExpoView {
   private var segmentSelectedImages: [UIImage] = []
 
   private func rebuildAndApplySegmentImages() {
-    let normalColor: UIColor =
-      isDark
-      ? UIColor.white.withAlphaComponent(0.55)
-      : UIColor.black.withAlphaComponent(0.45)
-    let selectedColor: UIColor = isDark ? .white : .black
+    let normalColor = inactiveTintColor.withAlphaComponent(isDark ? 0.78 : 0.72)
+    let selectedColor = activeTintColor
     segmentNormalImages = tabs.map {
       makeSegmentImage(
         symbol: $0.sfSymbol ?? fallbackSymbol($0.key),
@@ -266,6 +265,10 @@ public final class ChatNativeTabBarView: ExpoView {
     if segmentedControl.selectedSegmentIndex != currentIndex {
       segmentedControl.selectedSegmentIndex = currentIndex
     }
+
+    segmentedControl.selectedSegmentTintColor =
+      activeTintColor.withAlphaComponent(isDark ? 0.30 : 0.18)
+
     // Swap icon tint to reflect selected/unselected state
     swapSegmentImages(selectedIndex: currentIndex)
   }
@@ -358,10 +361,6 @@ public final class ChatNativeTabBarView: ExpoView {
       : UIColor.black.withAlphaComponent(0.06).cgColor
 
     segmentedControl.backgroundColor = .clear
-    segmentedControl.selectedSegmentTintColor =
-      isDark
-      ? UIColor.white.withAlphaComponent(0.22)
-      : UIColor.black.withAlphaComponent(0.13)
 
     // Rebuild rendered icon+text images with the current colour scheme.
     rebuildAndApplySegmentImages()

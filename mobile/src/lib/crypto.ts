@@ -470,6 +470,10 @@ export const decryptMessage = async (
         if (!trimmedCiphertext.startsWith('{')) return "[Decryption Failed - Format]";
 
         const payload: HybridPayload = JSON.parse(trimmedCiphertext);
+        // Group messages are plain JSON (e.g. {"text":"hello"}) — return as-is without decryption.
+        if (!payload.iv || !payload.c) {
+            return trimmedCiphertext;
+        }
         const keysToTry: { field: 'k' | 's', key: string }[] = [];
 
         if (isMyMessage) {

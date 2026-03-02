@@ -92,6 +92,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var lastKnownViewportHeight: CGFloat = 0.0
   private var contentPaddingBottom: CGFloat = sectionBottomInset
   private var isApplyingRowsUpdate = false
+  private var _setRowsGeneration: UInt = 0
   private var pendingRowsPayload: [[String: Any]]?
   private var sourceRowsPayload: [[String: Any]] = []
   private var nativeSendEnabled = false
@@ -144,7 +145,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private(set) var inputBar: ChatInputBar?
   private var inputBarEnabled = false
   private var inputBarPlaceholder = "Message"
-  private var keyboardHeight: CGFloat = 0
+  var keyboardHeight: CGFloat = 0
   /// Persistent overlay container that sits above everything for send transitions.
   private let transitionOverlayHost = UIView()
 
@@ -182,7 +183,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   required init(appContext: AppContext? = nil) {
-    NSLog("[ChatListView] init START")
     let layout = ChatCollectionFlowLayout()
     layout.minimumLineSpacing = 2
     layout.sectionInset = UIEdgeInsets(
@@ -194,7 +194,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     collectionView = UICollectionView(frame: .zero, collectionViewLayout: layout)
 
     super.init(appContext: appContext)
-    NSLog("[ChatListView] init super.init done")
     clipsToBounds = false
 
     if let cachedAppearance = Self.bootstrapCachedAppearance() {
@@ -249,7 +248,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       object: nil
     )
 
-    NSLog("[ChatListView] init COMPLETE")
   }
 
   private func pixelAlignedValue(_ value: CGFloat) -> CGFloat {
@@ -318,12 +316,13 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return
     }
     isApplyingRowsUpdate = true
+    _setRowsGeneration &+= 1
+    let mySetRowsGeneration = _setRowsGeneration
 
     let mergedRows = mergedRowsPayload(from: nextRows)
     let parsed = mergedRows.compactMap(ChatListRow.init).filter { row in
       row.messageType != "agent_progress"
     }
-    NSLog("[ChatListView] setRows parsed: %d, previous: %d", parsed.count, rows.count)
     let previousRows = rows
     let previousDistanceFromBottom = currentDistanceFromBottom()
     let wasNearBottom = previousDistanceFromBottom <= listBottomThreshold
@@ -480,7 +479,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
       // Apply mode2 additive animations after reloadData so the reorder
       // appears smooth instead of an instant jump.
-      if shouldAnimateReorder, !preReorderScreenY.isEmpty {
+      // Skip if a queued setRows ran during finalize (cells were
+      // recreated/repositioned — our pre-reorder positions are stale).
+      let reorderQueuedProcessed = _setRowsGeneration != mySetRowsGeneration
+      if shouldAnimateReorder, !preReorderScreenY.isEmpty, !reorderQueuedProcessed {
         collectionView.layoutIfNeeded()
 
         // Strip UIKit implicit animations (same as the batch-update path).
@@ -532,7 +534,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
             cell.layer.add(fadeAnim, forKey: "reorderFadeIn")
           }
         }
-        NSLog("[ChatListView] reorder animated — shifted:%d", reorderShifted)
       }
 
       return
@@ -562,7 +563,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let safeReloads = reloads.filter { $0.item >= 0 && $0.item < previousRows.count }
 
     guard !deletions.isEmpty || !insertions.isEmpty || !safeReloads.isEmpty else {
-      NSLog("[ChatListView] setRows — no changes, finalize only")
       applyDataSource()
       finalize(false)
       return
@@ -787,14 +787,17 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       // Undo the instant scroll, then animate it. The UIView spring
       // scroll naturally pushes existing cells up and reveals the new
       // cell from the bottom — no additive animations needed.
-      isInternalScrollAdjustment = true
-      collectionView.setContentOffset(
-        CGPoint(x: 0, y: preUpdateOffset), animated: false)
+      // Scroll back to pre-update position BEFORE starting the animated scroll.
+      // Use performInternalScrollAdjustment to avoid the scrollViewDidScroll
+      // logic marking the list as not-near-bottom.
+      performInternalScrollAdjustment {
+        collectionView.setContentOffset(
+          CGPoint(x: 0, y: preUpdateOffset), animated: false)
+      }
+      // Now animate to bottom. scrollToBottom sets isInternalScrollAdjustment
+      // and resets it in the completion handler.
       scrollToBottom(animated: true)
 
-      NSLog(
-        "[ChatListAnim] mode2 — animatedScroll from:%.1f ins:%d",
-        preUpdateOffset, insertions.count)
       updateDebugStats(shifted: 0, newSlide: 0, maxDelta: 0, scrollDelta: 0)
       return
     }
@@ -803,6 +806,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     // Cells land at their true final screen positions so we can
     // compute screen-space deltas for additive animations.
     finalize(false)
+
+    // Detect if finishRowsUpdate processed a queued setRows (recursive).
+    // When that happens, cells may have been recreated/repositioned by
+    // the recursive update's own animation (reorder, reload, etc).
+    // Applying additive animations from the OUTER batch update would use
+    // stale preUpdateScreenY positions and conflict with the recursive
+    // update's animation, causing a visible gap/shift.
+    let queuedUpdateProcessed = _setRowsGeneration != mySetRowsGeneration
 
     // CRITICAL (Telegram approach): Strip ALL UIKit-implicit animations
     // from every visible cell. UICollectionView sneaks in opacity/position/
@@ -824,6 +835,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       // Ensure absolute full opacity — no transparency at any point.
       cell.layer.opacity = 1.0
       cell.contentView.layer.opacity = 1.0
+    }
+
+    if queuedUpdateProcessed {
+      NSLog("[ChatListAnim] skipping additive — queued setRows processed during finalize")
+      maybeStartPendingSendTransition()
+      return
     }
 
     if shouldAnimateUpdate {
@@ -912,11 +929,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         let newCellSlideOffset = pixelAlignedValue(
           max(dbgMaxDelta, debugAnimSlideOffset))
 
-        NSLog(
-          "[ChatListAnim] mode2 — preScreenY:%d preOff:%.1f postOff:%.1f scrollΔ:%.1f visible:%d maxΔ:%.1f newSlideOff:%.1f",
-          preUpdateScreenY.count, preUpdateOffset, postOffset, dbgScrollDelta,
-          collectionView.visibleCells.count, dbgMaxDelta, newCellSlideOffset)
-
         // --- Pass 2: apply animations ---
         for info in cellInfos {
           if !info.isNew {
@@ -930,9 +942,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               anim.isRemovedOnCompletion = true
               info.cell.layer.add(anim, forKey: "insertionShift")
               dbgShifted += 1
-              NSLog(
-                "[ChatListAnim]   shift '%@' Δ:%.1f",
-                String(info.key.prefix(12)), info.delta)
             }
           } else if !info.isHiddenForSend {
             // Additive path fallback (only reached during send transitions
@@ -947,11 +956,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
             slideAnim.isRemovedOnCompletion = true
             info.cell.layer.add(slideAnim, forKey: "insertSlideUp")
             dbgNewSlide += 1
-            NSLog(
-              "[ChatListAnim]   newSlide '%@' offset:%.0f (maxΔ:%.1f)",
-              String(info.key.prefix(12)), newCellSlideOffset, dbgMaxDelta)
-          } else {
-            NSLog("[ChatListAnim]   skip hidden '%@'", String(info.key.prefix(12)))
           }
         }
 
@@ -959,13 +963,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         break
       }
 
-      NSLog(
-        "[ChatListAnim] result — shifted:%d newSlide:%d maxΔ:%.1f scrollΔ:%.1f dur:%.2f offset:%.0f",
-        dbgShifted, dbgNewSlide, dbgMaxDelta, dbgScrollDelta, animDuration, debugAnimSlideOffset)
       updateDebugStats(
         shifted: dbgShifted, newSlide: dbgNewSlide,
         maxDelta: dbgMaxDelta, scrollDelta: dbgScrollDelta)
     }
+
+    // Safety net: ensure the send overlay starts even if the attempt
+    // inside finalize failed (e.g. cell wasn't laid out yet).
+    maybeStartPendingSendTransition()
   }
 
   func setEngineSurfaceId(_ value: String) {
@@ -1424,7 +1429,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       }
       cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
     }
-    NSLog("[ChatListView] refreshVisibleStatuses reason=%@", reason)
   }
 
   public func collectionView(
@@ -1529,9 +1533,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     guard let queued = pendingRowsPayload else {
       return
     }
-    NSLog(
-      "[ChatListAnim] ⚠️ finishRowsUpdate — processing queued setRows (%d rows) during finalize",
-      queued.count)
     pendingRowsPayload = nil
     setRows(queued)
   }
@@ -2186,12 +2187,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     onNativeEvent(["type": "sendTransitionCompleted", "messageId": revealedMessageId ?? ""])
   }
 
-  private var hasLoggedDispatcherStatus = false
   private func emitViewport(force: Bool = false) {
-    if !hasLoggedDispatcherStatus {
-      hasLoggedDispatcherStatus = true
-      NSLog("[ChatListView] EventDispatcher status — dispatchers initialized (non-nil)")
-    }
     let contentHeight = collectionView.contentSize.height
     let layoutHeight = collectionView.bounds.height
     let offsetY = collectionView.contentOffset.y
@@ -2648,7 +2644,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     // 6. Either append natively (no JS dependency) or delegate to JS.
     if nativeSendEnabled {
-      NSLog("[ChatListView] handleNativeSend using native queue")
       queueNativeOutgoingMessage(
         messageId: messageId,
         text: text,
@@ -2735,7 +2730,6 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         }
       }
     } else {
-      NSLog("[ChatListView] handleNativeSend dispatching onNativeEvent sendMessage")
       var sendPayload: [String: Any] = [
         "type": "sendMessage",
         "messageId": messageId,
@@ -2751,9 +2745,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         sendPayload["agentText"] = agentText
       }
       onNativeEvent(sendPayload)
-      NSLog("[ChatListView] handleNativeSend onNativeEvent dispatched")
     }
-    NSLog("[ChatListView] handleNativeSend END")
   }
 
   private func topPresentingViewController() -> UIViewController? {

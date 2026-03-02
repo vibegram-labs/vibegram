@@ -4,7 +4,6 @@ final class ChatPinnedBannerView: UIControl {
   static let preferredHeight: CGFloat = 44.0
 
   private let blurView = UIVisualEffectView(effect: nil)
-  private let tintOverlayView = UIView()
   private let iconContainer = UIView()
   private let iconGlowView = UIView()
   private let iconImageView = UIImageView()
@@ -40,34 +39,35 @@ final class ChatPinnedBannerView: UIControl {
   func applyTheme(textColor: UIColor, surfaceColor: UIColor, isDark: Bool) {
     if #available(iOS 26.0, *) {
       let glass = UIGlassEffect()
-      glass.isInteractive = false
+      glass.isInteractive = true
       blurView.effect = glass
     } else {
       blurView.effect = UIBlurEffect(style: .systemThinMaterial)
     }
-    tintOverlayView.backgroundColor = surfaceColor.withAlphaComponent(isDark ? 0.22 : 0.14)
-    iconContainer.backgroundColor = surfaceColor.withAlphaComponent(isDark ? 0.30 : 0.20)
+    blurView.contentView.backgroundColor = surfaceColor.withAlphaComponent(isDark ? 0.16 : 0.10)
+    blurView.alpha = isDark ? 0.98 : 0.94
+    iconContainer.backgroundColor = surfaceColor.withAlphaComponent(isDark ? 0.24 : 0.16)
     iconGlowView.backgroundColor = textColor.withAlphaComponent(isDark ? 0.30 : 0.20)
     iconImageView.tintColor = textColor.withAlphaComponent(0.95)
     titleLabel.textColor = textColor.withAlphaComponent(0.96)
     bodyLabel.textColor = textColor.withAlphaComponent(0.82)
-    layer.borderColor = textColor.withAlphaComponent(isDark ? 0.12 : 0.08).cgColor
+    blurView.layer.borderColor = textColor.withAlphaComponent(isDark ? 0.10 : 0.06).cgColor
   }
 
   private func setup() {
-    clipsToBounds = true
-    layer.cornerCurve = .continuous
-    layer.cornerRadius = ChatPinnedBannerView.preferredHeight / 2.0
-    layer.borderWidth = 1.0
-    layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
     backgroundColor = .clear
 
     addSubview(blurView)
-    blurView.contentView.addSubview(tintOverlayView)
-    addSubview(iconContainer)
+    blurView.layer.cornerCurve = .continuous
+    blurView.layer.cornerRadius = ChatPinnedBannerView.preferredHeight / 2.0
+    blurView.layer.borderWidth = 1.0
+    blurView.layer.borderColor = UIColor.white.withAlphaComponent(0.12).cgColor
+    blurView.clipsToBounds = true
+
+    blurView.contentView.addSubview(iconContainer)
     iconContainer.addSubview(iconGlowView)
     iconContainer.addSubview(iconImageView)
-    addSubview(textStack)
+    blurView.contentView.addSubview(textStack)
 
     iconImageView.image = UIImage(systemName: "pin.fill")
     iconImageView.contentMode = .scaleAspectFit
@@ -99,7 +99,6 @@ final class ChatPinnedBannerView: UIControl {
   override func layoutSubviews() {
     super.layoutSubviews()
     blurView.frame = bounds
-    tintOverlayView.frame = blurView.bounds
 
     let iconSize: CGFloat = 28.0
     iconContainer.frame = CGRect(x: 10.0, y: (bounds.height - iconSize) * 0.5, width: iconSize, height: iconSize)

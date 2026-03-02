@@ -63,7 +63,7 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
     const { colors, effectiveTheme } = useThemeStore();
     const { user: currentUser } = useAuthStore();
     const { upsertContact, isContact } = useContactStore();
-    const { chats, setActiveChat, updateChatFriendInfoByFriendId } = useChatStore();
+    const { chats, setActiveChat, updateChatFriendInfoByFriendId, startChat } = useChatStore();
     const { showToast } = useToastStore();
 
     // Search state (page 0)
@@ -260,7 +260,7 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
         headerProgress.value = withTiming(0, SMOOTH_TIMING);
     };
 
-    const handleMessage = () => {
+    const handleMessage = async () => {
         if (!foundUser?.userId) return;
 
         const friendId = foundUser.userId;
@@ -269,7 +269,21 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
         const friendPublicKey = foundUser.publicKey || '';
         const existingChat = chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase());
 
-        // Close modal first (slide down)
+        // Resolve chatId before closing the modal so we always navigate to the right chat
+        let targetChatId = existingChat?.chatId || null;
+        if (!targetChatId) {
+            try {
+                targetChatId = await startChat(friendId, {
+                    username: friendName,
+                    profileImage: friendImage,
+                    publicKey: friendPublicKey,
+                });
+            } catch (e) {
+                console.warn('[NewChatModal] startChat failed, navigating with friendId fallback', e);
+            }
+        }
+
+        // Close modal (slide down)
         if (onFullClose) {
             onFullClose();
         } else {
@@ -278,14 +292,23 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
 
         // Wait for animation to finish then navigate
         setTimeout(() => {
-            if (existingChat?.chatId) {
-                setActiveChat(existingChat.chatId);
-                router.push({ pathname: '/chat', params: { id: existingChat.chatId } });
+            if (targetChatId) {
+                setActiveChat(targetChatId);
+                router.push({ pathname: '/chat', params: { id: targetChatId } });
             } else {
-                router.push({
-                    pathname: '/chat',
-                    params: { friendId, friendName, friendImage, friendPublicKey }
-                });
+                // Last-resort fallback: look up the chat again in case startChat populated it
+                const freshChat = useChatStore.getState().chats.find(
+                    c => (c.friendId || '').toUpperCase() === friendId.toUpperCase()
+                );
+                if (freshChat?.chatId) {
+                    setActiveChat(freshChat.chatId);
+                    router.push({ pathname: '/chat', params: { id: freshChat.chatId } });
+                } else {
+                    router.push({
+                        pathname: '/chat',
+                        params: { friendId, friendName, friendImage, friendPublicKey }
+                    });
+                }
             }
         }, 300);
     };

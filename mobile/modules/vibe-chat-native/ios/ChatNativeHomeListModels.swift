@@ -68,7 +68,7 @@ struct ChatNativeHomeListRow {
     let avatarFallback =
       normalizedString(raw["avatarFallback"] ?? raw["avatar_fallback"])
       ?? String(title.prefix(1)).uppercased()
-    let type = normalizedString(raw["type"])
+    let type = normalizedString(raw["type"] ?? raw["chatType"] ?? raw["chat_type"])
     let isGroup =
       parseBool(raw["isGroup"] ?? raw["is_group"]) ?? (type == "group" || type == "channel")
     let previewRows = parsePreviewRows(raw["previewRows"] ?? raw["preview_rows"])

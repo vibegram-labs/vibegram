@@ -73,8 +73,9 @@ private fun decryptHybridMessage(
     val ivB64 = payload.optString("iv", "")
     val cB64 = payload.optString("c", "")
     val kB64 = payload.optString("k", "")
-    if (ivB64.isEmpty() || cB64.isEmpty() || kB64.isEmpty()) {
-      return "[Decryption Failed]"
+    // Group messages are plain JSON (e.g. {"text":"hello"}) — return as-is without decryption.
+    if (ivB64.isEmpty() || cB64.isEmpty()) {
+      return trimmed
     }
 
     val keyCandidates = ArrayList<String>(2)

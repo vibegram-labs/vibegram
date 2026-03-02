@@ -112,6 +112,14 @@ class ChatEngineModule : Module() {
       ChatEngine.getChatProfileSummary(payload)
     }
 
+    Function("getPinnedMessages") { payload: Map<String, Any?> ->
+      ChatEngine.getPinnedMessages(payload)
+    }
+
+    Function("pinMessage") { payload: Map<String, Any?> ->
+      ChatEngine.pinMessage(payload)
+    }
+
     Function("getChatJournal") {
       ChatEngine.getJournal()
     }

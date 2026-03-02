@@ -35,6 +35,8 @@ class LiquidGlassView(context: Context, appContext: AppContext) : ExpoView(conte
   private var tint: String? = null
   private var tintColor: Int? = null
   private var pressFeedbackEnabled = true
+  private var borderEnabled = true
+  private var shadowEnabled = true
   private var cornerRadiusPx = 0f
   private var isPressedVisual = false
 
@@ -107,8 +109,8 @@ class LiquidGlassView(context: Context, appContext: AppContext) : ExpoView(conte
       sheenStart = sheenStart,
       sheenMid = sheenMid,
       sheenEnd = sheenEnd,
-      borderColor = border,
-      innerBorderColor = innerBorder,
+      borderColor = if (borderEnabled) border else Color.TRANSPARENT,
+      innerBorderColor = if (borderEnabled) innerBorder else Color.TRANSPARENT,
       pressedOverlayColor = pressedOverlay,
     )
 
@@ -118,10 +120,20 @@ class LiquidGlassView(context: Context, appContext: AppContext) : ExpoView(conte
       blurIntensity < 16 -> 5f
       else -> 7f
     }
-    elevation = dp(elevationDp)
+    elevation = if (shadowEnabled) dp(elevationDp) else 0f
     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
-      outlineAmbientShadowColor = if (isDark) Color.argb(110, 0, 0, 0) else Color.argb(60, 42, 55, 84)
-      outlineSpotShadowColor = if (isDark) Color.argb(140, 0, 0, 0) else Color.argb(72, 42, 55, 84)
+      outlineAmbientShadowColor =
+        if (shadowEnabled) {
+          if (isDark) Color.argb(110, 0, 0, 0) else Color.argb(60, 42, 55, 84)
+        } else {
+          Color.TRANSPARENT
+        }
+      outlineSpotShadowColor =
+        if (shadowEnabled) {
+          if (isDark) Color.argb(140, 0, 0, 0) else Color.argb(72, 42, 55, 84)
+        } else {
+          Color.TRANSPARENT
+        }
     }
     invalidate()
   }
@@ -197,6 +209,16 @@ class LiquidGlassView(context: Context, appContext: AppContext) : ExpoView(conte
 
   fun setTintColor(value: Int?) {
     tintColor = value
+    applyVisuals()
+  }
+
+  fun setBorderEnabled(value: Boolean?) {
+    borderEnabled = value ?: true
+    applyVisuals()
+  }
+
+  fun setShadowEnabled(value: Boolean?) {
+    shadowEnabled = value ?: true
     applyVisuals()
   }
 

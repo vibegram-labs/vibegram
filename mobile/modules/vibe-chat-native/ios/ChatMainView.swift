@@ -115,20 +115,16 @@ public final class ChatMainView: ExpoView,
   private let headerContentView = UIView()
 
   private let backGlassView = UIVisualEffectView(effect: nil)
-  private let backPressedOverlayView = UIView()
   private let backButton = UIButton(type: .system)
 
   private let titleGlassView = UIVisualEffectView(effect: nil)
-  private let titlePressedOverlayView = UIView()
   private let titleButton = UIButton(type: .custom)
 
   private let avatarGlassView = UIVisualEffectView(effect: nil)
-  private let avatarPressedOverlayView = UIView()
   private let avatarButton = UIButton(type: .system)
   private let avatarImageView = UIImageView()
   private let avatarFallbackIconView = UIImageView()
   private let menuGlassView = UIVisualEffectView(effect: nil)
-  private let menuPressedOverlayView = UIView()
   private let menuButton = UIButton(type: .system)
 
   private let profileHeaderContainer = UIView()
@@ -138,10 +134,8 @@ public final class ChatMainView: ExpoView,
   private let profileHeaderMaskGradientLayer = CAGradientLayer()
   private let profileHeaderContentView = UIView()
   private let profileBackGlassView = UIVisualEffectView(effect: nil)
-  private let profileBackPressedOverlayView = UIView()
   private let profileBackButton = UIButton(type: .system)
   private let profileMenuGlassView = UIVisualEffectView(effect: nil)
-  private let profileMenuPressedOverlayView = UIView()
   private let profileMenuButton = UIButton(type: .system)
 
   private let chatHeaderStack = UIStackView()
@@ -150,8 +144,6 @@ public final class ChatMainView: ExpoView,
   private let profileHeaderStack = UIStackView()
   private let profileTitleLabel = UILabel()
   private let profileSubtitleLabel = UILabel()
-
-  private let headerPressedOverlayColor = UIColor(white: 1.0, alpha: 0.08)
 
   private let rootWallpaperLayer = CAGradientLayer()
   private let pagesHost = UIView()
@@ -162,6 +154,7 @@ public final class ChatMainView: ExpoView,
   private let agentScrollView = UIScrollView()
   private let agentContentView = UIView()
   private let agentPromptNode = ChatMainProfileAgentPromptNode()
+  private let profileMembersNode = ChatMainProfileMembersNode()
   private let profileWallpaperLayer = CAGradientLayer()
   private let profileWallpaperPatternLayer = CAGradientLayer()
   private let profileWallpaperPatternMaskLayer = CALayer()
@@ -202,6 +195,7 @@ public final class ChatMainView: ExpoView,
   private var profileHandleText: String = ""
   private var profileBioText: String = ""
   private var groupMemberDisplayNameByUserId: [String: String] = [:]
+  private var groupMemberRoleByUserId: [String: String] = [:]
   private var groupMemberOrder: [String] = []
   private var groupMemberCount: Int?
   private var groupTypingUserIds: [String] = []
@@ -242,6 +236,7 @@ public final class ChatMainView: ExpoView,
   private var profileSwipeStartProgress: CGFloat = 0.0
   private var chatHeaderCenterMinWidth: CGFloat = 0.0
   private var standaloneProfileMode = false
+  private var profileHierarchyAttached = false
 
   private lazy var profileSwipeBackGesture: UIScreenEdgePanGestureRecognizer = {
     let gesture = UIScreenEdgePanGestureRecognizer(
@@ -311,6 +306,7 @@ public final class ChatMainView: ExpoView,
     layoutChrome()
     layoutPages()
     layoutProfileContent()
+    layoutProfileMembersContent()
     layoutAgentContent()
     applyPageState(animated: false, emitEvent: false)
   }
@@ -445,6 +441,7 @@ public final class ChatMainView: ExpoView,
 
   func setGroupMembers(_ rawMembers: [[String: Any]]) {
     var nextNamesByUserId: [String: String] = [:]
+    var nextRolesByUserId: [String: String] = [:]
     var nextOrder: [String] = []
     for raw in rawMembers {
       let rawId =
@@ -464,8 +461,19 @@ public final class ChatMainView: ExpoView,
         nextOrder.append(normalizedId)
       }
       nextNamesByUserId[normalizedId] = displayName.isEmpty ? trimmedId : displayName
+      if let rawRole =
+        (raw["role"] as? String)
+        ?? (raw["memberRole"] as? String)
+        ?? (raw["participantRole"] as? String)
+      {
+        let normalizedRole = rawRole.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if !normalizedRole.isEmpty {
+          nextRolesByUserId[normalizedId] = normalizedRole
+        }
+      }
     }
     groupMemberDisplayNameByUserId = nextNamesByUserId
+    groupMemberRoleByUserId = nextRolesByUserId
     groupMemberOrder = nextOrder
     refreshTypingStateFromEngine(force: true)
     updateHeaderTexts()
@@ -514,39 +522,43 @@ public final class ChatMainView: ExpoView,
     if standaloneProfileMode == value { return }
     standaloneProfileMode = value
     refreshAgentCardVisibility()
+    updateChatModeHeaderControls()
     if value {
+      syncProfileHierarchyForMode()
       chatListView.setInputBarEnabled(false)
       chatListView.setNativeSendEnabled(false)
       currentPage = .profile
       pendingNativePageTarget = nil
       pendingNativePageLockUntil = 0.0
       applyPageState(animated: false, emitEvent: false)
+    } else {
+      chatListView.setInputBarEnabled(true)
+      chatListView.setNativeSendEnabled(true)
+      currentPage = .chat
+      pendingNativePageTarget = nil
+      pendingNativePageLockUntil = 0.0
+      applyPageState(animated: false, emitEvent: false)
+      syncProfileHierarchyForMode()
     }
   }
 
   func setPage(_ value: String, animated: Bool) {
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if normalized == "profile" {
-      if standaloneProfileMode {
-        if currentPage != .profile {
-          currentPage = .profile
-          applyPageState(animated: animated, emitEvent: false)
-        }
-      } else {
-        onNativeEvent(["type": "headerAvatarPressed"])
+      if !standaloneProfileMode {
+        return
+      }
+      if currentPage != .profile {
+        currentPage = .profile
+        applyPageState(animated: animated, emitEvent: false)
       }
       return
     }
     if normalized == "agent" {
-      if standaloneProfileMode {
-        if currentPage != .profile {
-          currentPage = .profile
-          applyPageState(animated: animated, emitEvent: false)
-        }
-        presentAgentConfigEditor()
-      } else {
-        onNativeEvent(["type": "headerAgentPressed"])
+      if !standaloneProfileMode {
+        return
       }
+      onNativeEvent(["type": "headerAgentPressed"])
       return
     }
     if standaloneProfileMode {
@@ -601,6 +613,7 @@ public final class ChatMainView: ExpoView,
     pagesHost.addSubview(profilePage)
     profilePage.addSubview(profileScrollView)
     profileScrollView.addSubview(profileContentView)
+    profilePage.addSubview(profileMembersNode)
     profilePage.isHidden = true
     profilePage.alpha = 0
     profileWallpaperPatternLayer.mask = profileWallpaperPatternMaskLayer
@@ -617,9 +630,18 @@ public final class ChatMainView: ExpoView,
     agentPage.alpha = 0.0
     agentScrollView.showsVerticalScrollIndicator = false
     agentScrollView.alwaysBounceVertical = true
+    if #available(iOS 11.0, *) {
+      agentScrollView.contentInsetAdjustmentBehavior = .never
+    }
+    agentScrollView.contentInset = .zero
+    agentScrollView.scrollIndicatorInsets = .zero
     agentPromptNode.delegate = self
+    profileMembersNode.setMembers([])
+    profileMembersNode.onBackTap = { [weak self] in
+      self?.setProfileMembersVisible(false, animated: true)
+    }
 
-    profilePage.addSubview(profileHeaderContainer)
+    addSubview(profileHeaderContainer)
     profileHeaderContainer.clipsToBounds = false
     profileHeaderMaskView.isUserInteractionEnabled = false
     profileHeaderContainer.addSubview(profileHeaderMaskView)
@@ -633,11 +655,10 @@ public final class ChatMainView: ExpoView,
     profileHeaderMaskGradientLayer.locations = [0.0, 0.58, 1.0]
     profileHeaderMaskView.layer.mask = profileHeaderMaskGradientLayer
     profileHeaderContainer.addSubview(profileHeaderContentView)
+    profileHeaderContainer.layer.zPosition = 60.0
     profileHeaderContainer.alpha = 0.0
     profileHeaderContainer.isHidden = true
 
-    profileHeaderContentView.addSubview(profileBackButton)
-    profileHeaderContentView.addSubview(profileMenuButton)
     profileHeaderContentView.addSubview(profileHeaderStack)
 
     addSubview(headerContainer)
@@ -654,87 +675,41 @@ public final class ChatMainView: ExpoView,
     headerMaskGradientLayer.locations = [0.0, 0.58, 1.0]
     headerMaskView.layer.mask = headerMaskGradientLayer
     headerContainer.addSubview(headerContentView)
+    headerContainer.layer.zPosition = 50.0
 
-    headerContentView.addSubview(backButton)
-    headerContentView.addSubview(menuButton)
-    headerContentView.addSubview(titleButton)
-    headerContentView.addSubview(avatarButton)
+    headerContentView.addSubview(backGlassView)
+    headerContentView.addSubview(titleGlassView)
+    headerContentView.addSubview(avatarGlassView)
+    headerContentView.addSubview(menuGlassView)
+    backGlassView.contentView.addSubview(backButton)
+    titleGlassView.contentView.addSubview(titleButton)
+    avatarGlassView.contentView.addSubview(avatarButton)
+    menuGlassView.contentView.addSubview(menuButton)
 
-    [backButton, titleButton, avatarButton, menuButton].forEach { button in
+    profileHeaderContentView.addSubview(profileBackGlassView)
+    profileHeaderContentView.addSubview(profileMenuGlassView)
+    profileBackGlassView.contentView.addSubview(profileBackButton)
+    profileMenuGlassView.contentView.addSubview(profileMenuButton)
+
+    [backButton, titleButton, avatarButton, menuButton, profileBackButton, profileMenuButton].forEach
+    { button in
       button.backgroundColor = .clear
       button.contentHorizontalAlignment = .center
       button.contentVerticalAlignment = .center
       button.clipsToBounds = true
+      button.adjustsImageWhenHighlighted = true
     }
-
-    [profileBackButton, profileMenuButton].forEach { button in
-      button.backgroundColor = .clear
-      button.contentHorizontalAlignment = .center
-      button.contentVerticalAlignment = .center
-      button.clipsToBounds = true
-    }
-
-    backGlassView.isUserInteractionEnabled = false
-    backGlassView.clipsToBounds = true
-    backButton.addSubview(backGlassView)
-    backButton.sendSubviewToBack(backGlassView)
-
-    backPressedOverlayView.isUserInteractionEnabled = false
-    backPressedOverlayView.backgroundColor = headerPressedOverlayColor
-    backPressedOverlayView.alpha = 0
-    backButton.addSubview(backPressedOverlayView)
-
-    titleGlassView.isUserInteractionEnabled = false
-    titleGlassView.clipsToBounds = true
-    titleButton.addSubview(titleGlassView)
-    titleButton.sendSubviewToBack(titleGlassView)
-
-    titlePressedOverlayView.isUserInteractionEnabled = false
-    titlePressedOverlayView.backgroundColor = headerPressedOverlayColor
-    titlePressedOverlayView.alpha = 0
-    titleButton.addSubview(titlePressedOverlayView)
-
-    avatarGlassView.isUserInteractionEnabled = false
-    avatarGlassView.clipsToBounds = true
-    avatarButton.addSubview(avatarGlassView)
-    avatarButton.sendSubviewToBack(avatarGlassView)
-
-    avatarPressedOverlayView.isUserInteractionEnabled = false
-    avatarPressedOverlayView.backgroundColor = headerPressedOverlayColor
-    avatarPressedOverlayView.alpha = 0
-    avatarButton.addSubview(avatarPressedOverlayView)
-
-    menuGlassView.isUserInteractionEnabled = false
-    menuGlassView.clipsToBounds = true
-    menuButton.addSubview(menuGlassView)
-    menuButton.sendSubviewToBack(menuGlassView)
-
-    menuPressedOverlayView.isUserInteractionEnabled = false
-    menuPressedOverlayView.backgroundColor = headerPressedOverlayColor
-    menuPressedOverlayView.alpha = 0
-    menuButton.addSubview(menuPressedOverlayView)
 
     titleButton.addSubview(chatHeaderStack)
 
-    profileBackGlassView.isUserInteractionEnabled = false
-    profileBackGlassView.clipsToBounds = true
-    profileBackButton.addSubview(profileBackGlassView)
-    profileBackButton.sendSubviewToBack(profileBackGlassView)
-
-    profileBackPressedOverlayView.isUserInteractionEnabled = false
-    profileBackPressedOverlayView.backgroundColor = headerPressedOverlayColor
-    profileBackPressedOverlayView.alpha = 0
-    profileBackButton.addSubview(profileBackPressedOverlayView)
-
-    profileMenuGlassView.isUserInteractionEnabled = false
-    profileMenuGlassView.clipsToBounds = true
-    profileMenuButton.addSubview(profileMenuGlassView)
-    profileMenuButton.sendSubviewToBack(profileMenuGlassView)
-
-    profileMenuPressedOverlayView.isUserInteractionEnabled = false
-    profileMenuPressedOverlayView.backgroundColor = headerPressedOverlayColor
-    profileMenuPressedOverlayView.alpha = 0
-    profileMenuButton.addSubview(profileMenuPressedOverlayView)
+    [
+      backGlassView, titleGlassView, avatarGlassView, menuGlassView, profileBackGlassView,
+      profileMenuGlassView,
+    ].forEach { glassView in
+      glassView.clipsToBounds = true
+      glassView.layer.cornerCurve = .continuous
+      glassView.contentView.backgroundColor = .clear
+    }
 
     backButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
     backButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
@@ -742,6 +717,7 @@ public final class ChatMainView: ExpoView,
     menuButton.setImage(UIImage(systemName: "ellipsis"), for: .normal)
     menuButton.addTarget(self, action: #selector(handleMenuPressed), for: .touchUpInside)
     menuButton.isHidden = true
+    menuGlassView.isHidden = true
 
     profileBackButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
     profileBackButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
@@ -751,12 +727,6 @@ public final class ChatMainView: ExpoView,
     avatarButton.addTarget(self, action: #selector(handleAvatarPressed), for: .touchUpInside)
     avatarButton.addSubview(avatarImageView)
     avatarButton.addSubview(avatarFallbackIconView)
-    avatarButton.bringSubviewToFront(avatarPressedOverlayView)
-    menuButton.bringSubviewToFront(menuPressedOverlayView)
-    backButton.bringSubviewToFront(backPressedOverlayView)
-    titleButton.bringSubviewToFront(titlePressedOverlayView)
-    profileBackButton.bringSubviewToFront(profileBackPressedOverlayView)
-    profileMenuButton.bringSubviewToFront(profileMenuPressedOverlayView)
 
     let backSymbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     backButton.setPreferredSymbolConfiguration(backSymbolConfig, forImageIn: .normal)
@@ -797,6 +767,11 @@ public final class ChatMainView: ExpoView,
 
     profileScrollView.showsVerticalScrollIndicator = false
     profileScrollView.alwaysBounceVertical = true
+    if #available(iOS 11.0, *) {
+      profileScrollView.contentInsetAdjustmentBehavior = .never
+    }
+    profileScrollView.contentInset = .zero
+    profileScrollView.scrollIndicatorInsets = .zero
     profilePage.addGestureRecognizer(profileSwipeBackGesture)
 
     profileContentView.addSubview(profileAvatarView)
@@ -878,14 +853,59 @@ public final class ChatMainView: ExpoView,
     profileAgentRow.isHidden = true
 
     rebuildProfileTabs()
-    configureHeaderPressFeedback()
+    profileHierarchyAttached = true
     refreshHeaderGlass()
     updateAvatarViews()
+    syncProfileHierarchyForMode()
+    updateChatModeHeaderControls()
+  }
+
+  private func ensureProfileHierarchyAttached() {
+    guard !profileHierarchyAttached else { return }
+
+    if profilePage.superview !== self {
+      profilePage.removeFromSuperview()
+      insertSubview(profilePage, belowSubview: headerContainer)
+    }
+    if agentPage.superview !== self {
+      agentPage.removeFromSuperview()
+      insertSubview(agentPage, belowSubview: headerContainer)
+    }
+    if profileHeaderContainer.superview == nil {
+      addSubview(profileHeaderContainer)
+    }
+    bringSubviewToFront(profileHeaderContainer)
+    profileHierarchyAttached = true
+    setNeedsLayout()
+  }
+
+  private func detachProfileHierarchyIfNeeded() {
+    guard profileHierarchyAttached else { return }
+    profileHeaderContainer.removeFromSuperview()
+    profilePage.removeFromSuperview()
+    agentPage.removeFromSuperview()
+    profileHierarchyAttached = false
+  }
+
+  private func syncProfileHierarchyForMode() {
+    if standaloneProfileMode {
+      ensureProfileHierarchyAttached()
+    } else {
+      detachProfileHierarchyIfNeeded()
+    }
   }
 
   private func syncListDispatchers() {
     chatListView.onNativeEvent = onNativeEvent
     chatListView.onViewportChanged = onViewportChanged
+  }
+
+  private func updateChatModeHeaderControls() {
+    // Avatar is always visible in the header; tapping it navigates to profile
+    // only when standaloneProfileMode is enabled (otherwise JS handles navigation).
+    avatarButton.isHidden = false
+    avatarButton.isUserInteractionEnabled = true
+    titleButton.isUserInteractionEnabled = true
   }
 
   private func startObservingChatEngine() {
@@ -1827,15 +1847,20 @@ public final class ChatMainView: ExpoView,
     if targetTab != profileActiveTab {
       profileActiveTab = targetTab
       profileTabContentNeedsReload = true
+      rebuildProfileTabs()
+      setNeedsLayout()
     }
-    setPage("profile", animated: true)
 
-    if pinnedBannerIsFile,
-      let mediaUrl = pinnedBannerMediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
-      !mediaUrl.isEmpty
-    {
-      DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-        self?.chatListView.openPinnedDocument(urlString: mediaUrl)
+    if standaloneProfileMode {
+      setPage("profile", animated: true)
+
+      if pinnedBannerIsFile,
+        let mediaUrl = pinnedBannerMediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+        !mediaUrl.isEmpty
+      {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
+          self?.chatListView.openPinnedDocument(urlString: mediaUrl)
+        }
       }
     }
 
@@ -1844,6 +1869,7 @@ public final class ChatMainView: ExpoView,
       "messageId": messageId,
       "isFile": pinnedBannerIsFile,
       "tab": targetTab.rawValue,
+      "standaloneProfileMode": standaloneProfileMode,
     ]
     if let title = pinnedBannerTitle {
       payload["title"] = title
@@ -1893,77 +1919,9 @@ public final class ChatMainView: ExpoView,
     }
   }
 
-  private func configureHeaderPressFeedback() {
-    let controls: [UIControl] = [
-      backButton, titleButton, avatarButton, menuButton, profileBackButton, profileMenuButton,
-    ]
-    controls.forEach { control in
-      control.addTarget(
-        self, action: #selector(handleHeaderPressDown(_:)), for: [.touchDown, .touchDragEnter])
-      control.addTarget(
-        self,
-        action: #selector(handleHeaderPressUp(_:)),
-        for: [.touchUpInside, .touchUpOutside, .touchCancel, .touchDragExit, .touchDragOutside]
-      )
-    }
-  }
-
   private func markPendingNativePageChange(_ page: ChatMainPage) {
     pendingNativePageTarget = page
     pendingNativePageLockUntil = CACurrentMediaTime() + 2.0
-  }
-
-  @objc private func handleHeaderPressDown(_ sender: UIControl) {
-    setHeaderControlPressed(sender, isPressed: true)
-  }
-
-  @objc private func handleHeaderPressUp(_ sender: UIControl) {
-    setHeaderControlPressed(sender, isPressed: false)
-  }
-
-  private func setHeaderControlPressed(_ control: UIControl, isPressed: Bool) {
-    let duration: TimeInterval = isPressed ? 0.1 : 0.22
-    let damping: CGFloat = isPressed ? 1.0 : 0.72
-
-    UIView.animate(
-      withDuration: duration,
-      delay: 0,
-      usingSpringWithDamping: damping,
-      initialSpringVelocity: 0.25,
-      options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState]
-    ) {
-      if control === self.backButton {
-        let scale: CGFloat = isPressed ? 0.9 : 1.0
-        self.backButton.imageView?.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.backGlassView.alpha = isPressed ? 0.92 : 1.0
-        self.backPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
-      } else if control === self.titleButton {
-        let scale: CGFloat = isPressed ? 0.992 : 1.0
-        self.titleButton.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.titleGlassView.alpha = isPressed ? 0.92 : 1.0
-        self.titlePressedOverlayView.alpha = isPressed ? 1.0 : 0.0
-      } else if control === self.avatarButton {
-        let scale: CGFloat = isPressed ? 0.96 : 1.0
-        self.avatarButton.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.avatarGlassView.alpha = isPressed ? 0.92 : 1.0
-        self.avatarPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
-      } else if control === self.menuButton {
-        let scale: CGFloat = isPressed ? 0.96 : 1.0
-        self.menuButton.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.menuGlassView.alpha = isPressed ? 0.92 : 1.0
-        self.menuPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
-      } else if control === self.profileBackButton {
-        let scale: CGFloat = isPressed ? 0.9 : 1.0
-        self.profileBackButton.imageView?.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.profileBackGlassView.alpha = isPressed ? 0.92 : 1.0
-        self.profileBackPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
-      } else if control === self.profileMenuButton {
-        let scale: CGFloat = isPressed ? 0.96 : 1.0
-        self.profileMenuButton.transform = CGAffineTransform(scaleX: scale, y: scale)
-        self.profileMenuGlassView.alpha = isPressed ? 0.92 : 1.0
-        self.profileMenuPressedOverlayView.alpha = isPressed ? 1.0 : 0.0
-      }
-    }
   }
 
   private func layoutChrome() {
@@ -1974,15 +1932,16 @@ public final class ChatMainView: ExpoView,
     headerMaskBlurView.frame = headerMaskView.bounds
     headerMaskOverlayView.frame = headerMaskBlurView.bounds
     headerMaskGradientLayer.frame = headerMaskView.bounds
+    headerContainer.bringSubviewToFront(headerContentView)
 
     let contentY = safeTop + 8.0
     headerContentView.frame = CGRect(
       x: 12.0, y: contentY, width: max(0.0, bounds.width - 24.0), height: 44.0)
 
-    backButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
-    avatarButton.frame = CGRect(
+    backGlassView.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
+    avatarGlassView.frame = CGRect(
       x: max(0.0, headerContentView.bounds.width - 44.0), y: 0.0, width: 44.0, height: 44.0)
-    menuButton.frame = .zero
+    menuGlassView.frame = .zero
 
     let maxCenterWidth = max(0.0, headerContentView.bounds.width * 0.65)
     let chatReq = max(
@@ -1990,35 +1949,28 @@ public final class ChatMainView: ExpoView,
     let computedCenterWidth = min(maxCenterWidth, max(160.0, chatReq + 36.0))
     chatHeaderCenterMinWidth = max(chatHeaderCenterMinWidth, computedCenterWidth)
     let centerWidth = min(maxCenterWidth, max(chatHeaderCenterMinWidth, computedCenterWidth))
-    titleButton.frame = CGRect(
+    titleGlassView.frame = CGRect(
       x: (headerContentView.bounds.width - centerWidth) * 0.5,
       y: 0.0,
       width: centerWidth,
       height: 44.0
     )
 
+    backButton.frame = backGlassView.bounds
+    titleButton.frame = titleGlassView.bounds
+    avatarButton.frame = avatarGlassView.bounds
+    menuButton.frame = menuGlassView.bounds
+
     [backButton, avatarButton, titleButton, menuButton].forEach { control in
       control.layer.cornerRadius = control.bounds.height / 2.0
     }
-    [
-      backGlassView, avatarGlassView, titleGlassView, menuGlassView, backPressedOverlayView,
-      avatarPressedOverlayView,
-      menuPressedOverlayView,
-      titlePressedOverlayView,
-    ]
-    .forEach { view in
-      view.frame = view.superview?.bounds ?? .zero
-      view.layer.cornerRadius = (view.superview?.bounds.height ?? 0) / 2.0
+    [backGlassView, avatarGlassView, titleGlassView, menuGlassView]
+      .forEach { view in
+      view.layer.cornerRadius = view.bounds.height / 2.0
     }
 
-    avatarButton.layer.cornerRadius = 22.0
     avatarImageView.frame = avatarButton.bounds
     avatarFallbackIconView.frame = avatarButton.bounds.insetBy(dx: 12.0, dy: 12.0)
-    avatarPressedOverlayView.frame = avatarButton.bounds
-    if let imageView = backButton.imageView {
-      backButton.bringSubviewToFront(imageView)
-    }
-    backButton.bringSubviewToFront(backPressedOverlayView)
 
     let titleBounds = titleButton.bounds.insetBy(dx: 12.0, dy: 4.0)
     chatHeaderStack.frame = titleBounds
@@ -2028,11 +1980,13 @@ public final class ChatMainView: ExpoView,
     profileHeaderBlurView.frame = profileHeaderMaskView.bounds
     profileHeaderOverlayView.frame = profileHeaderBlurView.bounds
     profileHeaderMaskGradientLayer.frame = profileHeaderMaskView.bounds
+    profileHeaderContainer.bringSubviewToFront(profileHeaderContentView)
     profileHeaderContentView.frame = CGRect(
       x: 12.0, y: contentY, width: max(0.0, bounds.width - 24.0), height: 44.0)
+    profileHeaderContentView.isUserInteractionEnabled = true
 
-    profileBackButton.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
-    profileMenuButton.frame = CGRect(
+    profileBackGlassView.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
+    profileMenuGlassView.frame = CGRect(
       x: max(0.0, profileHeaderContentView.bounds.width - 44.0), y: 0.0, width: 44.0, height: 44.0)
 
     let profileReq = max(
@@ -2046,24 +2000,15 @@ public final class ChatMainView: ExpoView,
     )
     profileHeaderStack.frame = profileCenterFrame.insetBy(dx: 12.0, dy: 4.0)
 
+    profileBackButton.frame = profileBackGlassView.bounds
+    profileMenuButton.frame = profileMenuGlassView.bounds
+
     [profileBackButton, profileMenuButton].forEach { control in
       control.layer.cornerRadius = control.bounds.height / 2.0
     }
-    [
-      profileBackGlassView, profileMenuGlassView, profileBackPressedOverlayView,
-      profileMenuPressedOverlayView,
-    ].forEach { view in
-      view.frame = view.superview?.bounds ?? .zero
-      view.layer.cornerRadius = (view.superview?.bounds.height ?? 0) / 2.0
+    [profileBackGlassView, profileMenuGlassView].forEach { view in
+      view.layer.cornerRadius = view.bounds.height / 2.0
     }
-    if let imageView = profileBackButton.imageView {
-      profileBackButton.bringSubviewToFront(imageView)
-    }
-    profileBackButton.bringSubviewToFront(profileBackPressedOverlayView)
-    if let imageView = profileMenuButton.imageView {
-      profileMenuButton.bringSubviewToFront(imageView)
-    }
-    profileMenuButton.bringSubviewToFront(profileMenuPressedOverlayView)
   }
 
   private func layoutPages() {
@@ -2094,26 +2039,31 @@ public final class ChatMainView: ExpoView,
     )
     chatPage.bringSubviewToFront(pinnedBannerView)
 
-    profilePage.frame = CGRect(
-      x: 0.0, y: -headerHeight,
-      width: pageWidth, height: pageHeight + headerHeight)
+    if standaloneProfileMode {
+      profilePage.frame = bounds
+    } else {
+      profilePage.frame = CGRect(
+        x: 0.0, y: -headerHeight,
+        width: pageWidth, height: pageHeight + headerHeight)
+    }
     profileWallpaperLayer.frame = profilePage.bounds
     profileWallpaperPatternLayer.frame = profilePage.bounds
     profileWallpaperPatternMaskLayer.frame = profileWallpaperPatternLayer.bounds
-    profileScrollView.frame = CGRect(
-      x: 0.0, y: headerHeight,
-      width: pageWidth, height: pageHeight)
+    profileScrollView.frame = profilePage.bounds
 
-    agentPage.frame = CGRect(
-      x: 0.0, y: -headerHeight,
-      width: pageWidth, height: pageHeight + headerHeight)
-    agentScrollView.frame = CGRect(
-      x: 0.0, y: headerHeight,
-      width: pageWidth, height: pageHeight)
+    if standaloneProfileMode {
+      agentPage.frame = bounds
+    } else {
+      agentPage.frame = CGRect(
+        x: 0.0, y: -headerHeight,
+        width: pageWidth, height: pageHeight + headerHeight)
+    }
+    agentScrollView.frame = agentPage.bounds
   }
 
   private func layoutProfileContent() {
     let width = max(1.0, profileScrollView.bounds.width)
+    let headerHeight = safeAreaInsets.top + 60.0
     let sideInset: CGFloat = 16.0
     let textInset: CGFloat = 24.0
 
@@ -2121,7 +2071,7 @@ public final class ChatMainView: ExpoView,
 
     let avatarSize: CGFloat = 118.0
     profileAvatarView.frame = CGRect(
-      x: (width - avatarSize) * 0.5, y: 30.0, width: avatarSize, height: avatarSize)
+      x: (width - avatarSize) * 0.5, y: headerHeight + 30.0, width: avatarSize, height: avatarSize)
     profileAvatarView.layer.cornerRadius = avatarSize * 0.5
     profileAvatarImageView.frame = profileAvatarView.bounds
     profileAvatarFallbackIconView.frame = profileAvatarView.bounds.insetBy(dx: 30.0, dy: 30.0)
@@ -2250,15 +2200,26 @@ public final class ChatMainView: ExpoView,
     let sideInset: CGFloat = 16.0
     let cardWidth = width - (sideInset * 2.0)
     let cardHeight = agentPromptNode.preferredHeight(for: cardWidth)
-
-    agentContentView.frame = CGRect(x: 0.0, y: 0.0, width: width, height: cardHeight + 36.0)
-    agentPromptNode.frame = CGRect(
-      x: sideInset,
-      y: 18.0,
-      width: cardWidth,
-      height: cardHeight
-    )
+    let contentHeight = max(cardHeight + 36.0, agentScrollView.bounds.height)
+    agentContentView.frame = CGRect(x: 0.0, y: 0.0, width: width, height: contentHeight)
+    agentPromptNode.frame = CGRect(x: sideInset, y: 18.0, width: cardWidth, height: cardHeight)
     agentScrollView.contentSize = CGSize(width: width, height: agentContentView.bounds.height)
+  }
+
+  private func layoutProfileMembersContent() {
+    profileMembersNode.frame = profilePage.bounds
+    profileMembersNode.setTopInset(safeAreaInsets.top)
+    syncProfileMembersLayoutState()
+  }
+
+  private func syncProfileMembersLayoutState() {
+    profileMembersNode.syncPresentation(hostScrollView: profileScrollView)
+  }
+
+  private func setProfileMembersVisible(_ visible: Bool, animated: Bool) {
+    if visible == profileMembersNode.isPresented { return }
+    profileMembersNode.setPresented(visible, animated: animated, hostScrollView: profileScrollView)
+    updateHeaderTexts()
   }
 
   private func applyTheme() {
@@ -2285,10 +2246,10 @@ public final class ChatMainView: ExpoView,
     }
     headerMaskOverlayView.backgroundColor = chatBackground.withAlphaComponent(0.88)
     rootWallpaperLayer.isHidden = true
-    backGlassView.backgroundColor = chatBackground.withAlphaComponent(0.10)
-    titleGlassView.backgroundColor = chatBackground.withAlphaComponent(0.10)
-    avatarGlassView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.22)
-    menuGlassView.backgroundColor = chatBackground.withAlphaComponent(0.10)
+    backGlassView.contentView.backgroundColor = chatBackground.withAlphaComponent(0.10)
+    titleGlassView.contentView.backgroundColor = chatBackground.withAlphaComponent(0.10)
+    avatarGlassView.contentView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.22)
+    menuGlassView.contentView.backgroundColor = chatBackground.withAlphaComponent(0.10)
     refreshHeaderGlass()
 
     profileHeaderContainer.backgroundColor = .clear
@@ -2296,8 +2257,8 @@ public final class ChatMainView: ExpoView,
       UIBlurEffect(style: isDarkTheme ? .systemThinMaterialDark : .systemThinMaterialLight)
     profileHeaderOverlayView.backgroundColor =
       profileBackground.withAlphaComponent(isDarkTheme ? 0.42 : 0.72)
-    profileBackGlassView.backgroundColor = profileCardBg.withAlphaComponent(0.68)
-    profileMenuGlassView.backgroundColor = profileCardBg.withAlphaComponent(0.68)
+    profileBackGlassView.contentView.backgroundColor = profileCardBg.withAlphaComponent(0.68)
+    profileMenuGlassView.contentView.backgroundColor = profileCardBg.withAlphaComponent(0.68)
 
     backButton.tintColor = text
     menuButton.tintColor = text
@@ -2317,6 +2278,7 @@ public final class ChatMainView: ExpoView,
     profilePage.backgroundColor = profileBackground
     profileScrollView.backgroundColor = profileBackground
     profileContentView.backgroundColor = profileBackground
+    profileMembersNode.applyTheme(backgroundColor: profileBackground)
     agentPage.backgroundColor = profileBackground
     agentScrollView.backgroundColor = profileBackground
     agentContentView.backgroundColor = profileBackground
@@ -2510,13 +2472,19 @@ public final class ChatMainView: ExpoView,
         title: "Members",
         subtitle: resolvedGroupMembersRowSubtitle(),
         titleColor: appearance.bubbleMeGradient.last ?? appearance.textColorMe,
-        showsSeparator: true
+        showsSeparator: true,
+        iconName: "person.3.fill",
+        iconTintColor: appearance.textColorMe.withAlphaComponent(0.9),
+        iconBackgroundColor: appearance.bubbleThemColor.withAlphaComponent(0.45)
       )
       profileBioRow.configure(
-        title: "Typing",
+        title: "Live status",
         subtitle: resolvedGroupTypingSubtitle() ?? "No one typing right now",
         titleColor: nil,
-        showsSeparator: showsAgentRow
+        showsSeparator: showsAgentRow,
+        iconName: "waveform.path.ecg",
+        iconTintColor: appearance.textColorThem.withAlphaComponent(0.95),
+        iconBackgroundColor: appearance.bubbleThemColor.withAlphaComponent(0.35)
       )
 
       let agentName = normalizedAgentString(agentConfig?["name"]) ?? "Vibe AI"
@@ -2525,10 +2493,13 @@ public final class ChatMainView: ExpoView,
       let docsLabel = docsCount == 1 ? "1 file" : "\(docsCount) files"
       let stateLabel = enabled ? "Enabled" : "Disabled"
       profileAgentRow.configure(
-        title: "AI Agent",
+        title: "Configuration",
         subtitle: "\(stateLabel) • \(agentName) • \(docsLabel)",
         titleColor: nil,
-        showsSeparator: false
+        showsSeparator: false,
+        iconName: "slider.horizontal.3",
+        iconTintColor: appearance.textColorThem.withAlphaComponent(0.95),
+        iconBackgroundColor: appearance.bubbleThemColor.withAlphaComponent(0.35)
       )
     } else {
       let usernameRowSubtitle: String
@@ -2547,20 +2518,29 @@ public final class ChatMainView: ExpoView,
         title: "Username",
         subtitle: usernameRowSubtitle,
         titleColor: appearance.bubbleMeGradient.last ?? appearance.textColorMe,
-        showsSeparator: hasBioRow
+        showsSeparator: hasBioRow,
+        iconName: "at",
+        iconTintColor: appearance.textColorMe.withAlphaComponent(0.95),
+        iconBackgroundColor: appearance.bubbleThemColor.withAlphaComponent(0.35)
       )
       profileBioRow.configure(
         title: "Bio",
         subtitle: hasBioRow ? profileBioText : "No bio",
         titleColor: nil,
-        showsSeparator: false
+        showsSeparator: false,
+        iconName: "text.quote",
+        iconTintColor: appearance.textColorThem.withAlphaComponent(0.95),
+        iconBackgroundColor: appearance.bubbleThemColor.withAlphaComponent(0.35)
       )
 
       profileAgentRow.configure(
         title: "AI Agent",
         subtitle: "Available in group profile",
         titleColor: nil,
-        showsSeparator: false
+        showsSeparator: false,
+        iconName: "sparkles",
+        iconTintColor: appearance.textColorThem.withAlphaComponent(0.95),
+        iconBackgroundColor: appearance.bubbleThemColor.withAlphaComponent(0.35)
       )
     }
 
@@ -2740,6 +2720,35 @@ public final class ChatMainView: ExpoView,
   private func applyPageState(animated: Bool, emitEvent: Bool) {
     updateHeaderTexts()
 
+    if standaloneProfileMode {
+      currentPage = .profile
+      headerContainer.alpha = 0.0
+      headerContainer.isUserInteractionEnabled = false
+      profileHeaderContainer.isHidden = false
+      profileHeaderContainer.alpha = 1.0
+      profileHeaderContainer.isUserInteractionEnabled = true
+      profileHeaderStack.transform = .identity
+      profileMenuGlassView.alpha = 1.0
+      profilePage.isHidden = false
+      profilePage.alpha = 1.0
+      profilePage.transform = .identity
+      agentPage.isHidden = true
+      agentPage.alpha = 0.0
+      agentPage.transform = .identity
+      pinnedBannerView.alpha = 0.0
+      avatarGlassView.alpha = 0.0
+      bringSubviewToFront(profileHeaderContainer)
+      applyHeaderGlassMorph(chatFactor: 0.0)
+      if emitEvent {
+        onNativeEvent(["type": "mainPageChanged", "page": currentPage.rawValue])
+      }
+      return
+    }
+
+    if currentPage != .chat {
+      currentPage = .chat
+    }
+
     let width = pagesHost.bounds.width
     let profileOffscreenRight = CGAffineTransform(translationX: width, y: 0.0)
     let profileOffscreenLeft = CGAffineTransform(translationX: -width, y: 0.0)
@@ -2748,6 +2757,10 @@ public final class ChatMainView: ExpoView,
     let isChat = currentPage == .chat
     let isProfile = currentPage == .profile
     let isAgent = currentPage == .agent
+
+    if !isProfile && profileMembersNode.isPresented {
+      setProfileMembersVisible(false, animated: false)
+    }
 
     let chatHeaderAlpha: CGFloat = isChat ? 1.0 : 0.0
     let profileHeaderAlpha: CGFloat = isChat ? 0.0 : 1.0
@@ -2764,12 +2777,14 @@ public final class ChatMainView: ExpoView,
       profilePage.alpha = 1.0
       profilePage.isHidden = false
       profileHeaderContainer.isHidden = false
+      bringSubviewToFront(profileHeaderContainer)
     }
     if isAgent && agentPage.isHidden {
       agentPage.transform = agentOffscreenRight
       agentPage.alpha = 1.0
       agentPage.isHidden = false
       profileHeaderContainer.isHidden = false
+      bringSubviewToFront(profileHeaderContainer)
     }
 
     headerContainer.isUserInteractionEnabled = isChat
@@ -2782,6 +2797,11 @@ public final class ChatMainView: ExpoView,
     let agentTargetTransform = isAgent ? CGAffineTransform.identity : agentOffscreenRight
 
     let apply = {
+      if isChat {
+        self.bringSubviewToFront(self.headerContainer)
+      } else {
+        self.bringSubviewToFront(self.profileHeaderContainer)
+      }
       self.profilePage.transform = profileTargetTransform
       self.agentPage.transform = agentTargetTransform
       self.headerContainer.alpha = chatHeaderAlpha
@@ -2790,10 +2810,11 @@ public final class ChatMainView: ExpoView,
       self.profileHeaderStack.alpha = 1.0
       self.chatHeaderStack.transform = chatHeaderTransform
       self.profileHeaderStack.transform = profileHeaderTransform
-      self.avatarButton.alpha = avatarAlpha
+      self.avatarGlassView.alpha = avatarAlpha
       self.pinnedBannerView.alpha = (isChat && !self.pinnedBannerView.isHidden) ? 1.0 : 0.0
-      self.menuButton.alpha = 0.0
-      self.profileMenuButton.alpha = isProfile ? 1.0 : 0.0
+      self.menuGlassView.alpha = 0.0
+      self.profileMenuGlassView.alpha = isProfile ? 1.0 : 0.0
+      self.applyHeaderGlassMorph(chatFactor: isChat ? 1.0 : 0.0)
     }
 
     if animated {
@@ -2893,16 +2914,27 @@ public final class ChatMainView: ExpoView,
     profileHeaderContainer.alpha = 1.0 - clamped
     chatHeaderStack.transform = CGAffineTransform(translationX: -14.0 * (1.0 - clamped), y: 0.0)
     profileHeaderStack.transform = CGAffineTransform(translationX: 14.0 * clamped, y: 0.0)
-    avatarButton.alpha = clamped
-    menuButton.alpha = 0.0
+    avatarGlassView.alpha = clamped
+    menuGlassView.alpha = 0.0
     headerContainer.isUserInteractionEnabled = false
     profileHeaderContainer.isUserInteractionEnabled = false
+    applyHeaderGlassMorph(chatFactor: clamped)
+  }
+
+  private func applyHeaderGlassMorph(chatFactor: CGFloat) {
+    _ = chatFactor
+    titleGlassView.transform = .identity
+    avatarGlassView.transform = .identity
+    menuGlassView.transform = .identity
+    profileBackGlassView.transform = .identity
+    profileMenuGlassView.transform = .identity
   }
 
   override public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer)
     -> Bool
   {
     if gestureRecognizer === profileSwipeBackGesture {
+      if profileMembersNode.isPresented { return false }
       if standaloneProfileMode { return false }
       return currentPage == .profile
     }
@@ -2910,25 +2942,13 @@ public final class ChatMainView: ExpoView,
   }
 
   @objc private func handleBackPressed() {
-    if standaloneProfileMode {
-      if currentPage == .agent {
-        currentPage = .profile
-        applyPageState(animated: true, emitEvent: false)
-        return
-      }
-      onNativeEvent(["type": "headerBack"])
+    if profileMembersNode.isPresented {
+      setProfileMembersVisible(false, animated: true)
       return
     }
-    if currentPage == .agent {
-      markPendingNativePageChange(.profile)
+    if standaloneProfileMode && currentPage == .agent {
       currentPage = .profile
-      applyPageState(animated: true, emitEvent: true)
-      return
-    }
-    if currentPage == .profile {
-      markPendingNativePageChange(.chat)
-      currentPage = .chat
-      applyPageState(animated: true, emitEvent: true)
+      applyPageState(animated: true, emitEvent: false)
       return
     }
     onNativeEvent(["type": "headerBack"])
@@ -2936,7 +2956,11 @@ public final class ChatMainView: ExpoView,
 
   @objc private func handleAvatarPressed() {
     guard currentPage == .chat else { return }
-    onNativeEvent(["type": "headerAvatarPressed"])
+    if !standaloneProfileMode {
+      return
+    }
+    currentPage = .profile
+    applyPageState(animated: true, emitEvent: false)
   }
 
   @objc private func handleMenuPressed() {
@@ -2976,6 +3000,7 @@ public final class ChatMainView: ExpoView,
     onNativeEvent([
       "type": "profileUsernamePressed",
       "handle": profileHandleText,
+      "openMembers": isGroupOrChannel,
     ])
   }
 
@@ -2996,7 +3021,35 @@ public final class ChatMainView: ExpoView,
   }
 
   @objc private func handleAgentRowTapped() {
-    presentAgentConfigEditor()
+    onNativeEvent(["type": "headerAgentPressed"])
+  }
+
+  private func presentMembersPage() {
+    guard isGroupOrChannel else { return }
+    if currentPage != .profile {
+      currentPage = .profile
+      applyPageState(animated: true, emitEvent: false)
+    }
+
+    var seen = Set<String>()
+    var members: [ChatMainProfileMembersItem] = []
+    for rawId in groupMemberOrder {
+      let normalized = rawId.uppercased()
+      guard seen.insert(normalized).inserted else { continue }
+      let role = (groupMemberRoleByUserId[normalized] ?? "member").lowercased()
+      let isAdmin = role == "owner" || role == "admin"
+      members.append(
+        .init(
+          userId: normalized,
+          name: resolvedGroupMemberDisplayName(normalized),
+          roleLabel: role == "owner" ? "Owner" : (isAdmin ? "Admin" : "Member"),
+          isAdmin: isAdmin
+        )
+      )
+    }
+    profileMembersNode.setMembers(members)
+    setProfileMembersVisible(true, animated: true)
+    setNeedsLayout()
   }
 
   // MARK: - Agent Config
@@ -3098,36 +3151,13 @@ public final class ChatMainView: ExpoView,
 
   private func presentAgentConfigEditor() {
     guard standaloneProfileMode, isGroupOrChannel else { return }
+    setProfileMembersVisible(false, animated: false)
+    currentPage = .agent
+    applyPageState(animated: true, emitEvent: false)
+    setNeedsLayout()
+
     let currentId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !currentId.isEmpty else { return }
-    guard let presenter = topMostViewController() else { return }
-
-    if presenter is ChatAgentConfigViewController {
-      return
-    }
-
-    let controller = ChatAgentConfigViewController()
-    controller.chatId = currentId
-    controller.agentConfig = agentConfig
-    controller.documents = getAgentDocuments()
-    controller.onSave = { [weak self] config in
-      self?.applyAgentConfigUpdate(config)
-    }
-    controller.onDelete = { [weak self] in
-      self?.applyAgentConfigDeletion()
-    }
-
-    if let nav = (presenter as? UINavigationController) ?? presenter.navigationController {
-      if nav.topViewController is ChatAgentConfigViewController {
-        return
-      }
-      nav.pushViewController(controller, animated: true)
-      return
-    }
-
-    let nav = UINavigationController(rootViewController: controller)
-    nav.modalPresentationStyle = .fullScreen
-    presenter.present(nav, animated: true)
   }
 
   private func normalizedAgentConfig(_ config: [String: Any]?, fallbackChatId: String)

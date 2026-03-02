@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Socket as PhxSocket, Channel } from 'phoenix';
+import { AppState, AppStateStatus } from 'react-native';
 import { Buffer } from 'buffer';
 import ProxyManager from './ProxyManager';
 import AuthManager from './AuthManager';
@@ -39,6 +40,72 @@ const MEDIA_LOCAL_FILE_MISSING = 'MEDIA_LOCAL_FILE_MISSING';
 const LOCAL_MEDIA_MISSING_USER_MESSAGE = 'Local media file is no longer available. Please record/select again.';
 const RETRY_DISPATCH_GAP_MS = 320;
 const STALE_SENDING_RETRY_MS = 14_000;
+const CHAT_STORE_STORAGE_KEY = 'vibe-chat-store';
+const PERSISTED_TEXT_LIMIT = 420;
+
+const trimPersistedText = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const trimmed = value.trim();
+    if (!trimmed) return undefined;
+    return trimmed.length > PERSISTED_TEXT_LIMIT
+        ? `${trimmed.slice(0, PERSISTED_TEXT_LIMIT)}…`
+        : trimmed;
+};
+
+const sanitizeMessageForPersist = (message?: Message): Message | undefined => {
+    if (!message) return undefined;
+    return {
+        id: message.id,
+        fromId: message.fromId,
+        chatId: message.chatId,
+        encryptedContent: '', // avoid large payloads in AsyncStorage
+        type: message.type,
+        timestamp: message.timestamp,
+        status: message.status,
+        mediaUrl: message.mediaUrl,
+        fileName: message.fileName,
+        fileSize: message.fileSize,
+        duration: message.duration,
+        replyToId: message.replyToId,
+        plaintext: trimPersistedText(message.plaintext),
+        caption: trimPersistedText(message.caption),
+        isEdited: message.isEdited,
+        editedAt: message.editedAt,
+        viewOnce: message.viewOnce,
+        isVideoNote: message.isVideoNote,
+    };
+};
+
+const sanitizeChatForPersist = (chat: Chat): Chat => {
+    const sanitizedLastMessage = sanitizeMessageForPersist(chat.lastMessage);
+    return {
+        ...chat,
+        messages: [], // do not persist full history; it can exceed CursorWindow on Android
+        lastMessage: sanitizedLastMessage,
+        previewLastMessage:
+            trimPersistedText(chat.previewLastMessage)
+            || trimPersistedText(sanitizedLastMessage?.plaintext)
+            || trimPersistedText(sanitizedLastMessage?.caption)
+            || chat.previewLastMessage,
+    };
+};
+
+const normalizeHydratedChats = (raw: unknown): Chat[] => {
+    if (!Array.isArray(raw)) return [];
+    return raw
+        .filter((entry): entry is Chat => !!entry && typeof entry === 'object' && typeof (entry as any).chatId === 'string')
+        .map((chat) => ({
+            ...chat,
+            messages: [],
+            lastMessage: sanitizeMessageForPersist(chat.lastMessage),
+            previewLastMessage: trimPersistedText(chat.previewLastMessage) || chat.previewLastMessage,
+        }));
+};
+
+const isCursorWindowHydrationError = (error: unknown): boolean => {
+    const message = String((error as any)?.message || error || '').toLowerCase();
+    return message.includes('cursorwindow') || message.includes('row too big');
+};
 
 const isRecoverableSendError = (error: unknown) => {
     const message = String((error as any)?.message || error || '').toLowerCase();
@@ -338,6 +405,7 @@ interface ChatState {
 
 // Module-level flag to ensure socket is only initialized once
 let socketInitialized = false;
+let appStateSubscription: { remove: () => void } | null = null;
 
 // Module-level socket and channel variables (not persisted)
 let socket: PhxSocket | null = null;
@@ -995,12 +1063,16 @@ const warmFriendPublicKey = async (
         const baseUrl = proxy.getBestUrl();
         const auth = AuthManager.getInstance().getSession();
         try {
+            const controller = new AbortController();
+            const timeoutId = setTimeout(() => controller.abort(), 12000);
             const res = await fetch(`${baseUrl}/api/user/${friendId}`, {
+                signal: controller.signal,
                 headers: {
                     'ngrok-skip-browser-warning': 'true',
                     ...buildAuthHeaders(auth),
                 }
             });
+            clearTimeout(timeoutId);
             if (!res.ok) return null;
 
             const userData = await res.json();
@@ -1215,6 +1287,10 @@ export const resetSocketConnection = () => {
     pendingRetryPumpRunning.clear();
     pendingRetryPumpNeedsAnotherPass.clear();
 
+    // Remove foreground reconnect listener
+    appStateSubscription?.remove();
+    appStateSubscription = null;
+
     // Reset flag so socket can be re-initialized
     socketInitialized = false;
     disconnectChatEngineShadowTransport();
@@ -1268,8 +1344,10 @@ export const useChatStore = create<ChatState>()(
 
                 socket = new PhxSocket(socketUrl, {
                     params: { token: auth.loginToken || auth.userId },
-                    // Disable automatic reconnection to prevent spam when server is unavailable
-                    reconnectAfterMs: () => 10000, // Wait 10 seconds between reconnect attempts
+                    // Fail fast if connection drops, check more frequently
+                    heartbeatIntervalMs: 10000,
+                    // Use backoff: 1s, 2s, 5s, 10s max
+                    reconnectAfterMs: (tries) => [1000, 2000, 5000, 10000][tries - 1] || 10000,
                 });
 
                 socket.connect();
@@ -1654,6 +1732,30 @@ export const useChatStore = create<ChatState>()(
                     // Don't clear channels here - let onClose handle it
                     // Just update connection status
                     set({ isConnected: false });
+                });
+
+                // Reconnect immediately when the app returns to the foreground.
+                // Without this, the Phoenix heartbeat timeout (10s) plus reconnect
+                // backoff (1-10s) can delay reconnection by 10-13s.
+                appStateSubscription?.remove();
+                let lastAppState: AppStateStatus = AppState.currentState;
+                appStateSubscription = AppState.addEventListener('change', (nextState: AppStateStatus) => {
+                    if (lastAppState.match(/inactive|background/) && nextState === 'active') {
+                        if (socket && !get().isConnected) {
+                            chatStoreLog('[ChatStore] App foregrounded — forcing socket reconnect');
+                            try {
+                                // Disconnect then reconnect to reset Phoenix internal state
+                                // and bypass the backoff timer.
+                                socket.disconnect(() => {
+                                    socket?.connect();
+                                });
+                            } catch (e) {
+                                // Fallback: just try connecting
+                                try { socket?.connect(); } catch (_) { /* ignore */ }
+                            }
+                        }
+                    }
+                    lastAppState = nextState;
                 });
             },
 
@@ -4076,24 +4178,44 @@ export const useChatStore = create<ChatState>()(
 
         }),
         {
-            name: 'vibe-chat-store',
+            name: CHAT_STORE_STORAGE_KEY,
             storage: createJSONStorage(() => AsyncStorage),
             // Only persist chats and activeChatId, exclude transient state
             partialize: (state) => ({
-                chats: state.chats,
+                chats: state.chats.map(sanitizeChatForPersist),
                 activeChatId: state.activeChatId,
             }),
             // Merge persisted state with initial state
-            merge: (persistedState, currentState) => ({
-                ...currentState,
-                ...(persistedState as Partial<ChatState>),
-            }),
+            merge: (persistedState, currentState) => {
+                const persisted = (persistedState as Partial<ChatState>) || {};
+                const chats = normalizeHydratedChats(persisted.chats);
+                const persistedActiveChatId =
+                    typeof persisted.activeChatId === 'string' ? persisted.activeChatId : null;
+                const activeChatId =
+                    persistedActiveChatId && chats.some((chat) => chat.chatId === persistedActiveChatId)
+                        ? persistedActiveChatId
+                        : null;
+                return {
+                    ...currentState,
+                    chats,
+                    activeChatId,
+                };
+            },
             // Called when store is rehydrated from storage
             onRehydrateStorage: () => {
                 chatStoreLog('[ChatStore] Starting hydration from storage...');
                 return (state, error) => {
                     if (error) {
                         console.error('[ChatStore] Hydration error:', error);
+                        if (isCursorWindowHydrationError(error)) {
+                            AsyncStorage.removeItem(CHAT_STORE_STORAGE_KEY)
+                                .then(() => {
+                                    console.warn('[ChatStore] Cleared oversized persisted chat payload after hydration failure.');
+                                })
+                                .catch((storageError) => {
+                                    console.warn('[ChatStore] Failed to clear oversized persisted payload:', storageError);
+                                });
+                        }
                     } else {
                         chatStoreLog('[ChatStore] Hydration complete. Chats:', state?.chats?.length || 0);
                         // Messages have encryptedContent but no plaintext after hydration
