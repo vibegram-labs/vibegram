@@ -93,6 +93,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var shouldAutoScroll = true
   private var previousOffsetY: CGFloat = 0.0
   private var skipNextTransitionScrollCorrection = false
+  private var lastKnownViewportWidth: CGFloat = 0.0
   private var lastKnownViewportHeight: CGFloat = 0.0
   private var contentPaddingBottom: CGFloat = sectionBottomInset
   private var isApplyingRowsUpdate = false
@@ -292,6 +293,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
   override public func layoutSubviews() {
     let previousHeight = lastKnownViewportHeight
+    let previousWidth = lastKnownViewportWidth
     super.layoutSubviews()
     wallpaperLayer.frame = bounds
     wallpaperPatternLayer.frame = bounds
@@ -308,7 +310,13 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     layoutActivityOverlay()
 
     let currentHeight = collectionView.bounds.height
+    let currentWidth = collectionView.bounds.width
     lastKnownViewportHeight = currentHeight
+    lastKnownViewportWidth = currentWidth
+
+    if abs(previousWidth - currentWidth) > 0.5 {
+      collectionView.collectionViewLayout.invalidateLayout()
+    }
 
     guard previousHeight > 0.0, abs(previousHeight - currentHeight) > 0.5 else {
       updateBottomAnchorInset()
