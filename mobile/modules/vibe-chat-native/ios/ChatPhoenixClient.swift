@@ -378,7 +378,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
 
 /// Standalone delegate for HTTP requests that need cert pinning (e.g. history fetch).
 @available(iOS 13.0, *)
-final class PinnedSessionDelegate: NSObject, URLSessionDelegate {
+class PinnedSessionDelegate: NSObject, URLSessionDelegate {
   func urlSession(
     _ session: URLSession,
     didReceive challenge: URLAuthenticationChallenge,

@@ -676,6 +676,10 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
     const nativeHomeRows = useMemo<NativeHomeListRow[]>(() => {
         const useNativeEnginePresence = Platform.OS === 'ios' || Platform.OS === 'android'
+        // When native engine is available, skip the expensive per-chat message
+        // mapping for previewRows. The native ChatPreviewViewController fetches
+        // its own rows from ChatEngine.getChatRows() which is much faster.
+        const useNativePreview = useNativeEnginePresence
         return filteredChats.map((chat: any) => {
             const friendId = (chat.friendId || '').toUpperCase()
             const chatType = normalizeChatType(chat?.type)
@@ -691,55 +695,60 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             const isOnline = !useNativeEnginePresence && canShowPeerPresence && onlineUsers.has(friendId)
             const preview = isTyping ? 'typing...' : getMessageText(chat.lastMessage)
             const lastMsgTime = chat.lastMessage ? timeAgo(chat.lastMessage.timestamp || chat.updatedAt) : ''
-            const sourceMessages: any[] = Array.isArray(chat?.messages) ? chat.messages : []
-            const myUserIdUpper = (user?.userId || '').trim().toUpperCase()
-            const runtimeMessages: RuntimeChatMessage[] = sourceMessages
-                .map((message: any) => {
-                    const messageId = typeof message?.id === 'string'
-                        ? message.id
-                        : (typeof message?.id === 'number' ? String(message.id) : '')
-                    if (!messageId) return null
-                    const fromId = typeof message?.fromId === 'string' ? message.fromId : undefined
-                    const timestampMs = toTimestampMs(
-                        message?.timestampMs ?? message?.timestamp ?? message?.createdAt ?? message?.created_at
-                    )
-                    const inferredIsMe = !!fromId && !!myUserIdUpper && fromId.trim().toUpperCase() === myUserIdUpper
-                    return {
-                        id: messageId,
-                        chatId: chat.chatId,
-                        fromId,
-                        timestamp: typeof message?.timestamp === 'string' ? message.timestamp : undefined,
-                        text: getMessageText(message),
-                        type: typeof message?.type === 'string' ? message.type : 'text',
-                        status: typeof message?.status === 'string' ? message.status : undefined,
-                        mediaUrl: (
-                            typeof message?.mediaUrl === 'string' ? message.mediaUrl :
-                                (typeof message?.media_url === 'string' ? message.media_url :
-                                    (typeof message?.uri === 'string' ? message.uri : undefined))
-                        ),
-                        fileName: (
-                            typeof message?.fileName === 'string' ? message.fileName :
-                                (typeof message?.file_name === 'string' ? message.file_name : undefined)
-                        ),
-                        duration: toFiniteNumber(message?.duration),
-                        waveform: Array.isArray(message?.waveform)
-                            ? message.waveform.filter((n: any) => typeof n === 'number' && Number.isFinite(n))
-                            : undefined,
-                        isVideoNote: message?.isVideoNote === true,
-                        uploadProgress: toFiniteNumber(message?.uploadProgress ?? message?.upload_progress),
-                        isMe: typeof message?.isMe === 'boolean' ? message.isMe : inferredIsMe,
-                        timestampMs,
-                        isEdited: message?.isEdited === true,
-                        isPinned: message?.isPinned === true,
-                        editedAt: toFiniteNumber(message?.editedAt ?? message?.edited_at),
-                        replyToId: typeof message?.replyToId === 'string' ? message.replyToId : undefined,
-                        reactionEmoji: typeof message?.reactionEmoji === 'string' ? message.reactionEmoji : undefined,
-                        encryptedContent: typeof message?.encryptedContent === 'string' ? message.encryptedContent : undefined,
-                    }
-                })
-                .filter((value): value is RuntimeChatMessage => value !== null)
-                .sort((a, b) => a.timestampMs - b.timestampMs)
-            const previewRows = runtimeMessages.length > 0 ? mapMessagesToNativeRows(runtimeMessages) : undefined
+
+            // Skip expensive message→nativeRow mapping when native engine handles previews
+            let previewRows: any[] | undefined
+            if (!useNativePreview) {
+                const sourceMessages: any[] = Array.isArray(chat?.messages) ? chat.messages : []
+                const myUserIdUpper = (user?.userId || '').trim().toUpperCase()
+                const runtimeMessages = sourceMessages
+                    .map((message: any) => {
+                        const messageId = typeof message?.id === 'string'
+                            ? message.id
+                            : (typeof message?.id === 'number' ? String(message.id) : '')
+                        if (!messageId) return null
+                        const fromId = typeof message?.fromId === 'string' ? message.fromId : undefined
+                        const timestampMs = toTimestampMs(
+                            message?.timestampMs ?? message?.timestamp ?? message?.createdAt ?? message?.created_at
+                        )
+                        const inferredIsMe = !!fromId && !!myUserIdUpper && fromId.trim().toUpperCase() === myUserIdUpper
+                        return {
+                            id: messageId,
+                            chatId: chat.chatId,
+                            fromId,
+                            timestamp: typeof message?.timestamp === 'string' ? message.timestamp : undefined,
+                            text: getMessageText(message),
+                            type: typeof message?.type === 'string' ? message.type : 'text',
+                            status: typeof message?.status === 'string' ? message.status : undefined,
+                            mediaUrl: (
+                                typeof message?.mediaUrl === 'string' ? message.mediaUrl :
+                                    (typeof message?.media_url === 'string' ? message.media_url :
+                                        (typeof message?.uri === 'string' ? message.uri : undefined))
+                            ),
+                            fileName: (
+                                typeof message?.fileName === 'string' ? message.fileName :
+                                    (typeof message?.file_name === 'string' ? message.file_name : undefined)
+                            ),
+                            duration: toFiniteNumber(message?.duration),
+                            waveform: Array.isArray(message?.waveform)
+                                ? message.waveform.filter((n: any) => typeof n === 'number' && Number.isFinite(n))
+                                : undefined,
+                            isVideoNote: message?.isVideoNote === true,
+                            uploadProgress: toFiniteNumber(message?.uploadProgress ?? message?.upload_progress),
+                            isMe: typeof message?.isMe === 'boolean' ? message.isMe : inferredIsMe,
+                            timestampMs,
+                            isEdited: message?.isEdited === true,
+                            isPinned: message?.isPinned === true,
+                            editedAt: toFiniteNumber(message?.editedAt ?? message?.edited_at),
+                            replyToId: typeof message?.replyToId === 'string' ? message.replyToId : undefined,
+                            reactionEmoji: typeof message?.reactionEmoji === 'string' ? message.reactionEmoji : undefined,
+                            encryptedContent: typeof message?.encryptedContent === 'string' ? message.encryptedContent : undefined,
+                        } as RuntimeChatMessage
+                    })
+                    .filter(Boolean) as RuntimeChatMessage[]
+                runtimeMessages.sort((a, b) => a.timestampMs - b.timestampMs)
+                previewRows = runtimeMessages.length > 0 ? mapMessagesToNativeRows(runtimeMessages) : undefined
+            }
 
             return {
                 chatId: chat.chatId,
@@ -1215,12 +1224,12 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                     <View style={[styles.headerContentContainer, { height: insets.top + 56, paddingTop: insets.top }]}>
                         {/* Title Container - Centered properly in the header area */}
                         <View style={[StyleSheet.absoluteFill, { top: insets.top, alignItems: 'center', justifyContent: 'center', zIndex: -1 }]} pointerEvents="none">
-                            <Animated.View key={!isConnected ? 'connecting' : (isLoading ? 'updating' : 'chats')} entering={FadeIn.duration(200)} exiting={FadeOut.duration(200)}>
+                            <Animated.View key={!isConnected ? 'connecting' : (isLoading && chats.length === 0 ? 'updating' : 'chats')} entering={FadeIn.duration(200)} exiting={FadeOut.duration(200)}>
                                 <Text style={[
                                     styles.headerTitle,
                                     { color: colors.text },
                                 ]}>
-                                    {!isConnected ? 'Connecting...' : (isLoading ? 'Updating...' : 'Chats')}
+                                    {!isConnected ? 'Connecting...' : (isLoading && chats.length === 0 ? 'Updating...' : 'Chats')}
                                 </Text>
                             </Animated.View>
                         </View>

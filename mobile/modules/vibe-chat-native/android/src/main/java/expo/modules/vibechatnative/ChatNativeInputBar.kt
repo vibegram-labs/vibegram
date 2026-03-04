@@ -1,11 +1,17 @@
 package expo.modules.vibechatnative
 
+import android.animation.ObjectAnimator
+import android.animation.ValueAnimator
+import android.Manifest
+import android.app.Activity
 import android.content.Context
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaRecorder
 import android.net.Uri
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
@@ -19,16 +25,25 @@ import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
 import android.view.View
 import android.view.ViewConfiguration
+import android.view.animation.AccelerateDecelerateInterpolator
 import android.view.inputmethod.EditorInfo
+import android.widget.Toast
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultCallback
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.contract.ActivityResultContract
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.ContextCompat
 import expo.modules.kotlin.AppContext
 import expo.modules.vibechatnative.R
 import java.io.File
 import java.util.UUID
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -77,9 +92,10 @@ internal class ChatNativeInputBar(
   private val actionIcon = ImageView(context)
 
   private val uiHandler = Handler(Looper.getMainLooper())
-  private val longPressTimeoutMs = min(230, ViewConfiguration.getLongPressTimeout())
-  private val lockThresholdPx = dp(44)
-  private val cancelThresholdPx = dp(76)
+  private val longPressTimeoutMs = min(200, ViewConfiguration.getLongPressTimeout())
+  private val lockThresholdPx = dp(60)
+  private val cancelThresholdPx = dp(100)
+  private val minRecordSendDurationMs = 600L
 
   private var surfaceColor = Color.argb(246, 20, 24, 30)
   private var textColor = Color.WHITE
@@ -94,8 +110,9 @@ internal class ChatNativeInputBar(
   private var longPressArmed = false
   private var longPressStarted = false
   private var lockActivatedInGesture = false
-  private var downX = 0f
-  private var downY = 0f
+  private var micTouchActive = false
+  private var downRawX = 0f
+  private var downRawY = 0f
 
   private var isRecording = false
   private var isLockedRecording = false
@@ -104,13 +121,24 @@ internal class ChatNativeInputBar(
   private var recordingStartedAtMs = 0L
   private var vadTicker: Runnable? = null
   private val recordingAmplitudes = ArrayList<Int>(256)
+  private var lockHintArrowAnimator: ObjectAnimator? = null
+  private var slideHintChevronAnimator: ObjectAnimator? = null
+  private var slideHintLabelAnimator: ObjectAnimator? = null
+  private var lastTimerPulseSecond = -1
+  private var vadVisualLevel = 0f
 
   private val longPressRunnable = Runnable {
     longPressArmed = false
-    if (startVoiceRecording()) {
-      longPressStarted = true
-      lockActivatedInGesture = false
-      performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+    ensureMicrophonePermission { granted ->
+      if (!granted || !micTouchActive) {
+        listener?.onRecordingCanceled()
+        return@ensureMicrophonePermission
+      }
+      if (startVoiceRecording()) {
+        longPressStarted = true
+        lockActivatedInGesture = false
+        performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+      }
     }
   }
 
@@ -191,9 +219,17 @@ internal class ChatNativeInputBar(
 
   override fun onDetachedFromWindow() {
     super.onDetachedFromWindow()
+    micTouchActive = false
     uiHandler.removeCallbacks(longPressRunnable)
     vadTicker?.let { uiHandler.removeCallbacks(it) }
     vadTicker = null
+    stopRecordingHintAnimations()
+    resetVadVisuals()
+    recordingTimerLabel.animate().cancel()
+    recordingTimerLabel.scaleX = 1f
+    recordingTimerLabel.scaleY = 1f
+    recordingTimerLabel.alpha = 1f
+    recordingTimerLabel.translationY = 0f
     lockHintPill.animate().cancel()
     lockHintPill.visibility = View.GONE
     attachmentMenu?.dismiss(animated = false)
@@ -319,6 +355,7 @@ internal class ChatNativeInputBar(
     recordingTimerLabel.layoutParams = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
     recordingTimerLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
     recordingTimerLabel.typeface = Typeface.MONOSPACE
+    recordingTimerLabel.text = "0:00.00"
     recordingTimerLabel.maxLines = 1
     recordingOverlay.addView(recordingTimerLabel)
 
@@ -432,6 +469,182 @@ internal class ChatNativeInputBar(
       .start()
   }
 
+  private fun ensureMicrophonePermission(onReady: (Boolean) -> Unit) {
+    val permission =
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+        Manifest.permission.RECORD_AUDIO
+      } else {
+        null
+      }
+    if (permission == null || hasPermission(permission)) {
+      onReady(true)
+      return
+    }
+    launchWithResult<String, Boolean>(ActivityResultContracts.RequestPermission(), permission) { granted ->
+      if (!granted) {
+        toast("Microphone permission is required for voice messages")
+      }
+      onReady(granted)
+    }
+  }
+
+  private fun hasPermission(permission: String): Boolean {
+    return ContextCompat.checkSelfPermission(context, permission) == PackageManager.PERMISSION_GRANTED
+  }
+
+  private fun <I, O> launchWithResult(
+    contract: ActivityResultContract<I, O>,
+    input: I,
+    callback: (O) -> Unit,
+  ) {
+    val activity = resolveComponentActivity()
+    if (activity == null) {
+      callback.invoke(defaultResultForMissingActivity(contract))
+      return
+    }
+    val key = "chat-input-${UUID.randomUUID()}"
+    var launcher: ActivityResultLauncher<I>? = null
+    launcher =
+      activity.activityResultRegistry.register(
+        key,
+        contract,
+        ActivityResultCallback<O> { output ->
+          try {
+            callback(output)
+          } finally {
+            launcher?.unregister()
+          }
+        },
+      )
+    launcher.launch(input)
+  }
+
+  @Suppress("UNCHECKED_CAST")
+  private fun <I, O> defaultResultForMissingActivity(contract: ActivityResultContract<I, O>): O {
+    return when (contract) {
+      is ActivityResultContracts.RequestPermission -> false as O
+      else -> throw IllegalStateException("No ComponentActivity available for activity result")
+    }
+  }
+
+  private fun resolveComponentActivity(): ComponentActivity? {
+    return resolveActivity() as? ComponentActivity
+  }
+
+  private fun resolveActivity(): Activity? {
+    val fromAppContext = appContext?.currentActivity
+    if (fromAppContext != null) return fromAppContext
+    return context as? Activity
+  }
+
+  private fun toast(message: String) {
+    Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+  }
+
+  private fun startRecordingHintAnimations() {
+    if (!isRecording || isLockedRecording) return
+    if (lockHintArrowAnimator != null || slideHintChevronAnimator != null || slideHintLabelAnimator != null) return
+
+    val slideOffset = dpF(8f)
+    val upOffset = dpF(6f)
+    val interpolator = AccelerateDecelerateInterpolator()
+
+    slideHintChevronAnimator =
+      ObjectAnimator.ofFloat(recordingSlideChevron, View.TRANSLATION_X, 0f, -slideOffset).apply {
+        duration = 550L
+        repeatCount = ValueAnimator.INFINITE
+        repeatMode = ValueAnimator.REVERSE
+        this.interpolator = interpolator
+        start()
+      }
+    slideHintLabelAnimator =
+      ObjectAnimator.ofFloat(recordingSlideLabel, View.TRANSLATION_X, 0f, -slideOffset).apply {
+        duration = 550L
+        repeatCount = ValueAnimator.INFINITE
+        repeatMode = ValueAnimator.REVERSE
+        this.interpolator = interpolator
+        start()
+      }
+    lockHintArrowAnimator =
+      ObjectAnimator.ofFloat(lockHintArrow, View.TRANSLATION_Y, 0f, -upOffset).apply {
+        duration = 520L
+        repeatCount = ValueAnimator.INFINITE
+        repeatMode = ValueAnimator.REVERSE
+        this.interpolator = interpolator
+        start()
+      }
+  }
+
+  private fun stopRecordingHintAnimations(resetTransforms: Boolean = true) {
+    lockHintArrowAnimator?.cancel()
+    slideHintChevronAnimator?.cancel()
+    slideHintLabelAnimator?.cancel()
+    lockHintArrowAnimator = null
+    slideHintChevronAnimator = null
+    slideHintLabelAnimator = null
+    if (resetTransforms) {
+      lockHintArrow.translationY = 0f
+      recordingSlideChevron.translationX = 0f
+      recordingSlideLabel.translationX = 0f
+    }
+  }
+
+  private fun animateTimerLabelEntry() {
+    recordingTimerLabel.animate().cancel()
+    recordingTimerLabel.alpha = 0.72f
+    recordingTimerLabel.translationY = dpF(2f)
+    recordingTimerLabel.animate()
+      .alpha(1f)
+      .translationY(0f)
+      .setDuration(180L)
+      .start()
+  }
+
+  private fun pulseTimerLabel() {
+    recordingTimerLabel.animate().cancel()
+    recordingTimerLabel.animate()
+      .scaleX(1.06f)
+      .scaleY(1.06f)
+      .setDuration(90L)
+      .withEndAction {
+        recordingTimerLabel.animate()
+          .scaleX(1f)
+          .scaleY(1f)
+          .setDuration(120L)
+          .start()
+      }
+      .start()
+  }
+
+  private fun applyVadVisual(level: Float) {
+    if (!isRecording) {
+      vadVisualLevel = 0f
+      return
+    }
+    val clamped = level.coerceIn(0f, 1f)
+    vadVisualLevel = (vadVisualLevel * 0.72f) + (clamped * 0.28f)
+    val baseScale = if (isLockedRecording) 1.08f else 1.1f
+    val pulse = if (isLockedRecording) 0.16f else 0.22f
+    val scale = baseScale + (vadVisualLevel * pulse)
+    actionButton.scaleX = scale
+    actionButton.scaleY = scale
+    val dotScale = 1f + (vadVisualLevel * 0.26f)
+    recordingDot.scaleX = dotScale
+    recordingDot.scaleY = dotScale
+  }
+
+  private fun resetVadVisuals() {
+    vadVisualLevel = 0f
+    actionButton.animate().cancel()
+    actionButton.animate()
+      .scaleX(1f)
+      .scaleY(1f)
+      .setDuration(160L)
+      .start()
+    recordingDot.scaleX = 1f
+    recordingDot.scaleY = 1f
+  }
+
   private fun updateDragVisuals(dx: Float, dy: Float) {
     if (!isRecording || isLockedRecording) {
       recordingSlideLabel.alpha = 1f
@@ -440,6 +653,9 @@ internal class ChatNativeInputBar(
       recordingSlideChevron.translationX = 0f
       lockHintPill.translationY = 0f
       return
+    }
+    if (abs(dx) > dpF(1f) || abs(dy) > dpF(1f)) {
+      stopRecordingHintAnimations(resetTransforms = false)
     }
     val cancelProgress = (-dx / cancelThresholdPx.toFloat()).coerceIn(0f, 1f)
     val lockProgress = (-dy / lockThresholdPx.toFloat()).coerceIn(0f, 1f)
@@ -459,6 +675,9 @@ internal class ChatNativeInputBar(
     recordingSlideChevron.translationX = 0f
     lockHintPill.alpha = if (lockHintPill.visibility == View.VISIBLE) 1f else 0f
     lockHintPill.translationY = 0f
+    if (isRecording && !isLockedRecording) {
+      startRecordingHintAnimations()
+    }
   }
 
   private fun bindEvents() {
@@ -484,6 +703,11 @@ internal class ChatNativeInputBar(
       if (!isRecording) {
         listener?.onAttachmentPressed()
         openAttachmentMenu()
+      }
+    }
+    recordingSlideLabel.setOnClickListener {
+      if (isRecording && isLockedRecording) {
+        cancelVoiceRecording()
       }
     }
     attachmentButton.setOnTouchListener { _, event -> handleAttachmentTouch(event) }
@@ -539,8 +763,9 @@ internal class ChatNativeInputBar(
 
     when (event.actionMasked) {
       MotionEvent.ACTION_DOWN -> {
-        downX = event.x
-        downY = event.y
+        micTouchActive = true
+        downRawX = event.rawX
+        downRawY = event.rawY
         longPressStarted = false
         lockActivatedInGesture = false
         animateButtonPress(actionButton, true, 70L)
@@ -556,15 +781,15 @@ internal class ChatNativeInputBar(
 
       MotionEvent.ACTION_MOVE -> {
         if (isRecording) {
-          val dx = event.x - downX
-          val dy = event.y - downY
+          val dx = event.rawX - downRawX
+          val dy = event.rawY - downRawY
           updateDragVisuals(dx = dx, dy = dy)
           if (!isLockedRecording && dy < -lockThresholdPx) {
             isLockedRecording = true
             lockActivatedInGesture = true
             listener?.onRecordingState(true, true)
             performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            recordingSlideLabel.text = "Tap send to finish"
+            recordingSlideLabel.text = "Cancel"
             recordingSlideChevron.visibility = View.GONE
             showLockHint(visible = false, animated = true)
             resetRecordingDragVisuals()
@@ -580,6 +805,7 @@ internal class ChatNativeInputBar(
       }
 
       MotionEvent.ACTION_UP -> {
+        micTouchActive = false
         uiHandler.removeCallbacks(longPressRunnable)
         longPressArmed = false
         animateButtonPress(actionButton, false, 120L)
@@ -599,6 +825,7 @@ internal class ChatNativeInputBar(
       }
 
       MotionEvent.ACTION_CANCEL -> {
+        micTouchActive = false
         uiHandler.removeCallbacks(longPressRunnable)
         longPressArmed = false
         animateButtonPress(actionButton, false, 120L)
@@ -694,9 +921,20 @@ internal class ChatNativeInputBar(
     input.visibility = if (isRecording) View.INVISIBLE else View.VISIBLE
     recordingOverlay.visibility = if (isRecording) View.VISIBLE else View.GONE
     if (!isRecording) {
+      stopRecordingHintAnimations()
       recordingDot.alpha = 1f
+      recordingDot.scaleX = 1f
+      recordingDot.scaleY = 1f
       recordingSlideChevron.visibility = View.VISIBLE
       recordingSlideLabel.text = "Slide to cancel"
+      recordingSlideLabel.isClickable = false
+      recordingSlideLabel.isFocusable = false
+      recordingSlideLabel.setTextColor(withAlpha(textColor, 0.78f))
+      recordingSlideChevron.setTextColor(withAlpha(textColor, 0.78f))
+      recordingTimerLabel.scaleX = 1f
+      recordingTimerLabel.scaleY = 1f
+      recordingTimerLabel.alpha = 1f
+      recordingTimerLabel.translationY = 0f
       attachmentButton.animate().cancel()
       attachmentButton.translationX = 0f
       attachmentButton.scaleX = 1f
@@ -704,7 +942,17 @@ internal class ChatNativeInputBar(
       showLockHint(visible = false, animated = false)
     } else {
       recordingSlideChevron.visibility = if (isLockedRecording) View.GONE else View.VISIBLE
-      recordingSlideLabel.text = if (isLockedRecording) "Tap send to finish" else "Slide to cancel"
+      recordingSlideLabel.text = if (isLockedRecording) "Cancel" else "Slide to cancel"
+      recordingSlideLabel.isClickable = isLockedRecording
+      recordingSlideLabel.isFocusable = isLockedRecording
+      if (isLockedRecording) {
+        recordingSlideLabel.setTextColor(withAlpha(dangerColor, 0.96f))
+        stopRecordingHintAnimations()
+      } else {
+        recordingSlideLabel.setTextColor(withAlpha(textColor, 0.78f))
+        startRecordingHintAnimations()
+      }
+      recordingSlideChevron.setTextColor(withAlpha(textColor, 0.78f))
       showLockHint(visible = !isLockedRecording, animated = true)
     }
     updateSurfaces()
@@ -733,6 +981,7 @@ internal class ChatNativeInputBar(
       .start()
     showLockHint(visible = true, animated = true)
     resetRecordingDragVisuals()
+    startRecordingHintAnimations()
   }
 
   private fun resetRecordingUiEffects() {
@@ -750,6 +999,7 @@ internal class ChatNativeInputBar(
       .scaleY(1f)
       .setDuration(160L)
       .start()
+    stopRecordingHintAnimations()
     resetRecordingDragVisuals()
     showLockHint(visible = false, animated = true)
   }
@@ -782,12 +1032,15 @@ internal class ChatNativeInputBar(
       recorder = mediaRecorder
       recordingFile = outputFile
       recordingStartedAtMs = SystemClock.elapsedRealtime()
+      lastTimerPulseSecond = -1
+      vadVisualLevel = 0f
       isRecording = true
       isLockedRecording = false
       recordingAmplitudes.clear()
       recordingSlideLabel.text = "Slide to cancel"
       recordingSlideChevron.visibility = View.VISIBLE
       updateRecordingStatus(buildRecordingStatusLine())
+      animateTimerLabelEntry()
       animateRecordingStartUi()
       refreshVisualState()
       listener?.onRecordingState(true, false)
@@ -830,14 +1083,20 @@ internal class ChatNativeInputBar(
         recordingAmplitudes.add(amplitude)
         val normalized = (amplitude / 32767f).coerceIn(0f, 1f)
         listener?.onRecordingVad(normalized)
+        applyVadVisual(normalized)
 
         updateRecordingStatus(buildRecordingStatusLine())
 
         val elapsedMs = max(0L, SystemClock.elapsedRealtime() - recordingStartedAtMs)
-        val blinkOn = (elapsedMs / 420L) % 2L == 0L
+        val totalSeconds = (elapsedMs / 1000L).toInt()
+        if (totalSeconds != lastTimerPulseSecond) {
+          lastTimerPulseSecond = totalSeconds
+          pulseTimerLabel()
+        }
+        val blinkOn = (elapsedMs / 500L) % 2L == 0L
         recordingDot.alpha = if (blinkOn) 1f else 0.24f
 
-        uiHandler.postDelayed(this, 70L)
+        uiHandler.postDelayed(this, 50L)
       }
     }
     vadTicker = ticker
@@ -849,7 +1108,8 @@ internal class ChatNativeInputBar(
     val totalSeconds = (elapsedMs / 1000L).toInt()
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
-    return String.format("%d:%02d", minutes, seconds)
+    val centis = ((elapsedMs % 1000L) / 10L).toInt()
+    return String.format("%d:%02d.%02d", minutes, seconds, centis)
   }
 
   private fun updateRecordingStatus(text: String) {
@@ -886,13 +1146,22 @@ internal class ChatNativeInputBar(
     isRecording = false
     isLockedRecording = false
     resetRecordingUiEffects()
+    resetVadVisuals()
+    lastTimerPulseSecond = -1
+    recordingTimerLabel.animate().cancel()
     listener?.onRecordingState(false, false)
     listener?.onRecordingVad(0f)
 
-    if (send && outputFile != null && outputFile.exists() && outputFile.length() > 0L) {
+    val canSend =
+      send &&
+      durationMs >= minRecordSendDurationMs &&
+      outputFile != null &&
+      outputFile.exists() &&
+      outputFile.length() > 0L
+    if (canSend) {
       listener?.onVoiceRecorded(
         Uri.fromFile(outputFile).toString(),
-        (durationMs.toDouble() / 1000.0).coerceAtLeast(0.1),
+        durationMs.toDouble() / 1000.0,
         buildWaveform(recordingAmplitudes, 40),
       )
     } else {

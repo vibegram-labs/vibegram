@@ -71,6 +71,7 @@ export default function ChatScreen() {
   const chats = useChatStore((s) => s.chats);
   const activeChatId = useChatStore((s) => s.activeChatId);
   const setActiveChat = useChatStore((s) => s.setActiveChat);
+  const startChat = useChatStore((s) => s.startChat);
   const loadChats = useChatStore((s) => s.loadChats);
   const loadMessages = useChatStore((s) => s.loadMessages);
   const initSocket = useChatStore((s) => s.initSocket);
@@ -88,6 +89,10 @@ export default function ChatScreen() {
   const nativeAvailable = nativeMainAvailable;
 
   const chatIdFromParams = getParamString(params?.id) || getParamString((params as any)?.chatId);
+  const friendIdFromParams = getParamString((params as any)?.friendId);
+  const friendNameFromParams = getParamString((params as any)?.friendName) ?? undefined;
+  const friendImageFromParams = getParamString((params as any)?.friendImage) ?? undefined;
+  const friendPublicKeyFromParams = getParamString((params as any)?.friendPublicKey) ?? undefined;
   const effectiveChatId = chatIdFromParams || activeChatId || chats[0]?.chatId || null;
   const activeChat = useMemo(
     () => chats.find((chat) => chat.chatId === effectiveChatId),
@@ -101,8 +106,48 @@ export default function ChatScreen() {
   useEffect(() => {
     if (!effectiveChatId) return;
     setActiveChat(effectiveChatId);
-    void loadMessages(effectiveChatId);
-  }, [effectiveChatId, setActiveChat, loadMessages]);
+    // When native engine is available, it handles message fetching via its own
+    // URLSession HTTP call (ChatEngine.loadChatHistoryIfNeededLocked).
+    // Skip the JS loadMessages to avoid redundant/timing-out JS-side fetch.
+    if (nativeEngineModule) {
+      console.log('[chat] native engine active — skipping JS loadMessages for', effectiveChatId);
+    } else {
+      void loadMessages(effectiveChatId);
+    }
+  }, [effectiveChatId, setActiveChat, loadMessages, nativeEngineModule]);
+
+  useEffect(() => {
+    if (chatIdFromParams || !friendIdFromParams) return;
+
+    let isCancelled = false;
+    (async () => {
+      try {
+        const createdChatId = await startChat(friendIdFromParams, {
+          username: friendNameFromParams,
+          profileImage: friendImageFromParams,
+          publicKey: friendPublicKeyFromParams,
+        });
+        if (isCancelled || !createdChatId) return;
+        setActiveChat(createdChatId);
+        router.replace({ pathname: '/chat', params: { id: createdChatId } });
+      } catch (error) {
+        console.warn('[chat] failed to resolve friendId route', error);
+      }
+    })();
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [
+    chatIdFromParams,
+    friendIdFromParams,
+    friendImageFromParams,
+    friendNameFromParams,
+    friendPublicKeyFromParams,
+    router,
+    setActiveChat,
+    startChat,
+  ]);
 
   const surfaceId = useMemo(
     () => `chat-native-main-${effectiveChatId || 'none'}`,
@@ -362,6 +407,31 @@ export default function ChatScreen() {
       peerUserId: activeChat?.friendId || undefined,
       isGroup: isGroupOrChannel,
     };
+
+    if (type === 'mediaReplyRequested') {
+      // Native side already sets the reply banner in the input bar.
+      return;
+    }
+
+    if (type === 'mediaResendRequested' || type === 'mediaEditRequested') {
+      const mediaUrl =
+        (typeof payload.editedImageUri === 'string' && payload.editedImageUri.trim())
+        || (typeof payload.mediaUrl === 'string' && payload.mediaUrl.trim());
+      if (!mediaUrl) return;
+      const caption = typeof payload.caption === 'string' ? payload.caption : '';
+      const sourceMessageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
+      void callNativeEngine('sendMessage', {
+        ...basePayload,
+        type: 'image',
+        text: caption,
+        metadata: {
+          mediaUrl,
+          sourceMessageId,
+          editedFromMessage: type === 'mediaEditRequested',
+        },
+      });
+      return;
+    }
 
     if (type === 'sendMessage') {
       if (Platform.OS === 'android') {

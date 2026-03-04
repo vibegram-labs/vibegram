@@ -1,6 +1,7 @@
 import UIKit
 
 final class ChatMainProfileActionNode: UIControl {
+  private let glassView = UIVisualEffectView(effect: nil)
   private let iconView = UIImageView()
   private let titleView = UILabel()
   private let pressedOverlay = UIView()
@@ -18,6 +19,10 @@ final class ChatMainProfileActionNode: UIControl {
   private func setup() {
     clipsToBounds = true
     layer.cornerCurve = .continuous
+
+    glassView.clipsToBounds = true
+    glassView.layer.cornerCurve = .continuous
+    addSubview(glassView)
 
     iconView.contentMode = .scaleAspectFit
     addSubview(iconView)
@@ -37,7 +42,9 @@ final class ChatMainProfileActionNode: UIControl {
     didSet {
       let scale: CGFloat = isHighlighted ? 0.97 : 1.0
       let duration: TimeInterval = isHighlighted ? 0.08 : 0.18
-      UIView.animate(withDuration: duration, delay: 0, options: [.curveEaseOut, .allowUserInteraction]) {
+      UIView.animate(
+        withDuration: duration, delay: 0, options: [.curveEaseOut, .allowUserInteraction]
+      ) {
         self.transform = CGAffineTransform(scaleX: scale, y: scale)
         self.pressedOverlay.alpha = self.isHighlighted ? 1.0 : 0.0
       }
@@ -47,8 +54,22 @@ final class ChatMainProfileActionNode: UIControl {
   override func layoutSubviews() {
     super.layoutSubviews()
     layer.cornerRadius = 16
-    iconView.frame = CGRect(x: (bounds.width - 24) * 0.5, y: 8, width: 24, height: 24)
-    titleView.frame = CGRect(x: 6, y: iconView.frame.maxY + 6, width: bounds.width - 12, height: 17)
+    glassView.layer.cornerRadius = 16
+    glassView.frame = bounds
+
+    let iconSize: CGFloat = 24
+    let titleHeight: CGFloat = 17
+    let spacing: CGFloat = 6
+    let totalHeight = iconSize + spacing + titleHeight
+    let startY = max(6.0, (bounds.height - totalHeight) * 0.5)
+    iconView.frame = CGRect(
+      x: (bounds.width - iconSize) * 0.5, y: startY, width: iconSize, height: iconSize)
+    titleView.frame = CGRect(
+      x: 6.0,
+      y: iconView.frame.maxY + spacing,
+      width: bounds.width - 12.0,
+      height: titleHeight
+    )
     pressedOverlay.frame = bounds
   }
 
@@ -65,6 +86,9 @@ final class ChatMainProfileActionNode: UIControl {
   func applyTheme(foreground: UIColor, background: UIColor) {
     titleView.textColor = foreground
     iconView.tintColor = foreground
-    self.backgroundColor = background
+    self.backgroundColor = .clear
+
+    glassView.effect = nil
+    glassView.contentView.backgroundColor = background.withAlphaComponent(0.68)
   }
 }

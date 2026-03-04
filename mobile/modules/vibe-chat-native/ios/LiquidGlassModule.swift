@@ -100,7 +100,10 @@ class LiquidGlassView: ExpoView {
 
   private func ensureEffectViewLayering() {
     guard visualEffectView.superview === self else { return }
-    sendSubviewToBack(visualEffectView)
+    // Keep the internal effect view at the end of the subview array so Fabric's
+    // child index bookkeeping for React-managed subviews stays stable.
+    // The view still renders behind children via zPosition = -1.
+    bringSubviewToFront(visualEffectView)
   }
 
   private func animatePressFeedback(isPressed: Bool) {

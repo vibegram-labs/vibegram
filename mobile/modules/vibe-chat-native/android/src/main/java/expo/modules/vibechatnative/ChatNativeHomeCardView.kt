@@ -9,6 +9,7 @@ import android.os.Build
 import android.util.LruCache
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.ViewOutlineProvider
 import android.widget.FrameLayout
 import android.widget.ImageView
 import android.widget.LinearLayout
@@ -69,6 +70,8 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
       gravity = Gravity.START or Gravity.CENTER_VERTICAL
     }
     avatarContainer.background = circleDrawable(Color.argb(255, 222, 230, 243))
+    avatarContainer.clipToOutline = true
+    avatarContainer.outlineProvider = ViewOutlineProvider.BACKGROUND
     addView(avatarContainer)
 
     avatarImage.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)

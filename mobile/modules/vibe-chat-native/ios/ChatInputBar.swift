@@ -656,6 +656,7 @@ final class ChatInputBar: UIView {
   private let attachGlass = UIVisualEffectView(effect: nil)
 
   private let pillContainer = UIView()
+  private let pillButton = UIButton(type: .system)
   private let pillGlass = UIVisualEffectView(effect: nil)
   private let textView = ChatComposerTextView()
   private let placeholderLabel = UILabel()
@@ -883,13 +884,19 @@ final class ChatInputBar: UIView {
   }
 
   private func restorePillGlassVisualState() {
+    pillGlass.isHidden = false
+    pillGlass.alpha = 1
+    pillGlass.transform = .identity
+
+    pillButton.isHidden = false
+    pillButton.alpha = 1
+    pillButton.transform = .identity
+
     pillContainer.isHidden = false
     pillContainer.alpha = 1
     pillContainer.backgroundColor = .clear
     pillContainer.transform = .identity
 
-    pillGlass.isHidden = false
-    pillGlass.alpha = 1
     refreshGlass()
   }
 
@@ -963,7 +970,12 @@ final class ChatInputBar: UIView {
     attachButton.backgroundColor = .clear
     attachGlass.contentView.addSubview(attachButton)
     let plusCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
-    attachButton.setImage(UIImage(systemName: "plus", withConfiguration: plusCfg), for: .normal)
+    applyControlGlyph(
+      button: attachButton,
+      symbolName: "plus",
+      symbolConfig: plusCfg,
+      tintColor: UIColor(white: 0.85, alpha: 1.0)
+    )
     attachButton.addTarget(self, action: #selector(attachTapped), for: .touchUpInside)
     contentRow.addSubview(attachGlass)
 
@@ -971,14 +983,17 @@ final class ChatInputBar: UIView {
     pillContainer.backgroundColor = .clear
     pillContainer.clipsToBounds = true
     pillContainer.layer.cornerCurve = .continuous
-    pillContainer.layer.borderWidth = 0.6
-    pillContainer.layer.borderColor = UIColor(white: 1.0, alpha: 0.12).cgColor
 
     // glass background of pill
-    pillGlass.isUserInteractionEnabled = false
+    pillGlass.isUserInteractionEnabled = true
     pillGlass.clipsToBounds = true
-    pillContainer.addSubview(pillGlass)
-    pillContainer.sendSubviewToBack(pillGlass)
+    contentRow.addSubview(pillGlass)
+
+    pillButton.backgroundColor = .clear
+    pillButton.clipsToBounds = false
+    pillGlass.contentView.addSubview(pillButton)
+
+    pillButton.addSubview(pillContainer)
 
     // placeholder
     placeholderLabel.text = placeholder
@@ -1080,8 +1095,6 @@ final class ChatInputBar: UIView {
     cancelOverlayButton.isHidden = true
     pillContainer.addSubview(cancelOverlayButton)
 
-    contentRow.addSubview(pillContainer)
-
     // ── Mic button (glass pill) ───────────────────────────────────────────
     micVADView.alpha = 0
     contentRow.addSubview(micVADView)
@@ -1091,7 +1104,12 @@ final class ChatInputBar: UIView {
     micButton.clipsToBounds = false
     micGlass.contentView.addSubview(micButton)
     let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-    micButton.setImage(UIImage(systemName: "mic", withConfiguration: micCfg), for: .normal)
+    applyControlGlyph(
+      button: micButton,
+      symbolName: "mic",
+      symbolConfig: micCfg,
+      tintColor: UIColor(white: 0.85, alpha: 1.0)
+    )
     micButton.addTarget(self, action: #selector(micTapped), for: .touchUpInside)
     contentRow.addSubview(micGlass)
 
@@ -1136,12 +1154,12 @@ final class ChatInputBar: UIView {
     textView.textColor = a.textColorThem
     textView.tintColor = a.textColorThem.withAlphaComponent(0.9)
     placeholderLabel.textColor = a.textColorThem.withAlphaComponent(0.45)
-    attachButton.tintColor = a.textColorThem.withAlphaComponent(0.9)
+    let controlTint = a.textColorThem.withAlphaComponent(0.9)
+    attachButton.tintColor = controlTint
     gifButton.tintColor = a.textColorThem.withAlphaComponent(gifPanelVisible ? 1.0 : 0.85)
-    micButton.tintColor = a.textColorThem.withAlphaComponent(0.9)
+    micButton.tintColor = controlTint
     sendGradient.colors = a.bubbleMeGradient.map(\.cgColor)
     pillTint = a.bubbleThemColor.withAlphaComponent(0.14)
-    pillContainer.layer.borderColor = UIColor(white: 1, alpha: 0.12).cgColor
 
     if let firstColor = a.bubbleMeGradient.first {
       micVADView.applyColor(firstColor.withAlphaComponent(0.25))
@@ -1180,6 +1198,21 @@ final class ChatInputBar: UIView {
     mentionDescLabel.textColor = a.textColorThem.withAlphaComponent(0.72)
 
     refreshGlass()
+    let plusCfg = UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+    applyControlGlyph(
+      button: attachButton,
+      symbolName: "plus",
+      symbolConfig: plusCfg,
+      tintColor: controlTint
+    )
+    let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
+    let micSymbol = isVideoMode ? "video" : "mic"
+    applyControlGlyph(
+      button: micButton,
+      symbolName: micSymbol,
+      symbolConfig: micCfg,
+      tintColor: controlTint
+    )
     CATransaction.commit()
   }
 
@@ -1445,9 +1478,12 @@ final class ChatInputBar: UIView {
     // Layout check: Initial visibility handled by updateButtonStates
 
     let actualPillW = max(1, pillRight - pillX)
-    pillContainer.frame = CGRect(x: pillX, y: 0, width: actualPillW, height: pillH)
+    pillGlass.frame = CGRect(x: pillX, y: 0, width: actualPillW, height: pillH)
+    pillButton.frame = pillGlass.bounds
+    pillContainer.frame = pillGlass.bounds
     // Corner radius: use the text-row height for capsule feel, capped for tall pills
     let cornerBase = (clampedTextH + textInsetV * 2)
+    pillGlass.layer.cornerRadius = min(cornerBase / 2, 22)
     pillContainer.layer.cornerRadius = min(cornerBase / 2, 22)
 
     // Position Send Button inside pill (inline with text area)
@@ -1561,7 +1597,6 @@ final class ChatInputBar: UIView {
     // ── View frame updates that should inherit UIView animations ──
     attachButton.frame = attachGlass.contentView.bounds
     micButton.frame = micGlass.contentView.bounds
-    pillGlass.frame = pillContainer.bounds
 
     if #available(iOS 26.0, *) {
       // Use native cornerConfiguration for liquid glass shapes
@@ -1618,19 +1653,31 @@ final class ChatInputBar: UIView {
       let pillEffect = UIGlassEffect()
       pillEffect.isInteractive = true
       pillGlass.effect = pillEffect
-      pillGlass.backgroundColor = pillTint
+      pillGlass.contentView.backgroundColor = pillTint
 
       let lockEffect = UIGlassEffect()
       lockPill.effect = lockEffect
-      lockPill.backgroundColor = UIColor(white: 0.1, alpha: 0.2)
+      lockPill.contentView.backgroundColor = UIColor(white: 0.1, alpha: 0.2)
     } else {
       attachGlass.effect = UIBlurEffect(style: .systemMaterial)
       micGlass.effect = UIBlurEffect(style: .systemMaterial)
       pillGlass.effect = UIBlurEffect(style: .systemMaterial)
-      pillGlass.backgroundColor = pillTint
+      pillGlass.contentView.backgroundColor = pillTint
       lockPill.effect = UIBlurEffect(style: .systemMaterialDark)
-      lockPill.backgroundColor = UIColor(white: 0.1, alpha: 0.2)
+      lockPill.contentView.backgroundColor = UIColor(white: 0.1, alpha: 0.2)
     }
+  }
+
+  private func applyControlGlyph(
+    button: UIButton,
+    symbolName: String,
+    symbolConfig: UIImage.SymbolConfiguration,
+    tintColor: UIColor
+  ) {
+    let image = UIImage(systemName: symbolName, withConfiguration: symbolConfig)
+
+    button.setImage(image, for: .normal)
+    button.tintColor = tintColor
   }
 
   // MARK: - Button states
@@ -1756,7 +1803,7 @@ final class ChatInputBar: UIView {
   }
 
   @objc private func attachTapped() {
-    setGifPanelVisible(false, animated: true)
+    setGifPanelVisible(false, animated: false)
     // Show native attachment sheet
     guard let vc = findViewController() else {
       delegate?.inputBarDidTapAttachment()
@@ -1801,7 +1848,12 @@ final class ChatInputBar: UIView {
     let iconName = isVideoMode ? "video" : "mic"
     UIView.transition(with: micButton, duration: 0.2, options: .transitionCrossDissolve) {
       let cfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
-      self.micButton.setImage(UIImage(systemName: iconName, withConfiguration: cfg), for: .normal)
+      self.applyControlGlyph(
+        button: self.micButton,
+        symbolName: iconName,
+        symbolConfig: cfg,
+        tintColor: self.appearance.textColorThem.withAlphaComponent(0.9)
+      )
     }
   }
 
@@ -1919,11 +1971,11 @@ final class ChatInputBar: UIView {
       appearance.bubbleMeGradient.first ?? UIColor(red: 0.49, green: 0.36, blue: 0.88, alpha: 1.0)
     UIView.animate(withDuration: 0.25, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
       if active {
-        self.pillContainer.layer.borderColor = agentColor.withAlphaComponent(0.55).cgColor
-        self.pillContainer.layer.borderWidth = 1.2
+        self.pillGlass.layer.borderColor = agentColor.withAlphaComponent(0.55).cgColor
+        self.pillGlass.layer.borderWidth = 1.2
       } else {
-        self.pillContainer.layer.borderColor = UIColor(white: 1.0, alpha: 0.12).cgColor
-        self.pillContainer.layer.borderWidth = 0.6
+        self.pillGlass.layer.borderColor = UIColor.clear.cgColor
+        self.pillGlass.layer.borderWidth = 0.0
       }
     }
   }
@@ -2021,6 +2073,27 @@ final class ChatInputBar: UIView {
       let dx = point.x - recordingGestureStartPoint.x
 
       lockPill.transform = CGAffineTransform(translationX: 0, y: min(0, dy + 6))
+
+      if dx < 0 && abs(dx) > abs(dy) {
+        let stretchAmount = abs(max(-100, dx))
+        self.micGlass.transform = CGAffineTransform(translationX: dx, y: 0)
+          .scaledBy(x: 1.2, y: 1.2)
+        let sx = 2.2 + (stretchAmount / 36.0)
+        let sy = max(1.2, 2.2 - (stretchAmount / 100.0))
+        self.micVADView.transform = CGAffineTransform(translationX: dx / 2.0, y: 0)
+          .scaledBy(x: sx, y: sy)
+      } else if dy < 0 {
+        let stretchAmount = abs(max(-60, dy))
+        self.micGlass.transform = CGAffineTransform(translationX: 0, y: dy)
+          .scaledBy(x: 1.2, y: 1.2)
+        let sy = 2.2 + (stretchAmount / 36.0)
+        let sx = max(1.2, 2.2 - (stretchAmount / 100.0))
+        self.micVADView.transform = CGAffineTransform(translationX: 0, y: dy / 2.0)
+          .scaledBy(x: sx, y: sy)
+      } else {
+        self.micGlass.transform = CGAffineTransform(scaleX: 1.2, y: 1.2)
+        self.micVADView.transform = CGAffineTransform(scaleX: 2.2, y: 2.2)
+      }
 
       if dy < -60 {
         lockActiveRecording()
@@ -2168,8 +2241,8 @@ final class ChatInputBar: UIView {
 
     // Mic Pulse / Scale
     UIView.animate(withDuration: 0.2) {
-      self.micGlass.transform = CGAffineTransform(scaleX: 2.8, y: 2.8)
-      self.micVADView.transform = CGAffineTransform(scaleX: 2.8, y: 2.8)
+      self.micGlass.transform = CGAffineTransform(scaleX: 1.2, y: 1.2)
+      self.micVADView.transform = CGAffineTransform(scaleX: 2.2, y: 2.2)
       self.micGlass.alpha = 1
     }
 
@@ -2288,14 +2361,16 @@ final class ChatInputBar: UIView {
     lockPill.isHidden = true
     cancelOverlayButton.isHidden = false
 
-    let sendIcon = UIImage(
-      systemName: "arrow.up.circle.fill",
-      withConfiguration: UIImage.SymbolConfiguration(pointSize: 22, weight: .medium))
+    let sendTint =
+      appearance.bubbleMeGradient.first
+      ?? appearance.textColorThem.withAlphaComponent(0.9)
     UIView.transition(with: micButton, duration: 0.2, options: .transitionCrossDissolve) {
-      self.micButton.setImage(sendIcon, for: .normal)
-      self.micButton.tintColor =
-        self.appearance.bubbleMeGradient.first
-        ?? self.appearance.textColorThem.withAlphaComponent(0.9)
+      self.applyControlGlyph(
+        button: self.micButton,
+        symbolName: "arrow.up.circle.fill",
+        symbolConfig: UIImage.SymbolConfiguration(pointSize: 22, weight: .medium),
+        tintColor: sendTint
+      )
     }
     micGlass.transform = CGAffineTransform(scaleX: 1.1, y: 1.1)
 
@@ -2545,9 +2620,12 @@ final class ChatInputBar: UIView {
 
       let micCfg = UIImage.SymbolConfiguration(pointSize: 13, weight: .medium)
       let iconName = self.isVideoMode ? "video" : "mic"
-      self.micButton.setImage(
-        UIImage(systemName: iconName, withConfiguration: micCfg), for: .normal)
-      self.micButton.tintColor = self.appearance.textColorThem.withAlphaComponent(0.9)
+      self.applyControlGlyph(
+        button: self.micButton,
+        symbolName: iconName,
+        symbolConfig: micCfg,
+        tintColor: self.appearance.textColorThem.withAlphaComponent(0.9)
+      )
 
       self.cancelOverlayButton.isHidden = true
 

@@ -1,5 +1,6 @@
+import AVFoundation
 import CoreLocation
-import PhotosUI
+import Photos
 import UIKit
 import UniformTypeIdentifiers
 
@@ -8,255 +9,308 @@ final class ChatAttachmentMenuController: UIViewController {
   var onSelectFile: ((String, String) -> Void)?
   var onSelectLocation: ((Double, Double) -> Void)?
 
+  // Kept for API compatibility with existing call sites.
   var sourceButtonFrameInWindow: CGRect?
   weak var sourceButtonView: UIView?
 
   private let appearance: ChatListAppearance
 
-  private let backdropView = UIVisualEffectView(effect: nil)
-  private let dimView = UIView()
-  private let panelView = UIView()
-  private let panelGlass = UIVisualEffectView(effect: nil)
-  private let headerLabel = UILabel()
+  private let headerGlass = UIVisualEffectView(effect: nil)
+  private let sectionDropdownButton = UIButton(type: .system)
+  private let filterDropdownButton = UIButton(type: .system)
   private let closeButton = UIButton(type: .system)
   private let contentView = UIView()
-  private let tabBar = UISegmentedControl(items: ["Gallery", "File", "Location", "Contact"])
-  private let inputField = UITextField()
 
-  // Gallery dashboard (AttachmentMenu.tsx inspired)
   private let galleryDashboard = UIView()
-  private let cameraHeroButton = UIButton(type: .custom)
-  private let galleryTileButton = UIButton(type: .custom)
-  private let fileTileButton = UIButton(type: .custom)
-  private let locationTileButton = UIButton(type: .custom)
-  private let contactTileButton = UIButton(type: .custom)
-  private let quickActionBottomRow = UIStackView()
-  private let pickLibraryButton = UIButton(type: .system)
-  private let pickCameraButton = UIButton(type: .system)
+  private let galleryLayout = UICollectionViewFlowLayout()
+  private lazy var galleryCollectionView = UICollectionView(
+    frame: .zero,
+    collectionViewLayout: galleryLayout
+  )
+  private let galleryEmptyLabel = UILabel()
 
-  // Simple alternate tab views
-  private let fileView = UIView()
   private let locationView = UIView()
-  private let contactView = UIView()
-  private let fileActionButton = UIButton(type: .system)
   private let locationActionButton = UIButton(type: .system)
-  private let contactPlaceholderLabel = UILabel()
 
-  private var hasAnimatedIn = false
-  private var isDismissingMenu = false
-  private var activeTabIndex = 0
-  private let morphTransition = GlassMorphTransition()
+  private let photoManager = PHCachingImageManager()
+  private var allGalleryAssets: [PHAsset] = []
+  private var galleryAssets: [PHAsset] = []
+  private var galleryThumbSize: CGSize = .zero
+  private var galleryBaseItem: CGFloat = 0
+  private var isSelectingAsset = false
+
+  private var cameraPreviewAvailable = false
+  private weak var cameraPreviewHostView: UIView?
+  private let cameraSession = AVCaptureSession()
+  private let cameraPreviewLayer = AVCaptureVideoPreviewLayer()
+  private let cameraSessionQueue = DispatchQueue(
+    label: "chat.attachment.menu.camera.session",
+    qos: .userInitiated
+  )
+  private var isCameraConfigured = false
+
+  private var activeSection: MenuSection = .gallery
+  private var activeGalleryFilter: GalleryFilter = .recent
+
+  private enum MenuSection: String {
+    case gallery = "Gallery"
+    case location = "Location"
+  }
+
+  private enum GalleryFilter: String {
+    case recent = "Recent"
+    case videos = "Videos"
+    case photos = "Photos"
+  }
 
   init(appearance: ChatListAppearance) {
     self.appearance = appearance
     super.init(nibName: nil, bundle: nil)
-    modalPresentationStyle = .overFullScreen
-    modalTransitionStyle = .crossDissolve
+    modalPresentationStyle = .pageSheet
   }
 
   required init?(coder: NSCoder) { nil }
 
   override func viewDidLoad() {
     super.viewDidLoad()
-    view.backgroundColor = .clear
-    setupBackdrop()
-    setupPanel()
+    cameraPreviewLayer.videoGravity = .resizeAspectFill
+    view.backgroundColor = UIColor.systemBackground
+
+    configureNativeSheetPresentation()
+    setupHeader()
     setupContent()
-    configureMorphTransition()
-    setActiveTab(0, animated: false)
+    setupMenus()
+
+    setActiveSection(.gallery, animated: false)
   }
 
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
     layoutChrome()
-    if !hasAnimatedIn {
-      prepareInitialMorphState()
-    }
   }
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    guard !hasAnimatedIn else { return }
-    hasAnimatedIn = true
-    animateInFromSource()
+    startCameraPreview()
   }
 
-  private func setupBackdrop() {
-    backdropView.frame = view.bounds
-    backdropView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+  override func viewWillDisappear(_ animated: Bool) {
+    super.viewWillDisappear(animated)
+    stopCameraPreview()
+  }
+
+  deinit {
+    stopCameraPreview()
+  }
+
+  private func configureNativeSheetPresentation() {
+    guard let sheet = sheetPresentationController else { return }
+    sheet.detents = [.medium(), .large()]
+    sheet.selectedDetentIdentifier = .medium
+    sheet.prefersGrabberVisible = true
+    sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+    sheet.prefersEdgeAttachedInCompactHeight = true
+    sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
+    sheet.preferredCornerRadius = 28
+  }
+
+  private func setupHeader() {
     if #available(iOS 26.0, *) {
-      let effect = UIGlassEffect(style: .clear)
+      let effect = UIGlassEffect(style: .regular)
       effect.isInteractive = true
-      backdropView.effect = effect
+      headerGlass.effect = effect
+      headerGlass.cornerConfiguration = .capsule()
     } else {
-      backdropView.effect = UIBlurEffect(style: .systemUltraThinMaterialDark)
+      headerGlass.effect = UIBlurEffect(style: .systemMaterial)
+      headerGlass.layer.cornerRadius = 20
+      headerGlass.layer.cornerCurve = .continuous
+      headerGlass.clipsToBounds = true
     }
-    backdropView.alpha = 0
-    view.addSubview(backdropView)
+    view.addSubview(headerGlass)
 
-    dimView.frame = view.bounds
-    dimView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
-    dimView.backgroundColor = UIColor.black.withAlphaComponent(0.18)
-    dimView.alpha = 0
-    view.addSubview(dimView)
+    sectionDropdownButton.showsMenuAsPrimaryAction = true
+    filterDropdownButton.showsMenuAsPrimaryAction = true
 
-    let tap = UITapGestureRecognizer(target: self, action: #selector(backdropTapped))
-    dimView.addGestureRecognizer(tap)
-  }
-
-  private func configureMorphTransition() {
-    morphTransition.hostView = view
-    morphTransition.sourceView = sourceButtonView
-    morphTransition.targetView = panelView
-    morphTransition.targetCornerRadius = 28
-    morphTransition.backdropViews = [backdropView, dimView]
-    morphTransition.contentViews = [headerLabel, closeButton, inputField, contentView, tabBar]
-  }
-
-  private func setupPanel() {
-    panelView.backgroundColor = .clear
-    panelView.clipsToBounds = false
-    panelView.layer.cornerCurve = .continuous
-    view.addSubview(panelView)
-
-    panelGlass.isUserInteractionEnabled = false
-    panelGlass.clipsToBounds = true
-    panelGlass.layer.cornerCurve = .continuous
-    panelView.addSubview(panelGlass)
-
-    if #available(iOS 26.0, *) {
-      let effect = UIGlassEffect()
-      effect.isInteractive = true
-      panelGlass.effect = effect
-      panelGlass.contentView.backgroundColor = UIColor.white.withAlphaComponent(0.05)
-    } else {
-      panelGlass.effect = UIBlurEffect(style: .systemMaterialDark)
-      panelGlass.contentView.backgroundColor = UIColor.white.withAlphaComponent(0.03)
-    }
-    panelView.layer.borderWidth = 0.6
-    panelView.layer.borderColor = UIColor.white.withAlphaComponent(0.10).cgColor
-
-    headerLabel.text = "Attachments"
-    headerLabel.font = .systemFont(ofSize: 18, weight: .semibold)
-    headerLabel.textColor = UIColor(white: 0.98, alpha: 0.95)
-    panelView.addSubview(headerLabel)
-
-    let closeCfg = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
-    closeButton.setImage(UIImage(systemName: "xmark", withConfiguration: closeCfg), for: .normal)
-    closeButton.tintColor = UIColor(white: 0.96, alpha: 0.9)
-    closeButton.backgroundColor = UIColor.white.withAlphaComponent(0.08)
-    closeButton.layer.cornerRadius = 16
-    closeButton.layer.cornerCurve = .continuous
-    closeButton.layer.borderWidth = 0.35
-    closeButton.layer.borderColor = UIColor.white.withAlphaComponent(0.16).cgColor
     closeButton.addTarget(self, action: #selector(closeTapped), for: .touchUpInside)
-    panelView.addSubview(closeButton)
 
-    inputField.borderStyle = .none
-    inputField.backgroundColor = UIColor.white.withAlphaComponent(0.08)
-    inputField.textColor = UIColor.white.withAlphaComponent(0.92)
-    inputField.attributedPlaceholder = NSAttributedString(
-      string: "Search or add caption",
-      attributes: [.foregroundColor: UIColor.white.withAlphaComponent(0.45)]
-    )
-    inputField.layer.cornerRadius = 14
-    inputField.layer.cornerCurve = .continuous
-    inputField.clearButtonMode = .whileEditing
-    inputField.leftView = UIView(frame: CGRect(x: 0, y: 0, width: 10, height: 10))
-    inputField.leftViewMode = .always
-    panelView.addSubview(inputField)
+    headerGlass.contentView.addSubview(sectionDropdownButton)
+    headerGlass.contentView.addSubview(filterDropdownButton)
+    headerGlass.contentView.addSubview(closeButton)
 
-    tabBar.selectedSegmentIndex = 0
-    tabBar.backgroundColor = .clear
-    tabBar.selectedSegmentTintColor = UIColor.white.withAlphaComponent(0.16)
-    tabBar.setTitleTextAttributes(
-      [
-        .foregroundColor: UIColor(white: 0.95, alpha: 0.84),
-        .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
-      ],
-      for: .normal
-    )
-    tabBar.setTitleTextAttributes(
-      [
-        .foregroundColor: UIColor.white,
-        .font: UIFont.systemFont(ofSize: 12, weight: .semibold),
-      ],
-      for: .selected
-    )
-    tabBar.addTarget(self, action: #selector(tabChanged), for: .valueChanged)
-    panelView.addSubview(tabBar)
+    styleCloseButton()
+  }
 
-    contentView.backgroundColor = .clear
-    panelView.addSubview(contentView)
+  private func setupMenus() {
+    updateSectionDropdownMenu()
+    updateFilterDropdownMenu()
+  }
+
+  private func updateSectionDropdownMenu() {
+    let galleryAction = UIAction(
+      title: MenuSection.gallery.rawValue,
+      image: UIImage(systemName: "photo.on.rectangle.angled"),
+      state: activeSection == .gallery ? .on : .off
+    ) { [weak self] _ in
+      self?.setActiveSection(.gallery, animated: true)
+    }
+
+    let locationAction = UIAction(
+      title: MenuSection.location.rawValue,
+      image: UIImage(systemName: "location.circle"),
+      state: activeSection == .location ? .on : .off
+    ) { [weak self] _ in
+      self?.setActiveSection(.location, animated: true)
+    }
+
+    let fileAction = UIAction(
+      title: "Choose File…",
+      image: UIImage(systemName: "doc")
+    ) { [weak self] _ in
+      self?.openFilePicker()
+    }
+
+    sectionDropdownButton.menu = UIMenu(children: [galleryAction, locationAction, fileAction])
+    styleDropdownButton(
+      sectionDropdownButton,
+      title: activeSection.rawValue,
+      symbol: "chevron.up.chevron.down",
+      prominent: true
+    )
+  }
+
+  private func updateFilterDropdownMenu() {
+    let recentAction = UIAction(
+      title: GalleryFilter.recent.rawValue,
+      image: UIImage(systemName: "clock"),
+      state: activeGalleryFilter == .recent ? .on : .off
+    ) { [weak self] _ in
+      self?.setGalleryFilter(.recent, animated: true)
+    }
+
+    let videosAction = UIAction(
+      title: GalleryFilter.videos.rawValue,
+      image: UIImage(systemName: "video"),
+      state: activeGalleryFilter == .videos ? .on : .off
+    ) { [weak self] _ in
+      self?.setGalleryFilter(.videos, animated: true)
+    }
+
+    let photosAction = UIAction(
+      title: GalleryFilter.photos.rawValue,
+      image: UIImage(systemName: "photo"),
+      state: activeGalleryFilter == .photos ? .on : .off
+    ) { [weak self] _ in
+      self?.setGalleryFilter(.photos, animated: true)
+    }
+
+    filterDropdownButton.menu = UIMenu(children: [recentAction, videosAction, photosAction])
+    styleDropdownButton(
+      filterDropdownButton,
+      title: activeGalleryFilter.rawValue,
+      symbol: "line.3.horizontal.decrease.circle",
+      prominent: false
+    )
+  }
+
+  private func styleDropdownButton(
+    _ button: UIButton,
+    title: String,
+    symbol: String,
+    prominent: Bool
+  ) {
+    if #available(iOS 26.0, *) {
+      var config = prominent
+        ? UIButton.Configuration.prominentGlass()
+        : UIButton.Configuration.glass()
+      config.cornerStyle = .capsule
+      config.title = title
+      config.image = UIImage(
+        systemName: symbol,
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+      )
+      config.imagePlacement = .trailing
+      config.imagePadding = 6
+      config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12)
+      button.configuration = config
+      return
+    }
+
+    var config = UIButton.Configuration.filled()
+    config.title = title
+    config.image = UIImage(
+      systemName: symbol,
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+    )
+    config.imagePlacement = .trailing
+    config.imagePadding = 6
+    config.baseBackgroundColor = UIColor.secondarySystemFill
+    config.baseForegroundColor = UIColor.label
+    config.cornerStyle = .capsule
+    config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 12, bottom: 8, trailing: 12)
+    button.configuration = config
+  }
+
+  private func styleCloseButton() {
+    if #available(iOS 26.0, *) {
+      var config = UIButton.Configuration.glass()
+      config.cornerStyle = .capsule
+      config.image = UIImage(
+        systemName: "xmark",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+      )
+      config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+      closeButton.configuration = config
+      return
+    }
+
+    var config = UIButton.Configuration.filled()
+    config.cornerStyle = .capsule
+    config.image = UIImage(
+      systemName: "xmark",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+    )
+    config.baseBackgroundColor = UIColor.secondarySystemFill
+    config.baseForegroundColor = UIColor.label
+    config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+    closeButton.configuration = config
   }
 
   private func setupContent() {
-    setupGalleryDashboard()
-    setupFileView()
-    setupLocationView()
-    setupContactView()
+    contentView.backgroundColor = .clear
+    view.addSubview(contentView)
 
-    [galleryDashboard, fileView, locationView, contactView].forEach {
+    setupGalleryDashboard()
+    setupLocationView()
+
+    [galleryDashboard, locationView].forEach {
       $0.backgroundColor = .clear
       contentView.addSubview($0)
     }
   }
 
   private func setupGalleryDashboard() {
-    configureCard(cameraHeroButton, title: "Camera", subtitle: "16:9 Preview", symbol: "camera.fill")
-    configureCard(galleryTileButton, title: "Gallery", subtitle: "Photos & videos", symbol: "photo.on.rectangle")
-    configureCard(fileTileButton, title: "File", subtitle: "Documents", symbol: "doc.fill")
-    configureCard(locationTileButton, title: "Location", subtitle: "Send pin", symbol: "location.fill")
-    configureCard(contactTileButton, title: "Contact", subtitle: "Coming soon", symbol: "person.crop.circle")
-
-    cameraHeroButton.contentHorizontalAlignment = .left
-    cameraHeroButton.contentVerticalAlignment = .top
-    cameraHeroButton.backgroundColor = UIColor.white.withAlphaComponent(0.03)
-
-    let cameraPreviewShade = CAGradientLayer()
-    cameraPreviewShade.colors = [
-      UIColor(white: 0.03, alpha: 0.92).cgColor,
-      UIColor(red: 0.10, green: 0.10, blue: 0.14, alpha: 0.75).cgColor,
-      UIColor(white: 0.02, alpha: 0.96).cgColor,
-    ]
-    cameraPreviewShade.startPoint = CGPoint(x: 0.0, y: 0.0)
-    cameraPreviewShade.endPoint = CGPoint(x: 1.0, y: 1.0)
-    cameraPreviewShade.name = "cameraPreviewShade"
-    cameraHeroButton.layer.insertSublayer(cameraPreviewShade, at: 0)
-
-    [cameraHeroButton, galleryTileButton, fileTileButton, locationTileButton, contactTileButton]
-      .forEach { galleryDashboard.addSubview($0) }
-
-    cameraHeroButton.addTarget(self, action: #selector(openCameraFromHero), for: .touchUpInside)
-    galleryTileButton.addTarget(self, action: #selector(openLibraryPicker), for: .touchUpInside)
-    fileTileButton.addTarget(self, action: #selector(openFilePickerFromTile), for: .touchUpInside)
-    locationTileButton.addTarget(self, action: #selector(openLocationFromTile), for: .touchUpInside)
-    contactTileButton.addTarget(self, action: #selector(showContactPlaceholderToast), for: .touchUpInside)
-
-    quickActionBottomRow.axis = .horizontal
-    quickActionBottomRow.alignment = .fill
-    quickActionBottomRow.distribution = .fillEqually
-    quickActionBottomRow.spacing = 10
-    galleryDashboard.addSubview(quickActionBottomRow)
-
-    configureFooterPillButton(pickLibraryButton, title: "Open Gallery", symbol: "photo")
-    configureFooterPillButton(pickCameraButton, title: "Open Camera", symbol: "camera")
-    pickLibraryButton.addTarget(self, action: #selector(openLibraryPicker), for: .touchUpInside)
-    pickCameraButton.addTarget(self, action: #selector(openCameraFromHero), for: .touchUpInside)
-    quickActionBottomRow.addArrangedSubview(pickLibraryButton)
-    quickActionBottomRow.addArrangedSubview(pickCameraButton)
-  }
-
-  private func setupFileView() {
-    configureCenterActionView(
-      fileView,
-      title: "Share a File",
-      subtitle: "Pick any document from Files",
-      actionButton: fileActionButton,
-      actionTitle: "Choose File",
-      actionSymbol: "doc.badge.plus"
+    galleryCollectionView.backgroundColor = .clear
+    galleryCollectionView.alwaysBounceVertical = true
+    galleryCollectionView.showsVerticalScrollIndicator = true
+    galleryCollectionView.contentInsetAdjustmentBehavior = .always
+    galleryCollectionView.dataSource = self
+    galleryCollectionView.delegate = self
+    galleryCollectionView.register(
+      ChatAttachmentAssetCell.self,
+      forCellWithReuseIdentifier: ChatAttachmentAssetCell.reuseIdentifier
     )
-    fileActionButton.addTarget(self, action: #selector(openFilePickerFromTile), for: .touchUpInside)
+    galleryCollectionView.register(
+      ChatAttachmentCameraCell.self,
+      forCellWithReuseIdentifier: ChatAttachmentCameraCell.reuseIdentifier
+    )
+    galleryDashboard.addSubview(galleryCollectionView)
+
+    galleryEmptyLabel.text = "No photos found"
+    galleryEmptyLabel.font = .systemFont(ofSize: 14, weight: .medium)
+    galleryEmptyLabel.textColor = UIColor.secondaryLabel
+    galleryEmptyLabel.textAlignment = .center
+    galleryEmptyLabel.numberOfLines = 0
+    galleryDashboard.addSubview(galleryEmptyLabel)
   }
 
   private func setupLocationView() {
@@ -271,105 +325,87 @@ final class ChatAttachmentMenuController: UIViewController {
     locationActionButton.addTarget(self, action: #selector(openLocationFromTile), for: .touchUpInside)
   }
 
-  private func setupContactView() {
-    contactPlaceholderLabel.text = "Contact sharing coming soon"
-    contactPlaceholderLabel.font = .systemFont(ofSize: 14, weight: .medium)
-    contactPlaceholderLabel.textColor = UIColor(white: 0.92, alpha: 0.75)
-    contactPlaceholderLabel.textAlignment = .center
-    contactPlaceholderLabel.numberOfLines = 0
-    contactView.addSubview(contactPlaceholderLabel)
-  }
-
   private func layoutChrome() {
     let safe = view.safeAreaInsets
     let w = view.bounds.width
     let h = view.bounds.height
-    let sideInset: CGFloat = 12
-    let bottomInset: CGFloat = max(safe.bottom, 8) + 14
-    let panelWidth = w - (sideInset * 2)
-    let panelHeight = min(max(420, h * 0.58), h - safe.top - bottomInset - 20)
-    let panelFrame = CGRect(
-      x: sideInset,
-      y: h - bottomInset - panelHeight,
-      width: panelWidth,
-      height: panelHeight
-    ).integral
 
-    if hasAnimatedIn && !isDismissingMenu {
-      panelView.frame = panelFrame
-    } else if !hasAnimatedIn {
-      panelView.frame = panelFrame
+    let headerX: CGFloat = 12
+    let headerY = safe.top + 8
+    let headerH: CGFloat = 42
+    let headerW = max(1, w - (headerX * 2))
+    headerGlass.frame = CGRect(x: headerX, y: headerY, width: headerW, height: headerH)
+
+    let closeSize: CGFloat = 30
+    closeButton.frame = CGRect(x: headerW - closeSize - 6, y: 6, width: closeSize, height: closeSize)
+
+    let filterW: CGFloat = filterDropdownButton.isHidden ? 0 : min(122, headerW * 0.30)
+    let sectionW = max(96, min(160, headerW - closeSize - filterW - 30))
+    sectionDropdownButton.frame = CGRect(x: 8, y: 4, width: sectionW, height: 34)
+
+    if filterDropdownButton.isHidden {
+      filterDropdownButton.frame = .zero
+    } else {
+      filterDropdownButton.frame = CGRect(
+        x: closeButton.frame.minX - filterW - 8,
+        y: 4,
+        width: filterW,
+        height: 34
+      )
     }
-    panelGlass.frame = panelView.bounds
-    panelGlass.layer.cornerRadius = panelView.layer.cornerRadius
 
-    let headerInset: CGFloat = 16
-    headerLabel.frame = CGRect(x: headerInset, y: 14, width: panelWidth - 80, height: 24)
-    closeButton.frame = CGRect(x: panelWidth - 16 - 32, y: 10, width: 32, height: 32)
-    inputField.frame = CGRect(x: 16, y: headerLabel.frame.maxY + 10, width: panelWidth - 32, height: 36)
+    let contentTop = headerGlass.frame.maxY + 8
+    let contentBottom = h - safe.bottom
+    contentView.frame = CGRect(x: 0, y: contentTop, width: w, height: max(1, contentBottom - contentTop))
 
-    let tabH: CGFloat = 34
-    let tabY = panelFrame.height - tabH - 14
-    tabBar.frame = CGRect(x: 16, y: tabY, width: panelWidth - 32, height: tabH)
-
-    let contentBottom = tabBar.frame.minY - 10
-    contentView.frame = CGRect(
-      x: 12,
-      y: inputField.frame.maxY + 10,
-      width: panelWidth - 24,
-      height: max(1, contentBottom - (inputField.frame.maxY + 10))
-    )
-
-    [galleryDashboard, fileView, locationView, contactView].forEach { $0.frame = contentView.bounds }
+    [galleryDashboard, locationView].forEach { $0.frame = contentView.bounds }
     layoutGalleryDashboard()
     layoutCenterTabViews()
+    updateCameraPreviewFrame()
   }
 
   private func layoutGalleryDashboard() {
     let bounds = galleryDashboard.bounds
     guard bounds.width > 0, bounds.height > 0 else { return }
 
-    let gap: CGFloat = 10
-    let footerH: CGFloat = 42
-    let dashboardH = max(1, bounds.height - footerH - gap)
+    galleryCollectionView.frame = bounds
+    galleryEmptyLabel.frame = bounds.insetBy(dx: 20, dy: 20)
 
-    let rightColW = floor((bounds.width - gap) * 0.36)
-    let leftW = bounds.width - gap - rightColW
-    let cameraH = min(floor(leftW * 9.0 / 16.0), dashboardH * 0.62)
-    let bottomY = cameraH + gap
-    let bottomH = max(1, dashboardH - bottomY)
+    let spacing: CGFloat = 2
+    let columns: CGFloat = bounds.width > 540 ? 5 : 3
+    let item = floor((bounds.width - ((columns - 1) * spacing)) / columns)
+    galleryBaseItem = item
 
-    cameraHeroButton.frame = CGRect(x: 0, y: 0, width: leftW, height: cameraH).integral
-    if let shade = cameraHeroButton.layer.sublayers?.first(where: { $0.name == "cameraPreviewShade" }) as? CAGradientLayer {
-      shade.frame = cameraHeroButton.bounds
-      shade.cornerRadius = cameraHeroButton.layer.cornerRadius
-    }
+    galleryLayout.scrollDirection = .vertical
+    galleryLayout.minimumLineSpacing = spacing
+    galleryLayout.minimumInteritemSpacing = spacing
+    galleryLayout.itemSize = CGSize(width: item, height: item)
+    galleryLayout.invalidateLayout()
 
-    let rightTileH = floor((dashboardH - gap) * 0.5)
-    galleryTileButton.frame = CGRect(x: leftW + gap, y: 0, width: rightColW, height: rightTileH).integral
-    fileTileButton.frame = CGRect(
-      x: leftW + gap, y: rightTileH + gap, width: rightColW, height: dashboardH - rightTileH - gap
-    ).integral
-
-    let bottomTileGap: CGFloat = 10
-    let bottomTileW = floor((leftW - bottomTileGap) * 0.5)
-    locationTileButton.frame = CGRect(x: 0, y: bottomY, width: bottomTileW, height: bottomH).integral
-    contactTileButton.frame = CGRect(
-      x: bottomTileW + bottomTileGap, y: bottomY, width: leftW - bottomTileW - bottomTileGap, height: bottomH
-    ).integral
-
-    quickActionBottomRow.frame = CGRect(x: 0, y: bounds.height - footerH, width: bounds.width, height: footerH)
+    let scale = view.window?.screen.scale ?? UIScreen.main.scale
+    galleryThumbSize = CGSize(width: item * scale, height: item * scale)
   }
 
   private func layoutCenterTabViews() {
     let insetBounds = contentView.bounds.insetBy(dx: 12, dy: 12)
-    [fileView, locationView, contactView].forEach { view in
+    [locationView].forEach { view in
       guard view.subviews.count >= 3 else { return }
       let title = view.subviews[0]
       let subtitle = view.subviews[1]
       let button = view.subviews[2]
-      title.frame = CGRect(x: 0, y: max(10, insetBounds.height * 0.20), width: insetBounds.width, height: 28)
-      subtitle.frame = CGRect(x: 10, y: title.frame.maxY + 6, width: insetBounds.width - 20, height: 40)
+
+      title.frame = CGRect(
+        x: 0,
+        y: max(10, insetBounds.height * 0.20),
+        width: insetBounds.width,
+        height: 28
+      )
+      subtitle.frame = CGRect(
+        x: 10,
+        y: title.frame.maxY + 6,
+        width: insetBounds.width - 20,
+        height: 40
+      )
       button.frame = CGRect(
         x: max(16, (insetBounds.width - 220) * 0.5),
         y: subtitle.frame.maxY + 16,
@@ -380,37 +416,285 @@ final class ChatAttachmentMenuController: UIViewController {
       subtitle.center.x = view.bounds.midX
       button.center.x = view.bounds.midX
     }
-    contactPlaceholderLabel.frame = contactView.bounds.insetBy(dx: 20, dy: 24)
   }
 
-  private func configureCard(
-    _ button: UIButton,
-    title: String,
-    subtitle: String,
-    symbol: String
-  ) {
-    button.clipsToBounds = true
-    button.layer.cornerRadius = 16
-    button.layer.cornerCurve = .continuous
-    button.layer.borderWidth = 0.45
-    button.layer.borderColor = UIColor.white.withAlphaComponent(0.10).cgColor
-    button.backgroundColor = UIColor.white.withAlphaComponent(0.05)
+  private func setActiveSection(_ section: MenuSection, animated: Bool) {
+    let changed = activeSection != section
+    activeSection = section
 
-    var config = UIButton.Configuration.plain()
-    config.image = UIImage(systemName: symbol)
-    config.imagePlacement = .top
-    config.imagePadding = 8
-    config.baseForegroundColor = UIColor.white.withAlphaComponent(0.96)
-    config.contentInsets = NSDirectionalEdgeInsets(top: 12, leading: 12, bottom: 12, trailing: 12)
-    config.attributedTitle = AttributedString(
-      title,
-      attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 13, weight: .semibold)])
-    )
-    config.attributedSubtitle = AttributedString(
-      subtitle,
-      attributes: AttributeContainer([.font: UIFont.systemFont(ofSize: 11, weight: .regular)])
-    )
-    button.configuration = config
+    galleryDashboard.isHidden = activeSection != .gallery
+    locationView.isHidden = activeSection != .location
+    filterDropdownButton.isHidden = activeSection != .gallery
+
+    updateSectionDropdownMenu()
+
+    if activeSection == .gallery {
+      refreshGalleryAssets()
+    }
+
+    view.setNeedsLayout()
+
+    guard animated && changed else { return }
+    let targetView = activeSection == .gallery ? galleryDashboard : locationView
+    targetView.alpha = 0.0
+    UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+      targetView.alpha = 1.0
+    }
+  }
+
+  private func setGalleryFilter(_ filter: GalleryFilter, animated: Bool) {
+    guard activeGalleryFilter != filter else { return }
+    activeGalleryFilter = filter
+    updateFilterDropdownMenu()
+    applyGalleryFilter()
+
+    guard animated else { return }
+    galleryDashboard.alpha = 0.0
+    UIView.animate(withDuration: 0.14, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
+      self.galleryDashboard.alpha = 1.0
+    }
+  }
+
+  private func applyGalleryFilter() {
+    switch activeGalleryFilter {
+    case .recent:
+      galleryAssets = allGalleryAssets
+      galleryEmptyLabel.text = "No media found"
+    case .videos:
+      galleryAssets = allGalleryAssets.filter { $0.mediaType == .video }
+      galleryEmptyLabel.text = "No videos found"
+    case .photos:
+      galleryAssets = allGalleryAssets.filter { $0.mediaType == .image }
+      galleryEmptyLabel.text = "No photos found"
+    }
+
+    galleryCollectionView.reloadData()
+    galleryEmptyLabel.isHidden = !galleryAssets.isEmpty
+  }
+
+  private func refreshGalleryAssets() {
+    let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+    switch status {
+    case .authorized, .limited:
+      loadGalleryAssets()
+    case .notDetermined:
+      PHPhotoLibrary.requestAuthorization(for: .readWrite) { [weak self] _ in
+        DispatchQueue.main.async {
+          self?.refreshGalleryAssets()
+        }
+      }
+    case .denied, .restricted:
+      allGalleryAssets = []
+      galleryAssets = []
+      galleryCollectionView.reloadData()
+      galleryEmptyLabel.text = "Allow Photos access to show your gallery"
+      galleryEmptyLabel.isHidden = false
+    @unknown default:
+      allGalleryAssets = []
+      galleryAssets = []
+      galleryCollectionView.reloadData()
+      galleryEmptyLabel.text = "Photos unavailable"
+      galleryEmptyLabel.isHidden = false
+    }
+  }
+
+  private func loadGalleryAssets() {
+    let fetchOptions = PHFetchOptions()
+    fetchOptions.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+    fetchOptions.fetchLimit = 300
+
+    let fetch = PHAsset.fetchAssets(with: fetchOptions)
+    var next: [PHAsset] = []
+    next.reserveCapacity(fetch.count)
+    fetch.enumerateObjects { asset, _, _ in
+      next.append(asset)
+    }
+
+    allGalleryAssets = next
+    applyGalleryFilter()
+  }
+
+  private func sendSelectedAsset(_ asset: PHAsset) {
+    guard !isSelectingAsset else { return }
+    isSelectingAsset = true
+
+    if asset.mediaType == .video {
+      sendSelectedVideoAsset(asset)
+      return
+    }
+
+    let options = PHImageRequestOptions()
+    options.isNetworkAccessAllowed = true
+    options.deliveryMode = .highQualityFormat
+    options.version = .current
+
+    PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) {
+      [weak self] data, uti, _, _ in
+      guard let self else { return }
+      guard let data else {
+        DispatchQueue.main.async { self.isSelectingAsset = false }
+        return
+      }
+
+      let ext: String = {
+        if let uti, let type = UTType(uti) {
+          return type.preferredFilenameExtension ?? "jpg"
+        }
+        return "jpg"
+      }()
+
+      let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("gallery-\(UUID().uuidString)")
+        .appendingPathExtension(ext)
+
+      do {
+        try data.write(to: tempURL, options: .atomic)
+        DispatchQueue.main.async {
+          self.isSelectingAsset = false
+          self.finishAndDismiss {
+            self.onSelectImage?(tempURL.absoluteString)
+          }
+        }
+      } catch {
+        DispatchQueue.main.async {
+          self.isSelectingAsset = false
+        }
+      }
+    }
+  }
+
+  private func sendSelectedVideoAsset(_ asset: PHAsset) {
+    let options = PHVideoRequestOptions()
+    options.isNetworkAccessAllowed = true
+    options.deliveryMode = .highQualityFormat
+
+    PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { [weak self] avAsset, _, _ in
+      guard let self else { return }
+      guard let urlAsset = avAsset as? AVURLAsset else {
+        DispatchQueue.main.async { self.isSelectingAsset = false }
+        return
+      }
+
+      let ext = urlAsset.url.pathExtension.isEmpty ? "mov" : urlAsset.url.pathExtension
+      let tempURL = FileManager.default.temporaryDirectory
+        .appendingPathComponent("gallery-video-\(UUID().uuidString)")
+        .appendingPathExtension(ext)
+
+      do {
+        if FileManager.default.fileExists(atPath: tempURL.path) {
+          try FileManager.default.removeItem(at: tempURL)
+        }
+        try FileManager.default.copyItem(at: urlAsset.url, to: tempURL)
+        DispatchQueue.main.async {
+          self.isSelectingAsset = false
+          self.finishAndDismiss {
+            self.onSelectImage?(tempURL.absoluteString)
+          }
+        }
+      } catch {
+        DispatchQueue.main.async {
+          self.isSelectingAsset = false
+        }
+      }
+    }
+  }
+
+  private func bindCameraPreview(to hostView: UIView) {
+    cameraPreviewHostView = hostView
+    cameraPreviewLayer.session = cameraSession
+    if cameraPreviewLayer.superlayer !== hostView.layer {
+      cameraPreviewLayer.removeFromSuperlayer()
+      hostView.layer.insertSublayer(cameraPreviewLayer, at: 0)
+    }
+    updateCameraPreviewFrame()
+  }
+
+  private func updateCameraPreviewFrame() {
+    guard let host = cameraPreviewHostView else { return }
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    cameraPreviewLayer.frame = host.bounds
+    CATransaction.commit()
+  }
+
+  private func reloadCameraTile() {
+    guard galleryCollectionView.numberOfSections > 0 else { return }
+    guard galleryCollectionView.numberOfItems(inSection: 0) > 0 else { return }
+    galleryCollectionView.reloadItems(at: [IndexPath(item: 0, section: 0)])
+  }
+
+  private func startCameraPreview() {
+    let status = AVCaptureDevice.authorizationStatus(for: .video)
+    switch status {
+    case .authorized:
+      configureAndStartCameraSession()
+    case .notDetermined:
+      AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+        DispatchQueue.main.async {
+          guard let self else { return }
+          self.cameraPreviewAvailable = granted
+          self.reloadCameraTile()
+        }
+        guard granted else { return }
+        self?.configureAndStartCameraSession()
+      }
+    case .denied, .restricted:
+      cameraPreviewAvailable = false
+      reloadCameraTile()
+    @unknown default:
+      cameraPreviewAvailable = false
+      reloadCameraTile()
+    }
+  }
+
+  private func configureAndStartCameraSession() {
+    cameraSessionQueue.async { [weak self] in
+      guard let self else { return }
+      if !self.isCameraConfigured {
+        self.cameraSession.beginConfiguration()
+        self.cameraSession.sessionPreset = .photo
+
+        self.cameraSession.inputs.forEach { self.cameraSession.removeInput($0) }
+        let camera =
+          AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .front)
+          ?? AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
+
+        guard
+          let camera,
+          let input = try? AVCaptureDeviceInput(device: camera),
+          self.cameraSession.canAddInput(input)
+        else {
+          self.cameraSession.commitConfiguration()
+          DispatchQueue.main.async {
+            self.cameraPreviewAvailable = false
+            self.reloadCameraTile()
+          }
+          return
+        }
+
+        self.cameraSession.addInput(input)
+        self.cameraSession.commitConfiguration()
+        self.isCameraConfigured = true
+      }
+
+      guard !self.cameraSession.isRunning else { return }
+      self.cameraSession.startRunning()
+      DispatchQueue.main.async {
+        self.cameraPreviewAvailable = true
+        self.reloadCameraTile()
+      }
+    }
+  }
+
+  private func stopCameraPreview() {
+    cameraPreviewLayer.session = nil
+    cameraPreviewHostView = nil
+    let session = cameraSession
+    cameraSessionQueue.async {
+      if session.isRunning {
+        session.stopRunning()
+      }
+    }
   }
 
   private func configureFooterPillButton(_ button: UIButton, title: String, symbol: String) {
@@ -419,6 +703,7 @@ final class ChatAttachmentMenuController: UIViewController {
     button.layer.borderWidth = 0.35
     button.layer.borderColor = UIColor.white.withAlphaComponent(0.14).cgColor
     button.backgroundColor = UIColor.white.withAlphaComponent(0.07)
+
     var config = UIButton.Configuration.plain()
     config.image = UIImage(systemName: symbol)
     config.imagePlacement = .leading
@@ -456,138 +741,23 @@ final class ChatAttachmentMenuController: UIViewController {
     host.addSubview(actionButton)
   }
 
-  private func setActiveTab(_ index: Int, animated: Bool) {
-    activeTabIndex = max(0, min(index, 3))
-    tabBar.selectedSegmentIndex = activeTabIndex
-    galleryDashboard.isHidden = activeTabIndex != 0
-    fileView.isHidden = activeTabIndex != 1
-    locationView.isHidden = activeTabIndex != 2
-    contactView.isHidden = activeTabIndex != 3
-
-    let placeholder: String
-    switch activeTabIndex {
-    case 0: placeholder = "Search or add caption"
-    case 1: placeholder = "File name (optional)"
-    case 2: placeholder = "Location note (optional)"
-    case 3: placeholder = "Search contacts"
-    default: placeholder = "Search"
-    }
-    inputField.attributedPlaceholder = NSAttributedString(
-      string: placeholder,
-      attributes: [.foregroundColor: UIColor.white.withAlphaComponent(0.45)]
-    )
-
-    guard animated else { return }
-    let targetView: UIView = [galleryDashboard, fileView, locationView, contactView][activeTabIndex]
-    targetView.alpha = 0.0
-    UIView.animate(withDuration: 0.18, delay: 0, options: [.curveEaseOut, .beginFromCurrentState]) {
-      targetView.alpha = 1.0
-    }
-  }
-
-  private func prepareInitialMorphState() {
-    panelView.layer.cornerRadius = 28
-    morphTransition.hostView = view
-    morphTransition.sourceView = sourceButtonView
-    morphTransition.sourceFrameInHost = resolvedSourceFrameInLocalCoords()
-    morphTransition.targetView = panelView
-    morphTransition.targetCornerRadius = 28
-    morphTransition.suppressTargetForInitialState()
-  }
-
-  private func animateInFromSource() {
-    panelView.layer.removeAllAnimations()
-    panelView.layer.cornerRadius = 28
-    morphTransition.animatePresent()
-  }
-
-  private func animateOutAndDismiss() {
-    guard !isDismissingMenu else { return }
-    isDismissingMenu = true
-
-    morphTransition.hostView = view
-    morphTransition.sourceView = sourceButtonView
-    morphTransition.sourceFrameInHost = resolvedSourceFrameInLocalCoords()
-    morphTransition.targetView = panelView
-    morphTransition.targetCornerRadius = 28
-    morphTransition.animateDismiss(fallbackOffsetY: 24) {
-      self.dismiss(animated: false)
-    }
-  }
-
-  private func targetPanelFrame() -> CGRect {
-    let safe = view.safeAreaInsets
-    let w = view.bounds.width
-    let h = view.bounds.height
-    let sideInset: CGFloat = 12
-    let bottomInset: CGFloat = max(safe.bottom, 8) + 14
-    let panelWidth = w - (sideInset * 2)
-    let panelHeight = min(max(420, h * 0.58), h - safe.top - bottomInset - 20)
-    return CGRect(
-      x: sideInset,
-      y: h - bottomInset - panelHeight,
-      width: panelWidth,
-      height: panelHeight
-    ).integral
-  }
-
-  private func resolvedSourceFrameInLocalCoords() -> CGRect? {
-    guard let sourceButtonFrameInWindow else { return nil }
-    if let window = view.window {
-      return window.convert(sourceButtonFrameInWindow, to: view)
-    }
-    return sourceButtonFrameInWindow
-  }
-
   private func finishAndDismiss(_ action: () -> Void) {
     action()
-    animateOutAndDismiss()
+    dismiss(animated: true)
   }
 
-  @objc private func backdropTapped() {
-    animateOutAndDismiss()
-  }
-
-  @objc private func closeTapped() {
-    animateOutAndDismiss()
-  }
-
-  @objc private func tabChanged() {
-    setActiveTab(tabBar.selectedSegmentIndex, animated: true)
-  }
-
-  @objc private func openLibraryPicker() {
-    var config = PHPickerConfiguration(photoLibrary: .shared())
-    config.selectionLimit = 10
-    config.filter = .any(of: [.images, .videos])
-    let picker = PHPickerViewController(configuration: config)
-    picker.delegate = self
-    present(picker, animated: true)
-  }
-
-  @objc private func openCameraFromHero() {
-    guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-      openLibraryPicker()
-      return
-    }
-    let picker = UIImagePickerController()
-    picker.sourceType = .camera
-    picker.delegate = self
-    picker.mediaTypes = [UTType.image.identifier]
-    picker.cameraCaptureMode = .photo
-    picker.videoQuality = .typeMedium
-    present(picker, animated: true)
-  }
-
-  @objc private func openFilePickerFromTile() {
+  private func openFilePicker() {
     let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.item])
     picker.delegate = self
     picker.allowsMultipleSelection = false
     present(picker, animated: true)
   }
 
+  @objc private func closeTapped() {
+    dismiss(animated: true)
+  }
+
   @objc private func openLocationFromTile() {
-    inputField.resignFirstResponder()
     ChatAttachmentMenuLocationManager.shared.requestOnce { [weak self] coord in
       DispatchQueue.main.async {
         guard let self else { return }
@@ -597,75 +767,11 @@ final class ChatAttachmentMenuController: UIViewController {
       }
     }
   }
-
-  @objc private func showContactPlaceholderToast() {
-    setActiveTab(3, animated: true)
-  }
-}
-
-extension ChatAttachmentMenuController: PHPickerViewControllerDelegate {
-  func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-    picker.dismiss(animated: true)
-    guard let first = results.first else { return }
-
-    let provider = first.itemProvider
-    let typeId = provider.hasItemConformingToTypeIdentifier(UTType.image.identifier)
-      ? UTType.image.identifier
-      : (provider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) ? UTType.movie.identifier : UTType.image.identifier)
-
-    provider.loadFileRepresentation(forTypeIdentifier: typeId) { [weak self] url, _ in
-      guard let self, let url else { return }
-      DispatchQueue.main.async {
-        self.finishAndDismiss {
-          self.onSelectImage?(url.absoluteString)
-        }
-      }
-    }
-  }
-}
-
-extension ChatAttachmentMenuController: UIDocumentPickerDelegate {
-  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-    guard let url = urls.first else { return }
-    finishAndDismiss {
-      self.onSelectFile?(url.absoluteString, url.lastPathComponent)
-    }
-  }
-}
-
-extension ChatAttachmentMenuController: UIImagePickerControllerDelegate, UINavigationControllerDelegate {
-  func imagePickerControllerDidCancel(_ picker: UIImagePickerController) {
-    picker.dismiss(animated: true)
-  }
-
-  func imagePickerController(
-    _ picker: UIImagePickerController,
-    didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-  ) {
-    var mediaURL = (info[.imageURL] as? URL) ?? (info[.mediaURL] as? URL)
-    if mediaURL == nil, let image = info[.originalImage] as? UIImage,
-      let data = image.jpegData(compressionQuality: 0.92)
-    {
-      let tempURL = FileManager.default.temporaryDirectory
-        .appendingPathComponent("camera-\(UUID().uuidString)")
-        .appendingPathExtension("jpg")
-      do {
-        try data.write(to: tempURL, options: .atomic)
-        mediaURL = tempURL
-      } catch {
-        mediaURL = nil
-      }
-    }
-    picker.dismiss(animated: true)
-    guard let mediaURL else { return }
-    finishAndDismiss {
-      self.onSelectImage?(mediaURL.absoluteString)
-    }
-  }
 }
 
 private final class ChatAttachmentMenuLocationManager: NSObject, CLLocationManagerDelegate {
   static let shared = ChatAttachmentMenuLocationManager()
+
   private let manager = CLLocationManager()
   private var callback: ((CLLocationCoordinate2D) -> Void)?
 
@@ -689,5 +795,220 @@ private final class ChatAttachmentMenuLocationManager: NSObject, CLLocationManag
 
   func locationManager(_ manager: CLLocationManager, didFailWithError error: Error) {
     callback = nil
+  }
+}
+
+extension ChatAttachmentMenuController: UIDocumentPickerDelegate {
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    guard let url = urls.first else { return }
+    finishAndDismiss {
+      self.onSelectFile?(url.absoluteString, url.lastPathComponent)
+    }
+  }
+}
+
+extension ChatAttachmentMenuController:
+  UICollectionViewDataSource, UICollectionViewDelegate, UICollectionViewDelegateFlowLayout
+{
+  func collectionView(_ collectionView: UICollectionView, numberOfItemsInSection section: Int)
+    -> Int
+  {
+    galleryAssets.count + 1
+  }
+
+  func collectionView(
+    _ collectionView: UICollectionView,
+    cellForItemAt indexPath: IndexPath
+  ) -> UICollectionViewCell {
+    if indexPath.item == 0 {
+      guard
+        let cameraCell = collectionView.dequeueReusableCell(
+          withReuseIdentifier: ChatAttachmentCameraCell.reuseIdentifier,
+          for: indexPath
+        ) as? ChatAttachmentCameraCell
+      else {
+        return UICollectionViewCell()
+      }
+      cameraCell.setCameraAvailable(cameraPreviewAvailable)
+      bindCameraPreview(to: cameraCell.previewView)
+      return cameraCell
+    }
+
+    guard
+      let cell = collectionView.dequeueReusableCell(
+        withReuseIdentifier: ChatAttachmentAssetCell.reuseIdentifier,
+        for: indexPath
+      ) as? ChatAttachmentAssetCell
+    else {
+      return UICollectionViewCell()
+    }
+
+    let assetIndex = indexPath.item - 1
+    guard assetIndex >= 0, assetIndex < galleryAssets.count else { return cell }
+
+    let asset = galleryAssets[assetIndex]
+    cell.representedAssetId = asset.localIdentifier
+    cell.imageView.image = nil
+
+    let targetSize = galleryThumbSize == .zero ? CGSize(width: 300, height: 300) : galleryThumbSize
+    let options = PHImageRequestOptions()
+    options.deliveryMode = .opportunistic
+    options.resizeMode = .fast
+    options.isNetworkAccessAllowed = true
+
+    photoManager.requestImage(
+      for: asset,
+      targetSize: targetSize,
+      contentMode: .aspectFill,
+      options: options
+    ) { image, _ in
+      guard cell.representedAssetId == asset.localIdentifier else { return }
+      cell.imageView.image = image
+    }
+
+    return cell
+  }
+
+  func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
+    guard indexPath.item > 0 else { return }
+    let assetIndex = indexPath.item - 1
+    guard assetIndex < galleryAssets.count else { return }
+    sendSelectedAsset(galleryAssets[assetIndex])
+  }
+
+  func collectionView(
+    _ collectionView: UICollectionView,
+    layout collectionViewLayout: UICollectionViewLayout,
+    sizeForItemAt indexPath: IndexPath
+  ) -> CGSize {
+    let base = max(1, galleryBaseItem)
+    if indexPath.item == 0 {
+      return CGSize(width: base, height: floor(base * (16.0 / 9.0)))
+    }
+    return CGSize(width: base, height: base)
+  }
+}
+
+private final class ChatAttachmentAssetCell: UICollectionViewCell {
+  static let reuseIdentifier = "ChatAttachmentAssetCell"
+
+  let imageView = UIImageView()
+  var representedAssetId: String = ""
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    clipsToBounds = true
+    layer.cornerCurve = .continuous
+    layer.cornerRadius = 8
+
+    imageView.frame = bounds
+    imageView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    imageView.contentMode = .scaleAspectFill
+    imageView.backgroundColor = UIColor.white.withAlphaComponent(0.08)
+    contentView.addSubview(imageView)
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  override func prepareForReuse() {
+    super.prepareForReuse()
+    representedAssetId = ""
+    imageView.image = nil
+  }
+}
+
+private final class ChatAttachmentCameraCell: UICollectionViewCell {
+  static let reuseIdentifier = "ChatAttachmentCameraCell"
+
+  let previewView = UIView()
+  private let gridLayer = CAShapeLayer()
+  private let unavailableOverlay = UIView()
+  private let unavailableIcon = UIImageView()
+  private let unavailableLabel = UILabel()
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    clipsToBounds = true
+    layer.cornerCurve = .continuous
+    layer.cornerRadius = 10
+    layer.borderWidth = 0.4
+    layer.borderColor = UIColor.white.withAlphaComponent(0.24).cgColor
+
+    previewView.backgroundColor = UIColor(white: 0.08, alpha: 1.0)
+    previewView.frame = bounds
+    previewView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    previewView.clipsToBounds = true
+    contentView.addSubview(previewView)
+
+    gridLayer.strokeColor = UIColor.white.withAlphaComponent(0.24).cgColor
+    gridLayer.fillColor = UIColor.clear.cgColor
+    gridLayer.lineWidth = 0.9
+    previewView.layer.addSublayer(gridLayer)
+
+    unavailableOverlay.backgroundColor = UIColor.black.withAlphaComponent(0.34)
+    unavailableOverlay.frame = bounds
+    unavailableOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    contentView.addSubview(unavailableOverlay)
+
+    unavailableIcon.image = UIImage(
+      systemName: "camera.fill",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
+    )
+    unavailableIcon.tintColor = UIColor.white.withAlphaComponent(0.92)
+    unavailableIcon.contentMode = .scaleAspectFit
+    unavailableOverlay.addSubview(unavailableIcon)
+
+    unavailableLabel.text = "Camera"
+    unavailableLabel.font = .systemFont(ofSize: 11, weight: .semibold)
+    unavailableLabel.textColor = UIColor.white.withAlphaComponent(0.92)
+    unavailableLabel.textAlignment = .center
+    unavailableOverlay.addSubview(unavailableLabel)
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+
+    let centerY = bounds.midY
+    unavailableIcon.frame = CGRect(
+      x: (bounds.width - 20) * 0.5,
+      y: centerY - 16,
+      width: 20,
+      height: 20
+    )
+    unavailableLabel.frame = CGRect(
+      x: 6,
+      y: unavailableIcon.frame.maxY + 2,
+      width: bounds.width - 12,
+      height: 14
+    )
+
+    let b = previewView.bounds
+    let path = UIBezierPath()
+    let thirdX = b.width / 3.0
+    let twoThirdX = thirdX * 2.0
+    let thirdY = b.height / 3.0
+    let twoThirdY = thirdY * 2.0
+
+    [thirdX, twoThirdX].forEach { x in
+      path.move(to: CGPoint(x: x, y: b.minY))
+      path.addLine(to: CGPoint(x: x, y: b.maxY))
+    }
+    [thirdY, twoThirdY].forEach { y in
+      path.move(to: CGPoint(x: b.minX, y: y))
+      path.addLine(to: CGPoint(x: b.maxX, y: y))
+    }
+
+    gridLayer.path = path.cgPath
+    gridLayer.frame = b
+  }
+
+  func setCameraAvailable(_ available: Bool) {
+    unavailableOverlay.isHidden = available
   }
 }

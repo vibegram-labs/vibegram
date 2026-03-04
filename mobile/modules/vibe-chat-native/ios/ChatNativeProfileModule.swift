@@ -12,92 +12,92 @@ public class ChatNativeProfileModule: Module {
       true
     }
 
-    View(ChatNativeProfileView.self) {
-      Prop("profileOnly") { (view: ChatNativeProfileView, value: Bool?) in
+    View(ChatProfileMainView.self) {
+      Prop("profileOnly") { (view: ChatProfileMainView, value: Bool?) in
         view.setProfileOnly(value ?? true)
       }
 
-      Prop("surfaceId") { (view: ChatNativeProfileView, value: String) in
+      Prop("surfaceId") { (view: ChatProfileMainView, value: String) in
         view.surfaceId = value
       }
 
-      Prop("rows") { (view: ChatNativeProfileView, rows: [[String: Any]]) in
+      Prop("rows") { (view: ChatProfileMainView, rows: [[String: Any]]) in
         view.setRows(rows)
       }
 
-      Prop("engineSurfaceId") { (view: ChatNativeProfileView, value: String?) in
+      Prop("engineSurfaceId") { (view: ChatProfileMainView, value: String?) in
         view.setEngineSurfaceId(value ?? "")
       }
 
-      Prop("chatId") { (view: ChatNativeProfileView, value: String?) in
+      Prop("chatId") { (view: ChatProfileMainView, value: String?) in
         view.setEngineChatId(value ?? "")
       }
 
-      Prop("myUserId") { (view: ChatNativeProfileView, value: String?) in
+      Prop("myUserId") { (view: ChatProfileMainView, value: String?) in
         view.setEngineMyUserId(value ?? "")
       }
 
-      Prop("peerUserId") { (view: ChatNativeProfileView, value: String?) in
+      Prop("peerUserId") { (view: ChatProfileMainView, value: String?) in
         view.setEnginePeerUserId(value ?? "")
       }
 
-      Prop("statusAuthorityEnabled") { (view: ChatNativeProfileView, enabled: Bool) in
+      Prop("statusAuthorityEnabled") { (view: ChatProfileMainView, enabled: Bool) in
         view.setStatusAuthorityEnabled(enabled)
       }
 
-      Prop("appearance") { (view: ChatNativeProfileView, appearance: [String: Any]) in
+      Prop("appearance") { (view: ChatProfileMainView, appearance: [String: Any]) in
         view.setAppearance(appearance)
       }
 
-      Prop("headerTitle") { (view: ChatNativeProfileView, value: String?) in
+      Prop("headerTitle") { (view: ChatProfileMainView, value: String?) in
         view.setHeaderTitle(value ?? "")
       }
 
-      Prop("headerSubtitle") { (view: ChatNativeProfileView, value: String?) in
+      Prop("headerSubtitle") { (view: ChatProfileMainView, value: String?) in
         view.setHeaderSubtitle(value ?? "")
       }
 
-      Prop("profileName") { (view: ChatNativeProfileView, value: String?) in
+      Prop("profileName") { (view: ChatProfileMainView, value: String?) in
         view.setProfileName(value ?? "")
       }
 
-      Prop("profileHandle") { (view: ChatNativeProfileView, value: String?) in
+      Prop("profileHandle") { (view: ChatProfileMainView, value: String?) in
         view.setProfileHandle(value ?? "")
       }
 
-      Prop("profileBio") { (view: ChatNativeProfileView, value: String?) in
+      Prop("profileBio") { (view: ChatProfileMainView, value: String?) in
         view.setProfileBio(value ?? "")
       }
 
-      Prop("avatarUri") { (view: ChatNativeProfileView, value: String?) in
+      Prop("avatarUri") { (view: ChatProfileMainView, value: String?) in
         view.setAvatarUri(value)
       }
 
-      Prop("isOnline") { (view: ChatNativeProfileView, value: Bool?) in
+      Prop("isOnline") { (view: ChatProfileMainView, value: Bool?) in
         view.setIsOnline(value ?? false)
       }
 
-      Prop("isChatMuted") { (view: ChatNativeProfileView, value: Bool?) in
+      Prop("isChatMuted") { (view: ChatProfileMainView, value: Bool?) in
         view.setIsChatMuted(value ?? false)
       }
 
-      Prop("isGroupOrChannel") { (view: ChatNativeProfileView, value: Bool?) in
+      Prop("isGroupOrChannel") { (view: ChatProfileMainView, value: Bool?) in
         view.setIsGroupOrChannel(value ?? false)
       }
 
-      Prop("groupMembers") { (view: ChatNativeProfileView, value: [[String: Any]]?) in
+      Prop("groupMembers") { (view: ChatProfileMainView, value: [[String: Any]]?) in
         view.setGroupMembers(value ?? [])
       }
 
-      Prop("groupMemberCount") { (view: ChatNativeProfileView, value: Int?) in
+      Prop("groupMemberCount") { (view: ChatProfileMainView, value: Int?) in
         view.setGroupMemberCount(value)
       }
 
-      Prop("agentConfig") { (view: ChatNativeProfileView, value: [String: Any]?) in
+      Prop("agentConfig") { (view: ChatProfileMainView, value: [String: Any]?) in
         view.setAgentConfig(value)
       }
 
-      Prop("page") { (view: ChatNativeProfileView, value: String?) in
+      Prop("page") { (view: ChatProfileMainView, value: String?) in
         guard
           let value,
           !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty

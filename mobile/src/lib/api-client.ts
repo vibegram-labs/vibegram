@@ -464,6 +464,24 @@ export const apiClient = {
         }
     },
 
+    getChatMessages: async (chatId: string) => {
+        const res = await fetchWithRetry(`/chat/${chatId}/messages`)
+        const text = await res.text()
+        let json;
+        try {
+            json = JSON.parse(text);
+        } catch (e) {
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            throw new Error('Invalid JSON response');
+        }
+        if (!res.ok) throw new Error(json?.errors?.detail || json?.error || `HTTP ${res.status}`)
+        if (!Array.isArray(json)) {
+            if (json?.data && Array.isArray(json.data)) return json.data;
+            throw new Error(json?.errors?.detail || 'Invalid response format');
+        }
+        return json;
+    },
+
     deleteMessage: async (chatId: string, messageId: string, forEveryone = true) => {
         const res = await fetchWithRetry(`/chat/${chatId}/messages/${messageId}`, {
             method: 'DELETE',

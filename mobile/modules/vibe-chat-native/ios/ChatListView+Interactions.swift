@@ -444,25 +444,42 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
     messageId: String,
     sourcePoint: CGPoint?
   ) {
-    // The overlay dismisses itself in animateOut, but we trigger it here if not already dismissing?
-    // Wait, the delegate method is called on tap. The overlay is still present.
-    // The overlay code calls delegate then... nothing.
-    // So logic must call animateOut.
-    customContextMenuOverlay?.animateOut(reason: "reaction", completion: nil)
-
-    // Use the overlay's messageId directly as it's the source of truth
-    guard let overlay = customContextMenuOverlay else { return }
-
-    var payload: [String: Any] = [
-      "type": "contextMenuReaction",
-      "emoji": reaction,
-      "messageId": overlay.messageId,
-    ]
-    if let sourcePoint {
-      payload["sourceX"] = sourcePoint.x
-      payload["sourceY"] = sourcePoint.y
+    holdDebugLog(
+      "contextMenuDidSelectReaction id=\(messageId) emoji=\(reaction) source=\(sourcePoint.map { NSCoder.string(for: $0) } ?? "nil")"
+    )
+    var resolvedSourcePoint = sourcePoint
+    if let window, let hostCell = contextMenuHostCell as? ChatListCell,
+      let badgePoint = hostCell.reactionBadgeCenter(in: window)
+    {
+      resolvedSourcePoint = badgePoint
     }
-    onNativeEvent(payload)
+    let resolvedMessageId = messageId
+    applyLocalReactionEmoji(reaction, toMessageId: resolvedMessageId)
+
+    let emitReactionEvent = { [weak self] in
+      guard let self else { return }
+      var payload: [String: Any] = [
+        "type": "contextMenuReaction",
+        "emoji": reaction,
+        "messageId": resolvedMessageId,
+      ]
+      if let resolvedSourcePoint {
+        payload["sourceX"] = resolvedSourcePoint.x
+        payload["sourceY"] = resolvedSourcePoint.y
+      }
+      self.holdDebugLog(
+        "emit contextMenuReaction id=\(resolvedMessageId) emoji=\(reaction) source=\(resolvedSourcePoint.map { NSCoder.string(for: $0) } ?? "nil")"
+      )
+      self.onNativeEvent(payload)
+    }
+
+    // Overlay handles icon flight first. Dispatch reaction only after dismiss so
+    // the final native FX is visible above chat content, not behind the overlay.
+    if customContextMenuOverlay != nil {
+      customContextMenuOverlay?.animateOut(reason: "reaction", completion: emitReactionEvent)
+    } else {
+      emitReactionEvent()
+    }
   }
 
   public func contextMenuDidSelectAction(_ actionId: String, messageId _: String) {

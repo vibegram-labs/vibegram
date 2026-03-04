@@ -79,15 +79,35 @@ defmodule Vibe.Chat do
         |> Repo.all()
         |> Enum.group_by(& &1.chat_id)
 
-      # Batch-fetch latest message per chat using a window function
-      last_messages =
-        from(m in Message,
+      # Batch-fetch latest 15 messages per chat using a window function
+      ranked_query =
+        from m in Message,
           where: m.chat_id in ^chat_ids,
-          distinct: m.chat_id,
-          order_by: [asc: m.chat_id, desc: m.timestamp]
-        )
-        |> Repo.all()
-        |> Map.new(fn m -> {m.chat_id, m} end)
+          select: %{
+            id: m.id,
+            rnk: row_number() |> over(partition_by: m.chat_id, order_by: [desc: m.timestamp])
+          }
+
+      top_message_ids =
+        if chat_ids == [] do
+          []
+        else
+          Repo.all(ranked_query)
+          |> Enum.filter(&(&1.rnk <= 15))
+          |> Enum.map(& &1.id)
+        end
+
+      last_messages_by_chat =
+        if top_message_ids == [] do
+          %{}
+        else
+          from(m in Message,
+            where: m.id in ^top_message_ids,
+            order_by: [asc: m.timestamp]
+          )
+          |> Repo.all()
+          |> Enum.group_by(& &1.chat_id)
+        end
 
       # Batch-fetch member counts for group/channel chats
       group_channel_ids =
@@ -127,18 +147,18 @@ defmodule Vibe.Chat do
         friend_p = List.first(Map.get(friend_participants, chat_id, []))
 
         # Filter last message by cleared_at if applicable
-        last_msg = Map.get(last_messages, chat_id)
+        chat_messages = Map.get(last_messages_by_chat, chat_id, [])
 
-        last_msg =
-          if last_msg && my_settings.messages_cleared_at do
+        chat_messages =
+          if my_settings.messages_cleared_at do
             cleared_at_ms =
               my_settings.messages_cleared_at
               |> DateTime.from_naive!("Etc/UTC")
               |> DateTime.to_unix(:millisecond)
 
-            if last_msg.timestamp > cleared_at_ms, do: last_msg, else: nil
+            Enum.filter(chat_messages, &(&1.timestamp > cleared_at_ms))
           else
-            last_msg
+            chat_messages
           end
 
         room_type = if(room, do: room.type, else: "dm")
@@ -157,7 +177,7 @@ defmodule Vibe.Chat do
             nil
           end
 
-        last_msg_for_client = to_client_message(last_msg)
+        messages_for_client = Enum.map(chat_messages, &to_client_message/1)
 
         %{
           chatId: chat_id,
@@ -172,7 +192,7 @@ defmodule Vibe.Chat do
           friendName: if(friend_p && friend_p.user, do: friend_p.user.username, else: nil),
           friendImage: if(friend_p && friend_p.user, do: friend_p.user.profile_image, else: nil),
           members: members,
-          messages: if(last_msg_for_client, do: [last_msg_for_client], else: []),
+          messages: messages_for_client,
           unreadCount: 0,
           pinned: my_settings.pinned,
           muted: my_settings.muted

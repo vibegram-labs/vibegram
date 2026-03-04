@@ -2,6 +2,49 @@ import AVFoundation
 import UIKit
 
 private let chatCellHoldDebugLogs = true
+private let chatCellReactionDebugLogs = true
+private let agentBoldRegex = try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
+private let chatMediaImageCache = NSCache<NSString, UIImage>()
+private let chatMediaNaturalSizeCache = NSCache<NSString, NSValue>()
+
+// MARK: - Disk-backed image cache
+
+private let chatMediaDiskCacheQueue = DispatchQueue(label: "chat.media.disk-cache", qos: .utility)
+
+private func chatMediaDiskCacheDir() -> URL {
+  let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+  let dir = caches.appendingPathComponent("chat-media-images", isDirectory: true)
+  try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+  return dir
+}
+
+private func chatMediaDiskCacheKey(_ urlString: String) -> String {
+  // Stable hash — use SHA-like approach via hashValue but make it hex
+  let hash = UInt64(bitPattern: Int64(urlString.hashValue))
+  // Preserve extension for correct UIImage decoding
+  let ext = (urlString as NSString).pathExtension.lowercased()
+  let suffix = ["jpg", "jpeg", "png", "gif", "webp", "heic"].contains(ext) ? ".\(ext)" : ".img"
+  return String(format: "%016llx", hash) + suffix
+}
+
+func chatMediaDiskCacheSave(_ image: UIImage, forKey urlString: String) {
+  chatMediaDiskCacheQueue.async {
+    let dir = chatMediaDiskCacheDir()
+    let filename = chatMediaDiskCacheKey(urlString)
+    let fileURL = dir.appendingPathComponent(filename)
+    guard !FileManager.default.fileExists(atPath: fileURL.path) else { return }
+    guard let data = image.jpegData(compressionQuality: 0.88) else { return }
+    try? data.write(to: fileURL, options: [.atomic])
+  }
+}
+
+func chatMediaDiskCacheLoad(_ urlString: String) -> UIImage? {
+  let dir = chatMediaDiskCacheDir()
+  let filename = chatMediaDiskCacheKey(urlString)
+  let fileURL = dir.appendingPathComponent(filename)
+  guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+  return UIImage(contentsOfFile: fileURL.path)
+}
 
 final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
   // Telegram approach: cells are ALWAYS fully opaque. No fade-in,
@@ -31,12 +74,16 @@ final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
 
   override func layoutAttributesForElements(in rect: CGRect) -> [UICollectionViewLayoutAttributes]?
   {
-    let attributes = super.layoutAttributesForElements(in: rect)?
-      .map { $0.copy() as! UICollectionViewLayoutAttributes }
-    // Force alpha=1 on every layout pass — prevent UIKit from
-    // ever setting a sub-1.0 alpha on any cell at any point.
-    attributes?.forEach { $0.alpha = 1.0 }
-    return attributes
+    guard let attributes = super.layoutAttributesForElements(in: rect) else { return nil }
+    // During normal scrolling all attributes already have alpha=1.0.
+    // Only copy + fix during batch updates when UIKit may animate alpha.
+    let needsCorrection = attributes.contains { $0.alpha != 1.0 }
+    guard needsCorrection else { return attributes }
+    return attributes.map { attr in
+      let copy = attr.copy() as! UICollectionViewLayoutAttributes
+      copy.alpha = 1.0
+      return copy
+    }
   }
 
   override func layoutAttributesForItem(at indexPath: IndexPath)
@@ -94,14 +141,14 @@ final class BubbleBackgroundView: UIView {
     isHidden = hidden
     blurView.isHidden = hidden
     blurView.effect = UIBlurEffect(style: isMe ? .systemThinMaterialDark : .systemMaterialDark)
-    blurView.alpha = isMe ? 0.4 : 0.5
+    blurView.alpha = isMe ? 0.34 : 0.44
     gradientLayer.isHidden = !isMe
     gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-    gradientLayer.opacity = isMe ? 1.0 : 0.0
+    gradientLayer.opacity = isMe ? 0.88 : 0.0
     fillLayer.fillColor =
       isMe
       ? UIColor.clear.cgColor
-      : appearance.bubbleThemColor.cgColor
+      : appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 0.90).cgColor
     CATransaction.commit()
 
     if shapeOnlyChange {
@@ -134,14 +181,15 @@ final class BubbleBackgroundView: UIView {
         agentColor.withAlphaComponent(0.22).cgColor,
         agentColor.withAlphaComponent(0.08).cgColor,
       ]
-      gradientLayer.opacity = 1.0
-      fillLayer.fillColor = appearance.bubbleThemColor.cgColor
-      blurView.alpha = 0.45
+      gradientLayer.opacity = 0.82
+      fillLayer.fillColor =
+        appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 0.90).cgColor
+      blurView.alpha = 0.42
     } else {
       // For my agent mentions, just add the glowing border and a slight tint
       gradientLayer.isHidden = false
       gradientLayer.colors = appearance.bubbleMeGradient.map { $0.cgColor }
-      gradientLayer.opacity = 0.9
+      gradientLayer.opacity = 0.82
       blurView.alpha = 0.0
     }
 
@@ -386,6 +434,66 @@ private func isRTL(_ text: String) -> Bool {
   return text.range(of: "[\\u0600-\\u06FF]", options: .regularExpression) != nil
 }
 
+private func cachedNaturalMediaSize(for mediaUrl: String?) -> CGSize? {
+  guard let mediaUrl, !mediaUrl.isEmpty else { return nil }
+  guard let value = chatMediaNaturalSizeCache.object(forKey: mediaUrl as NSString) else {
+    return nil
+  }
+  let size = value.cgSizeValue
+  guard size.width > 1.0, size.height > 1.0 else { return nil }
+  return size
+}
+
+private func cacheNaturalMediaSize(_ size: CGSize, for mediaUrl: String?) {
+  guard let mediaUrl, !mediaUrl.isEmpty else { return }
+  guard size.width > 1.0, size.height > 1.0 else { return }
+  chatMediaNaturalSizeCache.setObject(NSValue(cgSize: size), forKey: mediaUrl as NSString)
+}
+
+private func probeLocalMediaSize(for mediaUrl: String?) -> CGSize? {
+  guard let mediaUrl, !mediaUrl.isEmpty else { return nil }
+  let trimmed = mediaUrl.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !trimmed.isEmpty else { return nil }
+
+  let resolvedPath: String? = {
+    let encodedTrimmed =
+      trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+    if let url = URL(string: trimmed) ?? URL(string: encodedTrimmed), url.isFileURL {
+      return url.path
+    }
+    if trimmed.hasPrefix("/") {
+      return trimmed
+    }
+    if let decoded = trimmed.removingPercentEncoding, decoded.hasPrefix("/") {
+      return decoded
+    }
+    if trimmed.hasPrefix("file://") {
+      let path = String(trimmed.dropFirst(7))
+      return path.removingPercentEncoding ?? path
+    }
+    return nil
+  }()
+
+  guard let resolvedPath else { return nil }
+  guard let image = UIImage(contentsOfFile: resolvedPath) else { return nil }
+  guard image.size.width > 1.0, image.size.height > 1.0 else { return nil }
+  return image.size
+}
+
+private func resolvedMediaNaturalSize(for row: ChatListRow) -> CGSize? {
+  if let mw = row.mediaWidth, let mh = row.mediaHeight, mw > 1.0, mh > 1.0 {
+    return CGSize(width: mw, height: mh)
+  }
+  if let cached = cachedNaturalMediaSize(for: row.mediaUrl) {
+    return cached
+  }
+  if let local = probeLocalMediaSize(for: row.mediaUrl) {
+    cacheNaturalMediaSize(local, for: row.mediaUrl)
+    return local
+  }
+  return nil
+}
+
 private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? = nil)
   -> NSAttributedString
 {
@@ -404,20 +512,18 @@ private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? 
 
   let attrString = NSMutableAttributedString(string: text, attributes: attrs)
 
-  if let regex = try? NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*") {
-    let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-    for match in matches.reversed() {
-      if let range = Range(match.range(at: 1), in: text) {
-        let boldContent = String(text[range])
-        var boldAttrs = attrs
-        if let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold) {
-          boldAttrs[.font] = UIFont(descriptor: descriptor, size: font.pointSize)
-        } else {
-          boldAttrs[.font] = UIFont.boldSystemFont(ofSize: font.pointSize)
-        }
-        let replacement = NSAttributedString(string: boldContent, attributes: boldAttrs)
-        attrString.replaceCharacters(in: match.range, with: replacement)
+  let matches = agentBoldRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+  for match in matches.reversed() {
+    if let range = Range(match.range(at: 1), in: text) {
+      let boldContent = String(text[range])
+      var boldAttrs = attrs
+      if let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold) {
+        boldAttrs[.font] = UIFont(descriptor: descriptor, size: font.pointSize)
+      } else {
+        boldAttrs[.font] = UIFont.boldSystemFont(ofSize: font.pointSize)
       }
+      let replacement = NSAttributedString(string: boldContent, attributes: boldAttrs)
+      attrString.replaceCharacters(in: match.range, with: replacement)
     }
   }
 
@@ -456,30 +562,49 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
 
   switch row.visualKind {
   case .voice, .video, .videoNote, .media:
-    let targetWidth: CGFloat
-    let mediaHeight: CGFloat
+    var targetWidth: CGFloat
+    var mediaHeight: CGFloat
     switch row.visualKind {
     case .voice:
       targetWidth = 242.0
-      mediaHeight = 56.0
-    case .video:
-      targetWidth = 224.0
-      mediaHeight = 140.0
+      mediaHeight = 44.0
     case .videoNote:
       targetWidth = 200.0
       mediaHeight = 200.0
-    case .media:
-      targetWidth = 210.0
-      mediaHeight = 132.0
+    case .video, .media:
+      if let naturalSize = resolvedMediaNaturalSize(for: row),
+        naturalSize.width > 1.0,
+        naturalSize.height > 1.0
+      {
+        let ratio = max(0.2, min(5.0, naturalSize.height / naturalSize.width))
+        targetWidth = max(120.0, min(maxContentWidth, naturalSize.width))
+        mediaHeight = max(84.0, targetWidth * ratio)
+        if mediaHeight > 380.0 {
+          mediaHeight = 380.0
+          targetWidth = mediaHeight / ratio
+        }
+      } else {
+        targetWidth = max(120.0, maxContentWidth)
+        mediaHeight = targetWidth
+      }
     case .text:
       targetWidth = maxContentWidth
       mediaHeight = 0.0
     }
 
+    let isFullBleed =
+      (row.visualKind == .media && row.messageType != "file") || row.visualKind == .video
+      || row.visualKind == .videoNote
     let contentWidth = min(maxContentWidth, targetWidth)
-    let bodyHeight = mediaHeight + bubbleMetaTopSpacing + bubbleMetaHeight
-    let bubbleWidth = max(bubbleMinWidth, contentWidth + (bubbleHorizontalPadding * 2.0))
-    let bubbleHeight = max(56.0, bodyHeight + bubbleTopPadding + bubbleBottomPadding)
+    let bodyHeight =
+      isFullBleed ? mediaHeight : (mediaHeight + bubbleMetaTopSpacing + bubbleMetaHeight)
+    let bubbleWidth =
+      isFullBleed
+      ? max(bubbleMinWidth, contentWidth)
+      : max(bubbleMinWidth, contentWidth + (bubbleHorizontalPadding * 2.0))
+    let bubbleHeight =
+      isFullBleed
+      ? max(56.0, bodyHeight) : max(56.0, bodyHeight + bubbleTopPadding + bubbleBottomPadding)
     return ChatMessageBubbleLayoutMetrics(
       bubbleWidth: bubbleWidth,
       bubbleHeight: bubbleHeight,
@@ -555,6 +680,59 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     inlineAttachmentHeight: attachmentBodyHeight,
     hasInlineAttachment: hasInlineAttachment
   )
+}
+
+private func bubbleRoundedPath(
+  rect: CGRect,
+  topLeft: CGFloat,
+  topRight: CGFloat,
+  bottomRight: CGFloat,
+  bottomLeft: CGFloat
+) -> UIBezierPath {
+  let width = max(1.0, rect.width)
+  let height = max(1.0, rect.height)
+  let radiusLimit = min(width, height) * 0.5
+  let tl = min(max(0.0, topLeft), radiusLimit)
+  let tr = min(max(0.0, topRight), radiusLimit)
+  let br = min(max(0.0, bottomRight), radiusLimit)
+  let bl = min(max(0.0, bottomLeft), radiusLimit)
+
+  let path = UIBezierPath()
+  path.move(to: CGPoint(x: tl, y: 0.0))
+  path.addLine(to: CGPoint(x: width - tr, y: 0.0))
+  path.addArc(
+    withCenter: CGPoint(x: width - tr, y: tr),
+    radius: tr,
+    startAngle: 3.0 * .pi / 2.0,
+    endAngle: 0.0,
+    clockwise: true
+  )
+  path.addLine(to: CGPoint(x: width, y: height - br))
+  path.addArc(
+    withCenter: CGPoint(x: width - br, y: height - br),
+    radius: br,
+    startAngle: 0.0,
+    endAngle: .pi / 2.0,
+    clockwise: true
+  )
+  path.addLine(to: CGPoint(x: bl, y: height))
+  path.addArc(
+    withCenter: CGPoint(x: bl, y: height - bl),
+    radius: bl,
+    startAngle: .pi / 2.0,
+    endAngle: .pi,
+    clockwise: true
+  )
+  path.addLine(to: CGPoint(x: 0.0, y: tl))
+  path.addArc(
+    withCenter: CGPoint(x: tl, y: tl),
+    radius: tl,
+    startAngle: .pi,
+    endAngle: 3.0 * .pi / 2.0,
+    clockwise: true
+  )
+  path.close()
+  return path
 }
 
 final class BubbleUploadProgressView: UIView {
@@ -954,7 +1132,7 @@ final class VoiceWaveformView: UIView {
   }
 }
 
-private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
+final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   static let shared = VoiceBubblePlaybackCoordinator()
 
   private weak var activeCell: ChatListCell?
@@ -964,6 +1142,7 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
   private var playbackProgress: CGFloat = 0.0
   private var level: CGFloat = 0.0
   private var isPlaying = false
+  private var activeDownloadTask: URLSessionDownloadTask?
 
   private override init() {
     super.init()
@@ -1008,20 +1187,28 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
       return
     }
 
-    if activeMessageId == messageId, let player {
-      if player.isPlaying {
-        player.pause()
-        isPlaying = false
-        NSLog("[ChatListView] voice pause messageId=%@ progress=%.3f", messageId, playbackProgress)
-        cell.applyVoicePlaybackState(
-          isPlaying: false, progress: playbackProgress, level: level
-        )
-      } else {
-        player.play()
-        isPlaying = true
-        NSLog("[ChatListView] voice resume messageId=%@ progress=%.3f", messageId, playbackProgress)
+    if activeMessageId == messageId {
+      if let player {
+        if player.isPlaying {
+          player.pause()
+          isPlaying = false
+          NSLog(
+            "[ChatListView] voice pause messageId=%@ progress=%.3f", messageId, playbackProgress)
+          cell.applyVoicePlaybackState(
+            isPlaying: false, progress: playbackProgress, level: level
+          )
+        } else {
+          player.play()
+          isPlaying = true
+          NSLog(
+            "[ChatListView] voice resume messageId=%@ progress=%.3f", messageId, playbackProgress)
+        }
+        return
+      } else if activeDownloadTask != nil {
+        NSLog("[ChatListView] voice cancel download messageId=%@", messageId)
+        stopActivePlayback(resetProgress: true)
+        return
       }
-      return
     }
 
     stopActivePlayback(resetProgress: true)
@@ -1041,6 +1228,134 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
       resolvedURL.path
     )
 
+    if !resolvedURL.isFileURL {
+      playRemoteURL(resolvedURL, messageId: messageId, cell: cell)
+      return
+    }
+
+    playLocalURL(resolvedURL, messageId: messageId, cell: cell)
+  }
+
+  private func playRemoteURL(_ url: URL, messageId: String, cell: ChatListCell) {
+    // Use Caches directory (persists across app sessions, unlike tmp/ which is wiped)
+    let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+    let cacheDir = caches.appendingPathComponent("voice-cache", isDirectory: true)
+    do {
+      try FileManager.default.createDirectory(at: cacheDir, withIntermediateDirectories: true)
+    } catch {
+      NSLog("[ChatListView] failed to create voice cache dir: %@", String(describing: error))
+    }
+
+    // Preserve the original file extension from the URL for correct AVAudioPlayer decoding
+    let urlExt = url.pathExtension.lowercased()
+    let ext = urlExt.isEmpty ? "m4a" : urlExt
+    let filename = String(format: "%016llx", url.absoluteString.hashValue) + "." + ext
+    let localURL = cacheDir.appendingPathComponent(filename)
+
+    if FileManager.default.fileExists(atPath: localURL.path) {
+      playLocalURL(localURL, messageId: messageId, cell: cell)
+      return
+    }
+
+    activeMessageId = messageId
+    activeCell = cell
+    cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
+
+    let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, response, error in
+      guard let tempURL = tempURL, error == nil else {
+        NSLog(
+          "[ChatListView] voice download failed url=%@ error=%@", url.absoluteString,
+          String(describing: error))
+        DispatchQueue.main.async {
+          if self?.activeMessageId == messageId {
+            self?.stopActivePlayback(resetProgress: true)
+          }
+        }
+        return
+      }
+
+      // Validate HTTP response — Supabase may return HTML error pages
+      if let httpResponse = response as? HTTPURLResponse {
+        let statusCode = httpResponse.statusCode
+        let contentType = httpResponse.value(forHTTPHeaderField: "Content-Type") ?? ""
+        NSLog(
+          "[ChatListView] voice download response messageId=%@ status=%d contentType=%@ bytes=%lld",
+          messageId,
+          statusCode,
+          contentType,
+          (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int64) ?? 0
+        )
+        if !(200...299).contains(statusCode) {
+          NSLog(
+            "[ChatListView] voice download HTTP error messageId=%@ status=%d",
+            messageId,
+            statusCode
+          )
+          DispatchQueue.main.async {
+            if self?.activeMessageId == messageId {
+              self?.stopActivePlayback(resetProgress: true)
+            }
+          }
+          return
+        }
+        // Reject HTML/JSON responses (error pages from storage providers)
+        let lowerCT = contentType.lowercased()
+        if lowerCT.contains("text/html") || lowerCT.contains("application/json") {
+          NSLog(
+            "[ChatListView] voice download got non-audio content messageId=%@ contentType=%@",
+            messageId,
+            contentType
+          )
+          DispatchQueue.main.async {
+            if self?.activeMessageId == messageId {
+              self?.stopActivePlayback(resetProgress: true)
+            }
+          }
+          return
+        }
+      }
+
+      // Validate file size — audio should be at least a few hundred bytes
+      let fileSize =
+        (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int64) ?? 0
+      if fileSize < 100 {
+        NSLog(
+          "[ChatListView] voice download too small messageId=%@ bytes=%lld",
+          messageId,
+          fileSize
+        )
+        DispatchQueue.main.async {
+          if self?.activeMessageId == messageId {
+            self?.stopActivePlayback(resetProgress: true)
+          }
+        }
+        return
+      }
+
+      do {
+        if FileManager.default.fileExists(atPath: localURL.path) {
+          try FileManager.default.removeItem(at: localURL)
+        }
+        try FileManager.default.moveItem(at: tempURL, to: localURL)
+        DispatchQueue.main.async {
+          if self?.activeMessageId == messageId {
+            self?.playLocalURL(localURL, messageId: messageId, cell: cell)
+          }
+        }
+      } catch {
+        NSLog("[ChatListView] voice move failed error=%@", String(describing: error))
+        DispatchQueue.main.async {
+          if self?.activeMessageId == messageId {
+            self?.stopActivePlayback(resetProgress: true)
+          }
+        }
+      }
+    }
+    activeDownloadTask = task
+    task.resume()
+  }
+
+  private func playLocalURL(_ resolvedURL: URL, messageId: String, cell: ChatListCell) {
     do {
       try AVAudioSession.sharedInstance().setCategory(
         .playback, mode: .default, options: [.duckOthers])
@@ -1113,6 +1428,8 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
   }
 
   private func stopActivePlayback(resetProgress: Bool) {
+    activeDownloadTask?.cancel()
+    activeDownloadTask = nil
     player?.stop()
     player = nil
     try? AVAudioSession.sharedInstance().setActive(false, options: [.notifyOthersOnDeactivation])
@@ -1139,10 +1456,13 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
     // Sandbox path remapping: App UUIDs change on update/build, breaking absolute paths.
     var pathString = trimmed
     if trimmed.hasPrefix("file://") {
-      if let url = URL(string: trimmed) {
+      let encoded =
+        trimmed.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? trimmed
+      if let url = URL(string: trimmed) ?? URL(string: encoded) {
         pathString = url.path
-      } else if let decoded = trimmed.removingPercentEncoding, let url = URL(string: decoded) {
-        pathString = url.path
+      } else {
+        pathString =
+          String(trimmed.dropFirst(7)).removingPercentEncoding ?? String(trimmed.dropFirst(7))
       }
     }
 
@@ -1171,6 +1491,11 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
     if let decoded = trimmed.removingPercentEncoding, decoded.hasPrefix("/") {
       return URL(fileURLWithPath: decoded)
     }
+    if let url = URL(string: trimmed), let scheme = url.scheme,
+      scheme == "http" || scheme == "https"
+    {
+      return url
+    }
     if let url = URL(string: trimmed), url.scheme == nil {
       return URL(fileURLWithPath: trimmed)
     }
@@ -1186,12 +1511,16 @@ private final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDeleg
 
 final class ChatListCell: UICollectionViewCell {
   static let reuseIdentifier = "ChatListCell"
+  private static let reactionBadgeBaseSize = CGSize(width: 34.0, height: 24.0)
+  private static let reactionBadgeInsetLeft: CGFloat = 8.0
+  private static let reactionBadgeInsetBottom: CGFloat = 6.0
 
   let bubbleView = BubbleBackgroundView()
   let tailView = BubbleTailView()
 
   private let messageLabel = UILabel()
   private let mediaContainerView = UIView()
+  private let mediaImageView = UIImageView()
   private let mediaPrimaryIconView = UIImageView()
   private let mediaVoiceButtonView = VoicePlayProgressView()
   private let mediaTitleLabel = UILabel()
@@ -1231,9 +1560,16 @@ final class ChatListCell: UICollectionViewCell {
   private var externalVoiceMessageId: String?
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress: CGFloat = 0.0
+  private var cachedLayoutMetrics: ChatMessageBubbleLayoutMetrics?
+  private var cachedLayoutWidth: CGFloat = 0
+  private var mediaImageTask: URLSessionDataTask?
+  private let fullBleedMaskLayer = CAShapeLayer()
+  private var lastReportedMediaSizeKey: String?
+  private var lastReactionDebugSignature: String?
   var resolveDisplayStatus: ((ChatListRow) -> String?)?
   var onVoiceBubbleTap: ((ChatListRow) -> Void)?
   var onInlineAttachmentTap: ((ChatListRow) -> Void)?
+  var onMediaNaturalSizeResolved: ((String?, String, CGSize) -> Void)?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -1246,6 +1582,7 @@ final class ChatListCell: UICollectionViewCell {
 
     contentView.addSubview(messageLabel)
     contentView.addSubview(mediaContainerView)
+    mediaContainerView.addSubview(mediaImageView)
     mediaContainerView.addSubview(mediaPrimaryIconView)
     mediaContainerView.addSubview(mediaVoiceButtonView)
     mediaContainerView.addSubview(mediaTitleLabel)
@@ -1277,6 +1614,10 @@ final class ChatListCell: UICollectionViewCell {
     mediaContainerView.clipsToBounds = true
     mediaContainerView.layer.cornerCurve = .continuous
     mediaContainerView.backgroundColor = UIColor(white: 0.0, alpha: 0.16)
+
+    mediaImageView.backgroundColor = .clear
+    mediaImageView.contentMode = .scaleAspectFill
+    mediaImageView.clipsToBounds = true
 
     mediaPrimaryIconView.tintColor = .white
     mediaPrimaryIconView.contentMode = .scaleAspectFit
@@ -1347,11 +1688,13 @@ final class ChatListCell: UICollectionViewCell {
     dayLabel.textColor = UIColor(white: 0.95, alpha: 0.9)
 
     reactionPillView.backgroundColor = UIColor(white: 0.0, alpha: 0.25)
-    reactionPillView.layer.cornerRadius = 14
+    reactionPillView.layer.cornerRadius = 12
     reactionPillView.layer.cornerCurve = .continuous
     reactionPillView.clipsToBounds = true
+    reactionPillView.layer.borderWidth = 1.0 / UIScreen.main.scale
+    reactionPillView.layer.borderColor = UIColor.white.withAlphaComponent(0.24).cgColor
 
-    reactionLabel.font = UIFont.systemFont(ofSize: 15)
+    reactionLabel.font = UIFont.systemFont(ofSize: 14)
     reactionLabel.textAlignment = .center
 
     bubbleView.isHidden = true
@@ -1381,6 +1724,10 @@ final class ChatListCell: UICollectionViewCell {
     return nil
   }
 
+  func currentMediaImage() -> UIImage? {
+    mediaImageView.image
+  }
+
   func applyAppearance(_ appearance: ChatListAppearance) {
     self.appearance = appearance
     dayLabel.textColor = appearance.dayTextColor
@@ -1402,6 +1749,7 @@ final class ChatListCell: UICollectionViewCell {
 
   func configure(row: ChatListRow, hiddenMessageId: String?) {
     self.row = row
+    cachedLayoutMetrics = nil
     switch row.kind {
     case .day:
       isGhostHidden = false
@@ -1450,6 +1798,13 @@ final class ChatListCell: UICollectionViewCell {
       if let reactionEmoji = row.reactionEmoji, !reactionEmoji.isEmpty {
         reactionPillView.isHidden = isGhostHidden
         reactionLabel.text = reactionEmoji
+        reactionPillView.backgroundColor =
+          row.isMe
+          ? UIColor(white: 1.0, alpha: 0.18)
+          : UIColor(white: 0.0, alpha: 0.24)
+        reactionDebugLog(
+          "configure id=\(row.messageId ?? "nil") emoji=\(reactionEmoji) hidden=\(isGhostHidden ? "Y" : "N")"
+        )
       } else {
         reactionPillView.isHidden = true
       }
@@ -1533,7 +1888,9 @@ final class ChatListCell: UICollectionViewCell {
     tailView.clearAgentTailStyle()
     onVoiceBubbleTap = nil
     onInlineAttachmentTap = nil
+    onMediaNaturalSizeResolved = nil
     row = nil
+    cachedLayoutMetrics = nil
     isGhostHidden = false
     mediaProgressSpinner.stopAnimating()
     mediaProgressOverlayView.isHidden = true
@@ -1542,6 +1899,7 @@ final class ChatListCell: UICollectionViewCell {
     externalVoiceMessageId = nil
     externalVoiceIsPlaying = false
     externalVoiceProgress = 0.0
+    lastReportedMediaSizeKey = nil
     resolveDisplayStatus = nil
     applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
     mediaWaveformView.setWaveform(nil)
@@ -1552,6 +1910,10 @@ final class ChatListCell: UICollectionViewCell {
     isContextMenuExtracted = false
     isContextMenuHeld = false
     hasSavedExtractionState = false
+    mediaImageTask?.cancel()
+    mediaImageTask = nil
+    mediaImageView.image = nil
+    lastReactionDebugSignature = nil
     applyContextMenuExtractionIfNeeded()
     applyContextMenuHoldIfNeeded(animated: false, strategy: "scaleCell")
     contentView.alpha = 1.0
@@ -1611,7 +1973,14 @@ final class ChatListCell: UICollectionViewCell {
       return
     }
 
-    let metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
+    let metrics: ChatMessageBubbleLayoutMetrics
+    if let cached = cachedLayoutMetrics, cachedLayoutWidth == bounds.width {
+      metrics = cached
+    } else {
+      metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
+      cachedLayoutMetrics = metrics
+      cachedLayoutWidth = bounds.width
+    }
     let bubbleWidth = metrics.bubbleWidth
     let bubbleHeight = metrics.bubbleHeight
     let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
@@ -1630,6 +1999,11 @@ final class ChatListCell: UICollectionViewCell {
     CATransaction.setDisableActions(true)
 
     bubbleView.frame = bubbleFrame
+    let isFullBleed =
+      metrics.isMediaLayout
+      && (row.visualKind == .media && row.messageType != "file" || row.visualKind == .video
+        || row.visualKind == .videoNote)
+
     if row.shape.showTail && !isGhostHidden {
       // IMPORTANT: tailView has a rotation+flip transform applied, so we MUST NOT
       // set .frame (undefined behavior per Apple docs). Use bounds + center instead.
@@ -1639,28 +2013,54 @@ final class ChatListCell: UICollectionViewCell {
       tailView.bounds = CGRect(origin: .zero, size: CGSize(width: tailSize, height: tailSize))
       tailView.center = CGPoint(x: tailX + tailSize * 0.5, y: tailY + tailSize * 0.5)
       tailView.isHidden = false
+      if isFullBleed {
+        tailView.setImage(mediaImageView.image)
+      } else {
+        tailView.setImage(nil)
+        tailView.configure(isMe: row.isMe, visible: true, appearance: appearance)
+      }
     } else {
       tailView.isHidden = true
     }
 
     if metrics.isMediaLayout {
-      let mediaFrame = pixelAlignedRect(
-        CGRect(
-          x: bubbleFrame.minX + bubbleHorizontalPadding,
-          y: bubbleFrame.minY + bubbleTopPadding,
-          width: metrics.contentWidth,
-          height: metrics.mediaHeight
-        ))
+      let mediaFrame =
+        isFullBleed
+        ? pixelAlignedRect(bubbleFrame.insetBy(dx: -0.6, dy: -0.6))
+        : pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.minX + bubbleHorizontalPadding,
+            y: bubbleFrame.minY + bubbleTopPadding,
+            width: metrics.contentWidth,
+            height: metrics.mediaHeight
+          ))
       mediaContainerView.frame = mediaFrame
+
       messageLabel.frame = .zero
+      let metaX =
+        isFullBleed
+        ? (bubbleFrame.maxX - metrics.metaWidth - 10)
+        : (bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth)
+      let metaY =
+        isFullBleed
+        ? (bubbleFrame.maxY - bubbleMetaHeight - 8) : (mediaFrame.maxY + bubbleMetaTopSpacing)
+
       metaContainerView.frame = pixelAlignedRect(
         CGRect(
-          x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
-          y: mediaFrame.maxY + bubbleMetaTopSpacing,
+          x: metaX,
+          y: metaY,
           width: metrics.metaWidth,
           height: bubbleMetaHeight
         ))
+
+      // The background for meta inside full bleed needs to be darker so it's illegible
+      // over image
+      if isFullBleed {
+        // Typically we add a shadow or dark background pill for meta over media.
+      }
+
       mediaProgressOverlayView.frame = mediaContainerView.bounds
+      mediaImageView.frame = mediaContainerView.bounds
       layoutMediaSubviews(for: row, in: mediaContainerView.bounds)
       inlineAttachmentView.frame = .zero
     } else {
@@ -1741,14 +2141,23 @@ final class ChatListCell: UICollectionViewCell {
     }
 
     if !reactionPillView.isHidden {
-      let reactionSize = CGSize(width: 38.0, height: 28.0)
+      let reactionFrame = pixelAlignedRect(reactionBadgeFrame(in: bubbleFrame))
+      reactionPillView.frame = reactionFrame
+      reactionPillView.layer.cornerRadius = floor(reactionFrame.height * 0.5)
       reactionLabel.frame = CGRect(
-        x: 0, y: 0, width: reactionSize.width, height: reactionSize.height)
-
-      let rx = row.isMe ? bubbleFrame.maxX - reactionSize.width + 4.0 : bubbleFrame.minX - 4.0
-      let ry = bubbleFrame.maxY - 12.0
-      reactionPillView.frame = CGRect(
-        x: rx, y: ry, width: reactionSize.width, height: reactionSize.height)
+        x: 0.0,
+        y: 0.0,
+        width: reactionFrame.width,
+        height: reactionFrame.height
+      )
+      let signature =
+        "\(row.messageId ?? "nil"):\(Int(reactionFrame.origin.x)):\(Int(reactionFrame.origin.y)):\(reactionLabel.text ?? "nil")"
+      if lastReactionDebugSignature != signature {
+        lastReactionDebugSignature = signature
+        reactionDebugLog(
+          "layout id=\(row.messageId ?? "nil") frame=\(NSCoder.string(for: reactionFrame)) emoji=\(reactionLabel.text ?? "nil")"
+        )
+      }
     }
 
     CATransaction.commit()
@@ -1763,6 +2172,10 @@ final class ChatListCell: UICollectionViewCell {
     mediaDetailLabel.isHidden = true
     mediaWaveformView.isHidden = true
     mediaDurationBadge.isHidden = true
+    mediaImageView.isHidden = true
+    mediaImageView.image = nil
+    mediaImageTask?.cancel()
+    mediaImageTask = nil
     mediaPrimaryIconView.image = nil
     mediaTitleLabel.text = nil
     mediaDetailLabel.text = nil
@@ -1821,6 +2234,7 @@ final class ChatListCell: UICollectionViewCell {
       mediaVoiceButtonView.isUserInteractionEnabled = !row.shouldShowUploadOverlay
 
     case .video:
+      mediaImageView.isHidden = false
       mediaPrimaryIconView.isHidden = false
       mediaPrimaryIconView.image = UIImage(systemName: "play.fill")?.withConfiguration(
         UIImage.SymbolConfiguration(pointSize: 26, weight: .bold))
@@ -1831,6 +2245,7 @@ final class ChatListCell: UICollectionViewCell {
       mediaContainerView.backgroundColor = UIColor(white: 0.0, alpha: 0.35)
 
     case .videoNote:
+      mediaImageView.isHidden = false
       mediaPrimaryIconView.isHidden = false
       mediaPrimaryIconView.image = UIImage(systemName: "play.fill")?.withConfiguration(
         UIImage.SymbolConfiguration(pointSize: 30, weight: .bold))
@@ -1841,6 +2256,7 @@ final class ChatListCell: UICollectionViewCell {
       mediaContainerView.backgroundColor = UIColor(white: 0.0, alpha: 0.4)
 
     case .media:
+      mediaImageView.isHidden = false
       mediaPrimaryIconView.isHidden = false
       let symbolName: String
       switch row.messageType {
@@ -1857,11 +2273,83 @@ final class ChatListCell: UICollectionViewCell {
         mediaTitleLabel.isHidden = false
         mediaTitleLabel.text = row.fileName?.isEmpty == false ? row.fileName : "File"
         mediaTitleLabel.textAlignment = .center
+        mediaImageView.isHidden = true
+        mediaContainerView.backgroundColor = UIColor(white: 0.0, alpha: 0.28)
+      } else {
+        mediaPrimaryIconView.isHidden = true
+        mediaContainerView.backgroundColor = .clear
       }
-      mediaContainerView.backgroundColor = UIColor(white: 0.0, alpha: 0.28)
 
     case .text:
       break
+    }
+
+    if !mediaImageView.isHidden, let urlStr = row.mediaUrl {
+      let shortUrl = urlStr.count > 80 ? String(urlStr.prefix(77)) + "..." : urlStr
+      let encodedUrlStr =
+        urlStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? urlStr
+      if let url = URL(string: urlStr) ?? URL(string: encodedUrlStr) {
+        if let cachedImage = chatMediaImageCache.object(forKey: urlStr as NSString) {
+          mediaImageView.image = cachedImage
+          reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: cachedImage)
+        } else if url.isFileURL || urlStr.hasPrefix("/") {
+          let path = url.isFileURL ? url.path : urlStr
+          if let image = UIImage(contentsOfFile: path) {
+            NSLog("[ChatMediaLoad] local file OK msgId=%@ url=%@", row.messageId ?? "-", shortUrl)
+            chatMediaImageCache.setObject(image, forKey: urlStr as NSString)
+            mediaImageView.image = image
+            reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: image)
+          } else {
+            NSLog("[ChatMediaLoad] local file MISSING msgId=%@ path=%@", row.messageId ?? "-", path)
+          }
+        } else if let diskImage = chatMediaDiskCacheLoad(urlStr) {
+          // Found on disk — restore to memory cache and display immediately
+          chatMediaImageCache.setObject(diskImage, forKey: urlStr as NSString)
+          mediaImageView.image = diskImage
+          reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: diskImage)
+        } else {
+          NSLog(
+            "[ChatMediaLoad] network fetch START msgId=%@ url=%@", row.messageId ?? "-", shortUrl)
+          mediaImageTask = URLSession.shared.dataTask(with: url) {
+            [weak self] data, response, error in
+            if let error {
+              NSLog(
+                "[ChatMediaLoad] network fetch FAIL msgId=%@ error=%@", row.messageId ?? "-",
+                error.localizedDescription)
+              return
+            }
+            guard let self = self, let data = data, let image = UIImage(data: data)
+            else {
+              let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+              let bodyPreview = data.flatMap { String(data: $0, encoding: .utf8) } ?? "nil"
+              NSLog(
+                "[ChatMediaLoad] network fetch NO_IMAGE msgId=%@ dataLen=%d status=%d url=%@ body=%@",
+                row.messageId ?? "-",
+                data?.count ?? 0, statusCode, urlStr, String(bodyPreview.prefix(200)))
+              return
+            }
+            NSLog(
+              "[ChatMediaLoad] network fetch OK msgId=%@ bytes=%d", row.messageId ?? "-", data.count
+            )
+            // Save to both memory and disk cache
+            chatMediaImageCache.setObject(image, forKey: urlStr as NSString)
+            chatMediaDiskCacheSave(image, forKey: urlStr)
+            DispatchQueue.main.async {
+              self.mediaImageView.image = image
+              self.reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: image)
+              if self.tailView.isHidden == false, let metrics = self.cachedLayoutMetrics,
+                metrics.isMediaLayout
+              {
+                self.tailView.setImage(image)
+              }
+            }
+          }
+          mediaImageTask?.resume()
+        }
+      } else {
+        NSLog(
+          "[ChatMediaLoad] URL parse FAIL msgId=%@ raw=%@", row.messageId ?? "-", shortUrl)
+      }
     }
 
     if row.visualKind == .voice {
@@ -1890,10 +2378,27 @@ final class ChatListCell: UICollectionViewCell {
     }
   }
 
+  private func reportNaturalMediaSizeIfNeeded(
+    for row: ChatListRow, mediaURL: String, image: UIImage
+  ) {
+    let size = image.size
+    guard size.width > 1.0, size.height > 1.0 else { return }
+    cacheNaturalMediaSize(size, for: mediaURL)
+    let sizeKey = "\(mediaURL)|\(Int(size.width.rounded()))x\(Int(size.height.rounded()))"
+    if lastReportedMediaSizeKey == sizeKey {
+      return
+    }
+    lastReportedMediaSizeKey = sizeKey
+    onMediaNaturalSizeResolved?(row.messageId, mediaURL, size)
+  }
+
   private func layoutMediaSubviews(for row: ChatListRow, in bounds: CGRect) {
     let width = bounds.width
     let height = bounds.height
 
+    let isFullBleed =
+      row.visualKind == .media && row.messageType != "file" || row.visualKind == .video
+      || row.visualKind == .videoNote
     let cornerRadius: CGFloat
     switch row.visualKind {
     case .videoNote:
@@ -1904,8 +2409,28 @@ final class ChatListCell: UICollectionViewCell {
       cornerRadius = 12.0
     }
 
-    mediaContainerView.layer.cornerRadius = cornerRadius
-    mediaProgressOverlayView.layer.cornerRadius = cornerRadius
+    if isFullBleed {
+      if row.visualKind == .videoNote {
+        mediaContainerView.layer.cornerRadius = floor(min(width, height) * 0.5)
+        mediaContainerView.layer.mask = nil
+      } else {
+        mediaContainerView.layer.cornerRadius = 0.0
+        fullBleedMaskLayer.frame = mediaContainerView.bounds
+        fullBleedMaskLayer.path =
+          bubbleRoundedPath(
+            rect: mediaContainerView.bounds,
+            topLeft: row.shape.borderTopLeftRadius,
+            topRight: row.shape.borderTopRightRadius,
+            bottomRight: row.shape.borderBottomRightRadius,
+            bottomLeft: row.shape.borderBottomLeftRadius
+          ).cgPath
+        mediaContainerView.layer.mask = fullBleedMaskLayer
+      }
+    } else {
+      mediaContainerView.layer.cornerRadius = cornerRadius
+      mediaContainerView.layer.mask = nil
+    }
+    mediaProgressOverlayView.layer.cornerRadius = mediaContainerView.layer.cornerRadius
 
     mediaPrimaryIconView.frame = .zero
     mediaVoiceButtonView.frame = .zero
@@ -2172,6 +2697,11 @@ final class ChatListCell: UICollectionViewCell {
     NSLog("[ChatCellHold] %@", message)
   }
 
+  private func reactionDebugLog(_ message: String) {
+    guard chatCellReactionDebugLogs else { return }
+    NSLog("[ChatCellReaction] %@", message)
+  }
+
   private func applyContextMenuExtractionIfNeeded() {
     if isContextMenuExtracted {
       if !hasSavedExtractionState {
@@ -2386,6 +2916,16 @@ final class ChatListCell: UICollectionViewCell {
     return bubbleView.convert(bubbleView.bounds, to: view)
   }
 
+  func reactionBadgeCenter(in view: UIView) -> CGPoint? {
+    guard row?.kind == .message else {
+      return nil
+    }
+    contentView.layoutIfNeeded()
+    let bubbleRect = bubbleView.convert(bubbleView.bounds, to: view)
+    let frame = reactionBadgeFrame(in: bubbleRect)
+    return CGPoint(x: frame.midX, y: frame.midY)
+  }
+
   func bubbleSnapshotView(in view: UIView) -> UIView? {
     guard let row = row, row.kind == .message else {
       return nil
@@ -2424,6 +2964,21 @@ final class ChatListCell: UICollectionViewCell {
     snapshot.clipsToBounds = false
 
     return snapshot
+  }
+
+  private func reactionBadgeFrame(in bubbleFrame: CGRect) -> CGRect {
+    let maxBadgeWidth = max(
+      20.0,
+      bubbleFrame.width - Self.reactionBadgeInsetLeft - 4.0
+    )
+    let width = min(Self.reactionBadgeBaseSize.width, maxBadgeWidth)
+    let height = Self.reactionBadgeBaseSize.height
+    return CGRect(
+      x: bubbleFrame.minX + Self.reactionBadgeInsetLeft,
+      y: bubbleFrame.maxY - Self.reactionBadgeInsetBottom - height,
+      width: width,
+      height: height
+    )
   }
 
   func transitionBubbleCaptureRects() -> (
@@ -2532,6 +3087,7 @@ final class BubbleTailView: UIView {
   private let tailMaskLayer = CAShapeLayer()
   private let clipMaskLayer = CAShapeLayer()
   private var currentIsMe: Bool = true
+  let imageView = UIImageView()
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -2540,11 +3096,27 @@ final class BubbleTailView: UIView {
     clipsToBounds = false
 
     addSubview(blurView)
+    addSubview(imageView)
+    imageView.contentMode = .scaleAspectFill
+    imageView.clipsToBounds = true
+    imageView.isHidden = true
     layer.addSublayer(gradientLayer)
     gradientLayer.startPoint = CGPoint(x: 0.0, y: 0.0)
     gradientLayer.endPoint = CGPoint(x: 1.0, y: 1.0)
     layer.addSublayer(fillLayer)
     layer.mask = tailMaskLayer
+  }
+
+  func setImage(_ image: UIImage?) {
+    imageView.image = image
+    imageView.isHidden = image == nil
+    blurView.isHidden = image != nil
+    fillLayer.isHidden = image != nil
+    if image != nil {
+      gradientLayer.isHidden = true
+    } else {
+      gradientLayer.isHidden = !currentIsMe
+    }
   }
 
   required init?(coder: NSCoder) {
@@ -2558,17 +3130,17 @@ final class BubbleTailView: UIView {
     isHidden = !visible
 
     // MUST match BubbleBackgroundView.configure exactly so tail+bubble look identical.
-    // Bubble uses:  blur .systemThinMaterialDark α0.4  + gradient 0.85  (me)
-    //               blur .systemMaterialDark     α0.5  + fill    0.82   (them)
+    // Bubble uses:  blur .systemThinMaterialDark α0.34 + gradient 0.88  (me)
+    //               blur .systemMaterialDark     α0.44 + fill    ~0.88  (them)
     blurView.effect = UIBlurEffect(style: isMe ? .systemThinMaterialDark : .systemMaterialDark)
-    blurView.alpha = isMe ? 0.4 : 0.5
+    blurView.alpha = isMe ? 0.34 : 0.44
     gradientLayer.isHidden = !isMe
     gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-    gradientLayer.opacity = isMe ? 1.0 : 0.0
+    gradientLayer.opacity = isMe ? 0.88 : 0.0
     fillLayer.fillColor =
       isMe
       ? UIColor.clear.cgColor
-      : appearance.bubbleThemColor.cgColor
+      : appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 0.90).cgColor
 
     // For 'me': rotate CW 25° (tail curves right at bottom-right of bubble)
     // For 'them': flip horizontally + rotate CCW 25° (tail curves left at bottom-left)
@@ -2592,12 +3164,12 @@ final class BubbleTailView: UIView {
         agentColor.withAlphaComponent(0.22).cgColor,
         agentColor.withAlphaComponent(0.08).cgColor,
       ]
-      gradientLayer.opacity = 1.0
-      blurView.alpha = 0.45
+      gradientLayer.opacity = 0.82
+      blurView.alpha = 0.42
     } else {
       gradientLayer.isHidden = false
       gradientLayer.colors = appearance.bubbleMeGradient.map(\.cgColor)
-      gradientLayer.opacity = 0.9
+      gradientLayer.opacity = 0.82
       blurView.alpha = 0.0
     }
     CATransaction.commit()
@@ -2615,6 +3187,7 @@ final class BubbleTailView: UIView {
     CATransaction.setDisableActions(true)
 
     blurView.frame = bounds
+    imageView.frame = bounds
     gradientLayer.frame = bounds
     fillLayer.frame = bounds
 

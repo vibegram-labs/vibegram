@@ -238,6 +238,10 @@ final class ChatAgentConfigViewController: UIViewController {
     generatePromptButton.setTitle("Generate", for: .normal)
     generatePromptButton.titleLabel?.font = UIFont.systemFont(ofSize: 13.0, weight: .semibold)
     generatePromptButton.tintColor = accentColor
+    generatePromptButton.backgroundColor = .secondarySystemGroupedBackground
+    generatePromptButton.layer.cornerRadius = 14.0
+    generatePromptButton.layer.cornerCurve = .continuous
+    generatePromptButton.contentEdgeInsets = UIEdgeInsets(top: 0.0, left: 10.0, bottom: 0.0, right: 10.0)
     generatePromptButton.addTarget(
       self, action: #selector(handleGeneratePromptTapped), for: .touchUpInside)
     contentView.addSubview(generatePromptButton)
@@ -323,15 +327,20 @@ final class ChatAgentConfigViewController: UIViewController {
     
     for (index, doc) in documents.enumerated() {
       let row = UIControl()
-      row.backgroundColor = .clear // will set explicitly below
+      row.backgroundColor = .secondarySystemGroupedBackground
       row.layer.cornerRadius = 12.0
       row.layer.cornerCurve = .continuous
-      row.layer.borderWidth = 1.0 / UIScreen.main.scale
-      row.layer.borderColor = UIColor.secondaryLabel.withAlphaComponent(0.2).cgColor
+      row.layer.borderWidth = 0.0
       row.translatesAutoresizingMaskIntoConstraints = false
       row.heightAnchor.constraint(equalToConstant: 48).isActive = true
       row.tag = index
       row.addTarget(self, action: #selector(handleDocumentTapped(_:)), for: .touchUpInside)
+      row.addTarget(self, action: #selector(handleDocumentTouchDown(_:)), for: [.touchDown, .touchDragEnter])
+      row.addTarget(
+        self,
+        action: #selector(handleDocumentTouchUp(_:)),
+        for: [.touchUpInside, .touchUpOutside, .touchDragExit, .touchCancel]
+      )
       
       let icon = UIImageView(image: UIImage(systemName: "doc.text.fill"))
       icon.tintColor = accentColor
@@ -345,6 +354,16 @@ final class ChatAgentConfigViewController: UIViewController {
       label.textColor = .label
       label.translatesAutoresizingMaskIntoConstraints = false
       row.addSubview(label)
+
+      let chevron = UIImageView(
+        image: UIImage(
+          systemName: "chevron.right",
+          withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+        ))
+      chevron.tintColor = UIColor.secondaryLabel.withAlphaComponent(0.7)
+      chevron.contentMode = .scaleAspectFit
+      chevron.translatesAutoresizingMaskIntoConstraints = false
+      row.addSubview(chevron)
       
       NSLayoutConstraint.activate([
         icon.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: 14),
@@ -353,8 +372,13 @@ final class ChatAgentConfigViewController: UIViewController {
         icon.heightAnchor.constraint(equalToConstant: 20),
         
         label.leadingAnchor.constraint(equalTo: icon.trailingAnchor, constant: 12),
-        label.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -14),
-        label.centerYAnchor.constraint(equalTo: row.centerYAnchor)
+        label.trailingAnchor.constraint(equalTo: chevron.leadingAnchor, constant: -10),
+        label.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+
+        chevron.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -14),
+        chevron.centerYAnchor.constraint(equalTo: row.centerYAnchor),
+        chevron.widthAnchor.constraint(equalToConstant: 10),
+        chevron.heightAnchor.constraint(equalToConstant: 14),
       ])
       
       documentsStack.addArrangedSubview(row)
@@ -596,6 +620,20 @@ final class ChatAgentConfigViewController: UIViewController {
        }
     }
     task.resume()
+  }
+
+  @objc private func handleDocumentTouchDown(_ sender: UIControl) {
+    UIView.animate(withDuration: 0.08) {
+      sender.alpha = 0.72
+      sender.transform = CGAffineTransform(scaleX: 0.992, y: 0.992)
+    }
+  }
+
+  @objc private func handleDocumentTouchUp(_ sender: UIControl) {
+    UIView.animate(withDuration: 0.16, delay: 0.0, options: [.curveEaseOut]) {
+      sender.alpha = 1.0
+      sender.transform = .identity
+    }
   }
 
   private func presentSimpleAlert(title: String, message: String) {

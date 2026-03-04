@@ -19,6 +19,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.PopupWindow
 import android.widget.TextView
+import android.os.SystemClock
 import kotlin.math.ceil
 import kotlin.math.floor
 import kotlin.math.max
@@ -31,6 +32,9 @@ internal class ChatContextMenuOverlay(
 ) {
   companion object {
     private const val TAG = "ChatContextMenuOverlay"
+    private const val HOLD_SCALE = 0.965f
+    private const val HOLD_PULSE_MS = 180L
+    private const val INTERACTION_GUARD_MS = 260L
   }
 
   internal data class Config(
@@ -96,9 +100,20 @@ internal class ChatContextMenuOverlay(
       return
     }
 
-    // Match iOS behavior: animate the snapshot only, not the live cell.
-    // Pre-scaling the live row distorts the captured bitmap (text size and bubble shape).
-    openIfLatest()
+    // Match iOS long-press pulse timing:
+    // 1) brief hold scale on live row, 2) restore to identity, 3) snapshot/open overlay.
+    holdView.animate().cancel()
+    holdView.animate()
+      .scaleX(HOLD_SCALE)
+      .scaleY(HOLD_SCALE)
+      .setDuration(HOLD_PULSE_MS)
+      .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
+      .withEndAction {
+        holdView.scaleX = 1f
+        holdView.scaleY = 1f
+        openIfLatest()
+      }
+      .start()
   }
 
   fun dismiss(animated: Boolean = true) {
@@ -189,6 +204,8 @@ internal class ChatContextMenuOverlay(
       }
     }
 
+    var controlsEnabledAtMs = 0L
+
     val bubbleSnapshot = buildBubbleSnapshot(
       captureHost = holdView,
       captureRectInRoot = captureRect,
@@ -277,6 +294,7 @@ internal class ChatContextMenuOverlay(
         setPadding(0, 0, 0, 0)
         background = null
         setOnClickListener { view ->
+          if (SystemClock.uptimeMillis() < controlsEnabledAtMs) return@setOnClickListener
           val loc = IntArray(2)
           view.getLocationInWindow(loc)
           val sourceX = loc[0] + (view.width * 0.5f)
@@ -346,6 +364,7 @@ internal class ChatContextMenuOverlay(
           setColor(Color.TRANSPARENT)
         }
         setOnClickListener {
+          if (SystemClock.uptimeMillis() < controlsEnabledAtMs) return@setOnClickListener
           onAction(actionId)
           dismiss(animated = true)
         }
@@ -440,9 +459,12 @@ internal class ChatContextMenuOverlay(
       }
     }
 
-    val hiddenViews = ArrayList<View>(2).apply {
-      add(anchor)
-      if (tailView != null && tailView !== anchor) add(tailView)
+    val hiddenViews = LinkedHashSet<View>().apply {
+      // Hide the same host used for snapshot capture to prevent live/snapshot
+      // mismatch flicker while the context overlay animates in.
+      add(holdView)
+      if (anchor !== holdView) add(anchor)
+      if (tailView != null && tailView !== anchor && tailView !== holdView) add(tailView)
     }
 
     active = ActiveOverlay(
@@ -452,13 +474,14 @@ internal class ChatContextMenuOverlay(
       reactionCard = reactionCard,
       actionsCard = actionsCard,
       holdView = holdView,
-      hiddenViews = hiddenViews,
+      hiddenViews = hiddenViews.toList(),
       anchorStartRect = captureRect,
       bubbleRect = bubbleSnapshotRect,
     )
 
     overlayRoot.setOnTouchListener { _, event ->
       if (event.actionMasked != MotionEvent.ACTION_UP) return@setOnTouchListener false
+      if (SystemClock.uptimeMillis() < controlsEnabledAtMs) return@setOnTouchListener true
       val x = event.x
       val y = event.y
       if (containsPoint(bubbleSnapshot, x, y)) return@setOnTouchListener false
@@ -483,11 +506,12 @@ internal class ChatContextMenuOverlay(
       popup.showAtLocation(rootView, Gravity.NO_GRAVITY, 0, 0)
     } catch (error: Throwable) {
       Log.e(TAG, "openOverlay showAtLocation failed", error)
-      restoreHiddenViews(hiddenViews)
+      restoreHiddenViews(hiddenViews.toList())
       restoreHoldView(holdView)
       active = null
       return
     }
+    controlsEnabledAtMs = SystemClock.uptimeMillis() + INTERACTION_GUARD_MS
 
     overlayRoot.post {
       overlayRoot.requestFocus()

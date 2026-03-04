@@ -721,7 +721,7 @@ public final class ChatMainView: ExpoView,
 
     profileBackButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
     profileBackButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
-    profileMenuButton.setImage(UIImage(systemName: "ellipsis"), for: .normal)
+    applyProfileHeaderMenuButtonStyle(profileMenuButton)
     profileMenuButton.addTarget(self, action: #selector(handleMenuPressed), for: .touchUpInside)
 
     avatarButton.addTarget(self, action: #selector(handleAvatarPressed), for: .touchUpInside)
@@ -733,7 +733,9 @@ public final class ChatMainView: ExpoView,
     let menuSymbolConfig = UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     menuButton.setPreferredSymbolConfiguration(menuSymbolConfig, forImageIn: .normal)
     profileBackButton.setPreferredSymbolConfiguration(backSymbolConfig, forImageIn: .normal)
-    profileMenuButton.setPreferredSymbolConfiguration(menuSymbolConfig, forImageIn: .normal)
+    if profileMenuButton.configuration == nil {
+      profileMenuButton.setPreferredSymbolConfiguration(menuSymbolConfig, forImageIn: .normal)
+    }
     avatarImageView.contentMode = .scaleAspectFill
     avatarImageView.isHidden = true
 
@@ -1919,6 +1921,23 @@ public final class ChatMainView: ExpoView,
     }
   }
 
+  private func applyProfileHeaderMenuButtonStyle(_ button: UIButton) {
+    if #available(iOS 26.0, *) {
+      var config = UIButton.Configuration.glass()
+      config.cornerStyle = .capsule
+      config.image = UIImage(
+        systemName: "ellipsis",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+      )
+      config.contentInsets = NSDirectionalEdgeInsets(top: 8, leading: 8, bottom: 8, trailing: 8)
+      button.configuration = config
+      return
+    }
+
+    button.configuration = nil
+    button.setImage(UIImage(systemName: "ellipsis"), for: .normal)
+  }
+
   private func markPendingNativePageChange(_ page: ChatMainPage) {
     pendingNativePageTarget = page
     pendingNativePageLockUntil = CACurrentMediaTime() + 2.0
@@ -2956,11 +2975,7 @@ public final class ChatMainView: ExpoView,
 
   @objc private func handleAvatarPressed() {
     guard currentPage == .chat else { return }
-    if !standaloneProfileMode {
-      return
-    }
-    currentPage = .profile
-    applyPageState(animated: true, emitEvent: false)
+    onNativeEvent(["type": "headerAvatarPressed"])
   }
 
   @objc private func handleMenuPressed() {

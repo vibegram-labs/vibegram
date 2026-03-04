@@ -84,33 +84,22 @@ private func chatEnginePrivateKey(from pem: String) -> SecKey? {
   ]
   var error: Unmanaged<CFError>?
 
-  // Attempt 1: raw DER — works for PKCS#1 ("BEGIN RSA PRIVATE KEY")
-  if let key = SecKeyCreateWithData(keyData as CFData, attrs as CFDictionary, &error) {
+  let isPKCS8 = pem.contains("BEGIN PRIVATE KEY") && !pem.contains("BEGIN RSA PRIVATE KEY")
+  let targetData = (isPKCS8 ? chatEngineExtractPKCS1FromPKCS8(keyData) : nil) ?? keyData
+
+  // Attempt 1: standard
+  if let key = SecKeyCreateWithData(targetData as CFData, attrs as CFDictionary, &error) {
     return key
   }
 
-  // Attempt 2: strip PKCS#8 envelope ("BEGIN PRIVATE KEY") to get PKCS#1 inner
-  if let pkcs1Data = chatEngineExtractPKCS1FromPKCS8(keyData) {
-    error = nil
-    if let key = SecKeyCreateWithData(pkcs1Data as CFData, attrs as CFDictionary, &error) {
-      return key
-    }
-  }
-
-  // Attempt 3: retry without explicit key-size (in case it's non-2048)
+  // Attempt 2: retry without explicit key-size (in case it's non-2048)
   let attrsNoSize: [String: Any] = [
     kSecAttrKeyType as String: kSecAttrKeyTypeRSA,
     kSecAttrKeyClass as String: kSecAttrKeyClassPrivate,
   ]
   error = nil
-  if let key = SecKeyCreateWithData(keyData as CFData, attrsNoSize as CFDictionary, &error) {
+  if let key = SecKeyCreateWithData(targetData as CFData, attrsNoSize as CFDictionary, &error) {
     return key
-  }
-  if let pkcs1Data = chatEngineExtractPKCS1FromPKCS8(keyData) {
-    error = nil
-    if let key = SecKeyCreateWithData(pkcs1Data as CFData, attrsNoSize as CFDictionary, &error) {
-      return key
-    }
   }
 
   // Safe logging — use takeUnretainedValue to avoid over-releasing CFError
@@ -358,6 +347,7 @@ final class ChatEngine {
   private var pinnedMessagesByChatId: [String: [[String: Any]]] = [:]
   private var pinnedFetchInFlightChatIds = Set<String>()
   private var historyRowsByChat: [String: [[String: Any]]] = [:]
+  private var historyFullyLoadedChats = Set<String>()
   private var historyLoadingChats = Set<String>()
   private var liveMessageRowsByChat: [String: [String: [String: Any]]] = [:]
   private var deletedMessageIdsByChat: [String: Set<String>] = [:]
@@ -838,6 +828,8 @@ final class ChatEngine {
         let nextCount = (openChatChannels[chatId] ?? 0) + 1
         openChatChannels[chatId] = nextCount
         joinNativeChatTopicIfNeededLocked(chatId: chatId)
+        // Eagerly fetch history so messages appear instantly when the chat view renders.
+        loadChatHistoryIfNeededLocked(chatId: chatId)
       }
       appendJournalLocked(event: "open-chat-channel", payload: payload)
       state["updatedAt"] = nowMs()
@@ -875,6 +867,39 @@ final class ChatEngine {
       postChangeLocked(reason: "chatChannelStateChanged", userInfo: ["chatId": chatId as Any])
       return snapshot
     }
+  }
+
+  /// Seeds chat histories right from the Home API fetch payload, preventing N+1 fetch requests
+  /// and avoiding network timeouts or delays when clicking into a chat.
+  func seedChatHistories(_ payload: [String: Any]) -> [String: Any] {
+    guard let histories = payload["chatHistories"] as? [String: [[String: Any]]] else {
+      return ["seeded": 0]
+    }
+
+    var triggered = 0
+    var chatIdsToPreload: [String] = []
+    queue.sync {
+      for (rawChatId, messagesArray) in histories {
+        guard let chatId = normalizedString(rawChatId), !chatId.isEmpty else { continue }
+        // We only seed if the full history hasn't already been loaded.
+        if !historyFullyLoadedChats.contains(chatId) {
+          let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: messagesArray)
+          historyRowsByChat[chatId] = rows
+          chatIdsToPreload.append(chatId)
+          triggered += 1
+        }
+      }
+      // Now kick off the full 15-message history fetch in the background
+      // for every seeded chat so messages are ready before the user taps in.
+      for chatId in chatIdsToPreload {
+        loadChatHistoryIfNeededLocked(chatId: chatId)
+      }
+    }
+
+    NSLog(
+      "[ChatEngine] seedChatHistories injected %d chats, preloading %d", triggered,
+      chatIdsToPreload.count)
+    return ["seeded": triggered]
   }
 
   func sendDeliveryReceipt(_ payload: [String: Any]) -> [String: Any] {
@@ -1113,11 +1138,11 @@ final class ChatEngine {
       return nil
     }
 
-    var mediaUrl = normalizedString(
+    let mediaUrl = normalizedString(
       metadataValue("mediaUrl", ["media_url", "previewUrl", "preview_url"]))
     let localPlaybackMediaUrl = mediaUrl.flatMap { self.isLocalMediaURI($0) ? $0 : nil }
-    var fileName = normalizedString(metadataValue("fileName", ["file_name"]))
-    var fileSize = parseLongValue(metadataValue("fileSize", ["file_size"]))
+    let fileName = normalizedString(metadataValue("fileName", ["file_name"]))
+    let fileSize = parseLongValue(metadataValue("fileSize", ["file_size"]))
     let latitude = parseDoubleValue(metadataValue("latitude", []))
     let longitude = parseDoubleValue(metadataValue("longitude", []))
     let duration = parseDoubleValue(metadataValue("duration", []))
@@ -1156,7 +1181,7 @@ final class ChatEngine {
     let peerUserIdHint = normalizedUpper(payload["peerUserId"] ?? payload["peer_user_id"])
 
     return queue.sync {
-      var effectivePayload = payload
+      let effectivePayload = payload
       let isGroup =
         (payload["isGroup"] as? Bool) == true || (payload["isGroupOrChannel"] as? Bool) == true
       NSLog(
@@ -1263,325 +1288,378 @@ final class ChatEngine {
         Int(nowMs() - keyResolveStartMs), chatId, messageId,
         friendPublicKey != nil ? "true" : "false")
 
+      let apiBase = self.apiBaseURLLocked()
+      let token = self.authHeaderTokenLocked()
+      let userId = normalizedString(self.getConfigValueLocked("userId"))
+      let myPublicKeyPem = normalizedString(
+        self.getConfigValueLocked("publicKeyPem") ?? self.getConfigValueLocked("publicKey"))
+
       let needsUpload =
         ["image", "gif", "file", "voice", "video", "music"].contains(type)
         && (mediaUrl != nil)
         && isLocalMediaURI(mediaUrl!)
+
+      var uploadTargetUrl: String? = nil
       if needsUpload {
+        uploadTargetUrl = mediaUrl
         setLiveMessageUploadProgressLocked(chatId: chatId, messageId: messageId, progress: 0.02)
         postChangeLocked(
           reason: "chatMessageChanged",
           userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
         )
       }
-      if needsUpload, let localMediaUrl = mediaUrl {
-        guard
-          let apiBase = apiBaseURLLocked(),
-          let token = authHeaderTokenLocked(),
-          let userId = normalizedString(getConfigValueLocked("userId"))
-        else {
-          upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
-          queueOutboundDraftLocked(
-            chatId: chatId, messageId: messageId, payload: effectivePayload,
-            reason: "missing_upload_config")
-          appendJournalLocked(
-            event: "native-media-upload-error",
-            payload: [
-              "chatId": chatId,
-              "messageId": messageId,
-              "reason": "missing_upload_config",
-            ])
-          setLiveMessageUploadProgressLocked(chatId: chatId, messageId: messageId, progress: nil)
-          postChangeLocked(
-            reason: "chatMessageChanged",
-            userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
-          )
-          postChangeLocked(
-            reason: "messageStatusChanged",
-            userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
-          return [
-            "accepted": true, "queued": true, "reason": "missing_upload_config",
-            "messageId": messageId, "state": "pending",
-          ]
-        }
-        appendJournalLocked(
-          event: "native-media-upload-start",
-          payload: [
-            "chatId": chatId,
-            "messageId": messageId,
-            "type": type,
-          ])
-        setLiveMessageUploadProgressLocked(chatId: chatId, messageId: messageId, progress: 0.08)
-        postChangeLocked(
-          reason: "chatMessageChanged",
-          userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
-        )
-        let uploadOutcome = uploadLocalMediaLocked(
-          localUri: localMediaUrl,
-          messageType: type,
-          fileNameHint: fileName,
-          userId: userId,
-          token: token,
-          apiBase: apiBase
-        )
-        if let uploadResult = uploadOutcome.result {
-          mediaUrl = uploadResult.remoteUrl
-          if fileName == nil { fileName = uploadResult.fileName }
-          if fileSize == nil { fileSize = uploadResult.fileSize }
-          var nextMetadata = (effectivePayload["metadata"] as? [String: Any]) ?? [:]
-          nextMetadata["mediaUrl"] = uploadResult.remoteUrl
-          if let localPlaybackMediaUrl { nextMetadata["localMediaUrl"] = localPlaybackMediaUrl }
-          if let fileName { nextMetadata["fileName"] = fileName }
-          if let fileSize { nextMetadata["fileSize"] = fileSize }
-          effectivePayload["metadata"] = nextMetadata
-          effectivePayload["chatId"] = chatId
-          effectivePayload["messageId"] = messageId
-          effectivePayload["type"] = type
-          effectivePayload["text"] = text
-          if var message = optimisticRow["message"] as? [String: Any] {
-            message["mediaUrl"] = uploadResult.remoteUrl
-            if let localPlaybackMediaUrl { message["localMediaUrl"] = localPlaybackMediaUrl }
-            if let fileName { message["fileName"] = fileName }
-            if let fileSize { message["fileSize"] = fileSize }
-            optimisticRow["message"] = message
-            upsertLiveMessageRowLocked(chatId: chatId, messageId: messageId, row: optimisticRow)
-          }
-          NSLog(
-            "[ChatEngine] voice upload complete chatId=%@ messageId=%@ remoteUrl=%@ localPlayback=%@ type=%@",
-            chatId,
-            messageId,
-            uploadResult.remoteUrl,
-            localPlaybackMediaUrl ?? "-",
-            type
-          )
-          setLiveMessageUploadProgressLocked(chatId: chatId, messageId: messageId, progress: 0.96)
-          postChangeLocked(
-            reason: "chatMessageChanged",
-            userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
-          )
-          appendJournalLocked(
-            event: "native-media-upload-ok",
-            payload: [
-              "chatId": chatId,
-              "messageId": messageId,
-              "url": uploadResult.remoteUrl,
-            ])
-        } else {
-          let reason = uploadOutcome.reason ?? "upload_failed"
-          let retryableReasons: Set<String> = [
-            "upload_failed", "upload_timeout", "missing_upload_config",
-          ]
-          let shouldQueue = retryableReasons.contains(reason)
-          upsertLocalStatusLocked(
-            chatId: chatId, messageId: messageId, status: shouldQueue ? "pending" : "error")
-          appendJournalLocked(
-            event: "native-media-upload-error",
-            payload: [
-              "chatId": chatId,
-              "messageId": messageId,
-              "reason": reason,
-            ])
-          setLiveMessageUploadProgressLocked(chatId: chatId, messageId: messageId, progress: nil)
-          postChangeLocked(
-            reason: "chatMessageChanged",
-            userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
-          )
-          postChangeLocked(
-            reason: "messageStatusChanged",
-            userInfo: [
-              "chatId": chatId,
-              "messageId": messageId,
-              "status": shouldQueue ? "pending" : "error",
-            ])
-          if shouldQueue {
-            queueOutboundDraftLocked(
-              chatId: chatId, messageId: messageId, payload: effectivePayload, reason: reason)
-            return [
-              "accepted": true, "queued": true, "reason": reason, "messageId": messageId,
-              "state": "pending",
-            ]
-          }
-          return ["accepted": false, "reason": reason, "messageId": messageId]
-        }
-      }
 
-      var fullPayloadBase: [String: Any] = ["text": text]
-      if let mediaUrl { fullPayloadBase["mediaUrl"] = mediaUrl }
-      if let mediaKey { fullPayloadBase["mediaKey"] = mediaKey }
-      if let fileName { fullPayloadBase["fileName"] = fileName }
-      if let fileSize { fullPayloadBase["fileSize"] = fileSize }
-      if let latitude { fullPayloadBase["latitude"] = latitude }
-      if let longitude { fullPayloadBase["longitude"] = longitude }
-      if let duration { fullPayloadBase["duration"] = duration }
-      if let width { fullPayloadBase["width"] = width }
-      if let height { fullPayloadBase["height"] = height }
-      if let replyToId { fullPayloadBase["replyToId"] = replyToId }
-      if let contact { fullPayloadBase["contact"] = contact }
-      if let caption { fullPayloadBase["caption"] = caption }
-      if let thumbnailBase64 { fullPayloadBase["thumbnailBase64"] = thumbnailBase64 }
-      if let viewOnce { fullPayloadBase["viewOnce"] = viewOnce }
-      if let isVideoNote { fullPayloadBase["isVideoNote"] = isVideoNote }
-      if let waveform { fullPayloadBase["waveform"] = waveform }
-      let fullPayload = makeJSONSafeMap(fullPayloadBase)
-      guard
-        let fullPayloadData = try? JSONSerialization.data(withJSONObject: fullPayload, options: []),
-        let fullPayloadString = String(data: fullPayloadData, encoding: .utf8)
-      else {
-        upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
-        return ["accepted": false, "reason": "payload_encode_failed", "messageId": messageId]
-      }
-
-      let myPublicKeyPem = normalizedString(
-        getConfigValueLocked("publicKeyPem") ?? getConfigValueLocked("publicKey"))
-      let encryptedContent: String
-      do {
-        if isGroup || friendPublicKey == nil {
-          encryptedContent = fullPayloadString
-        } else {
-          encryptedContent = try chatEngineEncryptHybridMessage(
-            recipientPublicKeyPem: friendPublicKey!,
-            message: fullPayloadString,
-            myPublicKeyPem: myPublicKeyPem
-          )
-        }
-      } catch {
-        upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
-        appendJournalLocked(
-          event: "native-send-message-error",
-          payload: [
-            "chatId": chatId,
-            "messageId": messageId,
-            "reason": "encrypt_failed",
-            "error": error.localizedDescription,
-          ])
-        postChangeLocked(
-          reason: "messageStatusChanged",
-          userInfo: ["chatId": chatId, "messageId": messageId, "status": "error"])
-        return ["accepted": false, "reason": "encrypt_failed", "messageId": messageId]
-      }
-
-      let pushPreview: String = {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty {
-          if trimmed.count <= 160 { return trimmed }
-          return String(trimmed.prefix(159)) + "…"
-        }
-        switch type {
-        case "image": return "Photo"
-        case "video": return "Video"
-        case "voice": return "Voice message"
-        case "music": return "Audio"
-        case "file": return "File"
-        case "location": return "Location"
-        case "contact": return "Contact"
-        case "gif": return "GIF"
-        default: return ""
-        }
-      }()
-
-      var wirePayload: [String: Any] = [
-        "id": messageId,
-        "encryptedContent": encryptedContent,
-        "timestamp": timestampMs,
-        "type": type,
-        "pushPreview": pushPreview,
-        "mediaUrl": NSNull(),
-        "fileName": NSNull(),
-        "latitude": NSNull(),
-        "longitude": NSNull(),
-      ]
-      if let replyToId, !replyToId.isEmpty {
-        wirePayload["replyToId"] = replyToId
-      }
-      if let fromId = normalizedString(getConfigValueLocked("userId")) {
-        wirePayload["fromId"] = fromId
-      }
-
-      if let agentMention = payload["agentMention"] as? Bool, agentMention {
-        wirePayload["agentMention"] = true
-        if let agentText = payload["agentText"] as? String {
-          wirePayload["agentText"] = agentText
-        }
-      }
-
-      if var message = optimisticRow["message"] as? [String: Any] {
-        message["encryptedContent"] = encryptedContent
-        optimisticRow["message"] = message
-        upsertLiveMessageRowLocked(chatId: chatId, messageId: messageId, row: optimisticRow)
-      }
-      pendingOutboundDraftsByMessageId[messageId] = effectivePayload
-
-      guard let client = phoenixClient as? ChatPhoenixClient else {
-        upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
-        queueOutboundDraftLocked(
-          chatId: chatId, messageId: messageId, payload: effectivePayload,
-          reason: "no_native_socket")
-        scheduleReconnectLocked(reason: "send_no_socket")
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-          self?.ensureNativeTransport(trigger: "send_no_socket")
-        }
-        postChangeLocked(
-          reason: "messageStatusChanged",
-          userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
-        return [
-          "accepted": true, "queued": true, "reason": "no_native_socket", "messageId": messageId,
-          "state": "pending",
-        ]
-      }
-      guard nativeJoinedChatIds.contains(chatId) else {
-        joinNativeChatTopicIfNeededLocked(chatId: chatId)
-        upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
-        queueOutboundDraftLocked(
-          chatId: chatId, messageId: messageId, payload: effectivePayload, reason: "chat_not_joined"
-        )
-        scheduleReconnectLocked(reason: "send_chat_not_joined")
-        DispatchQueue.global(qos: .utility).async { [weak self] in
-          self?.ensureNativeTransport(trigger: "send_chat_not_joined")
-        }
-        postChangeLocked(
-          reason: "messageStatusChanged",
-          userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
-        return [
-          "accepted": true, "queued": true, "reason": "chat_not_joined", "messageId": messageId,
-          "state": "pending",
-        ]
-      }
-
-      let ref = client.push(topic: chatTopic(for: chatId), event: "message", payload: wirePayload)
-      nativePendingMessagePushRefs[ref] = (chatId: chatId, messageId: messageId)
-
-      let timeoutRef = ref
-      queue.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+      DispatchQueue.global(qos: .userInitiated).async {
+        [weak self, friendPublicKey, uploadTargetUrl, myPublicKeyPem] in
         guard let self = self else { return }
-        if let pending = self.nativePendingMessagePushRefs.removeValue(forKey: timeoutRef) {
+
+        var finalMediaUrl = mediaUrl
+        var finalFileName = fileName
+        var finalFileSize = fileSize
+        var localEffectivePayload = effectivePayload
+        var localOptimisticRow = optimisticRow
+
+        if let localMediaUrl = uploadTargetUrl {
+          guard let apiBase = apiBase, let token = token, let userId = userId else {
+            self.queue.async {
+              self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
+              self.queueOutboundDraftLocked(
+                chatId: chatId, messageId: messageId, payload: localEffectivePayload,
+                reason: "missing_upload_config")
+              self.appendJournalLocked(
+                event: "native-media-upload-error",
+                payload: [
+                  "chatId": chatId,
+                  "messageId": messageId,
+                  "reason": "missing_upload_config",
+                ])
+              self.setLiveMessageUploadProgressLocked(
+                chatId: chatId, messageId: messageId, progress: nil)
+              self.postChangeLocked(
+                reason: "chatMessageChanged",
+                userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
+              )
+              self.postChangeLocked(
+                reason: "messageStatusChanged",
+                userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
+            }
+            return
+          }
+
+          self.queue.async {
+            self.appendJournalLocked(
+              event: "native-media-upload-start",
+              payload: [
+                "chatId": chatId,
+                "messageId": messageId,
+                "type": type,
+              ])
+            self.setLiveMessageUploadProgressLocked(
+              chatId: chatId, messageId: messageId, progress: 0.08)
+            self.postChangeLocked(
+              reason: "chatMessageChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
+            )
+          }
+
+          let uploadOutcome = self.uploadLocalMediaLocked(
+            localUri: localMediaUrl,
+            messageType: type,
+            fileNameHint: fileName,
+            userId: userId,
+            token: token,
+            apiBase: apiBase
+          ) { progress in
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+              guard let self else { return }
+              self.queue.sync {
+                self.setLiveMessageUploadProgressLocked(
+                  chatId: chatId,
+                  messageId: messageId,
+                  progress: CGFloat(progress * 0.90)
+                )
+              }
+            }
+          }
+
+          if let uploadResult = uploadOutcome.result {
+            finalMediaUrl = uploadResult.remoteUrl
+            if finalFileName == nil { finalFileName = uploadResult.fileName }
+            if finalFileSize == nil { finalFileSize = uploadResult.fileSize }
+
+            var nextMetadata = (localEffectivePayload["metadata"] as? [String: Any]) ?? [:]
+            nextMetadata["mediaUrl"] = uploadResult.remoteUrl
+            if let localPlaybackMediaUrl { nextMetadata["localMediaUrl"] = localPlaybackMediaUrl }
+            if let finalFileName { nextMetadata["fileName"] = finalFileName }
+            if let finalFileSize { nextMetadata["fileSize"] = finalFileSize }
+
+            localEffectivePayload["metadata"] = nextMetadata
+            localEffectivePayload["chatId"] = chatId
+            localEffectivePayload["messageId"] = messageId
+            localEffectivePayload["type"] = type
+            localEffectivePayload["text"] = text
+
+            if var message = localOptimisticRow["message"] as? [String: Any] {
+              message["mediaUrl"] = uploadResult.remoteUrl
+              if let localPlaybackMediaUrl { message["localMediaUrl"] = localPlaybackMediaUrl }
+              if let finalFileName { message["fileName"] = finalFileName }
+              if let finalFileSize { message["fileSize"] = finalFileSize }
+              localOptimisticRow["message"] = message
+            }
+
+            let threadMediaUrl = finalMediaUrl
+            let threadOptimisticRow = localOptimisticRow
+            self.queue.async {
+              self.upsertLiveMessageRowLocked(
+                chatId: chatId, messageId: messageId, row: threadOptimisticRow)
+              NSLog(
+                "[ChatEngine] voice upload complete chatId=%@ messageId=%@ remoteUrl=%@ localPlayback=%@ type=%@",
+                chatId,
+                messageId,
+                threadMediaUrl ?? "-",
+                localPlaybackMediaUrl ?? "-",
+                type
+              )
+              self.setLiveMessageUploadProgressLocked(
+                chatId: chatId, messageId: messageId, progress: 0.96)
+              self.postChangeLocked(
+                reason: "chatMessageChanged",
+                userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
+              )
+              self.appendJournalLocked(
+                event: "native-media-upload-ok",
+                payload: [
+                  "chatId": chatId,
+                  "messageId": messageId,
+                  "url": threadMediaUrl ?? "",
+                ])
+            }
+          } else {
+            let reason = uploadOutcome.reason ?? "upload_failed"
+            let retryableReasons: Set<String> = [
+              "upload_failed", "upload_timeout", "missing_upload_config",
+            ]
+            let shouldQueue = retryableReasons.contains(reason)
+
+            self.queue.async {
+              self.upsertLocalStatusLocked(
+                chatId: chatId, messageId: messageId, status: shouldQueue ? "pending" : "error")
+              self.appendJournalLocked(
+                event: "native-media-upload-error",
+                payload: [
+                  "chatId": chatId,
+                  "messageId": messageId,
+                  "reason": reason,
+                ])
+              self.setLiveMessageUploadProgressLocked(
+                chatId: chatId, messageId: messageId, progress: nil)
+              self.postChangeLocked(
+                reason: "chatMessageChanged",
+                userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
+              )
+              self.postChangeLocked(
+                reason: "messageStatusChanged",
+                userInfo: [
+                  "chatId": chatId,
+                  "messageId": messageId,
+                  "status": shouldQueue ? "pending" : "error",
+                ])
+              if shouldQueue {
+                self.queueOutboundDraftLocked(
+                  chatId: chatId, messageId: messageId, payload: localEffectivePayload,
+                  reason: reason)
+              }
+            }
+            return
+          }
+        }
+
+        var fullPayloadBase: [String: Any] = ["text": text]
+        if let finalMediaUrl { fullPayloadBase["mediaUrl"] = finalMediaUrl }
+        if let mediaKey { fullPayloadBase["mediaKey"] = mediaKey }
+        if let finalFileName { fullPayloadBase["fileName"] = finalFileName }
+        if let finalFileSize { fullPayloadBase["fileSize"] = finalFileSize }
+        if let latitude { fullPayloadBase["latitude"] = latitude }
+        if let longitude { fullPayloadBase["longitude"] = longitude }
+        if let duration { fullPayloadBase["duration"] = duration }
+        if let width { fullPayloadBase["width"] = width }
+        if let height { fullPayloadBase["height"] = height }
+        if let replyToId { fullPayloadBase["replyToId"] = replyToId }
+        if let contact { fullPayloadBase["contact"] = contact }
+        if let caption { fullPayloadBase["caption"] = caption }
+        if let thumbnailBase64 { fullPayloadBase["thumbnailBase64"] = thumbnailBase64 }
+        if let viewOnce { fullPayloadBase["viewOnce"] = viewOnce }
+        if let isVideoNote { fullPayloadBase["isVideoNote"] = isVideoNote }
+        if let waveform { fullPayloadBase["waveform"] = waveform }
+        let fullPayload = makeJSONSafeMap(fullPayloadBase)
+        guard
+          let fullPayloadData = try? JSONSerialization.data(
+            withJSONObject: fullPayload, options: []),
+          let fullPayloadString = String(data: fullPayloadData, encoding: .utf8)
+        else {
+          self.queue.async {
+            self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
+          }
+          return
+        }
+
+        let encryptedContent: String
+        do {
+          if isGroup || friendPublicKey == nil {
+            encryptedContent = fullPayloadString
+          } else {
+            encryptedContent = try chatEngineEncryptHybridMessage(
+              recipientPublicKeyPem: friendPublicKey!,
+              message: fullPayloadString,
+              myPublicKeyPem: myPublicKeyPem ?? ""
+            )
+          }
+        } catch {
+          self.queue.async {
+            self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
+            self.appendJournalLocked(
+              event: "native-send-message-error",
+              payload: [
+                "chatId": chatId,
+                "messageId": messageId,
+                "reason": "encrypt_failed",
+                "error": error.localizedDescription,
+              ])
+            self.postChangeLocked(
+              reason: "messageStatusChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "status": "error"])
+          }
+          return
+        }
+
+        let pushPreview: String = {
+          let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+          if !trimmed.isEmpty {
+            if trimmed.count <= 160 { return trimmed }
+            return String(trimmed.prefix(159)) + "…"
+          }
+          switch type {
+          case "image": return "Photo"
+          case "video": return "Video"
+          case "voice": return "Voice message"
+          case "music": return "Audio"
+          case "file": return "File"
+          case "location": return "Location"
+          case "contact": return "Contact"
+          case "gif": return "GIF"
+          default: return ""
+          }
+        }()
+
+        var wirePayload: [String: Any] = [
+          "id": messageId,
+          "encryptedContent": encryptedContent,
+          "timestamp": timestampMs,
+          "type": type,
+          "pushPreview": pushPreview,
+          "mediaUrl": NSNull(),
+          "fileName": NSNull(),
+          "latitude": NSNull(),
+          "longitude": NSNull(),
+        ]
+        if let replyToId, !replyToId.isEmpty {
+          wirePayload["replyToId"] = replyToId
+        }
+        if let fromId = userId {
+          wirePayload["fromId"] = fromId
+        }
+        if let agentMention = payload["agentMention"] as? Bool, agentMention {
+          wirePayload["agentMention"] = true
+          if let agentText = payload["agentText"] as? String {
+            wirePayload["agentText"] = agentText
+          }
+        }
+
+        if var message = localOptimisticRow["message"] as? [String: Any] {
+          message["encryptedContent"] = encryptedContent
+          localOptimisticRow["message"] = message
+        }
+        let threadOptimisticRow = localOptimisticRow
+        let threadEffectivePayload = localEffectivePayload
+        let threadWirePayload = wirePayload
+
+        self.queue.async {
+          self.upsertLiveMessageRowLocked(
+            chatId: chatId, messageId: messageId, row: threadOptimisticRow)
+          self.pendingOutboundDraftsByMessageId[messageId] = threadEffectivePayload
+
+          guard let client = self.phoenixClient as? ChatPhoenixClient else {
+            self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
+            self.queueOutboundDraftLocked(
+              chatId: chatId, messageId: messageId, payload: threadEffectivePayload,
+              reason: "no_native_socket")
+            self.scheduleReconnectLocked(reason: "send_no_socket")
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+              self?.ensureNativeTransport(trigger: "send_no_socket")
+            }
+            self.postChangeLocked(
+              reason: "messageStatusChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
+            return
+          }
+
+          guard self.nativeJoinedChatIds.contains(chatId) else {
+            self.joinNativeChatTopicIfNeededLocked(chatId: chatId)
+            self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "pending")
+            self.queueOutboundDraftLocked(
+              chatId: chatId, messageId: messageId, payload: threadEffectivePayload,
+              reason: "chat_not_joined"
+            )
+            self.scheduleReconnectLocked(reason: "send_chat_not_joined")
+            DispatchQueue.global(qos: .utility).async { [weak self] in
+              self?.ensureNativeTransport(trigger: "send_chat_not_joined")
+            }
+            self.postChangeLocked(
+              reason: "messageStatusChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "status": "pending"])
+            return
+          }
+
+          let ref = client.push(
+            topic: self.chatTopic(for: chatId), event: "message", payload: threadWirePayload)
+          self.nativePendingMessagePushRefs[ref] = (chatId: chatId, messageId: messageId)
+
+          let timeoutRef = ref
+          self.queue.asyncAfter(deadline: .now() + 15.0) { [weak self] in
+            guard let self = self else { return }
+            if let pending = self.nativePendingMessagePushRefs.removeValue(forKey: timeoutRef) {
+              self.appendJournalLocked(
+                event: "native-send-timeout",
+                payload: [
+                  "chatId": pending.chatId,
+                  "messageId": pending.messageId,
+                  "ref": timeoutRef,
+                ])
+              self.upsertLocalStatusLocked(
+                chatId: pending.chatId, messageId: pending.messageId, status: "error")
+              self.postChangeLocked(
+                reason: "messageStatusChanged",
+                userInfo: [
+                  "chatId": pending.chatId, "messageId": pending.messageId, "status": "error",
+                ])
+            }
+          }
+
           self.appendJournalLocked(
-            event: "native-send-timeout",
+            event: "native-send-message",
             payload: [
-              "chatId": pending.chatId,
-              "messageId": pending.messageId,
-              "ref": timeoutRef,
+              "chatId": chatId,
+              "messageId": messageId,
+              "ref": ref,
             ])
-          self.upsertLocalStatusLocked(
-            chatId: pending.chatId, messageId: pending.messageId, status: "error")
           self.postChangeLocked(
-            reason: "messageStatusChanged",
-            userInfo: ["chatId": pending.chatId, "messageId": pending.messageId, "status": "error"])
+            reason: "messageStatusChanged", userInfo: ["chatId": chatId, "messageId": messageId])
         }
       }
 
-      appendJournalLocked(
-        event: "native-send-message",
-        payload: [
-          "chatId": chatId,
-          "messageId": messageId,
-          "ref": ref,
-        ])
-      postChangeLocked(
-        reason: "messageStatusChanged", userInfo: ["chatId": chatId, "messageId": messageId])
       return [
         "accepted": true,
-        "transport": "native",
-        "ref": ref,
+        "queued": true,
         "messageId": messageId,
         "state": "sending",
       ]
@@ -2291,7 +2369,9 @@ final class ChatEngine {
       }
     }.resume()
 
-    return ["accepted": true, "queued": true, "chatId": chatId, "messageId": messageId, "pinned": pinned]
+    return [
+      "accepted": true, "queued": true, "chatId": chatId, "messageId": messageId, "pinned": pinned,
+    ]
   }
 
   func getChatProfileSummary(_ payload: [String: Any]) -> [String: Any] {
@@ -3200,7 +3280,8 @@ final class ChatEngine {
         }
         if frame.event == "pinned-updated" {
           guard
-            let messageId = self.normalizedString(frame.payload["messageId"] ?? frame.payload["message_id"])
+            let messageId = self.normalizedString(
+              frame.payload["messageId"] ?? frame.payload["message_id"])
           else { return }
           let pinned = self.parseBooleanLike(frame.payload["pinned"]) ?? true
           NSLog(
@@ -3241,6 +3322,17 @@ final class ChatEngine {
           if isAgentMessage {
             self.clearAgentProgressLocked(chatId: chatId, status: "done")
           }
+
+          let myUserId = self.normalizedUpper(self.getConfigValueLocked("userId"))
+          let isMe = self.normalizedUpper(fromId) == myUserId
+
+          if !isMe {
+            _ = self.sendDeliveryReceipt([
+              "chatId": chatId,
+              "messageId": insertedMessageId,
+            ])
+          }
+
           if self.peerTypingUserIdsByChatId[chatId] != nil {
             self.peerTypingUserIdsByChatId.removeValue(forKey: chatId)
             self.postChangeLocked(
@@ -4242,8 +4334,10 @@ final class ChatEngine {
           nextPinIds.joined(separator: ",")
         )
         let previousPins = self.pinnedMessagesByChatId[chatId] ?? []
-        let previousIds = Set(previousPins.compactMap { self.normalizedString($0["messageId"] ?? $0["message_id"]) })
-        let nextIds = Set(nextPins.compactMap { self.normalizedString($0["messageId"] ?? $0["message_id"]) })
+        let previousIds = Set(
+          previousPins.compactMap { self.normalizedString($0["messageId"] ?? $0["message_id"]) })
+        let nextIds = Set(
+          nextPins.compactMap { self.normalizedString($0["messageId"] ?? $0["message_id"]) })
         let allIds = previousIds.union(nextIds)
         for messageId in allIds {
           self.setMessagePinnedStateLocked(
@@ -4401,6 +4495,9 @@ final class ChatEngine {
 
   private func joinNativeChatTopicIfNeededLocked(chatId: String) {
     guard !chatId.isEmpty else { return }
+    // Always start HTTP history fetch immediately — do NOT gate behind socket state.
+    // This ensures messages load fast even before WebSocket is connected.
+    loadChatHistoryIfNeededLocked(chatId: chatId)
     guard let client = phoenixClient as? ChatPhoenixClient else {
       scheduleReconnectLocked(reason: "join_chat_no_socket")
       DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -4415,7 +4512,6 @@ final class ChatEngine {
       }
       return
     }
-    loadChatHistoryIfNeededLocked(chatId: chatId)
     if nativeJoinedChatIds.contains(chatId) { return }
     if nativeChatJoinRefsByRef.values.contains(chatId) { return }
     let ref = client.join(topic: chatTopic(for: chatId), payload: [:])
@@ -4597,13 +4693,44 @@ final class ChatEngine {
     body.append("\(value)\r\n".data(using: .utf8) ?? Data())
   }
 
+  fileprivate class UploadSessionDelegate: PinnedSessionDelegate, URLSessionTaskDelegate,
+    URLSessionDataDelegate
+  {
+    var onProgress: ((Float) -> Void)?
+    var onCompletion: ((Data?, HTTPURLResponse?, Error?) -> Void)?
+    var responseData = Data()
+    private var lastEmitTime: TimeInterval = 0
+
+    func urlSession(
+      _ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+      totalBytesSent: Int64, totalBytesExpectedToSend: Int64
+    ) {
+      guard totalBytesExpectedToSend > 0 else { return }
+      let now = CACurrentMediaTime()
+      if now - lastEmitTime > 0.05 {
+        lastEmitTime = now
+        onProgress?(Float(totalBytesSent) / Float(totalBytesExpectedToSend))
+      }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+      responseData.append(data)
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?)
+    {
+      onCompletion?(responseData, task.response as? HTTPURLResponse, error)
+    }
+  }
+
   private func uploadLocalMediaLocked(
     localUri: String,
     messageType: String,
     fileNameHint: String?,
     userId: String,
     token: String,
-    apiBase: URL
+    apiBase: URL,
+    onProgress: ((Float) -> Void)? = nil
   ) -> LocalMediaUploadOutcome {
     guard let fileURL = localFileURL(from: localUri) else {
       return LocalMediaUploadOutcome(result: nil, reason: "invalid_local_media_uri")
@@ -4645,22 +4772,26 @@ final class ChatEngine {
     body.append(fileData)
     body.append("\r\n".data(using: .utf8) ?? Data())
     body.append("--\(boundary)--\r\n".data(using: .utf8) ?? Data())
-    request.httpBody = body
+    let delegate = UploadSessionDelegate()
+    delegate.onProgress = onProgress
 
     let semaphore = DispatchSemaphore(value: 0)
     var responseData: Data?
     var responseCode: Int?
     var responseError: String?
-    let session = ChatPhoenixClient.makePinnedURLSession()
-    session.dataTask(with: request) { data, response, error in
-      defer { semaphore.signal() }
+
+    delegate.onCompletion = { data, res, error in
       if let error {
         responseError = error.localizedDescription
-        return
       }
-      responseCode = (response as? HTTPURLResponse)?.statusCode
+      responseCode = res?.statusCode
       responseData = data
-    }.resume()
+      semaphore.signal()
+    }
+
+    let session = ChatPhoenixClient.makePinnedURLSession(delegate: delegate)
+    let task = session.uploadTask(with: request, from: body)
+    task.resume()
     let waitResult = semaphore.wait(timeout: .now() + 40.0)
     if waitResult == .timedOut {
       return LocalMediaUploadOutcome(result: nil, reason: "upload_timeout")
@@ -4775,11 +4906,14 @@ final class ChatEngine {
   private func loadChatHistoryIfNeededLocked(chatId: String, force: Bool = false) {
     guard !chatId.isEmpty else { return }
     if historyLoadingChats.contains(chatId) { return }
-    if !force, historyRowsByChat[chatId] != nil { return }
+    if !force, historyFullyLoadedChats.contains(chatId) { return }
     guard
       let apiBase = apiBaseURLLocked(),
       let userId = normalizedString(getConfigValueLocked("userId"))
     else {
+      NSLog(
+        "[ChatEngine] loadChatHistory SKIP chatId=%@ reason=missing_config",
+        String(chatId.prefix(12)))
       appendJournalLocked(
         event: "native-chat-history-skip",
         payload: [
@@ -4791,15 +4925,22 @@ final class ChatEngine {
 
     historyLoadingChats.insert(chatId)
     let token = authHeaderTokenLocked()
-    var request = URLRequest(
-      url: apiBase.appendingPathComponent("api").appendingPathComponent("chats")
-        .appendingPathComponent(userId))
+    let baseMessageUrl = apiBase.appendingPathComponent("api").appendingPathComponent("chat")
+      .appendingPathComponent(chatId).appendingPathComponent("messages")
+    var urlComponents = URLComponents(url: baseMessageUrl, resolvingAgainstBaseURL: false)
+    urlComponents?.queryItems = [URLQueryItem(name: "limit", value: "15")]
+    let finalUrl = urlComponents?.url ?? baseMessageUrl
+    var request = URLRequest(url: finalUrl)
     request.httpMethod = "GET"
     request.setValue("application/json", forHTTPHeaderField: "Accept")
     request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
     if let token, !token.isEmpty {
       request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
     }
+    let fetchStartMs = self.nowMs()
+    NSLog(
+      "[ChatEngine] loadChatHistory START chatId=%@ url=%@", String(chatId.prefix(12)),
+      request.url?.absoluteString ?? "nil")
     appendJournalLocked(event: "native-chat-history-load-start", payload: ["chatId": chatId])
 
     // Use a pinned URLSession with the same cert pinning + TLS enforcement
@@ -4808,8 +4949,12 @@ final class ChatEngine {
     session.dataTask(with: request) { [weak self] data, response, error in
       guard let self else { return }
       self.queue.async {
+        let durationMs = self.nowMs() - fetchStartMs
         self.historyLoadingChats.remove(chatId)
         if let error {
+          NSLog(
+            "[ChatEngine] loadChatHistory FAIL chatId=%@ duration=%lldms error=%@",
+            String(chatId.prefix(12)), durationMs, error.localizedDescription)
           self.appendJournalLocked(
             event: "native-chat-history-load-error",
             payload: [
@@ -4823,6 +4968,9 @@ final class ChatEngine {
           return
         }
         guard let http = response as? HTTPURLResponse else {
+          NSLog(
+            "[ChatEngine] loadChatHistory FAIL chatId=%@ duration=%lldms error=invalid_response",
+            String(chatId.prefix(12)), durationMs)
           self.appendJournalLocked(
             event: "native-chat-history-load-error",
             payload: [
@@ -4832,6 +4980,9 @@ final class ChatEngine {
           return
         }
         guard (200...299).contains(http.statusCode), let data else {
+          NSLog(
+            "[ChatEngine] loadChatHistory FAIL chatId=%@ duration=%lldms status=%d",
+            String(chatId.prefix(12)), durationMs, http.statusCode)
           self.appendJournalLocked(
             event: "native-chat-history-load-error",
             payload: [
@@ -4840,41 +4991,51 @@ final class ChatEngine {
             ])
           return
         }
+        NSLog(
+          "[ChatEngine] loadChatHistory OK chatId=%@ duration=%lldms bytes=%d",
+          String(chatId.prefix(12)),
+          durationMs, data.count)
         self.applyChatHistoryResponseLocked(chatId: chatId, data: data)
       }
     }.resume()
   }
 
   private func applyChatHistoryResponseLocked(chatId: String, data: Data) {
-    guard
-      let object = try? JSONSerialization.jsonObject(with: data),
-      let chats = object as? [[String: Any]]
-    else {
+    guard let object = try? JSONSerialization.jsonObject(with: data) else {
       appendJournalLocked(
         event: "native-chat-history-load-error",
         payload: [
           "chatId": chatId,
-          "error": "invalid_json",
+          "error": "invalid_json_expected_messages_array",
         ])
       return
     }
 
-    let targetChat = chats.first(where: {
-      normalizedString($0["chatId"] ?? $0["chat_id"]) == chatId
-    })
-    if let targetChat {
-      cacheChatPeerInfoLocked(chatId: chatId, chatObject: targetChat)
+    let messagesArray: [[String: Any]]
+    if let array = object as? [[String: Any]] {
+      messagesArray = array
+    } else if let dict = object as? [String: Any], let array = dict["data"] as? [[String: Any]] {
+      messagesArray = array
+    } else {
+      appendJournalLocked(
+        event: "native-chat-history-load-error",
+        payload: [
+          "chatId": chatId,
+          "error": "invalid_json_expected_messages_array",
+        ])
+      return
     }
-    let rawMessages = (targetChat?["messages"] as? [[String: Any]]) ?? []
-    let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: rawMessages)
+
+    let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: messagesArray)
     historyRowsByChat[chatId] = rows
+    historyFullyLoadedChats.insert(chatId)
     state["updatedAt"] = nowMs()
     appendJournalLocked(
       event: "native-chat-history-load-ok",
       payload: [
         "chatId": chatId,
         "rows": rows.count,
-        "messages": rawMessages.count,
+        "messages": messagesArray.count,
       ])
     scheduleReplayQueuedOutboundLocked(chatId: chatId, trigger: "history_loaded")
     let snapshot = statusSnapshotLocked()

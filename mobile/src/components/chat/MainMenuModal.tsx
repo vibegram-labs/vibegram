@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
-import { View, Text, StyleSheet, Dimensions, Pressable, TouchableOpacity, Image, Modal, TextInput, ActivityIndicator, Keyboard, FlatList, Alert, TouchableWithoutFeedback } from 'react-native'
+import { View, Text, StyleSheet, Dimensions, Pressable, TouchableOpacity, Image, Modal, TextInput, ActivityIndicator, Keyboard, FlatList, Alert, TouchableWithoutFeedback, Platform } from 'react-native'
 import Animated, {
     useSharedValue,
     useAnimatedStyle,
@@ -20,6 +20,7 @@ import { useChatStore } from '../../lib/ChatStore'
 import { useAuthStore } from '../../lib/stores/auth-store'
 import { useToastStore } from '../../lib/stores/toast-store'
 import { apiClient } from '../../lib/api-client'
+import { getNativeChatHomeModule } from '../../native/home/runtime'
 import { X, Users, Megaphone, Search, Check, ChevronRight, ArrowLeft, MessageCircle, Image as ImageIcon } from 'lucide-react-native'
 import AnimatedGlassButton from '../native/AnimatedGlassButton'
 import SafeLiquidGlass from '../native/SafeLiquidGlass'
@@ -59,6 +60,7 @@ interface FoundUser {
     username?: string
     profileImage?: string
     phoneNumber?: string
+    publicKey?: string
 }
 
 const resolveFoundUserId = (user: Partial<FoundUser> | null | undefined): string => {
@@ -106,9 +108,10 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
     const router = useRouter()
     const { colors, effectiveTheme } = useThemeStore()
     const { contacts, upsertContact, isContact } = useContactStore()
-    const { chats, setActiveChat, createGroup, createChannel, updateChatFriendInfoByFriendId } = useChatStore()
+    const { chats, setActiveChat, createGroup, createChannel, updateChatFriendInfoByFriendId, startChat } = useChatStore()
     const { user } = useAuthStore()
     const { showToast } = useToastStore()
+    const nativeHomeModule = useMemo(() => getNativeChatHomeModule(), [])
     const isLight = effectiveTheme === 'light'
     const isDark = effectiveTheme === 'dark'
     const bgColor = colors.background
@@ -131,6 +134,7 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
     const childTranslateY = useSharedValue(SCREEN_HEIGHT)
     const childBackdrop = useSharedValue(0)
     const childStartY = useSharedValue(0)
+    const openingNativeNewChatRef = useRef(false)
 
 
 
@@ -300,6 +304,98 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
                 })
             }
         }, 280)
+    }
+
+    const handleNewChatPress = async () => {
+        if (Platform.OS !== 'ios') {
+            openChildView('newChat')
+            return
+        }
+        if (openingNativeNewChatRef.current) {
+            return
+        }
+        if (!nativeHomeModule?.presentNativeNewChat) {
+            console.warn('[MainMenuModal] native new chat module unavailable on iOS')
+            showToast('Native New Chat unavailable. Rebuild iOS app.', 'error')
+            return
+        }
+
+        try {
+            openingNativeNewChatRef.current = true
+            const nativeResult = await nativeHomeModule.presentNativeNewChat({
+                userId: user?.userId || '',
+                authToken: user?.loginToken || undefined,
+                theme: {
+                    isDark,
+                    background: colors.background,
+                    surface: colors.card,
+                    text: colors.text,
+                    textSecondary: colors.textSecondary,
+                    primary: colors.primary,
+                }
+            })
+            if (!nativeResult) {
+                return
+            }
+            if (nativeResult.action === 'busy') {
+                showToast('New Chat is already open', 'info')
+                return
+            }
+            if (nativeResult.action === 'error') {
+                showToast(nativeResult.error || 'Could not open New Chat', 'error')
+                return
+            }
+            if (nativeResult.action !== 'select') {
+                return
+            }
+
+            const selectedUser = normalizeFoundUser(nativeResult.user)
+            const friendId = resolveFoundUserId(selectedUser)
+            if (!friendId) {
+                return
+            }
+
+            const friendName = selectedUser?.username || friendId
+            const friendImage = selectedUser?.profileImage || ''
+            const friendPublicKey = selectedUser?.publicKey || ''
+
+            const existingChat = chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase())
+            let targetChatId = existingChat?.chatId || null
+
+            if (!targetChatId) {
+                try {
+                    targetChatId = await startChat(friendId, {
+                        username: friendName,
+                        profileImage: friendImage,
+                        publicKey: friendPublicKey,
+                    })
+                } catch (error) {
+                    console.warn('[MainMenuModal] native new chat startChat failed', error)
+                }
+            }
+
+            handleCloseInternal()
+            setTimeout(() => {
+                if (targetChatId) {
+                    setActiveChat(targetChatId)
+                    router.push({ pathname: '/chat', params: { id: targetChatId } })
+                    return
+                }
+                router.push({
+                    pathname: '/chat',
+                    params: {
+                        friendId,
+                        friendName,
+                        friendImage,
+                        friendPublicKey,
+                    },
+                })
+            }, 280)
+        } catch (error) {
+            console.warn('[MainMenuModal] native new chat modal failed', error)
+        } finally {
+            openingNativeNewChatRef.current = false
+        }
     }
 
 
@@ -638,7 +734,7 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
                             >
                                 {/* Actions - Simple Unified Buttons */}
                                 <View style={styles.simpleActionList}>
-                                    <TouchableOpacity onPress={() => openChildView('newChat')} style={styles.simpleActionBtn} activeOpacity={0.7}>
+                                    <TouchableOpacity onPress={handleNewChatPress} style={styles.simpleActionBtn} activeOpacity={0.7}>
                                         <EditChatVibeIcon size={22} color={colors.primary} strokeWidth={1.5} />
                                         <Text style={[styles.simpleActionText, { color: colors.primary }]}>New Chat</Text>
                                     </TouchableOpacity>

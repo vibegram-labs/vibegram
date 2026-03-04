@@ -158,11 +158,6 @@ private func privateSecKey(from pem: String) -> (key: SecKey?, failureDetails: S
     )
   }
 
-  let directResult = secKeyFromData(keyData, keyClass: kSecAttrKeyClassPrivate)
-  if let key = directResult.0 {
-    return (key, nil)
-  }
-
   if decoded.label == "PRIVATE KEY", let pkcs1Data = extractPKCS1FromPKCS8(keyData) {
     let pkcs1Result = secKeyFromData(pkcs1Data, keyClass: kSecAttrKeyClassPrivate)
     if let key = pkcs1Result.0 {
@@ -179,9 +174,14 @@ private func privateSecKey(from pem: String) -> (key: SecKey?, failureDetails: S
         base64Length: decoded.base64Length,
         derLength: keyData.count,
         failureStep: "SecKeyCreateWithData(pkcs8->pkcs1)",
-        importError: pkcs1Result.1 ?? directResult.1
+        importError: pkcs1Result.1
       )
     )
+  }
+
+  let directResult = secKeyFromData(keyData, keyClass: kSecAttrKeyClassPrivate)
+  if let key = directResult.0 {
+    return (key, nil)
   }
 
   return (

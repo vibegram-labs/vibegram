@@ -19,6 +19,30 @@ export type ChatNativeHomeModule = {
     apiBaseUrl?: string;
     authToken?: string;
   }) => Promise<{ chats: Record<string, unknown>[] }>;
+  presentNativeNewChat?: (payload: {
+    userId?: string;
+    apiBaseUrl?: string;
+    authToken?: string;
+    theme?: {
+      isDark?: boolean;
+      background?: string;
+      surface?: string;
+      text?: string;
+      textSecondary?: string;
+      primary?: string;
+    };
+  }) => Promise<{
+    action: 'select' | 'cancel' | 'busy' | 'error';
+    user?: {
+      id?: string;
+      userId?: string;
+      username?: string;
+      profileImage?: string;
+      phoneNumber?: string;
+      publicKey?: string;
+    };
+    error?: string;
+  } | null>;
 };
 
 export const ChatNativeHome = requireOptionalNativeModule<ChatNativeHomeModule>('ChatNativeHome');

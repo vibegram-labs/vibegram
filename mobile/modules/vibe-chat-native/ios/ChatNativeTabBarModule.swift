@@ -40,6 +40,15 @@ public final class ChatNativeTabBarView: ExpoView {
     CGSize(width: UIView.noIntrinsicMetric, height: 96)
   }
 
+  public override func layoutSubviews() {
+    super.layoutSubviews()
+    // Hide the default segmented-control background wrapper to avoid a double
+    // glass layer while keeping native segmented interactions.
+    if #available(iOS 13.0, *) {
+      segmentedControl.subviews.first?.alpha = 0
+    }
+  }
+
   private func setupView() {
     backgroundColor = .clear
     isOpaque = false

@@ -61,6 +61,7 @@ export default function ChatProfileScreen() {
   const setActiveChat = useChatStore((s) => s.setActiveChat);
   const loadMessages = useChatStore((s) => s.loadMessages);
   const loadChats = useChatStore((s) => s.loadChats);
+  const deleteChat = useChatStore((s) => s.deleteChat);
   const initSocket = useChatStore((s) => s.initSocket);
   const uploadProgress = useChatStore((s) => s.uploadProgress);
   const onlineUsers = useChatStore((s) => s.onlineUsers);
@@ -254,6 +255,21 @@ export default function ChatProfileScreen() {
       return;
     }
 
+    if (type === 'profileMembersPressed') {
+      if (effectiveChatId) {
+        router.push({ pathname: '/group-info', params: { groupId: effectiveChatId } });
+      }
+      return;
+    }
+
+    if (type === 'profileIdPressed') {
+      const idValue = typeof payload.id === 'string' ? payload.id.trim() : '';
+      if (idValue) {
+        Clipboard.setStringAsync(idValue).catch(() => {});
+      }
+      return;
+    }
+
     if (type === 'profileUsernamePressed') {
       const handle = typeof payload.handle === 'string' ? payload.handle.trim() : '';
       if (handle) {
@@ -296,12 +312,30 @@ export default function ChatProfileScreen() {
           void loadChats();
           router.replace({ pathname: '/chat', params: { id: effectiveChatId } });
         });
+        return;
       }
+      if (action === 'delete') {
+        void Promise.resolve(deleteChat(effectiveChatId)).finally(() => {
+          void loadChats();
+          router.replace('/chat');
+        });
+        return;
+      }
+    }
+
+    if (type === 'headerAudioCallPressed' || type === 'headerVideoCallPressed') {
+      // Keep parity with JS profile action buttons; call wiring can be added to native call flow.
+      return;
+    }
+
+    if (type === 'headerAgentPressed') {
+      return;
     }
   }, [
     activeChat?.friendId,
     activeChat?.muted,
     callNativeEngine,
+    deleteChat,
     effectiveChatId,
     loadChats,
     router,
@@ -368,6 +402,7 @@ export default function ChatProfileScreen() {
         isGroupOrChannel={isGroupOrChannel}
         groupMembers={groupMembers}
         groupMemberCount={groupMemberCount}
+        agentConfig={(activeChat as any)?.agentConfig as Record<string, unknown> | undefined}
         page="profile"
         onNativeEvent={handleNativeEvent}
         onNativeError={(error, context) => {

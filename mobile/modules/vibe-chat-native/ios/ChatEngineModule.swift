@@ -162,5 +162,9 @@ public final class ChatEngineModule: Module {
       let userIds = (payload["userIds"] as? [String]) ?? []
       _ = ChatEngine.shared.setPresenceSnapshot(userIds: userIds)
     }
+
+    Function("seedChatHistories") { (payload: [String: Any]) in
+      ChatEngine.shared.seedChatHistories(payload)
+    }
   }
 }

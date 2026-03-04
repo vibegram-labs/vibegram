@@ -38,6 +38,17 @@ private func makeLiquidGlassView(
   return view
 }
 
+private func makeBlurMaterialView(
+  style: UIBlurEffect.Style,
+  cornerRadius: CGFloat
+) -> UIVisualEffectView {
+  let view = UIVisualEffectView(effect: UIBlurEffect(style: style))
+  view.layer.cornerRadius = cornerRadius
+  view.layer.cornerCurve = .continuous
+  view.clipsToBounds = true
+  return view
+}
+
 // MARK: - ChatContextMenuOverlay
 
 public final class ChatContextMenuOverlay: UIView {
@@ -67,6 +78,7 @@ public final class ChatContextMenuOverlay: UIView {
   private var contextMenuMaskLayer: CALayer?
   private var ignoreBackgroundTapUntil: CFTimeInterval = 0
   private var enableControlsWorkItem: DispatchWorkItem?
+  private var isSelectingReaction = false
 
   private func holdDebugLog(_ message: String) {
     guard chatContextHoldDebugLogs else { return }
@@ -165,6 +177,7 @@ public final class ChatContextMenuOverlay: UIView {
   }
 
   @objc private func handleBackgroundTap(_ gesture: UITapGestureRecognizer) {
+    if isSelectingReaction { return }
     let now = CACurrentMediaTime()
     let point = gesture.location(in: self)
     if now < ignoreBackgroundTapUntil {
@@ -175,6 +188,25 @@ public final class ChatContextMenuOverlay: UIView {
     }
     holdDebugLog("backgroundTap accepted point=\(NSCoder.string(for: point))")
     animateOut(reason: "backgroundTap")
+  }
+
+  private func reactionLandingPointInOverlay() -> CGPoint {
+    let frame = bubbleSnapshot.layer.presentation()?.frame ?? bubbleSnapshot.frame
+    let badgeSize = CGSize(width: 34.0, height: 24.0)
+    let insetLeft: CGFloat = 8.0
+    let insetBottom: CGFloat = 6.0
+    // Snapshot frame may include bubble tail bounds. Incoming tails extend on the
+    // left, so shift the target start area right to keep landing inside bubble body.
+    let incomingTailInset: CGFloat = bubbleIsMe ? 0.0 : 24.0
+    let bodyMinX = frame.minX + incomingTailInset
+    let badgeX = min(
+      max(bodyMinX + insetLeft, bodyMinX + 2.0),
+      frame.maxX - badgeSize.width - 4.0
+    )
+    return CGPoint(
+      x: badgeX + (badgeSize.width * 0.5),
+      y: frame.maxY - insetBottom - (badgeSize.height * 0.5)
+    )
   }
 
   // MARK: - Layout
@@ -200,6 +232,7 @@ public final class ChatContextMenuOverlay: UIView {
 
     // Horizontal alignment: align to bubble edge, then clamp to viewport.
     let isRightAligned = bubbleIsMe || originalBubbleFrame.midX > bounds.midX
+    reactionPicker.setThinkingBlobDirection(isRightAligned: isRightAligned)
 
     // Reaction picker: align to bubble edge, clamped strictly to safe viewport
     let pickerWidth = min(pickerSize.width, bounds.width - 24)
@@ -425,7 +458,10 @@ public final class ChatContextMenuOverlay: UIView {
   }
 
   func animateOut(reason: String = "unknown", completion: (() -> Void)? = nil) {
-    if isDismissing { return }
+    if isDismissing {
+      completion?()
+      return
+    }
     isDismissing = true
     enableControlsWorkItem?.cancel()
     enableControlsWorkItem = nil
@@ -470,6 +506,7 @@ extension ChatContextMenuOverlay: UIGestureRecognizerDelegate {
   public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer)
     -> Bool
   {
+    if isSelectingReaction { return false }
     let now = CACurrentMediaTime()
     if now < ignoreBackgroundTapUntil {
       holdDebugLog(
@@ -496,7 +533,41 @@ extension ChatContextMenuOverlay: ChatContextMenuOverlayDelegate {
     messageId _: String,
     sourcePoint: CGPoint?
   ) {
-    delegate?.contextMenuDidSelectReaction(reaction, messageId: messageId, sourcePoint: sourcePoint)
+    guard !isDismissing, !isSelectingReaction else { return }
+    isSelectingReaction = true
+
+    reactionPicker.isUserInteractionEnabled = false
+    contextMenu.isUserInteractionEnabled = false
+
+    let fallbackSource = CGPoint(
+      x: reactionPicker.frame.midX,
+      y: reactionPicker.frame.minY + (reactionPicker.frame.height * 0.4)
+    )
+    let sourceInOverlay =
+      sourcePoint.flatMap { self.convert($0, from: nil) }
+      ?? fallbackSource
+    let targetInOverlay = reactionLandingPointInOverlay()
+
+    ChatReactionFxModule.shared.animateReactionFlight(
+      emoji: reaction,
+      from: sourceInOverlay,
+      to: targetInOverlay,
+      in: self,
+      bubbleView: bubbleSnapshot
+    ) { [weak self] in
+      guard let self else { return }
+      guard !self.isDismissing else {
+        self.isSelectingReaction = false
+        return
+      }
+      self.isSelectingReaction = false
+      let pointForEvent = self.convert(targetInOverlay, to: nil)
+      self.delegate?.contextMenuDidSelectReaction(
+        reaction,
+        messageId: self.messageId,
+        sourcePoint: pointForEvent
+      )
+    }
   }
 
   public func contextMenuDidSelectAction(_ actionId: String, messageId _: String) {
@@ -509,80 +580,114 @@ extension ChatContextMenuOverlay: ChatContextMenuOverlayDelegate {
 final class ReactionPickerView: UIView {
   weak var delegate: ChatContextMenuOverlayDelegate?
 
-  private let glassView: UIVisualEffectView
+  private let blurView: UIVisualEffectView
+  private let blurTintView = UIView()
+  private let tailBlobLarge: UIVisualEffectView
+  private let tailBlobSmall: UIVisualEffectView
   private let stack: UIStackView
   private let emojis = ["👍", "👎", "❤️", "🔥", "🎉", "💩"]
+  private static let pickerButtonSize: CGFloat = 44.0
+  private static let pickerSpacing: CGFloat = 4.0
+  private static let pickerPadding: CGFloat = 12.0
+  private static let pickerPillHeight: CGFloat = 52.0
+  private static let pickerTailHeight: CGFloat = 12.0
+  private var blobsOnRightSide = false
 
   let messageId: String
 
   override var intrinsicContentSize: CGSize {
     let emojiCount = CGFloat(emojis.count)
-    let buttonSize: CGFloat = 44
-    let spacing: CGFloat = 4
-    let padding: CGFloat = 12
-    let width = emojiCount * buttonSize + (emojiCount - 1) * spacing + padding * 2
-    return CGSize(width: width, height: buttonSize + 8)
+    let width =
+      emojiCount * Self.pickerButtonSize
+      + (emojiCount - 1.0) * Self.pickerSpacing
+      + Self.pickerPadding * 2.0
+    return CGSize(width: width, height: Self.pickerPillHeight + Self.pickerTailHeight)
   }
 
   init(appearance: ChatListAppearance, messageId: String) {
     self.messageId = messageId
-    // Liquid glass pill for reaction bar
-    self.glassView = makeLiquidGlassView(
-      style: appearance.isDark ? .systemThinMaterialDark : .systemThinMaterial,
-      cornerRadius: 26,
-      capsuleCorners: true
+    let blurStyle: UIBlurEffect.Style =
+      appearance.isDark ? .systemThickMaterialDark : .systemThinMaterialLight
+    self.blurView = makeBlurMaterialView(
+      style: blurStyle,
+      cornerRadius: Self.pickerPillHeight * 0.5
     )
+    self.tailBlobLarge = makeBlurMaterialView(style: blurStyle, cornerRadius: 5.5)
+    self.tailBlobSmall = makeBlurMaterialView(style: blurStyle, cornerRadius: 3.5)
     self.stack = UIStackView()
 
     super.init(frame: .zero)
 
-    glassView.translatesAutoresizingMaskIntoConstraints = false
-    addSubview(glassView)
+    clipsToBounds = false
+
+    blurView.translatesAutoresizingMaskIntoConstraints = false
+    addSubview(blurView)
+    addSubview(tailBlobLarge)
+    addSubview(tailBlobSmall)
 
     stack.axis = .horizontal
     stack.distribution = .fillEqually
-    stack.spacing = 4
+    stack.spacing = Self.pickerSpacing
     stack.alignment = .center
     stack.translatesAutoresizingMaskIntoConstraints = false
 
-    // Add stack to glass view's contentView so it renders above the glass
-    glassView.contentView.addSubview(stack)
+    blurTintView.backgroundColor =
+      appearance.isDark
+      ? UIColor(white: 0.06, alpha: 0.30)
+      : UIColor.white.withAlphaComponent(0.18)
+    blurTintView.translatesAutoresizingMaskIntoConstraints = false
+    blurView.contentView.addSubview(blurTintView)
+
+    // Add stack to blur view's contentView so it renders above the blur.
+    blurView.contentView.addSubview(stack)
 
     let stackTop = stack.topAnchor.constraint(
-      greaterThanOrEqualTo: glassView.contentView.topAnchor,
+      greaterThanOrEqualTo: blurView.contentView.topAnchor,
       constant: 4
     )
     let stackBottom = stack.bottomAnchor.constraint(
-      lessThanOrEqualTo: glassView.contentView.bottomAnchor,
+      lessThanOrEqualTo: blurView.contentView.bottomAnchor,
       constant: -4
     )
-    let stackCenterY = stack.centerYAnchor.constraint(equalTo: glassView.contentView.centerYAnchor)
+    let stackCenterY = stack.centerYAnchor.constraint(equalTo: blurView.contentView.centerYAnchor)
     stackTop.priority = .defaultHigh
     stackBottom.priority = .defaultHigh
     stackCenterY.priority = .defaultHigh
 
     NSLayoutConstraint.activate([
-      glassView.topAnchor.constraint(equalTo: topAnchor),
-      glassView.bottomAnchor.constraint(equalTo: bottomAnchor),
-      glassView.leadingAnchor.constraint(equalTo: leadingAnchor),
-      glassView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      blurView.topAnchor.constraint(equalTo: topAnchor),
+      blurView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      blurView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      blurView.heightAnchor.constraint(equalToConstant: Self.pickerPillHeight),
+
+      blurTintView.topAnchor.constraint(equalTo: blurView.contentView.topAnchor),
+      blurTintView.bottomAnchor.constraint(equalTo: blurView.contentView.bottomAnchor),
+      blurTintView.leadingAnchor.constraint(equalTo: blurView.contentView.leadingAnchor),
+      blurTintView.trailingAnchor.constraint(equalTo: blurView.contentView.trailingAnchor),
 
       stackTop,
       stackBottom,
       stackCenterY,
-      stack.leadingAnchor.constraint(equalTo: glassView.contentView.leadingAnchor, constant: 12),
-      stack.trailingAnchor.constraint(equalTo: glassView.contentView.trailingAnchor, constant: -12),
+      stack.leadingAnchor.constraint(equalTo: blurView.contentView.leadingAnchor, constant: 12),
+      stack.trailingAnchor.constraint(equalTo: blurView.contentView.trailingAnchor, constant: -12),
     ])
+
+    tailBlobLarge.bounds = CGRect(x: 0.0, y: 0.0, width: 11.0, height: 11.0)
+    tailBlobSmall.bounds = CGRect(x: 0.0, y: 0.0, width: 7.0, height: 7.0)
+    tailBlobLarge.layer.borderColor = UIColor.white.withAlphaComponent(0.22).cgColor
+    tailBlobLarge.layer.borderWidth = 1.0 / UIScreen.main.scale
+    tailBlobSmall.layer.borderColor = UIColor.white.withAlphaComponent(0.18).cgColor
+    tailBlobSmall.layer.borderWidth = 1.0 / UIScreen.main.scale
 
     for emoji in emojis {
       let btn = UIButton(type: .system)
       btn.setTitle(emoji, for: .normal)
       btn.titleLabel?.font = UIFont.systemFont(ofSize: 28)
       btn.translatesAutoresizingMaskIntoConstraints = false
-      let width = btn.widthAnchor.constraint(equalToConstant: 44)
+      let width = btn.widthAnchor.constraint(equalToConstant: Self.pickerButtonSize)
       width.priority = .defaultHigh
       width.isActive = true
-      let height = btn.heightAnchor.constraint(equalToConstant: 44)
+      let height = btn.heightAnchor.constraint(equalToConstant: Self.pickerButtonSize)
       height.priority = .defaultHigh
       height.isActive = true
       btn.addTarget(self, action: #selector(didTapEmoji(_:)), for: .touchUpInside)
@@ -591,6 +696,22 @@ final class ReactionPickerView: UIView {
   }
 
   required init?(coder: NSCoder) { fatalError() }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let largeX = blobsOnRightSide ? (bounds.width - 24.0) : 24.0
+    let smallX = blobsOnRightSide ? (bounds.width - 14.0) : 14.0
+    let largeCenter = CGPoint(x: largeX, y: Self.pickerPillHeight + 1.5)
+    let smallCenter = CGPoint(x: smallX, y: Self.pickerPillHeight + 9.0)
+    tailBlobLarge.center = largeCenter
+    tailBlobSmall.center = smallCenter
+  }
+
+  func setThinkingBlobDirection(isRightAligned: Bool) {
+    guard blobsOnRightSide != isRightAligned else { return }
+    blobsOnRightSide = isRightAligned
+    setNeedsLayout()
+  }
 
   @objc private func didTapEmoji(_ sender: UIButton) {
     guard let emoji = sender.title(for: .normal) else { return }

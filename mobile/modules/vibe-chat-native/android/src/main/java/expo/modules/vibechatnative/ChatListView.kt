@@ -53,6 +53,8 @@ import androidx.recyclerview.widget.RecyclerView
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
+import okio.buffer
+import okio.sink
 import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.max
@@ -98,6 +100,7 @@ private data class NativeRowItem(
   val isAgentMessage: Boolean = false,
   val agentName: String? = null,
   val plainContent: String? = null,
+  val uploadProgress: Float? = null,
 )
 
 private data class SendTransitionPayload(
@@ -111,359 +114,6 @@ private data class SendTransitionPayload(
 ) {
   fun motionStartRect(): RectF = RectF(startBackgroundRect ?: startRect)
   fun sourceContentRectResolved(): RectF = RectF(startContentRect ?: startRect)
-}
-
-private class NativeRowViewHolder(
-  val container: FrameLayout,
-  val bubbleContainer: FrameLayout,
-  val tailView: BubbleTailView,
-  val textView: TextView,
-  val inlineAttachmentView: FrameLayout,
-  val inlineAttachmentTitleView: TextView,
-  val inlineAttachmentSubtitleView: TextView,
-  val voiceContainer: FrameLayout,
-  val voiceButton: TextView,
-  val voiceWaveView: VoiceWaveformView,
-  val voiceDurationView: TextView,
-  val timeView: TextView,
-  val statusView: BubbleStatusIndicatorView,
-  val dayLabel: TextView,
-  val agentSenderLabel: TextView,
-) : RecyclerView.ViewHolder(container)
-
-private class BubbleTailView(context: Context) : View(context) {
-  private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    color = Color.argb(255, 106, 79, 207)
-  }
-  private val path = Path()
-
-  fun configure(isMe: Boolean, color: Int, visible: Boolean) {
-    paint.color = color
-    rotation = if (isMe) 25f else -25f
-    scaleX = if (isMe) 1f else -1f
-    visibility = if (visible) View.VISIBLE else View.GONE
-    invalidate()
-  }
-
-  override fun onDraw(canvas: Canvas) {
-    if (visibility != View.VISIBLE) return
-    path.reset()
-    path.moveTo(0f, 0f)
-    path.quadTo(-5f, 22f, 14f, 25f)
-    path.quadTo(10.5f, 29f, 0f, 29f)
-    // Extend geometry deep "into" the bubble body before closing.
-    // Since the tail is now drawn behind the bubble, this perfectly cleanly
-    // hides the geometric rotation seam of the rotated tail's left boundary line.
-    path.lineTo(-20f, 29f)
-    path.lineTo(-20f, 0f)
-    path.close()
-
-    canvas.save()
-    val sx = width / 29f
-    val sy = height / 29f
-    canvas.scale(sx, sy)
-    // Widen clip to accommodate the extended baseline hide-geometry,
-    // retaining the top seam clip (0.4f) to hide the bezier intersection.
-    canvas.clipRect(-25f, 29f * 0.4f, 34f, 34f)
-    canvas.drawPath(path, paint)
-    canvas.restore()
-  }
-}
-
-private class BubbleStatusIndicatorView(context: Context) : View(context) {
-  private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.STROKE
-    strokeCap = Paint.Cap.ROUND
-    strokeJoin = Paint.Join.ROUND
-    strokeWidth = dpF(1.35f)
-    color = Color.WHITE
-  }
-  private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    color = Color.WHITE
-    textAlign = Paint.Align.CENTER
-    textSize = dpF(10f)
-  }
-  private var status: String? = null
-  private var baseColor: Int = Color.WHITE
-  private val tmpPath = Path()
-
-  fun bind(rawStatus: String?, color: Int) {
-    val normalized = rawStatus?.trim()?.lowercase()
-    if (status == normalized && baseColor == color) return
-    status = normalized
-    baseColor = color
-    requestLayout()
-    invalidate()
-  }
-
-  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-    val s = status
-    val baseWidthDp = when (s) {
-      "sent" -> 16
-      "delivered", "read" -> 22
-      else -> 16
-    }
-    val w = resolveSize(dp(baseWidthDp), widthMeasureSpec)
-    val h = resolveSize(dp(14), heightMeasureSpec)
-    setMeasuredDimension(w, h)
-  }
-
-  override fun onDraw(canvas: Canvas) {
-    super.onDraw(canvas)
-    val s = status ?: return
-    val w = width.toFloat().coerceAtLeast(1f)
-    val h = height.toFloat().coerceAtLeast(1f)
-    when (s) {
-      "pending" -> {
-        textPaint.color = withAlpha(baseColor, 0.95f)
-        textPaint.textSize = h * 0.90f
-        val y = (h * 0.5f) - ((textPaint.descent() + textPaint.ascent()) * 0.5f)
-        canvas.drawText("\u25F7", w * 0.5f, y, textPaint)
-      }
-      "error" -> {
-        textPaint.color = Color.argb(255, 255, 122, 122)
-        textPaint.textSize = h * 0.92f
-        val y = (h * 0.5f) - ((textPaint.descent() + textPaint.ascent()) * 0.5f)
-        canvas.drawText("!", w * 0.5f, y, textPaint)
-      }
-      "sent" -> drawChecks(canvas, w, h, doubleCheck = false, color = baseColor)
-      "delivered" -> drawChecks(canvas, w, h, doubleCheck = true, color = baseColor)
-      "read" -> drawChecks(canvas, w, h, doubleCheck = true, color = Color.argb(255, 0, 163, 255))
-      else -> Unit
-    }
-  }
-
-  private fun drawChecks(canvas: Canvas, w: Float, h: Float, doubleCheck: Boolean, color: Int) {
-    strokePaint.color = color
-    // Determine a base scale from the height to keep aspect ratio consistent
-    val s = h / 24f
-    
-    // For single check, we center it. For double check, we right-align the entire glyph set.
-    // Native double check typically has bounding box ~22x14, single check ~16x14.
-    // The design paths here are from a 24x24 unit grid.
-    
-    // Calculate right bound of the path (the double check's right-most point is ~20 on the 24 grid)
-    // If not double check, the right-most point is ~15 on the 24 grid.
-    val pathWidthUnits = if (doubleCheck) 20f else 15f
-    val pathWidth = pathWidthUnits * s
-    
-    // Offset x to right-align the icon block, preserving exactly 1x scale logic
-    val offsetX = max(0f, (w - pathWidth) - (2f * s)) // small constant padding
-    
-    fun p(x: Float, y: Float): Pair<Float, Float> = Pair(offsetX + x * s, y * s)
-
-    tmpPath.reset()
-    p(4f, 12.9f).let { (x, y) -> tmpPath.moveTo(x, y) }
-    p(7.14286f, 16.5f).let { (x, y) -> tmpPath.lineTo(x, y) }
-    p(15f, 7.5f).let { (x, y) -> tmpPath.lineTo(x, y) }
-    canvas.drawPath(tmpPath, strokePaint)
-
-    if (doubleCheck) {
-      tmpPath.reset()
-      p(20f, 7.5625f).let { (x, y) -> tmpPath.moveTo(x, y) }
-      p(11.4283f, 16.5625f).let { (x, y) -> tmpPath.lineTo(x, y) }
-      p(11f, 16f).let { (x, y) -> tmpPath.lineTo(x, y) }
-      canvas.drawPath(tmpPath, strokePaint)
-    }
-  }
-
-  private fun dp(value: Int): Int =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value.toFloat(),
-      context.resources.displayMetrics,
-    ).toInt()
-
-  private fun dpF(value: Float): Float =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value,
-      context.resources.displayMetrics,
-    )
-
-  private fun withAlpha(color: Int, alpha: Float): Int {
-    val a = (alpha.coerceIn(0f, 1f) * 255f).toInt()
-    return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
-  }
-}
-
-private class VoiceWaveformView(context: Context) : View(context) {
-  private val activePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    color = Color.WHITE
-  }
-  private val inactivePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    color = Color.argb(74, 255, 255, 255)
-  }
-  private val barCount = 34
-  private var barEnvelope: FloatArray = makeDefaultEnvelope(barCount)
-  private var playbackProgress = 0f
-  private var level = 0f
-  private var isPlaying = false
-  private var phase = 0f
-
-  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-    val desiredHeight = dp(10)
-    val resolvedHeight = resolveSize(desiredHeight, heightMeasureSpec)
-    super.onMeasure(widthMeasureSpec, MeasureSpec.makeMeasureSpec(resolvedHeight, MeasureSpec.EXACTLY))
-  }
-
-  fun updatePlayback(progress: Float, level: Float, isPlaying: Boolean) {
-    playbackProgress = progress.coerceIn(0f, 1f)
-    this.level = level.coerceIn(0f, 1f)
-    this.isPlaying = isPlaying
-    if (isPlaying) {
-      phase += 0.34f
-    }
-    invalidate()
-  }
-
-  fun setWaveform(samples: List<Float>?) {
-    val normalized =
-      samples
-        ?.map { it.coerceIn(0f, 1f) }
-        ?.filter { it.isFinite() }
-        .orEmpty()
-    if (normalized.isEmpty()) {
-      barEnvelope = makeDefaultEnvelope(barCount)
-      invalidate()
-      return
-    }
-    if (normalized.size == barCount) {
-      barEnvelope = shapeEnvelope(smoothEnvelope(normalized.toFloatArray()))
-      invalidate()
-      return
-    }
-    val bucketSize = normalized.size.toFloat() / barCount.toFloat()
-    val next = FloatArray(barCount)
-    for (index in 0 until barCount) {
-      val start = kotlin.math.floor(index * bucketSize).toInt()
-      val end = min(normalized.size, kotlin.math.floor((index + 1) * bucketSize).toInt())
-      if (start < end) {
-        var sumSquares = 0f
-        var peak = 0f
-        for (i in start until end) {
-          val value = normalized[i]
-          sumSquares += value * value
-          if (value > peak) peak = value
-        }
-        val count = (end - start).toFloat()
-        val rms = sqrt(sumSquares / max(1f, count))
-        val energy = (rms * 0.58f) + (peak * 0.42f)
-        next[index] = energy.coerceIn(0f, 1f).toDouble().pow(0.76).toFloat().coerceIn(0.12f, 1f)
-      } else {
-        val clamped = min(max(0, start), normalized.size - 1)
-        next[index] = normalized[clamped]
-      }
-    }
-    barEnvelope = shapeEnvelope(smoothEnvelope(smoothEnvelope(next)))
-    invalidate()
-  }
-
-  fun setColors(activeColor: Int, inactiveColor: Int) {
-    if (activePaint.color == activeColor && inactivePaint.color == inactiveColor) return
-    activePaint.color = activeColor
-    inactivePaint.color = inactiveColor
-    invalidate()
-  }
-
-  override fun onDraw(canvas: Canvas) {
-    super.onDraw(canvas)
-    if (width <= 0 || height <= 0) return
-    val spacing = dpF(2f)
-    val totalSpacing = spacing * (barCount - 1)
-    val barWidth = max(1f, (width - totalSpacing) / barCount.toFloat())
-    val minHeight = max(1f, height * 0.28f)
-    val maxHeight = max(minHeight + 1f, height * 0.92f)
-    var x = 0f
-    for (index in 0 until barCount) {
-      val normalizedIndex = index / max(1f, barCount.toFloat())
-      val base = barEnvelope[index]
-      val pulse =
-        if (isPlaying) {
-          (sin((phase + (index * 0.62f)).toDouble()) * 0.10 + 0.90).toFloat()
-        } else {
-          1.0f
-        }
-      val spectralBias = (0.92f + (0.12f * sin((index * 0.52f).toDouble()).toFloat())).coerceIn(0.82f, 1.12f)
-      val liveBoost = if (isPlaying) level * 0.22f else 0f
-      val amplitude = ((base + liveBoost) * pulse * spectralBias).coerceIn(0.12f, 1f)
-      val barHeight = minHeight + ((maxHeight - minHeight) * amplitude)
-      val y = (height - barHeight) * 0.5f
-      val paint = if (normalizedIndex < playbackProgress) activePaint else inactivePaint
-      val r = barWidth * 0.5f
-      canvas.drawRoundRect(x, y, x + barWidth, y + barHeight, r, r, paint)
-      x += barWidth + spacing
-    }
-  }
-
-  private fun smoothEnvelope(values: FloatArray): FloatArray {
-    if (values.size <= 2) return values
-    val out = FloatArray(values.size)
-    for (i in values.indices) {
-      val left = values[max(0, i - 1)]
-      val center = values[i]
-      val right = values[min(values.size - 1, i + 1)]
-      out[i] = ((left * 0.2f) + (center * 0.6f) + (right * 0.2f)).coerceIn(0.12f, 1f)
-    }
-    return out
-  }
-
-  private fun shapeEnvelope(values: FloatArray): FloatArray {
-    if (values.isEmpty()) return values
-    val last = max(1f, (values.size - 1).toFloat())
-    val out = FloatArray(values.size)
-    for (i in values.indices) {
-      val t = i / last
-      val edgeAttenuation = 1f - (kotlin.math.abs(t - 0.5f) * 0.18f)
-      out[i] = (values[i].toDouble().pow(0.86).toFloat() * edgeAttenuation).coerceIn(0.12f, 1f)
-    }
-    return out
-  }
-
-  private fun makeDefaultEnvelope(count: Int): FloatArray {
-    if (count <= 0) return floatArrayOf()
-    val out = FloatArray(count)
-    for (i in 0 until count) {
-      val t = i.toFloat() / max(1f, (count - 1).toFloat())
-      val wave = (kotlin.math.sin((t * Math.PI * 5.0) + 0.7) * 0.5 + 0.5).toFloat()
-      out[i] = (0.22f + (wave * 0.55f)).coerceIn(0.18f, 0.82f)
-    }
-    return out
-  }
-
-  private fun dp(value: Int): Int =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value.toFloat(),
-      context.resources.displayMetrics,
-    ).toInt()
-
-  private fun dpF(value: Float): Float =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value,
-      context.resources.displayMetrics,
-    )
-
-  private fun withAlpha(color: Int, alpha: Float): Int {
-    val a = (alpha.coerceIn(0f, 1f) * 255f).toInt()
-    return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
-  }
-
-  private fun blend(from: Int, to: Int, amount: Float): Int {
-    val t = amount.coerceIn(0f, 1f)
-    val inv = 1f - t
-    return Color.argb(
-      (Color.alpha(from) * inv + Color.alpha(to) * t).toInt(),
-      (Color.red(from) * inv + Color.red(to) * t).toInt(),
-      (Color.green(from) * inv + Color.green(to) * t).toInt(),
-      (Color.blue(from) * inv + Color.blue(to) * t).toInt(),
-    )
-  }
 }
 
 private class TypingRowViewHolder(val container: FrameLayout, val shimmerView: ShimmerTextView) : RecyclerView.ViewHolder(container)
@@ -500,6 +150,7 @@ private class NativeRowsAdapter(
     private var progress = 0f
     private var level = 0f
     private var isPlaying = false
+    private var activeDownloadCall: okhttp3.Call? = null
 
     fun bind(holder: NativeRowViewHolder, item: NativeRowItem) {
       if (activeMessageId == item.messageId) {
@@ -533,7 +184,14 @@ private class NativeRowsAdapter(
       }
 
       if (activeMessageId == messageId) {
-        val player = mediaPlayer ?: return
+        val player = mediaPlayer
+        if (player == null) {
+          if (activeDownloadCall != null) {
+            Log.d("ChatListView", "voice cancel download messageId=$messageId")
+            stop(resetProgress = true)
+          }
+          return
+        }
         if (!isPrepared) {
           Log.d("ChatListView", "voice tap ignored: player preparing messageId=$messageId")
           return
@@ -553,6 +211,79 @@ private class NativeRowsAdapter(
 
       stop(resetProgress = true)
 
+      if (mediaUrl.startsWith("http://") || mediaUrl.startsWith("https://")) {
+        playRemoteUrl(mediaUrl, messageId, holder)
+        return
+      }
+
+      playLocalUrl(mediaUrl, messageId, holder)
+    }
+
+    private fun playRemoteUrl(rawUrl: String, messageId: String, holder: NativeRowViewHolder) {
+      val cacheDir = java.io.File(context.cacheDir, "voice-cache")
+      if (!cacheDir.exists()) {
+        cacheDir.mkdirs()
+      }
+
+      // Hash the absolute URL string for filename to allow caching
+      val filename = String.format("%016x", rawUrl.hashCode().toLong() and 0xFFFFFFFFL) + ".m4a"
+      val localFile = java.io.File(cacheDir, filename)
+
+      if (localFile.exists()) {
+        playLocalUrl(localFile.absolutePath, messageId, holder)
+        return
+      }
+
+      activeMessageId = messageId
+      activeHolder = holder
+      applyState(holder, false, 0f, 0f)
+
+      val request = okhttp3.Request.Builder().url(rawUrl).build()
+      val call = okhttp3.OkHttpClient().newCall(request)
+      activeDownloadCall = call
+      
+      call.enqueue(object : okhttp3.Callback {
+        override fun onFailure(call: okhttp3.Call, e: java.io.IOException) {
+          Log.e("ChatListView", "voice download failed url=$rawUrl error=${e.message}", e)
+          handler.post {
+            if (activeMessageId == messageId) {
+              stop(resetProgress = true)
+            }
+          }
+        }
+
+        override fun onResponse(call: okhttp3.Call, response: okhttp3.Response) {
+          if (!response.isSuccessful) {
+            Log.e("ChatListView", "voice download failed url=$rawUrl code=${response.code}")
+            handler.post {
+              if (activeMessageId == messageId) {
+                stop(resetProgress = true)
+              }
+            }
+            return
+          }
+          try {
+            val sink = localFile.sink().buffer()
+            sink.writeAll(response.body!!.source())
+            sink.close()
+            handler.post {
+              if (activeMessageId == messageId) {
+                playLocalUrl(localFile.absolutePath, messageId, holder)
+              }
+            }
+          } catch (e: Exception) {
+            Log.e("ChatListView", "voice move failed error=${e.message}", e)
+            handler.post {
+              if (activeMessageId == messageId) {
+                stop(resetProgress = true)
+              }
+            }
+          }
+        }
+      })
+    }
+
+    private fun playLocalUrl(mediaUrl: String, messageId: String, holder: NativeRowViewHolder) {
       val player = MediaPlayer()
       try {
         if (mediaUrl.startsWith("content://")) {
@@ -655,11 +386,13 @@ private class NativeRowsAdapter(
     }
 
     private fun applyState(holder: NativeRowViewHolder, isPlaying: Boolean, progress: Float, level: Float) {
-      holder.voiceButton.text = if (isPlaying) "⏸" else "▶"
+      holder.voiceButton.setPlaybackState(isPlaying = isPlaying, progress = progress)
       holder.voiceWaveView.updatePlayback(progress, level, isPlaying)
     }
 
     private fun stop(resetProgress: Boolean) {
+      activeDownloadCall?.cancel()
+      activeDownloadCall = null
       ticker?.let { handler.removeCallbacks(it) }
       ticker = null
       mediaPlayer?.setOnCompletionListener(null)
@@ -848,248 +581,7 @@ private class NativeRowsAdapter(
       return TypingRowViewHolder(root, shimmerView)
     }
 
-    val root = FrameLayout(context).apply {
-      layoutParams = RecyclerView.LayoutParams(
-        RecyclerView.LayoutParams.MATCH_PARENT,
-        RecyclerView.LayoutParams.WRAP_CONTENT,
-      )
-      clipChildren = false
-      clipToPadding = false
-      setPadding(dp(8), dp(1), dp(8), dp(1))
-    }
-
-    val bubble = FrameLayout(context).apply {
-      layoutParams = FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-      )
-      clipChildren = false
-      clipToPadding = false
-      setPadding(dp(10), dp(7), dp(10), dp(7))
-      minimumWidth = dp(26)
-      alpha = 1f
-    }
-
-    val tail = BubbleTailView(context).apply {
-      visibility = View.GONE
-    }
-
-    val agentSender = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-      setTextColor(Color.argb(255, 125, 92, 225))
-      setTypeface(Typeface.DEFAULT_BOLD)
-      includeFontPadding = false
-      visibility = View.GONE
-      maxLines = 1
-    }
-
-    val text = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-      setTextColor(Color.WHITE)
-      setLineSpacing(0f, 1.1f)
-      includeFontPadding = false
-      maxWidth = (context.resources.displayMetrics.widthPixels * 0.85f).toInt()
-    }
-
-    val inlineAttachment = FrameLayout(context).apply {
-      visibility = View.GONE
-      background = GradientDrawable().apply {
-        cornerRadius = dpF(12f)
-        setColor(Color.argb(52, 0, 0, 0))
-      }
-      setPadding(dp(12), dp(8), dp(12), dp(8))
-      minimumWidth = dp(170)
-      isClickable = true
-      isFocusable = true
-    }
-    val inlineAttachmentIcon = TextView(context).apply {
-      setText("\uD83D\uDCC4")
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-      includeFontPadding = false
-    }
-    val inlineAttachmentTitle = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-      setTypeface(Typeface.DEFAULT_BOLD)
-      includeFontPadding = false
-      maxLines = 1
-    }
-    val inlineAttachmentSubtitle = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-      includeFontPadding = false
-      setText("Tap to open")
-      maxLines = 1
-    }
-    inlineAttachment.addView(
-      inlineAttachmentIcon,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.START or Gravity.CENTER_VERTICAL,
-      ),
-    )
-    inlineAttachment.addView(
-      inlineAttachmentTitle,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.START or Gravity.TOP,
-      ).apply {
-        leftMargin = dp(24)
-      },
-    )
-    inlineAttachment.addView(
-      inlineAttachmentSubtitle,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.START or Gravity.BOTTOM,
-      ).apply {
-        leftMargin = dp(24)
-      },
-    )
-
-    val voiceContainer = FrameLayout(context).apply {
-      visibility = View.GONE
-      alpha = 1f
-    }
-
-    val voiceButton = TextView(context).apply {
-      this.text = "▶"
-      gravity = Gravity.CENTER
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-      setTextColor(Color.WHITE)
-      background = GradientDrawable().apply {
-        setColor(Color.argb(56, 255, 255, 255))
-        shape = GradientDrawable.OVAL
-      }
-      includeFontPadding = false
-    }
-
-    val voiceWave = VoiceWaveformView(context)
-
-    val voiceDuration = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 11f)
-      setTextColor(Color.argb(200, 255, 255, 255))
-      gravity = Gravity.END or Gravity.CENTER_VERTICAL
-      includeFontPadding = false
-    }
-
-    val time = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 10f)
-      setTextColor(Color.argb(184, 255, 255, 255))
-      gravity = Gravity.END
-      includeFontPadding = false
-    }
-
-    val status = BubbleStatusIndicatorView(context).apply {
-      visibility = View.GONE
-    }
-
-    val day = TextView(context).apply {
-      setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-      setTextColor(Color.argb(210, 236, 239, 255))
-      gravity = Gravity.CENTER
-      setPadding(dp(11), dp(4), dp(11), dp(4))
-      visibility = View.GONE
-    }
-
-    bubble.addView(
-      agentSender,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-      ),
-    )
-    bubble.addView(
-      text,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-      ),
-    )
-    bubble.addView(
-      inlineAttachment,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        dp(48),
-      ).apply {
-        gravity = Gravity.START or Gravity.TOP
-      },
-    )
-    voiceContainer.addView(
-      voiceButton,
-      FrameLayout.LayoutParams(dp(30), dp(30)).apply {
-        gravity = Gravity.START or Gravity.CENTER_VERTICAL
-      },
-    )
-    voiceContainer.addView(
-      voiceWave,
-      FrameLayout.LayoutParams(dp(128), dp(10)).apply {
-        gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        leftMargin = dp(38)
-      },
-    )
-    voiceContainer.addView(
-      voiceDuration,
-      FrameLayout.LayoutParams(dp(42), FrameLayout.LayoutParams.WRAP_CONTENT).apply {
-        gravity = Gravity.END or Gravity.CENTER_VERTICAL
-      },
-    )
-    bubble.addView(
-      voiceContainer,
-      FrameLayout.LayoutParams(dp(188), dp(34)).apply {
-        gravity = Gravity.START
-      },
-    )
-    bubble.addView(
-      time,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.END or Gravity.BOTTOM,
-      ).apply {
-        rightMargin = dp(0)
-        bottomMargin = dp(0)
-      },
-    )
-    bubble.addView(
-      status,
-      FrameLayout.LayoutParams(dp(16), dp(14), Gravity.END or Gravity.BOTTOM).apply {
-        rightMargin = 0
-        bottomMargin = 0
-      },
-    )
-    root.addView(
-      tail,
-      FrameLayout.LayoutParams(dp(29), dp(29)),
-    )
-    root.addView(bubble)
-    root.addView(
-      day,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.CENTER_HORIZONTAL,
-      ),
-    )
-
-    return NativeRowViewHolder(
-      root,
-      bubble,
-      tail,
-      text,
-      inlineAttachment,
-      inlineAttachmentTitle,
-      inlineAttachmentSubtitle,
-      voiceContainer,
-      voiceButton,
-      voiceWave,
-      voiceDuration,
-      time,
-      status,
-      day,
-      agentSender,
-    )
+    return createNativeMessageRowViewHolder(context)
   }
 
   override fun onBindViewHolder(holder: RecyclerView.ViewHolder, position: Int) {
@@ -1143,7 +635,7 @@ private class NativeRowsAdapter(
       voicePlayback.detach(holder)
       holder.voiceWaveView.updatePlayback(0f, 0f, false)
       holder.voiceWaveView.setWaveform(null)
-      holder.voiceButton.text = "▶"
+      holder.voiceButton.setPlaybackState(isPlaying = false, progress = 0f)
       holder.agentSenderLabel.visibility = View.GONE
     } else if (holder is TypingRowViewHolder) {
       holder.shimmerView.stopShimmer()
@@ -1264,7 +756,16 @@ private class NativeRowsAdapter(
     lp.gravity = if (effectiveIsMe) Gravity.END else Gravity.START
     bubbleContainer.layoutParams = lp
 
-    val bubbleThemFill = appearance.bubbleThemColor
+    val wallpaperAnchor = appearance.wallpaperGradient.firstOrNull() ?: appearance.bubbleThemColor
+    val isDarkPalette = Color.luminance(wallpaperAnchor) < 0.42f
+    val bubbleMeGradient =
+      appearance.bubbleMeGradient.map { base ->
+        blend(base, wallpaperAnchor, if (isDarkPalette) 0.14f else 0.18f)
+      }.toIntArray()
+    val bubbleThemFill = withAlpha(
+      blend(appearance.bubbleThemColor, wallpaperAnchor, if (isDarkPalette) 0.16f else 0.22f),
+      if (isDarkPalette) 0.88f else 0.90f,
+    )
     val metaBaseColor = if (effectiveIsMe) appearance.timeColorMe else appearance.timeColorThem
     val displayStatus = statusResolver?.invoke(item) ?: item.status
     statusView.bind(displayStatus, metaBaseColor)
@@ -1295,7 +796,7 @@ private class NativeRowsAdapter(
     val drawable = if (effectiveIsMe) {
       GradientDrawable(
         GradientDrawable.Orientation.TL_BR,
-        appearance.bubbleMeGradient,
+        bubbleMeGradient,
       )
     } else {
       GradientDrawable().apply { setColor(bubbleThemFill) }
@@ -1324,23 +825,31 @@ private class NativeRowsAdapter(
     }
 
     if (isVoice) {
-      bubbleContainer.setPadding(dp(10), dp(7), dp(10), dp(17))
+      bubbleContainer.setPadding(dp(8), dp(6), dp(10), dp(4))
       textView.visibility = View.GONE
       inlineAttachmentView.visibility = View.GONE
       inlineAttachmentView.setOnClickListener(null)
       voiceContainer.visibility = View.VISIBLE
-      bubbleContainer.minimumWidth = dp(220)
-      val voiceAccent = if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.20f) else withAlpha(appearance.textColorThem, 0.13f)
-      val voiceIconTint = if (effectiveIsMe) appearance.textColorMe else appearance.textColorThem
-      voiceButton.background = GradientDrawable().apply {
-        shape = GradientDrawable.OVAL
-        setColor(voiceAccent)
-      }
-      voiceButton.setTextColor(voiceIconTint)
-      voiceDurationView.setTextColor(if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.82f) else withAlpha(appearance.textColorThem, 0.78f))
+      bubbleContainer.minimumWidth = dp(258)
+      val voiceTextColor = if (effectiveIsMe) appearance.textColorMe else appearance.textColorThem
+      val voiceFillColor = if (effectiveIsMe) Color.argb(245, 255, 255, 255) else Color.argb(230, 255, 255, 255)
+      val voiceIconTint =
+        if (effectiveIsMe) {
+          bubbleMeGradient.firstOrNull() ?: Color.BLUE
+        } else {
+          withAlpha(voiceTextColor, 0.95f)
+        }
+      val voiceRingTint = withAlpha(voiceTextColor, 0.74f)
+      voiceButton.applyStyle(
+        fillColor = voiceFillColor,
+        iconTint = voiceIconTint,
+        ringTint = voiceRingTint,
+      )
+      voiceDurationView.setTextColor(if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.78f) else withAlpha(appearance.textColorThem, 0.78f))
+      voiceDurationView.gravity = Gravity.START or Gravity.CENTER_VERTICAL
       voiceWaveView.setColors(
-        activeColor = withAlpha(voiceIconTint, 0.96f),
-        inactiveColor = withAlpha(voiceIconTint, if (effectiveIsMe) 0.34f else 0.26f),
+        activeColor = withAlpha(voiceTextColor, 0.95f),
+        inactiveColor = withAlpha(voiceTextColor, 0.34f),
       )
       voiceButton.setOnClickListener {
         voicePlayback.toggle(this, item)
@@ -1352,16 +861,25 @@ private class NativeRowsAdapter(
       if (isExternallyActive) {
         voicePlayback.detach(this)
         voiceWaveView.updatePlayback(externalVoiceProgress, if (externalVoiceIsPlaying) 0.2f else 0f, externalVoiceIsPlaying)
-        voiceButton.text = if (externalVoiceIsPlaying) "⏸" else "▶"
+        voiceButton.setPlaybackState(isPlaying = externalVoiceIsPlaying, progress = externalVoiceProgress)
       } else {
         voicePlayback.bind(this, item)
+      }
+
+      if (item.uploadProgress != null && item.uploadProgress > 0f && item.uploadProgress < 1f) {
+        voiceUploadProgressView.visibility = View.VISIBLE
+        voiceUploadProgressView.progress = item.uploadProgress
+      } else {
+        voiceUploadProgressView.visibility = View.GONE
       }
     } else {
       bubbleContainer.setPadding(dp(10), dp(7), dp(10), if (hasInlineAttachment) dp(7) else dp(7))
       textView.visibility = View.VISIBLE
       voiceContainer.visibility = View.GONE
+      voiceUploadProgressView.visibility = View.GONE
       bubbleContainer.minimumWidth = dp(26)
       voiceButton.setOnClickListener(null)
+      voiceButton.setPlaybackState(isPlaying = false, progress = 0f)
       voicePlayback.detach(this)
       voiceWaveView.updatePlayback(0f, 0f, false)
       voiceWaveView.setWaveform(null)
@@ -1415,14 +933,14 @@ private class NativeRowsAdapter(
       tailView.configure(
         isMe = effectiveIsMe,
         visible = true,
-        color = if (effectiveIsMe) appearance.bubbleMeGradient.lastOrNull() ?: Color.WHITE else bubbleThemFill,
+        color = if (effectiveIsMe) bubbleMeGradient.lastOrNull() ?: Color.WHITE else bubbleThemFill,
       )
       val tailLp = tailView.layoutParams as FrameLayout.LayoutParams
       tailLp.gravity = if (effectiveIsMe) Gravity.END or Gravity.BOTTOM else Gravity.START or Gravity.BOTTOM
       tailLp.marginStart = 0
       tailLp.marginEnd = 0
       tailLp.bottomMargin = 0
-      if (effectiveIsMe) tailLp.marginEnd = dp(-28) else tailLp.marginStart = dp(-28)
+      if (effectiveIsMe) tailLp.marginEnd = dp(-27) else tailLp.marginStart = dp(-27)
       tailView.layoutParams = tailLp
     } else {
       tailView.visibility = View.GONE
@@ -1543,564 +1061,6 @@ private class NativeRowsAdapter(
     val seconds = totalSeconds % 60
     return String.format("%d:%02d", minutes, seconds)
   }
-
-  private fun withAlpha(color: Int, alpha: Float): Int {
-    val a = (alpha.coerceIn(0f, 1f) * 255f).toInt()
-    return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
-  }
-}
-
-private class NativeChatInputBar(
-  context: Context,
-) : FrameLayout(context) {
-  interface Listener {
-    fun onTextChanged(text: String)
-    fun onAttachmentPressed()
-    fun onSendText(text: String, messageId: String)
-    fun onRecordingState(isRecording: Boolean, isLocked: Boolean)
-    fun onRecordingVad(level: Float)
-    fun onRecordingCanceled()
-    fun onVoiceRecorded(uri: String, durationSeconds: Double, waveform: List<Float>)
-  }
-
-  var listener: Listener? = null
-
-  private val row = LinearLayout(context)
-  private val textPill = FrameLayout(context)
-  private val input = EditText(context)
-  private val attachmentButton = FrameLayout(context)
-  private val attachmentIcon = ChatInputActionIconView(context)
-  private val actionButton = FrameLayout(context)
-  private val actionIcon = ChatInputActionIconView(context)
-  
-  private val recordingStatusContainer = LinearLayout(context)
-  private val recordingDot = View(context)
-  private val statusText = TextView(context)
-  private val uiHandler = Handler(Looper.getMainLooper())
-  private val longPressTimeoutMs = min(220, ViewConfiguration.getLongPressTimeout())
-
-  private var surfaceColor = Color.argb(246, 20, 24, 30)
-  private var inputTextColor = Color.WHITE
-  private var inputHintColor = Color.argb(150, 255, 255, 255)
-  private var passiveIconColor = Color.WHITE
-  private var accentColor = Color.argb(255, 106, 79, 207)
-  private var neutralButtonColor = Color.argb(36, 255, 255, 255)
-
-  private var longPressArmed = false
-  private var longPressStarted = false
-  private var lockActivatedInGesture = false
-  private var downX = 0f
-  private var downY = 0f
-
-  private var isRecording = false
-  private var isLockedRecording = false
-  private var recorder: MediaRecorder? = null
-  private var recordingFile: File? = null
-  private var recordingStartedAtMs = 0L
-  private var vadTicker: Runnable? = null
-  private val recordingAmplitudes = ArrayList<Int>(256)
-
-  private val longPressRunnable = Runnable {
-    longPressArmed = false
-    if (startVoiceRecording()) {
-      longPressStarted = true
-      lockActivatedInGesture = false
-      performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-    }
-  }
-
-  init {
-    clipChildren = false
-    clipToPadding = false
-    setPadding(dp(8), dp(6), dp(8), dp(6))
-
-    row.orientation = LinearLayout.VERTICAL
-    row.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
-    addView(row)
-
-    val containerRow = LinearLayout(context).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.BOTTOM
-      layoutParams = LinearLayout.LayoutParams(
-        LinearLayout.LayoutParams.MATCH_PARENT,
-        LayoutParams.WRAP_CONTENT,
-      )
-    }
-    row.addView(containerRow)
-
-    attachmentButton.layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply {
-      rightMargin = dp(8)
-      bottomMargin = dp(2)
-    }
-    attachmentButton.background = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(Color.TRANSPARENT)
-    }
-    containerRow.addView(attachmentButton)
-
-    attachmentIcon.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-    attachmentIcon.icon = ChatInputActionIcon.ATTACH
-    attachmentIcon.tintColor = passiveIconColor
-    attachmentButton.addView(attachmentIcon)
-
-    textPill.layoutParams = LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f).apply {
-      rightMargin = dp(8)
-    }
-    textPill.background = GradientDrawable().apply {
-      shape = GradientDrawable.RECTANGLE
-      cornerRadius = dpF(21f)
-      setColor(Color.argb(245, 20, 24, 30))
-    }
-    containerRow.addView(textPill)
-
-    input.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-       gravity = Gravity.CENTER_VERTICAL
-    }
-    input.setBackgroundColor(Color.TRANSPARENT)
-    input.setTextColor(Color.WHITE)
-    input.setHintTextColor(Color.argb(150, 255, 255, 255))
-    input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
-    input.maxLines = 4
-    input.minLines = 1
-    input.setPadding(dp(16), dp(10), dp(16), dp(10))
-    textPill.addView(input)
-
-    recordingStatusContainer.layoutParams = FrameLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT).apply {
-      gravity = Gravity.CENTER_VERTICAL
-    }
-    recordingStatusContainer.orientation = LinearLayout.HORIZONTAL
-    recordingStatusContainer.gravity = Gravity.CENTER
-    recordingStatusContainer.visibility = View.GONE
-    
-    recordingDot.layoutParams = LinearLayout.LayoutParams(dp(8), dp(8)).apply {
-      rightMargin = dp(6)
-    }
-    recordingDot.background = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(Color.parseColor("#FF3B30"))
-    }
-    recordingStatusContainer.addView(recordingDot)
-
-    statusText.layoutParams = LinearLayout.LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT)
-    statusText.setTextColor(Color.argb(220, 255, 255, 255))
-    statusText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-    recordingStatusContainer.addView(statusText)
-    
-    textPill.addView(recordingStatusContainer)
-
-    actionButton.layoutParams = LinearLayout.LayoutParams(dp(42), dp(42)).apply {
-      bottomMargin = dp(2)
-    }
-    actionButton.background = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(neutralButtonColor)
-    }
-    containerRow.addView(actionButton)
-
-    actionIcon.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT)
-    actionIcon.icon = ChatInputActionIcon.MIC
-    actionIcon.tintColor = passiveIconColor
-    actionButton.addView(actionIcon)
-
-    input.addTextChangedListener(object : TextWatcher {
-      override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-      override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-        listener?.onTextChanged(s?.toString().orEmpty())
-        refreshActionVisual()
-      }
-
-      override fun afterTextChanged(s: Editable?) = Unit
-    })
-
-    attachmentButton.setOnClickListener {
-      if (!isRecording) listener?.onAttachmentPressed()
-    }
-    attachmentButton.setOnTouchListener { _, event -> handleAttachmentTouch(event) }
-    actionButton.setOnTouchListener { _, event -> handleActionTouch(event) }
-    refreshActionVisual()
-  }
-
-  fun setPlaceholder(value: String) {
-    input.hint = value
-  }
-
-  fun applyAppearance(appearance: ChatListAppearance, isDark: Boolean, backgroundReferenceColor: Int) {
-    val ref = backgroundReferenceColor
-    val textBase = appearance.textColorThem
-    val accentBase = appearance.bubbleMeGradient.lastOrNull() ?: appearance.textColorMe
-    surfaceColor =
-      if (isDark) {
-        withAlpha(blend(ref, Color.BLACK, 0.42f), 0.95f)
-      } else {
-        withAlpha(blend(ref, Color.WHITE, 0.78f), 0.98f)
-      }
-    inputTextColor = textBase
-    inputHintColor = withAlpha(textBase, if (isDark) 0.54f else 0.46f)
-    passiveIconColor = withAlpha(textBase, if (isDark) 0.92f else 0.86f)
-    accentColor = accentBase
-    neutralButtonColor = surfaceColor
-
-    textPill.background = GradientDrawable().apply {
-      shape = GradientDrawable.RECTANGLE
-      cornerRadius = dpF(21f)
-      setColor(surfaceColor)
-    }
-    input.setTextColor(inputTextColor)
-    input.setHintTextColor(inputHintColor)
-    statusText.setTextColor(withAlpha(textBase, if (isDark) 0.88f else 0.82f))
-    refreshActionVisual()
-  }
-
-  private fun handleActionTouch(event: MotionEvent): Boolean {
-    val hasText = input.text?.toString()?.trim()?.isNotEmpty() == true
-
-    if (hasText && !isRecording) {
-      when (event.actionMasked) {
-        MotionEvent.ACTION_DOWN -> {
-          pressVisual(true)
-          return true
-        }
-        MotionEvent.ACTION_UP -> {
-          pressVisual(false)
-          sendCurrentText()
-          return true
-        }
-        MotionEvent.ACTION_CANCEL -> {
-          pressVisual(false)
-          return true
-        }
-      }
-    }
-
-    when (event.actionMasked) {
-      MotionEvent.ACTION_DOWN -> {
-        downX = event.x
-        downY = event.y
-        longPressStarted = false
-        lockActivatedInGesture = false
-        if (isRecording && isLockedRecording) {
-          pressVisual(true)
-          return true
-        }
-        longPressArmed = true
-        uiHandler.postDelayed(longPressRunnable, longPressTimeoutMs.toLong())
-        pressVisual(true)
-        return true
-      }
-
-      MotionEvent.ACTION_MOVE -> {
-        if (isRecording) {
-          val dx = event.x - downX
-          val dy = event.y - downY
-          if (!isLockedRecording && dy < -dp(44)) {
-            isLockedRecording = true
-            lockActivatedInGesture = true
-            updateRecordingStatus("Locked • Tap to send")
-            listener?.onRecordingState(true, true)
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-          }
-          if (!isLockedRecording && dx < -dp(72)) {
-            cancelVoiceRecording()
-            pressVisual(false)
-            return true
-          }
-        }
-        return true
-      }
-
-      MotionEvent.ACTION_UP -> {
-        uiHandler.removeCallbacks(longPressRunnable)
-        longPressArmed = false
-        pressVisual(false)
-        if (isRecording) {
-          if (isLockedRecording && lockActivatedInGesture) {
-            return true
-          }
-          stopVoiceRecording(send = true)
-          return true
-        }
-        if (isRecording && isLockedRecording) {
-          stopVoiceRecording(send = true)
-          return true
-        }
-        if (longPressStarted) return true
-        if (isLockedRecording && isRecording) {
-          stopVoiceRecording(send = true)
-          return true
-        }
-        if (isRecording && !isLockedRecording) {
-          stopVoiceRecording(send = true)
-          return true
-        }
-        if (recordingStartedAtMs > 0L && isLockedRecording) {
-          stopVoiceRecording(send = true)
-          return true
-        }
-        if ((input.text?.toString()?.trim()?.isNotEmpty() == true)) {
-          sendCurrentText()
-        }
-        return true
-      }
-
-      MotionEvent.ACTION_CANCEL -> {
-        uiHandler.removeCallbacks(longPressRunnable)
-        longPressArmed = false
-        pressVisual(false)
-        if (isRecording && !isLockedRecording) {
-          stopVoiceRecording(send = true)
-        }
-        return true
-      }
-    }
-    return false
-  }
-
-  private fun sendCurrentText() {
-    val text = input.text?.toString()?.trim().orEmpty()
-    if (text.isEmpty()) return
-    val messageId = UUID.randomUUID().toString().lowercase()
-    listener?.onSendText(text, messageId)
-    input.setText("")
-  }
-
-  private fun refreshActionVisual() {
-    val hasText = input.text?.toString()?.trim()?.isNotEmpty() == true
-    actionIcon.icon =
-      when {
-        isRecording -> ChatInputActionIcon.RECORDING_DOT
-        hasText -> ChatInputActionIcon.SEND
-        else -> ChatInputActionIcon.MIC
-      }
-    val actionFillColor =
-      when {
-        isRecording -> withAlpha(accentColor, if (isLockedRecording) 0.94f else 0.86f)
-        hasText -> withAlpha(accentColor, 0.94f)
-        else -> surfaceColor
-      }
-    actionIcon.tintColor =
-      when {
-        isRecording || hasText -> Color.WHITE
-        else -> passiveIconColor
-      }
-    actionButton.background = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(actionFillColor)
-    }
-    attachmentIcon.tintColor = passiveIconColor
-    attachmentButton.alpha = if (isRecording) 0.45f else 1f
-    attachmentButton.background = GradientDrawable().apply {
-      shape = GradientDrawable.OVAL
-      setColor(surfaceColor)
-    }
-    if (isRecording) {
-      input.visibility = View.INVISIBLE
-      recordingStatusContainer.visibility = View.VISIBLE
-    } else {
-      input.visibility = View.VISIBLE
-      recordingStatusContainer.visibility = View.GONE
-    }
-  }
-
-  private fun pressVisual(pressed: Boolean) {
-    actionButton.animate()
-      .scaleX(if (pressed) 0.96f else 1f)
-      .scaleY(if (pressed) 0.96f else 1f)
-      .alpha(if (pressed) 0.88f else 1f)
-      .setDuration(if (pressed) 80L else 140L)
-      .start()
-  }
-
-  private fun handleAttachmentTouch(event: MotionEvent): Boolean {
-    if (isRecording) return true
-    when (event.actionMasked) {
-      MotionEvent.ACTION_DOWN -> {
-        attachmentButton.animate()
-          .scaleX(0.96f)
-          .scaleY(0.96f)
-          .alpha(0.88f)
-          .setDuration(70L)
-          .start()
-      }
-      MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
-        attachmentButton.animate()
-          .scaleX(1f)
-          .scaleY(1f)
-          .alpha(1f)
-          .setDuration(120L)
-          .start()
-      }
-    }
-    return false
-  }
-
-  private fun updateRecordingStatus(text: String) {
-    statusText.text = text
-    refreshActionVisual()
-  }
-
-  private fun startVoiceRecording(): Boolean {
-    if (isRecording) return true
-    val outputFile = File(context.cacheDir, "vibe-voice-${UUID.randomUUID()}.m4a")
-    val mediaRecorder = MediaRecorder()
-    return try {
-      mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC)
-      mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
-      mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
-      mediaRecorder.setAudioEncodingBitRate(64000)
-      mediaRecorder.setAudioSamplingRate(44100)
-      mediaRecorder.setOutputFile(outputFile.absolutePath)
-      mediaRecorder.prepare()
-      mediaRecorder.start()
-
-      recorder = mediaRecorder
-      recordingFile = outputFile
-      recordingStartedAtMs = SystemClock.elapsedRealtime()
-      isRecording = true
-      isLockedRecording = false
-      recordingAmplitudes.clear()
-      refreshActionVisual()
-      listener?.onRecordingState(true, false)
-      startVadTicker()
-      true
-    } catch (_: Throwable) {
-      try {
-        mediaRecorder.reset()
-      } catch (_: Throwable) {
-      }
-      try {
-        mediaRecorder.release()
-      } catch (_: Throwable) {
-      }
-      recorder = null
-      recordingFile = null
-      recordingStartedAtMs = 0L
-      isRecording = false
-      isLockedRecording = false
-      listener?.onRecordingCanceled()
-      listener?.onRecordingState(false, false)
-      false
-    }
-  }
-
-  private fun startVadTicker() {
-    vadTicker?.let { uiHandler.removeCallbacks(it) }
-    val ticker = object : Runnable {
-      override fun run() {
-        if (!isRecording) return
-        val recorderRef = recorder
-        val amplitude =
-          try {
-            recorderRef?.maxAmplitude ?: 0
-          } catch (_: Throwable) {
-            0
-          }
-        recordingAmplitudes.add(amplitude)
-        val normalized = (amplitude / 32767f).coerceIn(0f, 1f)
-        listener?.onRecordingVad(normalized)
-        
-        val elapsedMs = max(0L, SystemClock.elapsedRealtime() - recordingStartedAtMs)
-        val seconds = (elapsedMs / 1000L).toInt()
-        val mins = seconds / 60
-        val secs = seconds % 60
-        val timeStr = String.format("%d:%02d", mins, secs)
-        
-        val instruction = if (isLockedRecording) "Locked • Tap to send" else "Slide left to cancel"
-        statusText.text = "$timeStr  $instruction"
-        
-        val blinkOn = (elapsedMs / 500) % 2L == 0L
-        recordingDot.alpha = if (blinkOn) 1f else 0.2f
-
-        uiHandler.postDelayed(this, 70L)
-      }
-    }
-    vadTicker = ticker
-    uiHandler.post(ticker)
-  }
-
-  private fun stopVoiceRecording(send: Boolean) {
-    if (!isRecording) return
-    vadTicker?.let { uiHandler.removeCallbacks(it) }
-    vadTicker = null
-
-    val durationMs = max(0L, SystemClock.elapsedRealtime() - recordingStartedAtMs)
-    val outputFile = recordingFile
-    val recorderRef = recorder
-    recorder = null
-    recordingFile = null
-    recordingStartedAtMs = 0L
-
-    try {
-      recorderRef?.stop()
-    } catch (_: Throwable) {
-      // ignored; malformed/too-short recording
-    }
-    try {
-      recorderRef?.reset()
-    } catch (_: Throwable) {
-    }
-    try {
-      recorderRef?.release()
-    } catch (_: Throwable) {
-    }
-
-    isRecording = false
-    isLockedRecording = false
-    refreshActionVisual()
-    listener?.onRecordingState(false, false)
-    listener?.onRecordingVad(0f)
-
-    if (send && outputFile != null && outputFile.exists() && outputFile.length() > 0L) {
-      val waveform = buildWaveform(recordingAmplitudes, 40)
-      listener?.onVoiceRecorded(
-        Uri.fromFile(outputFile).toString(),
-        (durationMs.toDouble() / 1000.0).coerceAtLeast(0.1),
-        waveform,
-      )
-    } else {
-      outputFile?.delete()
-      listener?.onRecordingCanceled()
-    }
-    recordingAmplitudes.clear()
-    refreshActionVisual()
-  }
-
-  private fun cancelVoiceRecording() {
-    stopVoiceRecording(send = false)
-  }
-
-  private fun buildWaveform(samples: List<Int>, bins: Int): List<Float> {
-    if (samples.isEmpty() || bins <= 0) return emptyList()
-    val out = ArrayList<Float>(bins)
-    val chunk = max(1, samples.size / bins)
-    var i = 0
-    while (i < samples.size && out.size < bins) {
-      var maxAmp = 0
-      var j = i
-      val end = min(samples.size, i + chunk)
-      while (j < end) {
-        maxAmp = max(maxAmp, samples[j])
-        j++
-      }
-      out.add((maxAmp / 32767f).coerceIn(0f, 1f))
-      i += chunk
-    }
-    while (out.size < bins) out.add(0f)
-    return out
-  }
-
-  private fun dp(value: Int): Int =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value.toFloat(),
-      context.resources.displayMetrics,
-    ).toInt()
-
-  private fun dpF(value: Float): Float =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value,
-      context.resources.displayMetrics,
-    )
 
   private fun withAlpha(color: Int, alpha: Float): Int {
     val a = (alpha.coerceIn(0f, 1f) * 255f).toInt()
@@ -3459,6 +2419,7 @@ class ChatListView(
       val rawIsAgentMessage = (message["isAgentMessage"] as? Boolean) ?: false
       val rawAgentName = (message["agentName"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
       val rawPlainContent = (message["plainContent"] as? String)?.trim()?.takeIf { it.isNotEmpty() }
+      val uploadProgress = (message["uploadProgress"] as? Number)?.toFloat()
 
       output.add(
         NativeRowItem(
@@ -3478,6 +2439,7 @@ class ChatListView(
           isAgentMessage = rawIsAgentMessage,
           agentName = rawAgentName,
           plainContent = rawPlainContent,
+          uploadProgress = uploadProgress,
         ),
       )
 

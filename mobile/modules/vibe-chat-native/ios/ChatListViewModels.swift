@@ -92,6 +92,8 @@ struct ChatListRow {
   let waveform: [CGFloat]?
   let isVideoNote: Bool
   let uploadProgress: Double?
+  let mediaWidth: Double?
+  let mediaHeight: Double?
 
   // Agent message fields
   let isAgentMessage: Bool
@@ -253,6 +255,8 @@ struct ChatListRow {
       waveform = nil
       isVideoNote = false
       uploadProgress = nil
+      mediaWidth = nil
+      mediaHeight = nil
       isAgentMessage = false
       agentName = nil
       plainContent = nil
@@ -327,6 +331,14 @@ struct ChatListRow {
       ?? parseDouble(message["upload_progress"])
       ?? parseDouble(metadata?["uploadProgress"])
       ?? parseDouble(metadata?["upload_progress"])
+
+    let extra = message["extra"] as? [String: Any]
+    mediaWidth =
+      parseDouble(message["width"]) ?? parseDouble(metadata?["width"])
+      ?? parseDouble(extra?["width"])
+    mediaHeight =
+      parseDouble(message["height"]) ?? parseDouble(metadata?["height"])
+      ?? parseDouble(extra?["height"])
 
     // Agent message fields
     isAgentMessage = (message["isAgentMessage"] as? Bool) ?? false

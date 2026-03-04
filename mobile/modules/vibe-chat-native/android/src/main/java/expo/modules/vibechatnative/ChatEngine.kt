@@ -19,6 +19,7 @@ import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
+import okio.buffer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -902,242 +903,260 @@ internal object ChatEngine {
       emitChangeLocked("messageStatusChanged", chatId, messageId)
       Log.i("ChatEngine", "sendMessage optimistic row emitted in ${System.currentTimeMillis() - optimisticStartMs}ms chatId=$chatId messageId=$messageId")
 
-      // ── Now resolve friend public key (may do synchronous HTTP — no longer blocks UI) ──
-      val keyResolveStartMs = System.currentTimeMillis()
-      val friendPublicKey = if (isGroup) null else {
-        resolveFriendPublicKeyLocked(chatId, peerUserId)
-          ?: run {
-            Log.w(
-              "ChatEngine",
-              "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId keyResolveMs=${System.currentTimeMillis() - keyResolveStartMs}",
-            )
-            pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
-            upsertLocalStatusLocked(chatId, messageId, "pending")
-            queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
-            emitChangeLocked("messageStatusChanged", chatId, messageId)
-            loadChatHistoryIfNeededLocked(chatId, force = true)
-            ensureNativeTransportAsync("send_missing_friend_key")
-            return@synchronized mapOf(
-              "accepted" to true,
-              "queued" to true,
-              "reason" to "missing_friend_key",
-              "messageId" to messageId,
-              "state" to "pending",
-            )
-          }
-      }
-      Log.i("ChatEngine", "sendMessage keyResolved in ${System.currentTimeMillis() - keyResolveStartMs}ms chatId=$chatId messageId=$messageId hasKey=${friendPublicKey != null}")
-
-      val needsUpload =
-        setOf("image", "gif", "file", "voice", "video", "music").contains(type) &&
-          !mediaUrl.isNullOrBlank() &&
-          isLocalMediaUri(mediaUrl!!)
-      if (needsUpload) {
-        val apiBaseUrl = apiBaseUrlLocked()
-        val token = authHeaderTokenLocked()
-        val userId = normalized(getConfigValueLocked("userId"))
-        if (apiBaseUrl.isNullOrBlank() || token.isNullOrBlank() || userId.isNullOrBlank()) {
-          upsertLocalStatusLocked(chatId, messageId, "pending")
-          queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_upload_config")
-          appendJournalLocked(
-            "native-media-upload-error",
-            mapOf("chatId" to chatId, "messageId" to messageId, "reason" to "missing_upload_config"),
-          )
-          emitChangeLocked("messageStatusChanged", chatId, messageId)
-          return@synchronized mapOf(
-            "accepted" to true,
-            "queued" to true,
-            "reason" to "missing_upload_config",
-            "messageId" to messageId,
-            "state" to "pending",
-          )
-        }
-        appendJournalLocked(
-          "native-media-upload-start",
-          mapOf("chatId" to chatId, "messageId" to messageId, "type" to type),
-        )
-        when (val uploadResult = uploadLocalMediaLocked(mediaUrl!!, type, fileName, userId, token, apiBaseUrl)) {
-          is LocalMediaUploadOutcome.Success -> {
-            mediaUrl = uploadResult.value.remoteUrl
-            if (fileName.isNullOrBlank()) fileName = uploadResult.value.fileName
-            if (fileSize == null) fileSize = uploadResult.value.fileSize
-            val nextMetadata = linkedMapOf<String, Any?>()
-            val existingMetadata = payload["metadata"] as? Map<*, *> ?: emptyMap<String, Any?>()
-            existingMetadata.forEach { (k, v) -> if (k != null) nextMetadata[k.toString()] = v }
-            nextMetadata["mediaUrl"] = mediaUrl
-            if (!localPlaybackMediaUrl.isNullOrBlank()) {
-              nextMetadata["localMediaUrl"] = localPlaybackMediaUrl
-            }
-            if (!fileName.isNullOrBlank()) nextMetadata["fileName"] = fileName
-            if (fileSize != null) nextMetadata["fileSize"] = fileSize
-            effectivePayload["metadata"] = nextMetadata
-            effectivePayload["chatId"] = chatId
-            effectivePayload["messageId"] = messageId
-            effectivePayload["type"] = type
-            effectivePayload["text"] = text
-            optimisticMessage["mediaUrl"] = mediaUrl
-            if (!localPlaybackMediaUrl.isNullOrBlank()) {
-              optimisticMessage["localMediaUrl"] = localPlaybackMediaUrl
-            }
-            if (!fileName.isNullOrBlank()) optimisticMessage["fileName"] = fileName
-            if (fileSize != null) optimisticMessage["fileSize"] = fileSize
-            optimisticRow["message"] = optimisticMessage
-            upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
-            appendJournalLocked(
-              "native-media-upload-ok",
-              mapOf("chatId" to chatId, "messageId" to messageId, "url" to mediaUrl),
-            )
-            Log.d(
-              "ChatEngine",
-              "voice upload complete chatId=$chatId messageId=$messageId remoteUrl=${mediaUrl?.take(120)} localPlayback=${localPlaybackMediaUrl?.take(120)} type=$type",
-            )
-          }
-          is LocalMediaUploadOutcome.Failure -> {
-            val reason = uploadResult.reason
-            val shouldQueue = setOf("upload_failed", "upload_timeout", "missing_upload_config").contains(reason)
-            upsertLocalStatusLocked(chatId, messageId, if (shouldQueue) "pending" else "error")
-            appendJournalLocked(
-              "native-media-upload-error",
-              mapOf("chatId" to chatId, "messageId" to messageId, "reason" to reason),
-            )
-            emitChangeLocked("messageStatusChanged", chatId, messageId)
-            if (shouldQueue) {
-              queueOutboundDraftLocked(chatId, messageId, effectivePayload, reason)
-              return@synchronized mapOf(
-                "accepted" to true,
-                "queued" to true,
-                "reason" to reason,
-                "messageId" to messageId,
-                "state" to "pending",
-              )
-            }
-            return@synchronized mapOf("accepted" to false, "reason" to reason, "messageId" to messageId)
-          }
-        }
-      }
-
-      val encryptStartMs = System.currentTimeMillis()
-      val fullPayload = linkedMapOf<String, Any?>("text" to text)
-      if (!mediaUrl.isNullOrBlank()) fullPayload["mediaUrl"] = mediaUrl
-      if (!mediaKey.isNullOrBlank()) fullPayload["mediaKey"] = mediaKey
-      if (!fileName.isNullOrBlank()) fullPayload["fileName"] = fileName
-      if (fileSize != null) fullPayload["fileSize"] = fileSize
-      if (latitude != null) fullPayload["latitude"] = latitude
-      if (longitude != null) fullPayload["longitude"] = longitude
-      if (duration != null) fullPayload["duration"] = duration
-      if (width != null) fullPayload["width"] = width
-      if (height != null) fullPayload["height"] = height
-      if (!replyToId.isNullOrBlank()) fullPayload["replyToId"] = replyToId
-      if (contact != null) fullPayload["contact"] = contact
-      if (!caption.isNullOrBlank()) fullPayload["caption"] = caption
-      if (!thumbnailBase64.isNullOrBlank()) fullPayload["thumbnailBase64"] = thumbnailBase64
-      if (viewOnce != null) fullPayload["viewOnce"] = viewOnce
-      if (isVideoNote != null) fullPayload["isVideoNote"] = isVideoNote
-      if (waveform != null) fullPayload["waveform"] = waveform
-      val fullPayloadString = JSONObject(fullPayload).toString()
+      val apiBaseUrl = apiBaseUrlLocked()
+      val token = authHeaderTokenLocked()
+      val userId = normalized(getConfigValueLocked("userId"))
       val myPublicKeyPem = normalized(getConfigValueLocked("publicKeyPem") ?: getConfigValueLocked("publicKey"))
-      val recipientPublicKey = if (!isGroup) {
-        friendPublicKey ?: return@synchronized mapOf("accepted" to false, "reason" to "missing_friend_key", "messageId" to messageId)
-      } else {
-        null
-      }
 
-      val encryptedContent = if (isGroup) fullPayloadString else {
-        try {
-          chatEngineEncryptHybridMessage(recipientPublicKey!!, fullPayloadString, myPublicKeyPem)
-        } catch (e: Throwable) {
-          upsertLocalStatusLocked(chatId, messageId, "error")
-          appendJournalLocked(
-            "native-send-message-error",
-            mapOf("chatId" to chatId, "messageId" to messageId, "reason" to "encrypt_failed", "error" to (e.message ?: "encrypt_failed")),
-          )
-          emitChangeLocked("messageStatusChanged", chatId, messageId)
-          return@synchronized mapOf("accepted" to false, "reason" to "encrypt_failed", "messageId" to messageId)
+      Thread {
+        // ── Now resolve friend public key (may do synchronous HTTP — no longer blocks UI) ──
+        val keyResolveStartMs = System.currentTimeMillis()
+        val friendPublicKey = if (isGroup) null else {
+          synchronized(lock) { resolveFriendPublicKeyLocked(chatId, peerUserId) }
+            ?: run {
+              Log.w(
+                "ChatEngine",
+                "sendMessage queued reason=missing_friend_key chatId=$chatId messageId=$messageId peerUserId=$peerUserId keyResolveMs=${System.currentTimeMillis() - keyResolveStartMs}",
+              )
+              synchronized(lock) {
+                pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
+                upsertLocalStatusLocked(chatId, messageId, "pending")
+                queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_friend_key")
+                emitChangeLocked("messageStatusChanged", chatId, messageId)
+                loadChatHistoryIfNeededLocked(chatId, force = true)
+                ensureNativeTransportAsync("send_missing_friend_key")
+              }
+              return@Thread
+            }
         }
-      }
+        Log.i("ChatEngine", "sendMessage keyResolved in ${System.currentTimeMillis() - keyResolveStartMs}ms chatId=$chatId messageId=$messageId hasKey=${friendPublicKey != null}")
 
-      optimisticMessage["encryptedContent"] = encryptedContent
-      optimisticRow["message"] = optimisticMessage
-      upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
-      pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
+        val needsUpload =
+          setOf("image", "gif", "file", "voice", "video", "music").contains(type) &&
+            !mediaUrl.isNullOrBlank() &&
+            isLocalMediaUri(mediaUrl!!)
 
-      val pushPreview = text.trim().let { trimmed ->
-        if (trimmed.isNotEmpty()) {
-          if (trimmed.length <= 160) trimmed else trimmed.take(159) + "…"
+        var finalMediaUrl = mediaUrl
+        var finalFileName = fileName
+        var finalFileSize = fileSize
+
+        if (needsUpload) {
+          if (apiBaseUrl.isNullOrBlank() || token.isNullOrBlank() || userId.isNullOrBlank()) {
+            synchronized(lock) {
+              upsertLocalStatusLocked(chatId, messageId, "pending")
+              queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_upload_config")
+              appendJournalLocked(
+                "native-media-upload-error",
+                mapOf("chatId" to chatId, "messageId" to messageId, "reason" to "missing_upload_config"),
+              )
+              emitChangeLocked("messageStatusChanged", chatId, messageId)
+            }
+            return@Thread
+          }
+          synchronized(lock) {
+            appendJournalLocked(
+              "native-media-upload-start",
+              mapOf("chatId" to chatId, "messageId" to messageId, "type" to type),
+            )
+          }
+
+          val uploadResult = uploadLocalMediaLocked(mediaUrl!!, type, fileName, userId, token, apiBaseUrl) { p ->
+            synchronized(lock) {
+              setLiveMessageUploadProgressLocked(chatId, messageId, p * 0.90f)
+            }
+          }
+
+          synchronized(lock) {
+            when (uploadResult) {
+              is LocalMediaUploadOutcome.Success -> {
+                finalMediaUrl = uploadResult.value.remoteUrl
+                if (finalFileName.isNullOrBlank()) finalFileName = uploadResult.value.fileName
+                if (finalFileSize == null) finalFileSize = uploadResult.value.fileSize
+                val nextMetadata = linkedMapOf<String, Any?>()
+                val existingMetadata = payload["metadata"] as? Map<*, *> ?: emptyMap<String, Any?>()
+                existingMetadata.forEach { (k, v) -> if (k != null) nextMetadata[k.toString()] = v }
+                nextMetadata["mediaUrl"] = finalMediaUrl
+                if (!localPlaybackMediaUrl.isNullOrBlank()) {
+                  nextMetadata["localMediaUrl"] = localPlaybackMediaUrl
+                }
+                if (!finalFileName.isNullOrBlank()) nextMetadata["fileName"] = finalFileName
+                if (finalFileSize != null) nextMetadata["fileSize"] = finalFileSize
+                effectivePayload["metadata"] = nextMetadata
+                effectivePayload["chatId"] = chatId
+                effectivePayload["messageId"] = messageId
+                effectivePayload["type"] = type
+                effectivePayload["text"] = text
+                optimisticMessage["mediaUrl"] = finalMediaUrl
+                if (!localPlaybackMediaUrl.isNullOrBlank()) {
+                  optimisticMessage["localMediaUrl"] = localPlaybackMediaUrl
+                }
+                if (!finalFileName.isNullOrBlank()) optimisticMessage["fileName"] = finalFileName
+                if (finalFileSize != null) optimisticMessage["fileSize"] = finalFileSize
+                optimisticRow["message"] = optimisticMessage
+                upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
+                appendJournalLocked(
+                  "native-media-upload-ok",
+                  mapOf("chatId" to chatId, "messageId" to messageId, "url" to finalMediaUrl),
+                )
+                Log.d(
+                  "ChatEngine",
+                  "voice upload complete chatId=$chatId messageId=$messageId remoteUrl=${finalMediaUrl?.take(120)} localPlayback=${localPlaybackMediaUrl?.take(120)} type=$type",
+                )
+              }
+              is LocalMediaUploadOutcome.Failure -> {
+                val reason = uploadResult.reason
+                val shouldQueue = setOf("upload_failed", "upload_timeout", "missing_upload_config").contains(reason)
+                upsertLocalStatusLocked(chatId, messageId, if (shouldQueue) "pending" else "error")
+                appendJournalLocked(
+                  "native-media-upload-error",
+                  mapOf("chatId" to chatId, "messageId" to messageId, "reason" to reason),
+                )
+                emitChangeLocked("messageStatusChanged", chatId, messageId)
+                if (shouldQueue) {
+                  queueOutboundDraftLocked(chatId, messageId, effectivePayload, reason)
+                }
+                return@Thread
+              }
+            }
+          }
+        }
+
+        val encryptStartMs = System.currentTimeMillis()
+        val fullPayload = linkedMapOf<String, Any?>("text" to text)
+        if (!finalMediaUrl.isNullOrBlank()) fullPayload["mediaUrl"] = finalMediaUrl
+        if (!mediaKey.isNullOrBlank()) fullPayload["mediaKey"] = mediaKey
+        if (!finalFileName.isNullOrBlank()) fullPayload["fileName"] = finalFileName
+        if (finalFileSize != null) fullPayload["fileSize"] = finalFileSize
+        if (latitude != null) fullPayload["latitude"] = latitude
+        if (longitude != null) fullPayload["longitude"] = longitude
+        if (duration != null) fullPayload["duration"] = duration
+        if (width != null) fullPayload["width"] = width
+        if (height != null) fullPayload["height"] = height
+        if (!replyToId.isNullOrBlank()) fullPayload["replyToId"] = replyToId
+        if (contact != null) fullPayload["contact"] = contact
+        if (!caption.isNullOrBlank()) fullPayload["caption"] = caption
+        if (!thumbnailBase64.isNullOrBlank()) fullPayload["thumbnailBase64"] = thumbnailBase64
+        if (viewOnce != null) fullPayload["viewOnce"] = viewOnce
+        if (isVideoNote != null) fullPayload["isVideoNote"] = isVideoNote
+        if (waveform != null) fullPayload["waveform"] = waveform
+        val fullPayloadString = JSONObject(fullPayload).toString()
+
+        val recipientPublicKey = if (!isGroup) {
+          friendPublicKey ?: run {
+             synchronized(lock) {
+                upsertLocalStatusLocked(chatId, messageId, "error")
+                emitChangeLocked("messageStatusChanged", chatId, messageId)
+             }
+             return@Thread
+          }
         } else {
-          when (type) {
-            "image" -> "Photo"
-            "video" -> "Video"
-            "voice" -> "Voice message"
-            "music" -> "Audio"
-            "file" -> "File"
-            "location" -> "Location"
-            "contact" -> "Contact"
-            "gif" -> "GIF"
-            else -> ""
-          }
+          null
         }
-      }
-      val wirePayload = linkedMapOf<String, Any?>(
-        "id" to messageId,
-        "fromId" to normalized(getConfigValueLocked("userId")),
-        "encryptedContent" to encryptedContent,
-        "timestamp" to timestampMs,
-        "type" to type,
-        "pushPreview" to pushPreview,
-        "mediaUrl" to null,
-        "fileName" to null,
-        "latitude" to null,
-        "longitude" to null,
-      )
 
-      val client = phoenixClient
-      if (client == null) {
-        upsertLocalStatusLocked(chatId, messageId, "pending")
-        queueOutboundDraftLocked(chatId, messageId, effectivePayload, "no_native_socket")
-        emitChangeLocked("messageStatusChanged", chatId, messageId)
-        ensureNativeTransportAsync("send_no_socket")
-        return@synchronized mapOf(
-          "accepted" to true,
-          "queued" to true,
-          "reason" to "no_native_socket",
-          "messageId" to messageId,
-          "state" to "pending",
-        )
-      }
-      if (!nativeJoinedChatIds.contains(chatId)) {
-        joinNativeChatTopicIfNeededLocked(chatId)
-        upsertLocalStatusLocked(chatId, messageId, "pending")
-        queueOutboundDraftLocked(chatId, messageId, effectivePayload, "chat_not_joined")
-        emitChangeLocked("messageStatusChanged", chatId, messageId)
-        ensureNativeTransportAsync("send_chat_not_joined")
-        return@synchronized mapOf(
-          "accepted" to true,
-          "queued" to true,
-          "reason" to "chat_not_joined",
-          "messageId" to messageId,
-          "state" to "pending",
-        )
-      }
-      val ref = client.push(chatTopic(chatId), "message", wirePayload)
-      nativePendingMessagePushRefs[ref] = chatId to messageId
-      
-      Handler(Looper.getMainLooper()).postDelayed({
-        synchronized(lock) {
-          val pending = nativePendingMessagePushRefs.remove(ref)
-          if (pending != null) {
-            appendJournalLocked("native-send-timeout", mapOf("chatId" to pending.first, "messageId" to pending.second, "ref" to ref))
-            upsertLocalStatusLocked(pending.first, pending.second, "error")
-            emitChangeLocked("messageStatusChanged", pending.first, pending.second)
+        val encryptedContent = if (isGroup) fullPayloadString else {
+          val directRecipientPublicKey = recipientPublicKey ?: run {
+            synchronized(lock) {
+              upsertLocalStatusLocked(chatId, messageId, "error")
+              emitChangeLocked("messageStatusChanged", chatId, messageId)
+            }
+            return@Thread
+          }
+          try {
+            chatEngineEncryptHybridMessage(directRecipientPublicKey, fullPayloadString, myPublicKeyPem ?: "")
+          } catch (e: Throwable) {
+            synchronized(lock) {
+              upsertLocalStatusLocked(chatId, messageId, "error")
+              appendJournalLocked(
+                "native-send-message-error",
+                mapOf("chatId" to chatId, "messageId" to messageId, "reason" to "encrypt_failed", "error" to (e.message ?: "encrypt_failed")),
+              )
+              emitChangeLocked("messageStatusChanged", chatId, messageId)
+            }
+            return@Thread
           }
         }
-      }, 15000L)
-      
-      val totalSendMs = System.currentTimeMillis() - optimisticStartMs
-      appendJournalLocked("native-send-message", mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref))
-      Log.i("ChatEngine", "sendMessage pushed chatId=$chatId messageId=$messageId ref=$ref encryptMs=${System.currentTimeMillis() - encryptStartMs} totalMs=$totalSendMs")
-      emitChangeLocked("messageStatusChanged", chatId, messageId)
-      mapOf("accepted" to true, "transport" to "native", "ref" to ref, "messageId" to messageId, "state" to "sending")
+
+        val pushPreview = text.trim().let { trimmed ->
+          if (trimmed.isNotEmpty()) {
+            if (trimmed.length <= 160) trimmed else trimmed.take(159) + "…"
+          } else {
+            when (type) {
+              "image" -> "Photo"
+              "video" -> "Video"
+              "voice" -> "Voice message"
+              "music" -> "Audio"
+              "file" -> "File"
+              "location" -> "Location"
+              "contact" -> "Contact"
+              "gif" -> "GIF"
+              else -> ""
+            }
+          }
+        }
+
+        val wirePayload = linkedMapOf<String, Any?>(
+          "id" to messageId,
+          "fromId" to userId,
+          "encryptedContent" to encryptedContent,
+          "timestamp" to timestampMs,
+          "type" to type,
+          "pushPreview" to pushPreview,
+          "mediaUrl" to null,
+          "fileName" to null,
+          "latitude" to null,
+          "longitude" to null,
+        )
+
+        synchronized(lock) {
+          optimisticMessage["encryptedContent"] = encryptedContent
+          optimisticRow["message"] = optimisticMessage
+          upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
+          pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
+
+          val client = phoenixClient
+          if (client == null) {
+            upsertLocalStatusLocked(chatId, messageId, "pending")
+            queueOutboundDraftLocked(chatId, messageId, effectivePayload, "no_native_socket")
+            emitChangeLocked("messageStatusChanged", chatId, messageId)
+            ensureNativeTransportAsync("send_no_socket")
+            return@Thread
+          }
+          if (!nativeJoinedChatIds.contains(chatId)) {
+            joinNativeChatTopicIfNeededLocked(chatId)
+            upsertLocalStatusLocked(chatId, messageId, "pending")
+            queueOutboundDraftLocked(chatId, messageId, effectivePayload, "chat_not_joined")
+            emitChangeLocked("messageStatusChanged", chatId, messageId)
+            ensureNativeTransportAsync("send_chat_not_joined")
+            return@Thread
+          }
+
+          val ref = client.push(chatTopic(chatId), "message", wirePayload)
+          nativePendingMessagePushRefs[ref] = chatId to messageId
+          
+          Handler(Looper.getMainLooper()).postDelayed({
+            synchronized(lock) {
+              val pending = nativePendingMessagePushRefs.remove(ref)
+              if (pending != null) {
+                appendJournalLocked("native-send-timeout", mapOf("chatId" to pending.first, "messageId" to pending.second, "ref" to ref))
+                upsertLocalStatusLocked(pending.first, pending.second, "error")
+                emitChangeLocked("messageStatusChanged", pending.first, pending.second)
+              }
+            }
+          }, 15000L)
+          
+          val totalSendMs = System.currentTimeMillis() - optimisticStartMs
+          appendJournalLocked("native-send-message", mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref))
+          Log.i("ChatEngine", "sendMessage pushed chatId=$chatId messageId=$messageId ref=$ref encryptMs=${System.currentTimeMillis() - encryptStartMs} totalMs=$totalSendMs")
+          emitChangeLocked("messageStatusChanged", chatId, messageId)
+        }
+      }.start()
+
+      mapOf(
+        "accepted" to true, 
+        "queued" to true, 
+        "messageId" to messageId, 
+        "state" to "sending"
+      )
     }
   }
 
@@ -2435,6 +2454,16 @@ internal object ChatEngine {
     }
   }
 
+  private fun setLiveMessageUploadProgressLocked(chatId: String, messageId: String, progress: Float) {
+    val row = liveMessageRowsByChat[chatId]?.get(messageId) ?: return
+    val nextRow = LinkedHashMap(row)
+    val msg = (nextRow["message"] as? Map<*, *>)?.let { LinkedHashMap(it) } ?: return
+    msg["uploadProgress"] = progress
+    nextRow["message"] = msg
+    liveMessageRowsByChat[chatId]?.put(messageId, nextRow)
+    emitChangeLocked("chatMessageChanged", chatId, messageId)
+  }
+
   private fun markLiveMessageDeletedLocked(chatId: String, messageId: String) {
     liveMessageRowsByChat[chatId]?.let { perChat ->
       perChat.remove(messageId)
@@ -2876,6 +2905,7 @@ internal object ChatEngine {
     userId: String,
     token: String,
     apiBaseUrl: String,
+    onProgress: ((Float) -> Unit)? = null,
   ): LocalMediaUploadOutcome {
     val uploadUrl = resolveUploadUrl(apiBaseUrl) ?: return LocalMediaUploadOutcome.Failure("invalid_upload_url")
     val source = resolveLocalMediaSource(localUri, fileNameHint, messageType)
@@ -2886,9 +2916,34 @@ internal object ChatEngine {
       .addFormDataPart("user_id", userId)
       .addFormDataPart("type", uploadCategoryForMessageType(messageType))
       .build()
+      
+    val progressBody = object : RequestBody() {
+      override fun contentType() = multipart.contentType()
+      override fun contentLength() = multipart.contentLength()
+      override fun writeTo(sink: okio.BufferedSink) {
+        val countingSink = object : okio.ForwardingSink(sink) {
+          private var bytesWritten = 0L
+          private val totalLength = contentLength()
+          private var lastEmitMs = 0L
+          override fun write(source: okio.Buffer, byteCount: Long) {
+            super.write(source, byteCount)
+            bytesWritten += byteCount
+            val now = System.currentTimeMillis()
+            if (totalLength > 0 && now - lastEmitMs > 50) {
+              lastEmitMs = now
+              onProgress?.invoke(bytesWritten.toFloat() / totalLength.toFloat())
+            }
+          }
+        }
+        val bufferedSink = countingSink.buffer()
+        multipart.writeTo(bufferedSink)
+        bufferedSink.flush()
+      }
+    }
+
     val request = Request.Builder()
       .url(uploadUrl)
-      .post(multipart)
+      .post(progressBody)
       .header("ngrok-skip-browser-warning", "true")
       .header("Authorization", "Bearer $token")
       .build()
@@ -2933,7 +2988,7 @@ internal object ChatEngine {
     appendJournalLocked("native-chat-history-load-start", mapOf("chatId" to chatId))
 
     val requestBuilder = Request.Builder()
-      .url("$apiBaseUrl/api/chats/$userId")
+      .url("$apiBaseUrl/api/chat/$chatId/messages")
       .get()
       .header("Accept", "application/json")
       .header("ngrok-skip-browser-warning", "true")
@@ -2973,18 +3028,7 @@ internal object ChatEngine {
 
   private fun applyChatHistoryResponseLocked(chatId: String, bodyString: String) {
     try {
-      val root = JSONArray(bodyString)
-      var targetChat: JSONObject? = null
-      for (i in 0 until root.length()) {
-        val chat = root.optJSONObject(i) ?: continue
-        val id = normalized(chat.opt("chatId") ?: chat.opt("chat_id"))
-        if (id == chatId) {
-          targetChat = chat
-          break
-        }
-      }
-      targetChat?.let { cacheChatPeerInfoLocked(chatId, it) }
-      val messages = targetChat?.optJSONArray("messages") ?: JSONArray()
+      val messages = JSONArray(bodyString)
       val rows = buildHistoryRowsLocked(chatId, messages)
       historyRowsByChat[chatId] = rows.toMutableList()
       state["updatedAt"] = System.currentTimeMillis()
@@ -3319,6 +3363,13 @@ internal object ChatEngine {
         if (event == "message") {
           val insertedMessageId = applyNativeIncomingMessageEventLocked(chatId, payload)
           if (!insertedMessageId.isNullOrBlank()) {
+            val fromId = normalized(payload["fromId"] ?: payload["from_id"])
+            val myUserId = normalizedUpper(getConfigValueLocked("userId"))
+            val isMe = normalizedUpper(fromId) == myUserId
+            if (!isMe) {
+              sendDeliveryReceipt(mapOf("chatId" to chatId, "messageId" to insertedMessageId))
+            }
+
             if (peerTypingUserIdsByChatId[chatId] != null) {
               peerTypingUserIdsByChatId.remove(chatId)
               emitChangeLocked("peerTyping", chatId, "false")

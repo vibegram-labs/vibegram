@@ -63,6 +63,7 @@ private let chatListSendVerticalTiming = CAMediaTimingFunction(
   Float(0.27920937042459737),
   Float(0.91025390625)
 )
+private let chatReactionDebugLogs = true
 
 public final class ChatListView: ExpoView, UICollectionViewDataSource,
   UICollectionViewDelegateFlowLayout
@@ -83,6 +84,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private let wallpaperLayer = CAGradientLayer()
   private let wallpaperPatternLayer = CAGradientLayer()
   private let wallpaperPatternMaskLayer = CALayer()
+  private let scrollToneOverlay = UIView()
+  private let scrollToneTopLayer = CAGradientLayer()
+  private let scrollToneBottomLayer = CAGradientLayer()
   var rows: [ChatListRow] = []
   private var appearance = ChatListAppearance.fallback
   private var queuedAppearanceAfterSendTransition: ChatListAppearance?
@@ -125,6 +129,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var documentPreviewDataSource: ChatListDocumentPreviewDataSource?
   private var documentPreviewCacheByRemoteURL: [String: URL] = [:]
   private var documentPreviewInFlightURLs = Set<String>()
+  private var reactionDebugTargetMessageId: String?
+  private var reactionDebugTargetEmoji: String?
+  private var reactionDebugRemainingRowsChecks: Int = 0
 
   private var hiddenMessageId: String?
   private var pendingSendTransition: SendTransitionPayload?
@@ -224,7 +231,17 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     collectionView.dataSource = self
     collectionView.delegate = self
     installInteractionGestures()
+
+    scrollToneOverlay.isUserInteractionEnabled = false
+    scrollToneOverlay.backgroundColor = .clear
+    scrollToneOverlay.clipsToBounds = true
+    scrollToneOverlay.layer.addSublayer(scrollToneTopLayer)
+    scrollToneOverlay.layer.addSublayer(scrollToneBottomLayer)
+    addSubview(scrollToneOverlay)
+
     applyWallpaperAppearance()
+    applyScrollToneTheme()
+    updateScrollToneOverlay(offsetY: 0.0)
 
     // Transition overlay host — always on top of everything
     transitionOverlayHost.isUserInteractionEnabled = false
@@ -255,6 +272,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     return (value * scale).rounded() / scale
   }
 
+  private func reactionDebugLog(_ message: String) {
+    guard chatReactionDebugLogs else { return }
+    NSLog("[ChatReactionDebug] %@", message)
+  }
+
   deinit {
     NotificationCenter.default.removeObserver(self)
     updateChatEngineChannelBinding(forceDetach: true)
@@ -274,6 +296,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     wallpaperLayer.frame = bounds
     wallpaperPatternLayer.frame = bounds
     wallpaperPatternMaskLayer.frame = wallpaperPatternLayer.bounds
+    scrollToneOverlay.frame = bounds
+    updateScrollToneOverlay(offsetY: collectionView.contentOffset.y)
     transitionOverlayHost.frame = bounds
     layoutDebugPanel()
 
@@ -322,6 +346,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let mergedRows = mergedRowsPayload(from: nextRows)
     let parsed = mergedRows.compactMap(ChatListRow.init).filter { row in
       row.messageType != "agent_progress"
+    }
+    if let targetMessageId = reactionDebugTargetMessageId, reactionDebugRemainingRowsChecks > 0 {
+      reactionDebugRemainingRowsChecks -= 1
+      if let row = parsed.first(where: { $0.messageId == targetMessageId }) {
+        reactionDebugLog(
+          "setRows target id=\(targetMessageId) reaction=\(row.reactionEmoji ?? "nil") checksLeft=\(reactionDebugRemainingRowsChecks)"
+        )
+      } else {
+        reactionDebugLog(
+          "setRows target missing id=\(targetMessageId) parsedCount=\(parsed.count) checksLeft=\(reactionDebugRemainingRowsChecks)"
+        )
+      }
     }
     let previousRows = rows
     let previousDistanceFromBottom = currentDistanceFromBottom()
@@ -427,7 +463,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       // Find first mismatch to help debug which key triggered the reorder
       var mismatchIdx = -1
       for i in 0..<min(oldSharedOrder.count, newSharedOrder.count) {
-        if oldSharedOrder[i] != newSharedOrder[i] { mismatchIdx = i; break }
+        if oldSharedOrder[i] != newSharedOrder[i] {
+          mismatchIdx = i
+          break
+        }
       }
       if mismatchIdx < 0 && oldSharedOrder.count != newSharedOrder.count {
         mismatchIdx = min(oldSharedOrder.count, newSharedOrder.count)
@@ -608,7 +647,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     let expectedAfterCount = previousRows.count + insertions.count - deletions.count
     guard expectedAfterCount == parsed.count else {
-      let insertedKeys = parsed.enumerated().filter { !oldSet.contains($0.element.key) }.map { String($0.element.key.prefix(16)) }
+      let insertedKeys = parsed.enumerated().filter { !oldSet.contains($0.element.key) }.map {
+        String($0.element.key.prefix(16))
+      }
       NSLog(
         "[ChatListView] ⚠️ batch count mismatch (expected %d, got %d) — falling back to reloadData insertedKeys:%@",
         expectedAfterCount, parsed.count, insertedKeys.prefix(5).joined(separator: ","))
@@ -642,7 +683,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let insertedKeysSummary = insertions.prefix(3).compactMap { ip -> String? in
       guard ip.item < parsed.count else { return nil }
       let row = parsed[ip.item]
-      return "\(String(row.key.prefix(12)))(\(row.isMe ? "me" : "them"),\(row.isAgentMessage ? "agent" : "user"))"
+      return
+        "\(String(row.key.prefix(12)))(\(row.isMe ? "me" : "them"),\(row.isAgentMessage ? "agent" : "user"))"
     }.joined(separator: " ")
     NSLog(
       "[ChatListView] animDecision — shouldAnim:%@ isSmall:%@ wasNear:%@ mode:%d del:%d ins:%d reload:%d keys:[%@]",
@@ -891,7 +933,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           let cell: UICollectionViewCell
           let key: String
           let indexPath: IndexPath
-          let delta: CGFloat      // shift delta for existing cells
+          let delta: CGFloat  // shift delta for existing cells
           let isNew: Bool
           let isHiddenForSend: Bool
         }
@@ -905,9 +947,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           if let oldScreenY = preUpdateScreenY[key] {
             let currentScreenY = cell.center.y - postOffset
             let delta = pixelAlignedValue(oldScreenY - currentScreenY)
-            cellInfos.append(CellAnimInfo(
-              cell: cell, key: key, indexPath: ip, delta: delta,
-              isNew: false, isHiddenForSend: false))
+            cellInfos.append(
+              CellAnimInfo(
+                cell: cell, key: key, indexPath: ip, delta: delta,
+                isNew: false, isHiddenForSend: false))
             if abs(delta) > 0.5 {
               dbgMaxDelta = max(dbgMaxDelta, abs(delta))
             }
@@ -916,9 +959,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               guard let hid = self.hiddenMessageId, ip.item < self.rows.count else { return false }
               return self.rows[ip.item].messageId == hid
             }()
-            cellInfos.append(CellAnimInfo(
-              cell: cell, key: key, indexPath: ip, delta: 0,
-              isNew: true, isHiddenForSend: isHidden))
+            cellInfos.append(
+              CellAnimInfo(
+                cell: cell, key: key, indexPath: ip, delta: 0,
+                isNew: true, isHiddenForSend: isHidden))
           }
         }
 
@@ -993,6 +1037,13 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     updateChatEngineBinding()
     updateChatEngineChannelBinding()
     refreshVisibleStatuses(reason: "chatId")
+    // Eagerly load native rows if history is already cached in ChatEngine.
+    // This allows the list to render instantly without waiting for JS props.
+    if statusAuthorityEnabled, !engineChatId.isEmpty,
+      ChatEngine.shared.isChatHistoryLoaded(chatId: engineChatId)
+    {
+      setRows(sourceRowsPayload)
+    }
   }
 
   func setEngineMyUserId(_ value: String) {
@@ -1040,6 +1091,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     inputBar?.applyAppearance(next)
     if visualChanged {
       applyWallpaperAppearance()
+      applyScrollToneTheme()
+      updateScrollToneOverlay(offsetY: collectionView.contentOffset.y)
       applyActivityOverlayTheme()
       collectionView.reloadData()
     }
@@ -1290,6 +1343,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       guard let mediaURL = row.mediaUrl, !mediaURL.isEmpty else { return }
       self.openDocumentInApp(urlString: mediaURL)
     }
+    cell.onMediaNaturalSizeResolved = { [weak self] messageId, mediaURL, size in
+      self?.handleResolvedMediaSize(messageId: messageId, mediaURL: mediaURL, size: size)
+    }
     // Removed onVoiceBubbleTap so iOS uses Native Audio playback for Voice bubbles (like Android)
     cell.setExternalVoicePlayback(
       messageId: activeVoicePlaybackMessageId,
@@ -1318,11 +1374,29 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let hasFileNameHint =
       !(row.fileName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
     let isFileLikeType = row.messageType == "file"
+    let isVoiceVisual = row.visualKind == .voice
     let lowerMediaURL = mediaURL.lowercased()
     let isAgentDocURL =
       lowerMediaURL.contains("/uploads/agent-docs/")
       || lowerMediaURL.contains("/api/agent/document/")
-    guard isFileLikeType || hasFileNameHint || isAgentDocURL else { return }
+    if isVoiceVisual {
+      if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
+        VoiceBubblePlaybackCoordinator.shared.toggle(
+          cell: cell, messageId: row.messageId, mediaURL: mediaURL
+        )
+      }
+      return
+    }
+    let isImageVisual = row.visualKind == .media && row.messageType != "file"
+    if isImageVisual {
+      let seedImage = (collectionView.cellForItem(at: indexPath) as? ChatListCell)?
+        .currentMediaImage()
+      presentImageEditView(for: row, mediaURL: mediaURL, seedImage: seedImage)
+      return
+    }
+    let isMediaOrVideo =
+      row.visualKind == .media || row.visualKind == .video || row.visualKind == .videoNote
+    guard isFileLikeType || hasFileNameHint || isAgentDocURL || isMediaOrVideo else { return }
     openDocumentInApp(urlString: mediaURL)
   }
 
@@ -1454,6 +1528,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let offsetY = scrollView.contentOffset.y
     _ = offsetY - previousOffsetY  // delta unused
     previousOffsetY = offsetY
+    updateScrollToneOverlay(offsetY: offsetY)
 
     if let activeSendTransition {
       if skipNextTransitionScrollCorrection {
@@ -1585,70 +1660,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private func renderNativeReactionFxBurst(emoji: String, at point: CGPoint, tintColor: UIColor) {
-    let container = UIView(frame: bounds)
-    container.clipsToBounds = false
-    container.isUserInteractionEnabled = false
-    transitionOverlayHost.addSubview(container)
-
-    let emojiLabel = UILabel()
-    emojiLabel.text = emoji
-    emojiLabel.font = UIFont.systemFont(ofSize: 30)
-    emojiLabel.sizeToFit()
-    emojiLabel.center = point
-    emojiLabel.alpha = 0.0
-    emojiLabel.transform = CGAffineTransform(scaleX: 0.74, y: 0.74)
-    container.addSubview(emojiLabel)
-
-    UIView.animateKeyframes(
-      withDuration: 0.52,
-      delay: 0.0,
-      options: [.calculationModeCubic, .beginFromCurrentState]
-    ) {
-      UIView.addKeyframe(withRelativeStartTime: 0.0, relativeDuration: 0.25) {
-        emojiLabel.alpha = 1.0
-        emojiLabel.transform = CGAffineTransform(scaleX: 1.18, y: 1.18)
-      }
-      UIView.addKeyframe(withRelativeStartTime: 0.24, relativeDuration: 0.76) {
-        emojiLabel.alpha = 0.0
-        emojiLabel.center = CGPoint(x: point.x, y: point.y - 32.0)
-        emojiLabel.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
-      }
-    }
-
-    let pulseDotSize: CGFloat = 10
-    let pulseDot = UIView(frame: CGRect(x: 0, y: 0, width: pulseDotSize, height: pulseDotSize))
-    pulseDot.layer.cornerRadius = pulseDotSize * 0.5
-    pulseDot.backgroundColor = tintColor.withAlphaComponent(0.9)
-    pulseDot.center = point
-    pulseDot.alpha = 0.85
-    container.addSubview(pulseDot)
-
-    let pulseRingSize: CGFloat = 16
-    let pulseRing = UIView(frame: CGRect(x: 0, y: 0, width: pulseRingSize, height: pulseRingSize))
-    pulseRing.layer.cornerRadius = pulseRingSize * 0.5
-    pulseRing.layer.borderWidth = 2
-    pulseRing.layer.borderColor = tintColor.withAlphaComponent(0.9).cgColor
-    pulseRing.center = point
-    pulseRing.alpha = 0.85
-    container.addSubview(pulseRing)
-
-    UIView.animate(
-      withDuration: 0.46,
-      delay: 0.02,
-      options: [.curveEaseOut, .beginFromCurrentState]
-    ) {
-      pulseDot.alpha = 0.0
-      pulseDot.transform = CGAffineTransform(scaleX: 1.9, y: 1.9)
-      pulseRing.alpha = 0.0
-      pulseRing.transform = CGAffineTransform(scaleX: 2.6, y: 2.6)
-    } completion: { _ in
-      pulseDot.removeFromSuperview()
-      pulseRing.removeFromSuperview()
-    }
-
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.62) {
-      container.removeFromSuperview()
-    }
+    ChatReactionFxModule.shared.playLandingEffect(
+      emoji: emoji,
+      at: point,
+      in: transitionOverlayHost,
+      tintOverride: tintColor
+    )
   }
 
   private func messageId(fromRawRow row: [String: Any]) -> String? {
@@ -1683,6 +1700,77 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     -> [String: Any]?
   {
     payload.first(where: { messageId(fromRawRow: $0) == targetMessageId })
+  }
+
+  private func rowByApplyingReactionEmoji(
+    _ emoji: String,
+    toMessageId targetMessageId: String,
+    row: [String: Any]
+  ) -> (row: [String: Any], changed: Bool) {
+    guard messageId(fromRawRow: row) == targetMessageId else { return (row, false) }
+    guard var message = row["message"] as? [String: Any] else { return (row, false) }
+    let existing = (message["reactionEmoji"] as? String)?.trimmingCharacters(
+      in: .whitespacesAndNewlines)
+    if existing == emoji {
+      return (row, false)
+    }
+    message["reactionEmoji"] = emoji
+    var patched = row
+    patched["message"] = message
+    return (patched, true)
+  }
+
+  func applyLocalReactionEmoji(_ emoji: String, toMessageId messageId: String) {
+    let targetMessageId = messageId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let trimmedEmoji = emoji.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !targetMessageId.isEmpty, !trimmedEmoji.isEmpty else { return }
+    reactionDebugTargetMessageId = targetMessageId
+    reactionDebugTargetEmoji = trimmedEmoji
+    reactionDebugRemainingRowsChecks = 12
+    reactionDebugLog(
+      "applyLocal start id=\(targetMessageId) emoji=\(trimmedEmoji) sourceCount=\(sourceRowsPayload.count) nativeOut=\(nativeOutgoingRowsById[targetMessageId] != nil ? "Y" : "N") nativeEngine=\(nativeEngineRowsById[targetMessageId] != nil ? "Y" : "N")"
+    )
+
+    var didPatch = false
+    var sourcePatched = false
+    var outgoingPatched = false
+    var enginePatched = false
+
+    if !sourceRowsPayload.isEmpty {
+      let patched = sourceRowsPayload.map { row -> [String: Any] in
+        let result = rowByApplyingReactionEmoji(
+          trimmedEmoji, toMessageId: targetMessageId, row: row)
+        if result.changed {
+          didPatch = true
+          sourcePatched = true
+        }
+        return result.row
+      }
+      sourceRowsPayload = patched
+    }
+
+    if let row = nativeOutgoingRowsById[targetMessageId] {
+      let result = rowByApplyingReactionEmoji(trimmedEmoji, toMessageId: targetMessageId, row: row)
+      nativeOutgoingRowsById[targetMessageId] = result.row
+      didPatch = didPatch || result.changed
+      outgoingPatched = result.changed
+    }
+
+    if let row = nativeEngineRowsById[targetMessageId] {
+      let result = rowByApplyingReactionEmoji(trimmedEmoji, toMessageId: targetMessageId, row: row)
+      nativeEngineRowsById[targetMessageId] = result.row
+      didPatch = didPatch || result.changed
+      enginePatched = result.changed
+    }
+
+    reactionDebugLog(
+      "applyLocal patchResult id=\(targetMessageId) didPatch=\(didPatch ? "Y" : "N") source=\(sourcePatched ? "Y" : "N") outgoing=\(outgoingPatched ? "Y" : "N") engine=\(enginePatched ? "Y" : "N")"
+    )
+    guard didPatch else {
+      reactionDebugLog("applyLocal skipped id=\(targetMessageId) no row changed")
+      return
+    }
+    setRows(sourceRowsPayload)
   }
 
   private func resolveTransitionRow(for payload: SendTransitionPayload) -> ChatListRow? {
@@ -1862,6 +1950,17 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
     if let baseBubbleShape = baseMessage["bubbleShape"] {
       mergedMessage["bubbleShape"] = baseBubbleShape
+    }
+    if let targetMessageId = reactionDebugTargetMessageId,
+      let baseId = normalizedMessageId(baseMessage["id"]),
+      baseId == targetMessageId
+    {
+      let baseReaction = (baseMessage["reactionEmoji"] as? String) ?? "nil"
+      let overlayReaction = (overlayMessage["reactionEmoji"] as? String) ?? "nil"
+      let mergedReaction = (mergedMessage["reactionEmoji"] as? String) ?? "nil"
+      reactionDebugLog(
+        "mergeRow id=\(targetMessageId) baseReaction=\(baseReaction) overlayReaction=\(overlayReaction) mergedReaction=\(mergedReaction)"
+      )
     }
 
     var mergedRow = baseRow
@@ -2263,6 +2362,76 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     wallpaperPatternMaskLayer.contents = maskImage
     wallpaperPatternMaskLayer.frame = wallpaperPatternLayer.bounds
     wallpaperPatternLayer.isHidden = false
+  }
+
+  private func applyScrollToneTheme() {
+    let isDark = appearance.isDark
+    let topBase = appearance.wallpaperGradient.first ?? (isDark ? UIColor.black : UIColor.white)
+    let bottomBase = appearance.wallpaperGradient.last ?? topBase
+    let topTint = blendedScrollToneBase(color: topBase, isDark: isDark)
+    let bottomTint = blendedScrollToneBase(color: bottomBase, isDark: isDark)
+
+    scrollToneTopLayer.colors = [
+      topTint.withAlphaComponent(isDark ? 0.20 : 0.14).cgColor,
+      UIColor.clear.cgColor,
+    ]
+    scrollToneTopLayer.locations = [0.0, 1.0]
+    scrollToneTopLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
+    scrollToneTopLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
+
+    scrollToneBottomLayer.colors = [
+      UIColor.clear.cgColor,
+      bottomTint.withAlphaComponent(isDark ? 0.12 : 0.08).cgColor,
+    ]
+    scrollToneBottomLayer.locations = [0.0, 1.0]
+    scrollToneBottomLayer.startPoint = CGPoint(x: 0.5, y: 0.0)
+    scrollToneBottomLayer.endPoint = CGPoint(x: 0.5, y: 1.0)
+  }
+
+  private func updateScrollToneOverlay(offsetY: CGFloat) {
+    guard bounds.width > 0.0, bounds.height > 0.0 else { return }
+
+    let topHeight = min(bounds.height * 0.34, 250.0)
+    let bottomHeight = min(bounds.height * 0.24, 180.0)
+    scrollToneTopLayer.frame = CGRect(x: 0.0, y: 0.0, width: bounds.width, height: topHeight)
+    scrollToneBottomLayer.frame = CGRect(
+      x: 0.0, y: bounds.height - bottomHeight, width: bounds.width, height: bottomHeight)
+
+    let normalized = max(0.0, min(1.0, offsetY / 220.0))
+    let isDark = appearance.isDark
+    let topBaseOpacity: Float = isDark ? 0.34 : 0.26
+    let bottomBaseOpacity: Float = isDark ? 0.30 : 0.20
+    scrollToneTopLayer.opacity = min(0.62, topBaseOpacity + (Float(normalized) * 0.22))
+    scrollToneBottomLayer.opacity = min(0.48, bottomBaseOpacity + (Float(normalized) * 0.15))
+
+    let drift = max(-32.0, min(48.0, offsetY * 0.12))
+    scrollToneTopLayer.transform = CATransform3DMakeTranslation(0.0, -drift, 0.0)
+    scrollToneBottomLayer.transform = CATransform3DMakeTranslation(0.0, drift * 0.45, 0.0)
+  }
+
+  private func blendedScrollToneBase(color: UIColor, isDark: Bool) -> UIColor {
+    let target = isDark ? UIColor.black : UIColor.white
+    var cr: CGFloat = 0.0
+    var cg: CGFloat = 0.0
+    var cb: CGFloat = 0.0
+    var ca: CGFloat = 0.0
+    var tr: CGFloat = 0.0
+    var tg: CGFloat = 0.0
+    var tb: CGFloat = 0.0
+    var ta: CGFloat = 0.0
+    guard color.getRed(&cr, green: &cg, blue: &cb, alpha: &ca),
+      target.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
+    else {
+      return color
+    }
+    let mix: CGFloat = isDark ? 0.35 : 0.24
+    let inv = 1.0 - mix
+    return UIColor(
+      red: (cr * inv) + (tr * mix),
+      green: (cg * inv) + (tg * mix),
+      blue: (cb * inv) + (tb * mix),
+      alpha: 1.0
+    )
   }
 
   private func resolvedWallpaperMaskImage(for key: String) -> CGImage? {
@@ -2761,6 +2930,56 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       responder = current.next
     }
     return window?.rootViewController
+  }
+
+  private func handleResolvedMediaSize(messageId: String?, mediaURL: String, size: CGSize) {
+    guard size.width > 1.0, size.height > 1.0 else { return }
+    let hasMatchingRow = rows.contains { row in
+      if let messageId, let rowMessageId = row.messageId, rowMessageId == messageId {
+        return true
+      }
+      return row.mediaUrl == mediaURL
+    }
+    guard hasMatchingRow else { return }
+
+    flowLayout.invalidateLayout()
+    collectionView.performBatchUpdates(nil)
+  }
+
+  private func presentImageEditView(for row: ChatListRow, mediaURL: String, seedImage: UIImage?) {
+    guard let presenter = topPresentingViewController() else { return }
+    ChatImageEditModule.presentEditor(
+      from: presenter,
+      messageId: row.messageId,
+      mediaURL: mediaURL,
+      initialImage: seedImage,
+      initialCaption: row.text
+    ) { [weak self] payload in
+      guard let self else { return }
+      var event: [String: Any] = [
+        "type": payload.eventType.rawValue,
+        "mediaUrl": payload.mediaURL,
+      ]
+      if let messageId = payload.messageId {
+        event["messageId"] = messageId
+      }
+      if let caption = payload.caption, !caption.isEmpty {
+        event["caption"] = caption
+      }
+      if let editedImageURL = payload.editedImageURL {
+        event["editedImageUri"] = editedImageURL.absoluteString
+      }
+      self.onNativeEvent(event)
+
+      if payload.eventType == .reply, let inputBar = self.inputBar, let messageId = row.messageId {
+        let preview = row.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        inputBar.showReplyBanner(
+          messageId: messageId,
+          text: preview.isEmpty ? "Photo" : preview,
+          isMe: row.isMe
+        )
+      }
+    }
   }
 
   private func openDocumentInApp(urlString: String) {

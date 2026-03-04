@@ -1771,7 +1771,7 @@ export const useChatStore = create<ChatState>()(
                 set({ isLoading: true, lastChatsLoad: Date.now() });
 
                 try {
-                    // Fetch chats via native-first path (fallbacks to JS API client).
+                    // Fetch chats via native module (pure native, no JS fallback).
                     const data = await fetchHomeChatsNativeFirst({
                         userId: auth.userId,
                         apiBaseUrl: ProxyManager.getInstance().getBestUrl(),
@@ -1779,114 +1779,177 @@ export const useChatStore = create<ChatState>()(
                     });
 
                     // Process chats
-                    // Process chats with merge logic - PRESERVE local plaintext!
+                    // When native engine is available (iOS/Android), skip expensive
+                    // per-message merging and decryption — native ChatEngine handles
+                    // all message loading, decryption and rendering independently.
+                    // Only extract chat metadata needed for the home list UI.
+                    const useNativeFastPath = require('react-native').Platform.OS === 'ios' || require('react-native').Platform.OS === 'android';
                     const currentChats = get().chats;
                     let processedChats: Chat[] = [];
 
-                    processedChats = await Promise.all(data.map(async (c: any) => {
-                        const existing = currentChats.find(ec => ec.chatId === c.chatId);
+                    if (useNativeFastPath) {
+                        // ── Fast path: lightweight metadata-only processing ──
+                        processedChats = data.map((c: any) => {
+                            const existing = currentChats.find(ec => ec.chatId === c.chatId);
+                            // Only keep the last message for preview text (no merge/decrypt)
+                            const serverMessagesRaw = c.messages || [];
+                            const lastServerMsg = serverMessagesRaw.length > 0
+                                ? normalizeMessage(serverMessagesRaw[serverMessagesRaw.length - 1])
+                                : null;
+                            // Preserve existing local messages if any (they may have decrypted content)
+                            const existingMessages = existing?.messages || [];
+                            // Use existing last message plaintext if server doesn't have it
+                            const lastMsg = lastServerMsg || (existingMessages.length > 0 ? existingMessages[existingMessages.length - 1] : null);
 
-                        // Normalize server messages to ensure camelCase keys (encryptedContent, etc.)
-                        const serverMessagesRaw = c.messages || [];
-                        const serverMessages = serverMessagesRaw.map(normalizeMessage);
-
-                        const localMessages = existing?.messages || [];
-
-                        // Merge server history into local state with ID-reconcile support.
-                        // This prevents "sent+error duplicate" rows when backend rewrites IDs.
-                        let mergedMessages = [...localMessages];
-                        let mergeInsertedCount = 0;
-                        let mergeReconciledCount = 0;
-                        for (const serverMsg of serverMessages) {
-                            const mergeResult = upsertIncomingMessage(
-                                mergedMessages,
-                                serverMsg,
-                                auth?.userId || null,
-                            );
-                            if (mergeResult.changed) {
-                                if (mergeResult.reconciledFromMessageId) {
-                                    mergeReconciledCount += 1;
-                                } else if (mergeResult.inserted) {
-                                    mergeInsertedCount += 1;
-                                }
-                                mergedMessages = mergeResult.messages;
-                            }
-                        }
-                        mergedMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
-                        chatStoreLog(`[ChatStore-TargetLog] User ${auth?.userId} loaded chat ${c.chatId}. API returned ${serverMessages.length} msgs. Merged result is ${mergedMessages.length} msgs.`);
-                        const undecryptableCount = mergedMessages.filter(m => m.encryptedContent && !m.plaintext).length;
-                        if (undecryptableCount > 0) {
-                            chatStoreLog(`[ChatStore-TargetLog] Out of ${mergedMessages.length} msgs, ${undecryptableCount} need decryption/rendering.`);
-                        }
-
-                        chatStoreMessageLog('loadChats:merged', {
-                            chatId: c.chatId,
-                            localCount: localMessages.length,
-                            serverCount: serverMessages.length,
-                            mergedCount: mergedMessages.length,
-                            inserted: mergeInsertedCount,
-                            reconciled: mergeReconciledCount,
+                            return {
+                                chatId: c.chatId,
+                                type: c.type || 'dm',
+                                name: c.name || null,
+                                description: c.description || null,
+                                avatarUrl: c.avatarUrl || null,
+                                creatorId: c.creatorId || null,
+                                memberCount: c.memberCount || null,
+                                role: c.role || 'member',
+                                members: Array.isArray(c.members)
+                                    ? c.members
+                                        .map((member: any) => {
+                                            const userId = String(member?.userId || member?.id || '').trim().toUpperCase();
+                                            if (!userId) return null;
+                                            const name =
+                                                typeof member?.name === 'string' && member.name.trim().length > 0
+                                                    ? member.name.trim()
+                                                    : undefined;
+                                            const rawRole =
+                                                typeof member?.role === 'string'
+                                                    ? member.role.trim().toLowerCase()
+                                                    : '';
+                                            const role =
+                                                rawRole === 'owner' || rawRole === 'admin' || rawRole === 'member' || rawRole === 'subscriber'
+                                                    ? rawRole
+                                                    : undefined;
+                                            return { userId, name, role };
+                                        })
+                                        .filter(Boolean)
+                                    : undefined,
+                                friendId: c.friendId,
+                                friendName: c.friendName || c.name || c.friendId,
+                                friendImage: c.friendImage || c.avatarUrl || null,
+                                friendKey: extractPublicKey(c) || extractPublicKey(existing),
+                                messages: existingMessages,
+                                lastMessage: lastMsg || undefined,
+                                unreadCount: c.unreadCount || 0,
+                                pinned: c.pinned || false,
+                                muted: c.muted || false,
+                                markedUnread: c.markedUnread || false
+                            };
                         });
+                        console.log(`[ChatStore] loadChats native fast path: ${processedChats.length} chats processed (no message merge)`);
+                    } else {
+                        // ── Full JS path: merge + decrypt (non-native platforms) ──
+                        processedChats = await Promise.all(data.map(async (c: any) => {
+                            const existing = currentChats.find(ec => ec.chatId === c.chatId);
 
-                        // DECRYPT LAST MESSAGE FOR PREVIEW if needed
-                        const lastMsg = mergedMessages[mergedMessages.length - 1];
-                        if (lastMsg && !lastMsg.plaintext && lastMsg.encryptedContent) {
-                            try {
-                                if (auth?.keyPair?.privateKey) {
-                                    const isFromMe = (lastMsg.fromId || '').toUpperCase() === (auth.userId || '').toUpperCase();
-                                    const decrypted = await decryptMessageContent(auth.keyPair.privateKey, lastMsg.encryptedContent, isFromMe, c.chatId);
-                                    if (decrypted) {
-                                        const parsed = parseDecryptedContent(decrypted);
-                                        Object.assign(lastMsg, parsed);
+                            // Normalize server messages to ensure camelCase keys (encryptedContent, etc.)
+                            const serverMessagesRaw = c.messages || [];
+                            const serverMessages = serverMessagesRaw.map(normalizeMessage);
+
+                            const localMessages = existing?.messages || [];
+
+                            // Merge server history into local state with ID-reconcile support.
+                            let mergedMessages = [...localMessages];
+                            let mergeInsertedCount = 0;
+                            let mergeReconciledCount = 0;
+                            for (const serverMsg of serverMessages) {
+                                const mergeResult = upsertIncomingMessage(
+                                    mergedMessages,
+                                    serverMsg,
+                                    auth?.userId || null,
+                                );
+                                if (mergeResult.changed) {
+                                    if (mergeResult.reconciledFromMessageId) {
+                                        mergeReconciledCount += 1;
+                                    } else if (mergeResult.inserted) {
+                                        mergeInsertedCount += 1;
                                     }
+                                    mergedMessages = mergeResult.messages;
                                 }
-                            } catch (e) {
-                                // console.warn('[ChatStore] Preview decrypt failed', e);
                             }
-                        }
+                            mergedMessages.sort((a, b) => (a.timestamp || 0) - (b.timestamp || 0));
+                            chatStoreLog(`[ChatStore-TargetLog] User ${auth?.userId} loaded chat ${c.chatId}. API returned ${serverMessages.length} msgs. Merged result is ${mergedMessages.length} msgs.`);
+                            const undecryptableCount = mergedMessages.filter(m => m.encryptedContent && !m.plaintext).length;
+                            if (undecryptableCount > 0) {
+                                chatStoreLog(`[ChatStore-TargetLog] Out of ${mergedMessages.length} msgs, ${undecryptableCount} need decryption/rendering.`);
+                            }
 
-                        return {
-                            chatId: c.chatId,
-                            type: c.type || 'dm',
-                            name: c.name || null,
-                            description: c.description || null,
-                            avatarUrl: c.avatarUrl || null,
-                            creatorId: c.creatorId || null,
-                            memberCount: c.memberCount || null,
-                            role: c.role || 'member',
-                            members: Array.isArray(c.members)
-                                ? c.members
-                                    .map((member: any) => {
-                                        const userId = String(member?.userId || member?.id || '').trim().toUpperCase();
-                                        if (!userId) return null;
-                                        const name =
-                                            typeof member?.name === 'string' && member.name.trim().length > 0
-                                                ? member.name.trim()
-                                                : undefined;
-                                        const rawRole =
-                                            typeof member?.role === 'string'
-                                                ? member.role.trim().toLowerCase()
-                                                : '';
-                                        const role =
-                                            rawRole === 'owner' || rawRole === 'admin' || rawRole === 'member' || rawRole === 'subscriber'
-                                                ? rawRole
-                                                : undefined;
-                                        return { userId, name, role };
-                                    })
-                                    .filter(Boolean)
-                                : undefined,
-                            friendId: c.friendId,
-                            friendName: c.friendName || c.name || c.friendId,
-                            friendImage: c.friendImage || c.avatarUrl || null,
-                            friendKey: extractPublicKey(c) || extractPublicKey(existing),
-                            messages: mergedMessages,
-                            lastMessage: lastMsg || serverMessages[0] || null,
-                            unreadCount: c.unreadCount || 0,
-                            pinned: c.pinned || false,
-                            muted: c.muted || false,
-                            markedUnread: c.markedUnread || false
-                        };
-                    }));
+                            chatStoreMessageLog('loadChats:merged', {
+                                chatId: c.chatId,
+                                localCount: localMessages.length,
+                                serverCount: serverMessages.length,
+                                mergedCount: mergedMessages.length,
+                                inserted: mergeInsertedCount,
+                                reconciled: mergeReconciledCount,
+                            });
+
+                            // DECRYPT LAST MESSAGE FOR PREVIEW if needed
+                            const lastMsg = mergedMessages[mergedMessages.length - 1];
+                            if (lastMsg && !lastMsg.plaintext && lastMsg.encryptedContent) {
+                                try {
+                                    if (auth?.keyPair?.privateKey) {
+                                        const isFromMe = (lastMsg.fromId || '').toUpperCase() === (auth.userId || '').toUpperCase();
+                                        const decrypted = await decryptMessageContent(auth.keyPair.privateKey, lastMsg.encryptedContent, isFromMe, c.chatId);
+                                        if (decrypted) {
+                                            const parsed = parseDecryptedContent(decrypted);
+                                            Object.assign(lastMsg, parsed);
+                                        }
+                                    }
+                                } catch (e) {
+                                    // console.warn('[ChatStore] Preview decrypt failed', e);
+                                }
+                            }
+
+                            return {
+                                chatId: c.chatId,
+                                type: c.type || 'dm',
+                                name: c.name || null,
+                                description: c.description || null,
+                                avatarUrl: c.avatarUrl || null,
+                                creatorId: c.creatorId || null,
+                                memberCount: c.memberCount || null,
+                                role: c.role || 'member',
+                                members: Array.isArray(c.members)
+                                    ? c.members
+                                        .map((member: any) => {
+                                            const userId = String(member?.userId || member?.id || '').trim().toUpperCase();
+                                            if (!userId) return null;
+                                            const name =
+                                                typeof member?.name === 'string' && member.name.trim().length > 0
+                                                    ? member.name.trim()
+                                                    : undefined;
+                                            const rawRole =
+                                                typeof member?.role === 'string'
+                                                    ? member.role.trim().toLowerCase()
+                                                    : '';
+                                            const role =
+                                                rawRole === 'owner' || rawRole === 'admin' || rawRole === 'member' || rawRole === 'subscriber'
+                                                    ? rawRole
+                                                    : undefined;
+                                            return { userId, name, role };
+                                        })
+                                        .filter(Boolean)
+                                    : undefined,
+                                friendId: c.friendId,
+                                friendName: c.friendName || c.name || c.friendId,
+                                friendImage: c.friendImage || c.avatarUrl || null,
+                                friendKey: extractPublicKey(c) || extractPublicKey(existing),
+                                messages: mergedMessages,
+                                lastMessage: lastMsg || serverMessages[0] || null,
+                                unreadCount: c.unreadCount || 0,
+                                pinned: c.pinned || false,
+                                muted: c.muted || false,
+                                markedUnread: c.markedUnread || false
+                            };
+                        }));
+                    }
 
                     // Join chat channels for real-time updates
                     // Check socket exists and is connected
@@ -2179,6 +2242,27 @@ export const useChatStore = create<ChatState>()(
                     } else {
                         set({ chats: processedChats, isLoading: false });
                         chatStoreLog('[ChatStore] State updated with chats:', processedChats.length);
+                    }
+
+                    // Pre-load native chat histories for all chats so opening any
+                    // chat renders messages instantly (no 5-second network wait).
+                    if (useNativeFastPath) {
+                        try {
+                            const { getNativeChatEngineModule } = require('../native/chat/runtime');
+                            const engineModule = getNativeChatEngineModule();
+                            if (engineModule?.seedChatHistories) {
+                                const seedData: Record<string, any[]> = {};
+                                data.forEach((c: any) => {
+                                    if (c.chatId && Array.isArray(c.messages) && c.messages.length > 0) {
+                                        seedData[c.chatId] = c.messages;
+                                    }
+                                });
+                                engineModule.seedChatHistories({ chatHistories: seedData });
+                                console.log(`[ChatStore] seedChatHistories triggered for ${Object.keys(seedData).length} chats directly from home payload`);
+                            }
+                        } catch (e) {
+                            // Non-critical — chats will load on-demand when opened
+                        }
                     }
 
                     // Warm friend public keys for startup-sensitive chats (active + unread),

@@ -3,6 +3,7 @@ import { StyleSheet, View } from 'react-native';
 
 import { isNativeChatEnabled } from './runtime';
 import type {
+  NativeChatAgentConfig,
   NativeChatAppearance,
   NativeChatGroupMember,
   NativeChatRow,
@@ -41,6 +42,7 @@ interface NativeChatProfileSurfaceProps {
   isGroupOrChannel?: boolean;
   groupMembers?: NativeChatGroupMember[];
   groupMemberCount?: number;
+  agentConfig?: NativeChatAgentConfig | null;
   page?: 'profile' | 'agent';
   onViewportChanged?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
@@ -68,6 +70,7 @@ export function NativeChatProfileSurface({
   isGroupOrChannel,
   groupMembers,
   groupMemberCount,
+  agentConfig,
   page,
   onViewportChanged,
   onNativeEvent,
@@ -105,6 +108,7 @@ export function NativeChatProfileSurface({
       isGroupOrChannel={isGroupOrChannel}
       groupMembers={groupMembers}
       groupMemberCount={groupMemberCount}
+      agentConfig={agentConfig}
       page={page}
       onViewportChanged={(event: any) => {
         try {

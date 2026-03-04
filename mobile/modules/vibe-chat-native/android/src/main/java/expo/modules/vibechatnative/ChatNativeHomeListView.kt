@@ -14,6 +14,7 @@ import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
+import android.util.TypedValue
 import java.util.UUID
 
 @SuppressLint("ViewConstructor")
@@ -28,6 +29,7 @@ class ChatNativeHomeListView(
   private var previewAppearance: Map<String, Any?> = emptyMap()
   private var contentTopInsetPx: Int = 0
   private var contentBottomInsetPx: Int = 0
+  private val baseTopInsetPx: Int = dp(12f)
   private var rows: List<ChatNativeHomeListRow> = emptyList()
   private val engineListenerId = "native-home-list-${UUID.randomUUID()}"
 
@@ -137,14 +139,22 @@ class ChatNativeHomeListView(
   }
 
   private fun applyContentInsets() {
+    val topInset = contentTopInsetPx + baseTopInsetPx
     recyclerView.setPadding(
       recyclerView.paddingLeft,
-      contentTopInsetPx,
+      topInset,
       recyclerView.paddingRight,
       contentBottomInsetPx,
     )
     recyclerView.clipToPadding = false
   }
+
+  private fun dp(value: Float): Int =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      resources.displayMetrics,
+    ).toInt()
 
   override fun onAttachedToWindow() {
     super.onAttachedToWindow()

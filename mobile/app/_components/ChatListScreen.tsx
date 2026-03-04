@@ -2000,6 +2000,13 @@ export default function ChatListScreen({
         message: Message,
         sourcePoint?: { x: number; y: number }
     ) => {
+        console.log('[ReactionDebug] commitReactionLocally:start', {
+            messageId: message.id,
+            chatId: message.chatId || effectiveChatId,
+            emoji,
+            sourcePoint: sourcePoint || null,
+            shouldUseNativeList,
+        });
         setMessages((prev) => prev.map((entry) => (
             entry.id === message.id ? { ...entry, reactionEmoji: emoji } : entry
         )));
@@ -2032,6 +2039,10 @@ export default function ChatListScreen({
         if (!shouldUseNativeList && sourcePoint && Number.isFinite(sourcePoint.x) && Number.isFinite(sourcePoint.y)) {
             spawnReactionFx(emoji, message, sourcePoint.x, sourcePoint.y);
         }
+        console.log('[ReactionDebug] commitReactionLocally:done', {
+            messageId: message.id,
+            emoji,
+        });
     }, [effectiveChatId, shouldUseNativeList, spawnReactionFx]);
 
     const handleNativeSurfaceEvent = useCallback((event: { nativeEvent: Record<string, unknown> } | Record<string, unknown>) => {
@@ -2296,15 +2307,29 @@ export default function ChatListScreen({
             const messageIdRaw = nativeEvent.messageId;
             const emojiRaw = nativeEvent.emoji;
             if (typeof messageIdRaw !== 'string' || typeof emojiRaw !== 'string' || emojiRaw.trim().length === 0) {
+                console.log('[ReactionDebug] nativeEvent:contextMenuReaction:invalid-payload', nativeEvent);
                 return;
             }
             const message = messages.find((entry) => entry.id === messageIdRaw);
-            if (!message) return;
+            if (!message) {
+                console.log('[ReactionDebug] nativeEvent:contextMenuReaction:message-not-found', {
+                    messageId: messageIdRaw,
+                    emoji: emojiRaw,
+                    messagesCount: messages.length,
+                });
+                return;
+            }
             const sourceX = typeof nativeEvent.sourceX === 'number' ? nativeEvent.sourceX : undefined;
             const sourceY = typeof nativeEvent.sourceY === 'number' ? nativeEvent.sourceY : undefined;
             const sourcePoint = Number.isFinite(sourceX) && Number.isFinite(sourceY)
                 ? { x: sourceX as number, y: sourceY as number }
                 : undefined;
+            console.log('[ReactionDebug] nativeEvent:contextMenuReaction:received', {
+                messageId: messageIdRaw,
+                emoji: emojiRaw,
+                sourcePoint: sourcePoint || null,
+                shouldUseNativeList,
+            });
             if (shouldUseNativeList && sourcePoint) {
                 void nativeSurfaceRef.current?.playReactionFx({
                     emoji: emojiRaw,
@@ -2312,6 +2337,10 @@ export default function ChatListScreen({
                     y: sourcePoint.y,
                 });
                 commitReactionLocally(emojiRaw, message);
+                console.log('[ReactionDebug] nativeEvent:contextMenuReaction:nativeFx-dispatched', {
+                    messageId: messageIdRaw,
+                    emoji: emojiRaw,
+                });
                 return;
             }
             commitReactionLocally(emojiRaw, message, sourcePoint);

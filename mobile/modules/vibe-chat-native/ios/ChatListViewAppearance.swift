@@ -73,6 +73,13 @@ struct ChatListAppearance {
     let wallpaperPatternGradient = parseGradient(
       patternGradientStrings, fallback: fallback.wallpaperPatternGradient)
     let bubbleMeGradient = parseGradient(meGradientStrings, fallback: fallback.bubbleMeGradient)
+    let isDarkApprox = isDarkColor(wallpaperGradient.first ?? fallback.wallpaperGradient.first ?? .black)
+    let softenedPalette = softenedBubblePalette(
+      bubbleMeGradient: bubbleMeGradient,
+      bubbleThemColor: parseColor(raw["bubbleThemColor"] as? String) ?? fallback.bubbleThemColor,
+      wallpaperGradient: wallpaperGradient,
+      isDark: isDarkApprox
+    )
 
     return ChatListAppearance(
       backgroundMode: mode,
@@ -83,8 +90,8 @@ struct ChatListAppearance {
       wallpaperPatternOpacity: CGFloat(
         (raw["wallpaperPatternOpacity"] as? NSNumber)?.doubleValue ?? 0.0),
       wallpaperMaskKey: normalizedString(raw["wallpaperMaskKey"]),
-      bubbleMeGradient: bubbleMeGradient,
-      bubbleThemColor: parseColor(raw["bubbleThemColor"] as? String) ?? fallback.bubbleThemColor,
+      bubbleMeGradient: softenedPalette.me,
+      bubbleThemColor: softenedPalette.them,
       textColorMe: parseColor(raw["textColorMe"] as? String) ?? fallback.textColorMe,
       textColorThem: parseColor(raw["textColorThem"] as? String) ?? fallback.textColorThem,
       timeColorMe: parseColor(raw["timeColorMe"] as? String) ?? fallback.timeColorMe,
@@ -199,12 +206,18 @@ private func nativePresetAppearance(
   let patternGradient = parseGradient(resolvedPatternGradientColors, fallback: [])
   let bubbleMeGradient = parseGradient(
     variant.bubbleMeGradient, fallback: fallback.bubbleMeGradient)
-  let bubbleThemColor =
+  let rawBubbleThemColor =
     parseColor(variant.bubbleThemGradient.first) ?? parseColor(variant.bubbleThem)
     ?? fallback.bubbleThemColor
   let textColorMe = parseColor(variant.textColorMe) ?? fallback.textColorMe
   let textColorThem = parseColor(variant.textColorThem) ?? fallback.textColorThem
   let dayBackgroundBase = wallpaperGradient.first ?? fallback.wallpaperGradient.first ?? .black
+  let softenedPalette = softenedBubblePalette(
+    bubbleMeGradient: bubbleMeGradient,
+    bubbleThemColor: rawBubbleThemColor,
+    wallpaperGradient: wallpaperGradient,
+    isDark: isDark
+  )
 
   return ChatListAppearance(
     backgroundMode: mode,
@@ -214,8 +227,8 @@ private func nativePresetAppearance(
     wallpaperPatternLocations: variant.patternGradientLocations.map { NSNumber(value: $0) },
     wallpaperPatternOpacity: CGFloat(resolvedPatternOpacity),
     wallpaperMaskKey: preset.maskedImage,
-    bubbleMeGradient: bubbleMeGradient,
-    bubbleThemColor: bubbleThemColor,
+    bubbleMeGradient: softenedPalette.me,
+    bubbleThemColor: softenedPalette.them,
     textColorMe: textColorMe,
     textColorThem: textColorThem,
     timeColorMe: colorWithAlpha(textColorMe, 0.72),
@@ -450,6 +463,95 @@ private func parseNumberArray(_ raw: Any?) -> [NSNumber]? {
     return parsed.count == array.count ? parsed.map { NSNumber(value: $0) } : nil
   }
   return nil
+}
+
+private func softenedBubblePalette(
+  bubbleMeGradient: [UIColor],
+  bubbleThemColor: UIColor,
+  wallpaperGradient: [UIColor],
+  isDark: Bool
+) -> (me: [UIColor], them: UIColor) {
+  let wallFirst = wallpaperGradient.first ?? (isDark ? UIColor.black : UIColor.white)
+  let wallLast = wallpaperGradient.last ?? wallFirst
+  let wallpaperAnchor = blendColor(wallFirst, with: wallLast, amount: 0.36)
+
+  let softenedMe = bubbleMeGradient.map { color in
+    let contrast = contrastRatio(color, wallpaperAnchor)
+    let extra = max(0.0, min(0.12, (contrast - (isDark ? 4.2 : 3.8)) * 0.05))
+    let mix = (isDark ? 0.12 : 0.10) + extra
+    let base = blendColor(color, with: wallpaperAnchor, amount: mix)
+    return colorWithAlpha(base, 0.96)
+  }
+
+  let themContrast = contrastRatio(bubbleThemColor, wallpaperAnchor)
+  let themExtra = max(0.0, min(0.14, (themContrast - (isDark ? 2.6 : 2.2)) * 0.07))
+  let themMix = (isDark ? 0.12 : 0.09) + themExtra
+  var softenedThem = blendColor(bubbleThemColor, with: wallpaperAnchor, amount: themMix)
+  softenedThem = colorWithAlpha(softenedThem, isDark ? 0.94 : 0.96)
+
+  return (me: softenedMe, them: softenedThem)
+}
+
+private func blendColor(_ from: UIColor, with to: UIColor, amount: CGFloat) -> UIColor {
+  let t = max(0.0, min(1.0, amount))
+  var fr: CGFloat = 0
+  var fg: CGFloat = 0
+  var fb: CGFloat = 0
+  var fa: CGFloat = 0
+  var tr: CGFloat = 0
+  var tg: CGFloat = 0
+  var tb: CGFloat = 0
+  var ta: CGFloat = 0
+
+  guard from.getRed(&fr, green: &fg, blue: &fb, alpha: &fa),
+    to.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
+  else {
+    return from
+  }
+
+  let inv = 1.0 - t
+  return UIColor(
+    red: (fr * inv) + (tr * t),
+    green: (fg * inv) + (tg * t),
+    blue: (fb * inv) + (tb * t),
+    alpha: (fa * inv) + (ta * t)
+  )
+}
+
+private func isDarkColor(_ color: UIColor) -> Bool {
+  var r: CGFloat = 0
+  var g: CGFloat = 0
+  var b: CGFloat = 0
+  var a: CGFloat = 0
+  guard color.getRed(&r, green: &g, blue: &b, alpha: &a) else { return true }
+  let luminance = 0.299 * r + 0.587 * g + 0.114 * b
+  return luminance < 0.5
+}
+
+private func contrastRatio(_ c1: UIColor, _ c2: UIColor) -> CGFloat {
+  let l1 = relativeLuminance(c1)
+  let l2 = relativeLuminance(c2)
+  let hi = max(l1, l2)
+  let lo = min(l1, l2)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+private func relativeLuminance(_ color: UIColor) -> CGFloat {
+  var r: CGFloat = 0
+  var g: CGFloat = 0
+  var b: CGFloat = 0
+  var a: CGFloat = 0
+  guard color.getRed(&r, green: &g, blue: &b, alpha: &a) else { return 0.0 }
+
+  func linear(_ value: CGFloat) -> CGFloat {
+    if value <= 0.03928 { return value / 12.92 }
+    return pow((value + 0.055) / 1.055, 2.4)
+  }
+
+  let lr = linear(r)
+  let lg = linear(g)
+  let lb = linear(b)
+  return (0.2126 * lr) + (0.7152 * lg) + (0.0722 * lb)
 }
 
 private func colorWithAlpha(_ color: UIColor, _ alpha: CGFloat) -> UIColor {
