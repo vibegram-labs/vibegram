@@ -3389,8 +3389,12 @@ extension ChatListView: ChatInputBarDelegate {
     ])
   }
 
-  func inputBarDidSelectImage(uri: String) {
-    onNativeEvent(["type": "attachmentImage", "uri": uri])
+  func inputBarDidSelectImage(uri: String, caption: String?) {
+    var payload: [String: Any] = ["type": "attachmentImage", "uri": uri]
+    if let caption = caption, !caption.isEmpty {
+      payload["caption"] = caption
+    }
+    onNativeEvent(payload)
   }
 
   func inputBarDidSelectGif(

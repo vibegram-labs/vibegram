@@ -14,7 +14,7 @@ protocol ChatInputBarDelegate: AnyObject {
   func inputBarTextDidChange(text: String)
   func inputBarHeightDidChange()
   // Rich attachment callbacks (mirrors AttachmentMenu.tsx)
-  func inputBarDidSelectImage(uri: String)
+  func inputBarDidSelectImage(uri: String, caption: String?)
   func inputBarDidSelectGif(
     id: String,
     url: String,
@@ -1816,7 +1816,9 @@ final class ChatInputBar: UIView {
     } else {
       sheet.sourceButtonFrameInWindow = attachGlass.convert(attachGlass.bounds, to: nil)
     }
-    sheet.onSelectImage = { [weak self] uri in self?.delegate?.inputBarDidSelectImage(uri: uri) }
+    sheet.onSelectImage = { [weak self] uri, caption in
+      self?.delegate?.inputBarDidSelectImage(uri: uri, caption: caption)
+    }
     sheet.onSelectFile = { [weak self] uri, name in
       self?.delegate?.inputBarDidSelectFile(uri: uri, name: name)
     }

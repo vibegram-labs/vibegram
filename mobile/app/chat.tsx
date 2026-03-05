@@ -457,11 +457,12 @@ export default function ChatScreen() {
         console.log('[chat/native-main] Android attachmentImage handled via JS bridge', payload);
       }
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
+      const caption = typeof payload.caption === 'string' ? payload.caption : '';
       if (uri) {
         void callNativeEngine('sendMessage', {
           ...basePayload,
           type: 'image',
-          text: '',
+          text: caption,
           metadata: { mediaUrl: uri },
         });
       }

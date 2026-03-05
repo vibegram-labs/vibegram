@@ -222,11 +222,12 @@ export default function ChatListRoute() {
 
     if (type === 'attachmentImage') {
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
+      const caption = typeof payload.caption === 'string' ? payload.caption : '';
       if (uri) {
         void callNativeEngine('sendMessage', {
           ...basePayload,
           type: 'image',
-          text: '',
+          text: caption,
           metadata: { mediaUrl: uri },
         });
       }

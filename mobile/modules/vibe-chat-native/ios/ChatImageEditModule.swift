@@ -4,6 +4,7 @@ enum ChatImageEditEventType: String {
   case reply = "mediaReplyRequested"
   case edit = "mediaEditRequested"
   case resend = "mediaResendRequested"
+  case sendNew = "mediaSendNewRequested"
 }
 
 struct ChatImageEditActionPayload {

@@ -119,6 +119,7 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
   private let cropButton = UIButton(type: .system)
   private let undoButton = UIButton(type: .system)
   private let sendButton = UIButton(type: .system)
+  private let qualityButton = UIButton(type: .system)
 
   private let backgroundTapGesture = UITapGestureRecognizer()
 
@@ -129,6 +130,7 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
   private var keyboardHeight: CGFloat = 0
   private var uiHidden = false
   private var isToolMenuExpanded = false
+  private var isHighQuality = false
 
   init(
     messageId: String?,
@@ -270,6 +272,17 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
     sendButton.layer.borderWidth = 0.0
     sendButton.addTarget(self, action: #selector(handleSend), for: .touchUpInside)
     bottomToolbar.addSubview(sendButton)
+
+    qualityButton.titleLabel?.font = .systemFont(ofSize: 14, weight: .bold)
+    qualityButton.setTitle("SD", for: .normal)
+    qualityButton.setTitleColor(.white, for: .normal)
+    qualityButton.backgroundColor = UIColor(white: 0.14, alpha: 0.76)
+    qualityButton.layer.cornerCurve = .continuous
+    qualityButton.layer.borderWidth = 0.8
+    qualityButton.layer.borderColor = UIColor.white.withAlphaComponent(0.14).cgColor
+    qualityButton.clipsToBounds = true
+    qualityButton.addTarget(self, action: #selector(handleQualityToggle), for: .touchUpInside)
+    bottomToolbar.addSubview(qualityButton)
 
     refreshCaptionInputState()
     loadImage()
@@ -416,6 +429,15 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
     )
     sendButton.layer.cornerRadius = circleSize * 0.5
 
+    let qualitySize: CGFloat = 36.0
+    qualityButton.frame = CGRect(
+      x: sendButton.frame.minX - 12.0 - qualitySize,
+      y: (circleSize - qualitySize) * 0.5,
+      width: qualitySize,
+      height: qualitySize
+    )
+    qualityButton.layer.cornerRadius = qualitySize * 0.5
+
     let toolsWidth: CGFloat = isToolMenuExpanded ? 220.0 : 58.0
     toolsPill.frame = CGRect(
       x: (view.bounds.width - toolsWidth) * 0.5,
@@ -521,7 +543,19 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
   }
 
   private func writeJPEGToTemp(_ image: UIImage) -> URL? {
-    guard let data = image.jpegData(compressionQuality: 0.92) else { return nil }
+    let maxDimension: CGFloat = isHighQuality ? 2048.0 : 1080.0
+    let scale = min(1.0, maxDimension / max(image.size.width, image.size.height))
+    let targetSize = CGSize(width: image.size.width * scale, height: image.size.height * scale)
+
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1.0
+    let renderer = UIGraphicsImageRenderer(size: targetSize, format: format)
+    let resizedImage = renderer.image { _ in
+      image.draw(in: CGRect(origin: .zero, size: targetSize))
+    }
+
+    let quality: CGFloat = isHighQuality ? 0.85 : 0.70
+    guard let data = resizedImage.jpegData(compressionQuality: quality) else { return nil }
     let fileName = "chat-edit-\(UUID().uuidString).jpg"
     let url = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(fileName)
     do {
@@ -532,11 +566,21 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
     }
   }
 
+  @objc private func handleQualityToggle() {
+    isHighQuality.toggle()
+    qualityButton.setTitle(isHighQuality ? "HD" : "SD", for: .normal)
+    qualityButton.backgroundColor = isHighQuality ? .systemBlue : UIColor(white: 0.14, alpha: 0.76)
+    qualityButton.layer.borderColor =
+      isHighQuality ? UIColor.clear.cgColor : UIColor.white.withAlphaComponent(0.14).cgColor
+  }
+
   private func emit(_ eventType: ChatImageEditEventType) {
     refreshCaptionInputState()
     let editedImageURL: URL? = {
       if hasVisualEdits, let snapshot = snapshotEditedImage() {
         return writeJPEGToTemp(snapshot)
+      } else if let cachedOriginal = originalImage {
+        return writeJPEGToTemp(cachedOriginal)
       }
       return nil
     }()
@@ -815,7 +859,8 @@ final class ChatImageEditViewController: UIViewController, UITextViewDelegate,
   @objc private func handleSend() {
     refreshCaptionInputState()
     let didChangeCaption = captionText != initialCaption
-    let eventType: ChatImageEditEventType = (hasVisualEdits || didChangeCaption) ? .edit : .resend
+    let eventType: ChatImageEditEventType =
+      (messageId == nil) ? .sendNew : ((hasVisualEdits || didChangeCaption) ? .edit : .resend)
     emit(eventType)
   }
 

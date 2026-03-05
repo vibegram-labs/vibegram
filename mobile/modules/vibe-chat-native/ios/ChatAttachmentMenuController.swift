@@ -5,7 +5,7 @@ import UIKit
 import UniformTypeIdentifiers
 
 final class ChatAttachmentMenuController: UIViewController {
-  var onSelectImage: ((String) -> Void)?
+  var onSelectImage: ((String, String?) -> Void)?
   var onSelectFile: ((String, String) -> Void)?
   var onSelectLocation: ((Double, Double) -> Void)?
 
@@ -219,7 +219,8 @@ final class ChatAttachmentMenuController: UIViewController {
     prominent: Bool
   ) {
     if #available(iOS 26.0, *) {
-      var config = prominent
+      var config =
+        prominent
         ? UIButton.Configuration.prominentGlass()
         : UIButton.Configuration.glass()
       config.cornerStyle = .capsule
@@ -322,7 +323,8 @@ final class ChatAttachmentMenuController: UIViewController {
       actionTitle: "Use Current Location",
       actionSymbol: "location.circle"
     )
-    locationActionButton.addTarget(self, action: #selector(openLocationFromTile), for: .touchUpInside)
+    locationActionButton.addTarget(
+      self, action: #selector(openLocationFromTile), for: .touchUpInside)
   }
 
   private func layoutChrome() {
@@ -337,7 +339,8 @@ final class ChatAttachmentMenuController: UIViewController {
     headerGlass.frame = CGRect(x: headerX, y: headerY, width: headerW, height: headerH)
 
     let closeSize: CGFloat = 30
-    closeButton.frame = CGRect(x: headerW - closeSize - 6, y: 6, width: closeSize, height: closeSize)
+    closeButton.frame = CGRect(
+      x: headerW - closeSize - 6, y: 6, width: closeSize, height: closeSize)
 
     let filterW: CGFloat = filterDropdownButton.isHidden ? 0 : min(122, headerW * 0.30)
     let sectionW = max(96, min(160, headerW - closeSize - filterW - 30))
@@ -356,7 +359,8 @@ final class ChatAttachmentMenuController: UIViewController {
 
     let contentTop = headerGlass.frame.maxY + 8
     let contentBottom = h - safe.bottom
-    contentView.frame = CGRect(x: 0, y: contentTop, width: w, height: max(1, contentBottom - contentTop))
+    contentView.frame = CGRect(
+      x: 0, y: contentTop, width: w, height: max(1, contentBottom - contentTop))
 
     [galleryDashboard, locationView].forEach { $0.frame = contentView.bounds }
     layoutGalleryDashboard()
@@ -551,13 +555,28 @@ final class ChatAttachmentMenuController: UIViewController {
         try data.write(to: tempURL, options: .atomic)
         DispatchQueue.main.async {
           self.isSelectingAsset = false
-          self.finishAndDismiss {
-            self.onSelectImage?(tempURL.absoluteString)
-          }
+          self.presentEditor(for: tempURL, initialImage: UIImage(data: data))
         }
       } catch {
         DispatchQueue.main.async {
           self.isSelectingAsset = false
+        }
+      }
+    }
+  }
+
+  private func presentEditor(for url: URL, initialImage: UIImage?) {
+    ChatImageEditModule.presentEditor(
+      from: self,
+      messageId: nil,
+      mediaURL: url.absoluteString,
+      initialImage: initialImage,
+      initialCaption: nil
+    ) { [weak self] payload in
+      if payload.eventType == .sendNew {
+        let finalURL = payload.editedImageURL ?? url
+        self?.finishAndDismiss {
+          self?.onSelectImage?(finalURL.absoluteString, payload.caption)
         }
       }
     }
@@ -568,7 +587,8 @@ final class ChatAttachmentMenuController: UIViewController {
     options.isNetworkAccessAllowed = true
     options.deliveryMode = .highQualityFormat
 
-    PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { [weak self] avAsset, _, _ in
+    PHImageManager.default().requestAVAsset(forVideo: asset, options: options) {
+      [weak self] avAsset, _, _ in
       guard let self else { return }
       guard let urlAsset = avAsset as? AVURLAsset else {
         DispatchQueue.main.async { self.isSelectingAsset = false }
@@ -588,7 +608,7 @@ final class ChatAttachmentMenuController: UIViewController {
         DispatchQueue.main.async {
           self.isSelectingAsset = false
           self.finishAndDismiss {
-            self.onSelectImage?(tempURL.absoluteString)
+            self.onSelectImage?(tempURL.absoluteString, nil)
           }
         }
       } catch {
@@ -799,7 +819,8 @@ private final class ChatAttachmentMenuLocationManager: NSObject, CLLocationManag
 }
 
 extension ChatAttachmentMenuController: UIDocumentPickerDelegate {
-  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+  func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL])
+  {
     guard let url = urls.first else { return }
     finishAndDismiss {
       self.onSelectFile?(url.absoluteString, url.lastPathComponent)

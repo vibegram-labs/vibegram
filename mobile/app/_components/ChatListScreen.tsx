@@ -2187,8 +2187,9 @@ export default function ChatListScreen({
 
         if (type === 'attachmentImage') {
             const uriRaw = nativeEvent.uri;
+            const captionRaw = nativeEvent.caption;
             if (typeof uriRaw !== 'string' || !effectiveChatId) return;
-            void sendMessage(effectiveChatId, '', 'image', { mediaUrl: uriRaw });
+            void sendMessage(effectiveChatId, typeof captionRaw === 'string' ? captionRaw : '', 'image', { mediaUrl: uriRaw });
             return;
         }
 
