@@ -114,6 +114,7 @@ private struct NativeProfileAvatarContentView: View {
 private struct NativeProfileAvatarGlassMorphView: View {
   @ObservedObject var model: NativeProfileAvatarModel
   @Namespace private var namespace
+  @State private var showAvatar: Bool = true
 
   var body: some View {
     GlassEffectContainer(spacing: 40.0) {
@@ -121,7 +122,7 @@ private struct NativeProfileAvatarGlassMorphView: View {
         Color.clear
           .frame(maxWidth: .infinity, maxHeight: .infinity)
 
-        if !model.collapsed {
+        if showAvatar {
           NativeProfileAvatarImageView(
             image: model.loadedImage,
             fallbackText: model.fallbackText
@@ -137,6 +138,11 @@ private struct NativeProfileAvatarGlassMorphView: View {
       .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    .onChange(of: model.collapsed) { _, isCollapsed in
+      withAnimation(.bouncy) {
+        showAvatar = !isCollapsed
+      }
+    }
   }
 }
 
@@ -176,6 +182,7 @@ private struct NativeProfileAvatarImageView: View {
 final class NativeProfileAvatarView: ExpoView {
   private let model = NativeProfileAvatarModel()
   private let hostingController: UIHostingController<AnyView>
+  private var isHostingControllerAttached = false
 
   required init(appContext: AppContext? = nil) {
     hostingController = UIHostingController(
@@ -186,9 +193,14 @@ final class NativeProfileAvatarView: ExpoView {
     backgroundColor = .clear
     clipsToBounds = false
 
+    if #available(iOS 16.4, *) {
+      hostingController.safeAreaRegions = []
+    }
+
     let hostedView = hostingController.view!
     hostedView.translatesAutoresizingMaskIntoConstraints = false
     hostedView.backgroundColor = .clear
+    hostedView.clipsToBounds = false
     addSubview(hostedView)
 
     NSLayoutConstraint.activate([
@@ -197,6 +209,32 @@ final class NativeProfileAvatarView: ExpoView {
       hostedView.topAnchor.constraint(equalTo: topAnchor),
       hostedView.bottomAnchor.constraint(equalTo: bottomAnchor),
     ])
+  }
+
+  override func didMoveToWindow() {
+    super.didMoveToWindow()
+    if window != nil, !isHostingControllerAttached {
+      if let parentVC = findNearestViewController() {
+        parentVC.addChild(hostingController)
+        hostingController.didMove(toParent: parentVC)
+        isHostingControllerAttached = true
+      }
+    } else if window == nil, isHostingControllerAttached {
+      hostingController.willMove(toParent: nil)
+      hostingController.removeFromParent()
+      isHostingControllerAttached = false
+    }
+  }
+
+  private func findNearestViewController() -> UIViewController? {
+    var responder: UIResponder? = self
+    while let next = responder?.next {
+      if let vc = next as? UIViewController {
+        return vc
+      }
+      responder = next
+    }
+    return nil
   }
 
   func setImageUri(_ value: String?) {
@@ -211,9 +249,7 @@ final class NativeProfileAvatarView: ExpoView {
   }
 
   func setCollapsed(_ value: Bool?) {
-    withAnimation(.spring(response: 0.5, dampingFraction: 0.84)) {
-      model.collapsed = value ?? false
-    }
+    model.collapsed = value ?? false
   }
 
   func setExpandedSize(_ value: CGFloat?) {
