@@ -103,8 +103,10 @@ private struct NativeProfileAvatarContentView: View {
 
   var body: some View {
     if #available(iOS 26.0, *) {
+      let _ = print("[ProfileAvatar] ContentView: using GlassMorph path (iOS 26+)")
       NativeProfileAvatarGlassMorphView(model: model)
     } else {
+      let _ = print("[ProfileAvatar] ContentView: using Legacy path (< iOS 26)")
       NativeProfileAvatarLegacyView(model: model)
     }
   }
@@ -117,6 +119,7 @@ private struct NativeProfileAvatarGlassMorphView: View {
   @State private var showExpanded: Bool = true
 
   var body: some View {
+    let _ = print("[ProfileAvatar] GlassMorph body: showExpanded=\(showExpanded) collapsed=\(model.collapsed) collapsedSize=\(model.collapsedSize) expandedSize=\(model.expandedSize) collapsedTopInset=\(model.collapsedTopInset) expandedTopInset=\(model.expandedTopInset) spacerHeight=\(max(0, model.expandedTopInset - model.collapsedTopInset - model.collapsedSize))")
     GlassEffectContainer(spacing: 200.0) {
       // Use VStack so layout positions the glass shapes — no modifiers after glassEffectID
       VStack(spacing: 0) {
@@ -154,6 +157,7 @@ private struct NativeProfileAvatarGlassMorphView: View {
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
     .onChange(of: model.collapsed) { _, isCollapsed in
+      print("[ProfileAvatar] onChange: collapsed=\(isCollapsed) -> showExpanded=\(!isCollapsed)")
       withAnimation(.bouncy) {
         showExpanded = !isCollapsed
       }
@@ -233,11 +237,15 @@ final class NativeProfileAvatarView: ExpoView {
         parentVC.addChild(hostingController)
         hostingController.didMove(toParent: parentVC)
         isHostingControllerAttached = true
+        print("[ProfileAvatar] VC attached to parent: \(type(of: parentVC))")
+      } else {
+        print("[ProfileAvatar] VC attach FAILED — no parent VC found in responder chain")
       }
     } else if window == nil, isHostingControllerAttached {
       hostingController.willMove(toParent: nil)
       hostingController.removeFromParent()
       isHostingControllerAttached = false
+      print("[ProfileAvatar] VC detached (window=nil)")
     }
   }
 
@@ -252,6 +260,11 @@ final class NativeProfileAvatarView: ExpoView {
     return nil
   }
 
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    print("[ProfileAvatar] layoutSubviews frame=\(frame) clipsToBounds=\(clipsToBounds) superview.clipsToBounds=\(superview?.clipsToBounds ?? false)")
+  }
+
   func setImageUri(_ value: String?) {
     model.setImageUri(value)
   }
@@ -260,27 +273,43 @@ final class NativeProfileAvatarView: ExpoView {
     let nextValue = (value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
       ? value
       : "U") ?? "U"
+    guard model.fallbackText != nextValue else { return }
     model.fallbackText = nextValue
   }
 
   func setCollapsed(_ value: Bool?) {
-    model.collapsed = value ?? false
+    let resolved = value ?? false
+    guard model.collapsed != resolved else { return }
+    print("[ProfileAvatar] setCollapsed: \(resolved)")
+    model.collapsed = resolved
   }
 
   func setExpandedSize(_ value: CGFloat?) {
-    model.expandedSize = max(1.0, value ?? 100.0)
+    let resolved = max(1.0, value ?? 100.0)
+    guard model.expandedSize != resolved else { return }
+    print("[ProfileAvatar] setExpandedSize: \(resolved)")
+    model.expandedSize = resolved
   }
 
   func setCollapsedSize(_ value: CGFloat?) {
-    model.collapsedSize = max(1.0, value ?? 40.0)
+    let resolved = max(1.0, value ?? 40.0)
+    guard model.collapsedSize != resolved else { return }
+    print("[ProfileAvatar] setCollapsedSize: \(resolved)")
+    model.collapsedSize = resolved
   }
 
   func setExpandedTopInset(_ value: CGFloat?) {
-    model.expandedTopInset = max(0.0, value ?? 0.0)
+    let resolved = max(0.0, value ?? 0.0)
+    guard model.expandedTopInset != resolved else { return }
+    print("[ProfileAvatar] setExpandedTopInset: \(resolved)")
+    model.expandedTopInset = resolved
   }
 
   func setCollapsedTopInset(_ value: CGFloat?) {
-    model.collapsedTopInset = max(0.0, value ?? 0.0)
+    let resolved = max(0.0, value ?? 0.0)
+    guard model.collapsedTopInset != resolved else { return }
+    print("[ProfileAvatar] setCollapsedTopInset: \(resolved)")
+    model.collapsedTopInset = resolved
   }
 }
 
