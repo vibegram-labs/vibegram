@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, Switch, TouchableOpacity, Image, Platform, useWindowDimensions, Alert, ActivityIndicator, TextInput, Modal, Share, ScrollView } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useTranslation } from 'react-i18next';
@@ -12,11 +12,14 @@ import { useReferralStore } from '../../src/lib/stores/referral-store';
 import { ChevronRight, Bell, Shield, Server, Moon, User, ArrowLeft, Key, Camera, Image as ImageIcon, Bookmark, Crown, Award, Users, Briefcase, HardDrive, Edit2, QrCode } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as ImagePicker from 'expo-image-picker';
-import Animated, { useAnimatedScrollHandler, useSharedValue, useAnimatedStyle, interpolate, Extrapolate, withTiming, withSpring, useAnimatedReaction, runOnJS, useDerivedValue } from 'react-native-reanimated';
+import Animated, { useAnimatedScrollHandler, useSharedValue, useAnimatedStyle, useAnimatedReaction, interpolate, Extrapolate, withTiming, withSpring, runOnJS } from 'react-native-reanimated';
 
-import SafeLiquidGlass from '../../src/components/native/SafeLiquidGlass';
-import { useHaptics } from '../../src/lib/hooks/useHaptics';
+import SafeLiquidGlass, {
+    isNativeLiquidGlassAvailable,
+    type LiquidGlassNativeControlsConfig,
+} from '../../src/components/native/SafeLiquidGlass';
 import AnimatedGlassButton from '../../src/components/native/AnimatedGlassButton';
+import NativeProfileAvatar, { isNativeProfileAvatarAvailable } from '../../src/components/native/NativeProfileAvatar';
 import ConnectionModal from '../../src/components/settings/ConnectionModal';
 import SubscriptionModal from '../../src/components/settings/SubscriptionModal';
 import ReferralModal from '../../src/components/settings/ReferralModal';
@@ -26,7 +29,6 @@ import { apiClient } from '../../src/lib/api-client';
 import MaskedView from '@react-native-masked-view/masked-view';
 import { LinearGradient } from 'expo-linear-gradient';
 import { BlurView } from 'expo-blur';
-import { Canvas, Circle, Group, ColorMatrix, Paint, Image as SkiaImage, useImage, vec, dist, Rect, BlurMask, Mask, Blur } from '@shopify/react-native-skia';
 import * as Clipboard from 'expo-clipboard';
 import QRCode from 'react-native-qrcode-svg';
 import * as FileSystem from 'expo-file-system/legacy';
@@ -42,7 +44,6 @@ import PatternWallpaper from '../../src/components/chat/wallpapers/PatternWallpa
 
 // MaskedViewAny workaround for TypeScript
 const MaskedViewAny = MaskedView as any;
-const AnimatedBlurView = Animated.createAnimatedComponent(BlurView);
 
 const VIBE_QR_LOGO = require('../../assets/logos/logo1.png');
 
@@ -102,10 +103,10 @@ export default function SettingsScreen() {
     const HERO_COLLAPSED_HEIGHT = 120; // spacer for pinned hero
     const HERO_TOP_ADJUST = 12; // reduce top padding under Dynamic Island
     const HERO_MIX_DISTANCE = 160; // how far the avatar travels upward to "merge" with the island
-    const HERO_MIX_OVERSHOOT = 60; // extra travel so it fully disappears behind the island
     const HERO_ISLAND_ANCHOR = 56; // approximate Dynamic Island height inside the top inset
     const HERO_TOP_OFFSET = 80; // pushes the avatar slightly down if it feels too high
     const HERO_TOP = Math.max(0, insets.top - HERO_ISLAND_ANCHOR - HERO_TOP_ADJUST) + HERO_TOP_OFFSET;
+    const HERO_NATIVE_COLLAPSE_THRESHOLD = Math.max(44, HERO_MIX_DISTANCE * 0.58);
 
     // Navigation State
     const [activeView, setActiveView] = useState<ViewState>('main');
@@ -114,6 +115,7 @@ export default function SettingsScreen() {
     const [showReferralModal, setShowReferralModal] = useState(false);
     const [showBusinessModal, setShowBusinessModal] = useState(false);
     const [isUploading, setIsUploading] = useState(false);
+    const [isAvatarCollapsed, setIsAvatarCollapsed] = useState(false);
 
     // Load subscription data on mount
     useEffect(() => {
@@ -145,16 +147,33 @@ export default function SettingsScreen() {
     const scrollY = useSharedValue(0);
     const parentScale = useSharedValue(1);
     const headerProgress = useSharedValue(0);
-    const expandState = useSharedValue(0);
     const editMenuProgress = useSharedValue(0);
     const [isEditMenuOpen, setIsEditMenuOpen] = useState(false);
     const qrProgress = useSharedValue(0);
     const [isQrOpen, setIsQrOpen] = useState(false);
     const qrRef = React.useRef<any>(null);
+    const useNativeGlassButtons = Platform.OS === 'ios' && isNativeLiquidGlassAvailable();
+    const useNativeProfileAvatar = Platform.OS === 'ios' && isNativeProfileAvatarAvailable();
+    const springConfig = { damping: 25, stiffness: 350, mass: 0.6 };
 
     const scrollHandler = useAnimatedScrollHandler((event) => {
         scrollY.value = event.contentOffset.y;
     });
+
+    useAnimatedReaction(
+        () => activeView === 'main' && useNativeProfileAvatar && scrollY.value >= HERO_NATIVE_COLLAPSE_THRESHOLD,
+        (next, prev) => {
+            if (next === prev) return;
+            runOnJS(setIsAvatarCollapsed)(next);
+        },
+        [activeView, useNativeProfileAvatar, HERO_NATIVE_COLLAPSE_THRESHOLD]
+    );
+
+    useEffect(() => {
+        if (activeView !== 'main' || !useNativeProfileAvatar) {
+            setIsAvatarCollapsed(false);
+        }
+    }, [activeView, useNativeProfileAvatar]);
 
     useEffect(() => {
         headerProgress.value = withTiming(activeView !== 'main' ? 1 : 0, { duration: 300 });
@@ -187,6 +206,24 @@ export default function SettingsScreen() {
             if (finished) runOnJS(setIsQrOpen)(false);
         });
     };
+
+    const qrHeaderButton = useMemo<LiquidGlassNativeControlsConfig>(() => ({
+        kind: 'buttons',
+        items: [{ key: 'qr', title: '', sfSymbol: 'qrcode' }],
+        contentInsets: { top: 0, right: 0, bottom: 0, left: 0 },
+        onPress: openQr,
+    }), []);
+
+    const editHeaderButton = useMemo<LiquidGlassNativeControlsConfig>(() => ({
+        kind: 'buttons',
+        items: [{
+            key: 'edit',
+            title: t('settings.edit'),
+            foregroundColor: colors.text,
+        }],
+        contentInsets: { top: 0, right: 10, bottom: 0, left: 10 },
+        onPress: openEditMenu,
+    }), [colors.text, openEditMenu, t]);
 
     const shareQr = async () => {
         if (!user?.userId) return;
@@ -291,124 +328,20 @@ export default function SettingsScreen() {
         </View>
     );
 
-    const haptics = useHaptics();
-    const skiaImage = useImage(user?.profileImage);
-    const springConfig = { damping: 25, stiffness: 350, mass: 0.6 };
-    const LIQUID_MATRIX = [
-        1, 0, 0, 0, 0,
-        0, 1, 0, 0, 0,
-        0, 0, 1, 0, 0,
-        0, 0, 0, 20, -10,
-    ];
-
-    useAnimatedReaction(
-        () => scrollY.value,
-        (curr) => {
-            if (!user?.profileImage) return;
-            // Increased threshold to prevent premature expansion, keeping the liquid effect active longer
-            if (curr < -110 && expandState.value === 0) {
-                expandState.value = withSpring(1, springConfig);
-                runOnJS(haptics.light)();
-            } else if (curr > -10 && expandState.value === 1) {
-                expandState.value = withSpring(0, springConfig);
-            }
-        }
-    );
-
-    const wrapperStyle = useAnimatedStyle(() => {
-        const targetWidth = interpolate(expandState.value, [0, 1], [100, windowWidth]);
-        const targetHeight = interpolate(expandState.value, [0, 1], [100, windowHeight * 0.5]);
-        // Extended scale range to match the new deep pull threshold
-        const pullScale = interpolate(scrollY.value, [-220, 0], [2, 1], Extrapolate.CLAMP);
-        const scrollUp = Math.min(Math.max(scrollY.value, 0), HERO_MIX_DISTANCE);
-        const mixProgress = scrollUp / HERO_MIX_DISTANCE;
-        const collapsedBlend = interpolate(expandState.value, [0, 0.15], [1, 0], Extrapolate.CLAMP);
-
-        const mixScale = interpolate(scrollY.value, [0, HERO_MIX_DISTANCE], [1, 0.6], Extrapolate.CLAMP);
-        const scaleBlend = 1 - collapsedBlend + collapsedBlend * mixScale;
-
-        const mixOpacity = interpolate(
-            scrollY.value,
-            [0, HERO_MIX_DISTANCE * 0.7, HERO_MIX_DISTANCE],
-            [1, 1, 0],
-            Extrapolate.CLAMP
-        );
-        const opacity = 1 - collapsedBlend + collapsedBlend * mixOpacity;
-
-        const collapsedTranslateY = -scrollUp - mixProgress * HERO_MIX_OVERSHOOT;
+    const heroAvatarStyle = useAnimatedStyle(() => {
+        const scrollUp = Math.min(Math.max(scrollY.value, 0), HERO_MIX_DISTANCE)
         return {
-            width: targetWidth,
-            height: targetHeight,
-            marginBottom: 0,
-            marginTop: 0,
-            opacity,
+            opacity: interpolate(scrollY.value, [0, HERO_MIX_DISTANCE * 0.82], [1, 0], Extrapolate.CLAMP),
             transform: [
-                // When collapsed, move up with scroll (clamped) so it visually "mixes" into the Dynamic Island.
-                // When expanded, keep the existing dampened follow behavior.
-                { translateY: interpolate(expandState.value, [0, 1], [collapsedTranslateY, scrollY.value * 0.8]) },
-                { scale: pullScale * scaleBlend }
+                { translateY: -scrollUp },
+                { scale: interpolate(scrollY.value, [0, HERO_MIX_DISTANCE], [1, 0.76], Extrapolate.CLAMP) },
             ],
-            zIndex: 1050
-        };
-    });
-
-    const innerImageStyle = useAnimatedStyle(() => ({
-        borderRadius: interpolate(expandState.value, [0, 1], [50, 0]),
-        overflow: 'hidden',
-        flex: 1,
-        backgroundColor: colors.card,
-    }));
-
-    const avatarBlurStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(scrollY.value, [100, 150], [0, 1], Extrapolate.CLAMP) * interpolate(expandState.value, [0, 0.1], [1, 0], Extrapolate.CLAMP)
-    }));
-
-    const bannerBottomBlurStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(expandState.value, [0.5, 0.9], [0, 1]),
-        height: interpolate(expandState.value, [0.5, 1], [0, 100]),
-    }));
-
-    const dragDistance = useSharedValue(150);
-
-    useAnimatedReaction(
-        () => scrollY.value,
-        (y) => {
-            // Updated: Always magnet to TOP (0) whether pulling down or scrolling up
-            // [-220 -> 0] : [40 -> 150] (Pull Down -> Magnet stretches UP)
-            // [0 -> 100]  : [150 -> 40] (Scroll Up -> Magnet stretches UP towards header)
-            // Adjusted limit to 60 to prevent overlap with Island
-            dragDistance.value = interpolate(y, [-150, 0, 100], [60, 150, 60], Extrapolate.CLAMP);
         }
-    );
-
-    const blurRadius = useDerivedValue(() => {
-        return interpolate(scrollY.value, [-220, 0, 100], [10, 0, 10], Extrapolate.CLAMP);
-    });
-
-    const darkeningMatrix = useDerivedValue(() => {
-        // Opacity of "black" overlay -> Scale down RGB channels
-        // 0 -> No dark (1.0 scale), 0.6 -> Dark (0.4 scale)
-        const opacity = interpolate(scrollY.value, [-220, 0, 100], [0.85, 0, 0.85], Extrapolate.CLAMP);
-        const scale = 1 - opacity;
-        return [
-            scale, 0, 0, 0, 0,
-            0, scale, 0, 0, 0,
-            0, 0, scale, 0, 0,
-            0, 0, 0, 1, 0
-        ];
-    });
-
-    const bannerLayerStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(expandState.value, [0, 0.1], [0, 1])
-    }));
-
-    const liquidLayerStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(expandState.value, [0, 0.05], [1, 0])
-    }));
+    })
 
     const penButtonStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(expandState.value, [0, 0.2], [1, 0]),
-        transform: [{ scale: interpolate(expandState.value, [0, 0.2], [1, 0]) }]
+        opacity: interpolate(scrollY.value, [0, 90], [1, 0], Extrapolate.CLAMP),
+        transform: [{ scale: interpolate(scrollY.value, [0, 90], [1, 0.85], Extrapolate.CLAMP) }]
     }));
 
     // --- Dynamic Styles ---
@@ -473,29 +406,8 @@ export default function SettingsScreen() {
     const QR_SIZE = Math.min(260, Math.max(210, Math.floor(windowWidth * 0.62)));
 
     // Avatar Shrink Animation
-    const avatarStyle = useAnimatedStyle(() => {
-        const size = interpolate(scrollY.value, [0, 100], [100, 32], Extrapolate.CLAMP);
-        // Fade out as scroll increases to transition to title in header
-
-        return {
-            width: size,
-            height: size,
-            borderRadius: size / 2,
-            top: interpolate(scrollY.value, [0, 100], [insets.top + 10, insets.top + 6], Extrapolate.CLAMP),
-            left: (windowWidth - size) / 2,
-            position: 'absolute',
-            zIndex: 50,
-            opacity: interpolate(scrollY.value, [0, 80], [1, 0], Extrapolate.CLAMP)
-        };
-    });
-
-    const cameraIconStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(scrollY.value, [0, 50], [1, 0], Extrapolate.CLAMP),
-        transform: [{ scale: interpolate(scrollY.value, [0, 50], [1, 0.5], Extrapolate.CLAMP) }]
-    }));
-
     const headerMaskStyle = useAnimatedStyle(() => ({
-        opacity: interpolate(expandState.value, [0, 0.2], [1, 0])
+        opacity: interpolate(scrollY.value, [0, 80], [1, 0], Extrapolate.CLAMP)
     }));
 
     const backButtonStyle = useAnimatedStyle(() => ({
@@ -505,45 +417,18 @@ export default function SettingsScreen() {
 
     const floatingNameWrapperStyle = useAnimatedStyle(() => {
         const BASE_TOP = insets.top + 140
-        const EXPAND_TOP = windowHeight * 0.5 - 80; // Place on banner bottom
-        const PIN_OFFSET = 185; // BASE_TOP - (insets.top + 10)
-
-        // Vertical Movement
-        const currentTop = interpolate(expandState.value, [0, 1], [BASE_TOP, EXPAND_TOP]);
-
-        // Vertical scroll offset
-        const translateY = -Math.min(scrollY.value, PIN_OFFSET);
-
-        // Scale Effect
-        const scale = interpolate(scrollY.value, [160, 200], [1, 0.82], Extrapolate.CLAMP);
+        const translateY = -Math.min(Math.max(scrollY.value, 0), 150)
+        const scale = interpolate(scrollY.value, [0, 170], [1, 0.9], Extrapolate.CLAMP)
 
         return {
-            top: currentTop,
-            paddingLeft: interpolate(expandState.value, [0, 1], [0, 20]),
-            alignItems: expandState.value > 0.5 ? 'flex-start' : 'center',
+            top: BASE_TOP,
+            alignItems: 'center',
             transform: [
                 { translateY },
                 { scale }
             ],
-            zIndex: 1200, // Above everything
-            // Fade out on scroll into header
-            opacity: interpolate(scrollY.value, [220, 250], [1, 0], Extrapolate.CLAMP)
-        };
-    });
-
-    const floatingNameTextStyle = useAnimatedStyle(() => {
-        const textColor = interpolate(expandState.value, [0.8, 1], [0, 1]) === 1 ? '#fff' : colors.text;
-        return {
-            color: textColor,
-            fontSize: interpolate(scrollY.value, [-100, 0, 100], [34, 28, 18], Extrapolate.CLAMP),
-        };
-    });
-
-    const floatingSubtextStyle = useAnimatedStyle(() => {
-        const textColor = interpolate(expandState.value, [0.8, 1], [0, 1]) === 1 ? 'rgba(255,255,255,0.8)' : colors.textSecondary;
-        return {
-            color: textColor,
-            opacity: interpolate(expandState.value, [0.8, 1], [0.8, 1]), // Slightly brighter on banner
+            zIndex: 1200,
+            opacity: interpolate(scrollY.value, [0, 190, 230], [1, 1, 0], Extrapolate.CLAMP)
         };
     });
 
@@ -591,11 +476,20 @@ export default function SettingsScreen() {
                                 />
                             </Animated.View>
                         ) : (
-                            <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
-                                <TouchableOpacity onPress={openQr} style={styles.iconBtnCircle}>
-                                    <QrCode size={20} color={colors.text} />
-                                </TouchableOpacity>
-                            </SafeLiquidGlass>
+                            useNativeGlassButtons ? (
+                                <SafeLiquidGlass
+                                    style={styles.glassBtnCircle}
+                                    blurIntensity={15}
+                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                    nativeControls={qrHeaderButton}
+                                />
+                            ) : (
+                                <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                                    <TouchableOpacity onPress={openQr} style={styles.iconBtnCircle}>
+                                        <QrCode size={20} color={colors.text} />
+                                    </TouchableOpacity>
+                                </SafeLiquidGlass>
+                            )
                         )}
                     </View>
 
@@ -609,113 +503,135 @@ export default function SettingsScreen() {
                     </View>
 
                     {/* Right: Edit Button or Spacer */}
-                    <View style={styles.headerBtnWrapper}>
+                    <View style={[styles.headerBtnWrapper, activeView === 'main' && useNativeGlassButtons ? styles.headerTextBtnWrapper : null]}>
                         {activeView === 'main' ? (
-                            <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
-                                <TouchableOpacity onPress={openEditMenu} style={styles.iconBtnCircle}>
-                                    <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>{t('settings.edit')}</Text>
-                                </TouchableOpacity>
-                            </SafeLiquidGlass>
+                            useNativeGlassButtons ? (
+                                <SafeLiquidGlass
+                                    style={styles.glassBtnText}
+                                    blurIntensity={15}
+                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                    nativeControls={editHeaderButton}
+                                />
+                            ) : (
+                                <SafeLiquidGlass style={styles.glassBtnCircle} blurIntensity={15} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
+                                    <TouchableOpacity onPress={openEditMenu} style={styles.iconBtnCircle}>
+                                        <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>{t('settings.edit')}</Text>
+                                    </TouchableOpacity>
+                                </SafeLiquidGlass>
+                            )
                         ) : (
                             <View style={{ width: 44 }} />
                         )}
                     </View>
                 </View>
 
-                {/* HERO AVATAR (Pinned; does not scroll) */}
+                {/* HERO AVATAR */}
                 {activeView === 'main' && (
                     <View
                         pointerEvents="box-none"
                         style={[
                             StyleSheet.absoluteFill,
-                            { zIndex: 1060, top: HERO_TOP }
+                            { zIndex: 1060 }
                         ]}
                     >
                         <View pointerEvents="box-none" style={{ alignItems: 'center' }}>
-                            <Animated.View pointerEvents="box-none" style={[wrapperStyle, { alignItems: 'center', justifyContent: 'center' }]}>
-                                {/* LAYER 1: Standard Banner Image (Visible when expanding) */}
-                                <Animated.View style={[StyleSheet.absoluteFill, innerImageStyle, bannerLayerStyle]} pointerEvents="none">
-                                    {user?.profileImage ? (
-                                        <View style={{ width: '100%', height: '100%' }}>
-                                            <Image
-                                                source={{ uri: user.profileImage }}
-                                                style={{ width: '100%', height: '100%' }}
-                                                resizeMode="cover"
-                                            />
-                                            {/* Glass Strip for Banner */}
-                                            <AnimatedBlurView
-                                                intensity={0}
-                                                tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                                style={[{ position: 'absolute', bottom: 0, left: 0, right: 0 }, bannerBottomBlurStyle]}
-                                            />
-                                        </View>
-                                    ) : (
-                                        <View style={{ width: '100%', height: '100%', backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }}>
-                                            <Text style={{ fontSize: 18, color: '#fff' }}>{(user?.name?.[0] || user?.username?.[0] || 'U').toUpperCase()}</Text>
-                                        </View>
-                                    )}
-                                </Animated.View>
+                            {useNativeProfileAvatar ? (
+                                <>
+                                    <NativeProfileAvatar
+                                        pointerEvents="none"
+                                        style={{
+                                            position: 'absolute',
+                                            top: 0,
+                                            left: 0,
+                                            right: 0,
+                                            height: HERO_TOP + 120,
+                                        }}
+                                        imageUri={user?.profileImage}
+                                        fallbackText={user?.name || user?.username || 'U'}
+                                        collapsed={isAvatarCollapsed}
+                                        expandedSize={100}
+                                        expandedTopInset={HERO_TOP}
+                                    />
 
-                                {/* LAYER 2: Skia Liquid Avatar (Visible when collapsed) */}
-                                {user?.profileImage && skiaImage ? (
-                                    <Animated.View style={[{ position: 'absolute', top: -100, left: 0, right: 0, bottom: 0 }, liquidLayerStyle]} pointerEvents="none">
-                                        <Canvas style={{ flex: 1 }}>
-                                            <Mask
-                                                mode="luminance"
-                                                mask={
-                                                    <Group>
-                                                        <Group layer={
-                                                            <Paint>
-                                                                <ColorMatrix matrix={LIQUID_MATRIX} />
-                                                            </Paint>
-                                                        }>
-                                                            <Group>
-                                                                <BlurMask blur={15} style="normal" />
-                                                                {/* Reduced radius to 46 to prevent squaring off at edges (100px width) */}
-                                                                <Circle cx={50} cy={150} r={46} color="white" />
-                                                                <Circle cx={50} cy={dragDistance} r={32} color="white" />
-                                                            </Group>
-                                                        </Group>
-                                                    </Group>
-                                                }
-                                            >
-                                                <SkiaImage
-                                                    image={skiaImage}
-                                                    x={0}
-                                                    y={30}
-                                                    width={100}
-                                                    height={240}
-                                                    fit="cover"
+                                    <View
+                                        pointerEvents="box-none"
+                                        style={{
+                                            width: 100,
+                                            height: 100,
+                                            marginTop: HERO_TOP,
+                                            alignItems: 'flex-end',
+                                            justifyContent: 'flex-end',
+                                            zIndex: 1050,
+                                        }}
+                                    >
+                                        <Animated.View style={penButtonStyle}>
+                                            <TouchableOpacity onPress={pickImage}>
+                                                <SafeLiquidGlass
+                                                    style={{ padding: 8, borderRadius: 20 }}
+                                                    blurIntensity={15}
+                                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
                                                 >
-                                                    <Blur blur={blurRadius} />
-                                                    <ColorMatrix matrix={darkeningMatrix} />
-                                                </SkiaImage>
-                                            </Mask>
-                                        </Canvas>
-                                    </Animated.View>
-                                ) : null}
+                                                    <Edit2 size={16} color={colors.text} />
+                                                </SafeLiquidGlass>
+                                            </TouchableOpacity>
+                                        </Animated.View>
+                                    </View>
+                                </>
+                            ) : (
+                                <Animated.View
+                                    pointerEvents="box-none"
+                                    style={[
+                                        {
+                                            width: 100,
+                                            height: 100,
+                                            borderRadius: 50,
+                                            overflow: 'hidden',
+                                            alignItems: 'center',
+                                            justifyContent: 'center',
+                                            backgroundColor: colors.card,
+                                            zIndex: 1050,
+                                            marginTop: HERO_TOP,
+                                        },
+                                        heroAvatarStyle,
+                                    ]}
+                                >
+                                    <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                                        {user?.profileImage ? (
+                                            <View style={{ width: '100%', height: '100%' }}>
+                                                <Image
+                                                    source={{ uri: user.profileImage }}
+                                                    style={{ width: '100%', height: '100%' }}
+                                                    resizeMode="cover"
+                                                />
+                                            </View>
+                                        ) : (
+                                            <View style={{ width: '100%', height: '100%', backgroundColor: colors.primary, alignItems: 'center', justifyContent: 'center' }}>
+                                                <Text style={{ fontSize: 18, color: '#fff' }}>{(user?.name?.[0] || user?.username?.[0] || 'U').toUpperCase()}</Text>
+                                            </View>
+                                        )}
+                                    </View>
 
-                                {/* Edit/Pen Button */}
-                                <Animated.View style={[
-                                    {
-                                        position: 'absolute',
-                                        bottom: 0,
-                                        right: 0,
-                                        zIndex: 30
-                                    },
-                                    penButtonStyle
-                                ]}>
-                                    <TouchableOpacity onPress={pickImage}>
-                                        <SafeLiquidGlass
-                                            style={{ padding: 8, borderRadius: 20 }}
-                                            blurIntensity={15}
-                                            tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                        >
-                                            <Edit2 size={16} color={colors.text} />
-                                        </SafeLiquidGlass>
-                                    </TouchableOpacity>
+                                    <Animated.View style={[
+                                        {
+                                            position: 'absolute',
+                                            bottom: 0,
+                                            right: 0,
+                                            zIndex: 30
+                                        },
+                                        penButtonStyle
+                                    ]}>
+                                        <TouchableOpacity onPress={pickImage}>
+                                            <SafeLiquidGlass
+                                                style={{ padding: 8, borderRadius: 20 }}
+                                                blurIntensity={15}
+                                                tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                            >
+                                                <Edit2 size={16} color={colors.text} />
+                                            </SafeLiquidGlass>
+                                        </TouchableOpacity>
+                                    </Animated.View>
                                 </Animated.View>
-                            </Animated.View>
+                            )}
                         </View>
                     </View>
                 )}
@@ -903,26 +819,26 @@ export default function SettingsScreen() {
                                 left: 0,
                                 right: 0,
                                 zIndex: 1000,
-                                height: 60, // approximate height of content
+                                height: 60,
                             },
                             floatingNameWrapperStyle
                         ]}>
                         <View style={{ flexDirection: 'row', alignItems: 'center' }}>
-                            <Animated.Text style={[
-                                { fontWeight: '400' },
-                                floatingNameTextStyle
+                            <Text style={[
+                                styles.floatingName,
+                                { color: colors.text }
                             ]}>
                                 {user?.name || user?.username || 'Guest'}
-                            </Animated.Text>
+                            </Text>
                             <InlineBadge tier={userTier} size={18} />
                         </View>
 
-                        <Animated.Text style={[
-                            { fontSize: 13, marginTop: 2 },
-                            floatingSubtextStyle
+                        <Text style={[
+                            styles.floatingSubtext,
+                            { color: colors.textSecondary }
                         ]}>
                             {user?.phoneNumber ? `${user.phoneNumber} • ` : ''}@{user?.username || 'unknown'}
-                        </Animated.Text>
+                        </Text>
                     </Animated.View>
                 )}
 
@@ -1189,7 +1105,9 @@ const styles = StyleSheet.create({
     headerContainer: { position: 'absolute', top: 0, left: 0, right: 0, zIndex: 1000 },
     headerContentContainer: { position: 'absolute', top: 0, left: 0, right: 0, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingHorizontal: 16, paddingBottom: 4 },
     headerBtnWrapper: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
+    headerTextBtnWrapper: { width: undefined, minWidth: 56 },
     glassBtnCircle: { width: 44, height: 44, borderRadius: 22, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
+    glassBtnText: { minWidth: 56, height: 44, borderRadius: 22, overflow: 'hidden' },
     iconBtnCircle: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
     headerCenterWrapper: { flex: 1, alignItems: 'center', justifyContent: 'center', marginHorizontal: 10, height: 44 },
     headerTitle: { fontSize: 17, fontWeight: '700', textAlign: 'center' },
@@ -1206,19 +1124,6 @@ const styles = StyleSheet.create({
     settingValue: { fontSize: 15, opacity: 0.7 },
     footer: { alignItems: 'center', marginTop: 10, marginBottom: 30 },
     footerText: { fontSize: 12, opacity: 0.5 },
-    cameraBadge: {
-        position: 'absolute',
-        bottom: 0,
-        right: 0,
-        width: 28,
-        height: 28,
-        borderRadius: 14,
-        alignItems: 'center',
-        justifyContent: 'center',
-        shadowColor: '#000',
-        shadowOffset: { width: 0, height: 2 },
-        shadowOpacity: 0.2,
-        shadowRadius: 4,
-        elevation: 4
-    }
+    floatingName: { fontSize: 28, fontWeight: '400' },
+    floatingSubtext: { fontSize: 13, marginTop: 2 },
 });
