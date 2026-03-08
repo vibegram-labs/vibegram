@@ -149,44 +149,55 @@ private struct NativeProfileAvatarInnerContent: View {
 @available(iOS 26.0, *)
 private struct NativeProfileAvatarGlassMorphView: View {
   @ObservedObject var model: NativeProfileAvatarModel
+  @Namespace private var namespace
+  @State private var showExpanded: Bool = true
 
-  /// Scroll progress 0…1 from fully expanded to fully collapsed.
-  private var progress: CGFloat {
-    let travel = max(1, model.expandedTopInset - model.collapsedTopInset)
-    return max(0, min(1, model.scrollOffset / travel))
-  }
-
-  /// Single circle shrinks from expandedSize → collapsedSize.
-  private var currentSize: CGFloat {
-    model.expandedSize + (model.collapsedSize - model.expandedSize) * progress
-  }
-
-  /// Single circle moves from expandedTopInset → collapsedTopInset.
-  private var currentTop: CGFloat {
-    model.expandedTopInset + (model.collapsedTopInset - model.expandedTopInset) * progress
+  /// Distance between anchor bottom and expanded top — matches the
+  /// GlassEffectContainer spacing exactly so effects stay separate at
+  /// rest but morph during transitions (Apple pattern: container spacing
+  /// == layout container spacing).
+  private var gap: CGFloat {
+    max(1, model.expandedTopInset - model.collapsedTopInset - model.collapsedSize)
   }
 
   var body: some View {
-    ZStack {
-      Color.black
+    GlassEffectContainer(spacing: gap) {
+      // VStack spacing MUST equal container spacing — if container
+      // spacing > VStack spacing, effects merge at rest.
+      VStack(spacing: gap) {
+        // Anchor: always-present morph target at collapsed position
+        NativeProfileAvatarInnerContent(
+          image: model.loadedImage,
+          fallbackText: model.fallbackText,
+          size: model.collapsedSize
+        )
+        .frame(width: model.collapsedSize, height: model.collapsedSize)
+        .clipShape(Circle())
+        .glassEffect()
+        .glassEffectID("avatar-anchor", in: namespace)
 
-      if let image = model.loadedImage {
-        Image(uiImage: image)
-          .resizable()
-          .scaledToFill()
-          .opacity(max(0, 1.0 - progress * 1.5))
-      } else {
-        Text(String(model.fallbackText.prefix(1)).uppercased())
-          .font(.system(size: max(14.0, currentSize * 0.34), weight: .semibold))
-          .foregroundStyle(.white)
-          .opacity(max(0, 1.0 - progress * 1.5))
+        if showExpanded {
+          // Expanded avatar — morphs into/out of anchor
+          NativeProfileAvatarInnerContent(
+            image: model.loadedImage,
+            fallbackText: model.fallbackText,
+            size: model.expandedSize
+          )
+          .frame(width: model.expandedSize, height: model.expandedSize)
+          .clipShape(Circle())
+          .glassEffect()
+          .glassEffectID("avatar-main", in: namespace)
+        }
+      }
+      .padding(.top, model.collapsedTopInset)
+      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+    }
+    .frame(maxWidth: .infinity, maxHeight: .infinity)
+    .onChange(of: model.collapsed) { _, isCollapsed in
+      withAnimation(.bouncy) {
+        showExpanded = !isCollapsed
       }
     }
-    .frame(width: currentSize, height: currentSize)
-    .clipShape(Circle())
-    .glassEffect()
-    .padding(.top, currentTop)
-    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
   }
 }
 

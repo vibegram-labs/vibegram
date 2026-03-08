@@ -42,7 +42,9 @@ interface NativeChatTabsViewProps {
     activeTintColor?: number | null;
     inactiveTintColor?: number | null;
     isDark?: boolean;
+    isVibeExpanded?: boolean;
     onIndexChange?: (event: NativeSyntheticEvent<NativeTabPressPayload>) => void;
+    onVibeSubmit?: (event: NativeSyntheticEvent<{ text: string }>) => void;
     style?: any;
 }
 
@@ -87,6 +89,8 @@ export interface NativeTabBarProps {
     screenWidth?: number;
     onVibePress?: () => void;
     fallbackTabWidth?: number;
+    isVibeExpanded?: boolean;
+    onVibeSubmit?: (text: string) => void;
 }
 
 const FALLBACK_TAB_WIDTH = 70;
@@ -111,6 +115,8 @@ export default function NativeTabBar({
     screenWidth,
     onVibePress,
     fallbackTabWidth,
+    isVibeExpanded,
+    onVibeSubmit,
 }: NativeTabBarProps) {
     const vibeIndex = tabs.findIndex(isVibeTab);
     const vibeTab = vibeIndex >= 0 ? tabs[vibeIndex] : undefined;
@@ -180,7 +186,14 @@ export default function NativeTabBar({
                     activeTintColor={nativeActiveTintColor}
                     inactiveTintColor={nativeInactiveTintColor}
                     isDark={isDark}
+                    isVibeExpanded={isVibeExpanded}
                     onIndexChange={handleNativeIndexChange}
+                    onVibeSubmit={(e: any) => {
+                        const payload = e?.nativeEvent ?? e;
+                        if (payload?.text && onVibeSubmit) {
+                            onVibeSubmit(payload.text);
+                        }
+                    }}
                 />
             </View>
         );
@@ -664,7 +677,7 @@ const styles = StyleSheet.create({
         width: '100%',
         paddingBottom: Platform.OS === 'ios' ? 10 : 8,
         paddingTop: 2,
-        paddingHorizontal: 10,
+        paddingHorizontal: 22,
         alignItems: 'stretch',
         justifyContent: 'flex-end',
         backgroundColor: 'transparent',

@@ -976,21 +976,33 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     avatarView.setCollapsedSize(heroCollapsedAvatarSize)
     avatarView.setExpandedTopInset(heroTop)
     avatarView.setCollapsedTopInset(collapsedTop)
-    avatarView.setScrollOffset(scrollView.contentOffset.y)
+
+    if #available(iOS 26.0, *) {
+      // Glass morph: don't send scrollOffset — layout is driven by collapsed toggle.
+    } else {
+      avatarView.setScrollOffset(scrollView.contentOffset.y)
+    }
   }
 
   private func updateScrollAnimations(offsetY: CGFloat) {
     let resolvedOffset = max(0, offsetY)
-
-    // Pass scroll offset to the SwiftUI glass morph view — it drives the
-    // VStack spacing so the expanded avatar physically moves toward the
-    // anchor.  The GlassEffectContainer merges the shapes automatically
-    // when they are close enough.
-    avatarView.setScrollOffset(resolvedOffset)
-
-    // Pen-button tracking — UIKit layer, independent of glass morph.
     let travelDistance = max(1.0, currentHeroTop - currentCollapsedTop)
     let progress = max(0.0, min(1.0, resolvedOffset / travelDistance))
+
+    if #available(iOS 26.0, *) {
+      // Glass morph: toggle collapsed at threshold — no scrollOffset to
+      // keep the glass layout 100 % static between state changes.
+      let shouldCollapse = progress > 0.75
+      if shouldCollapse != avatarCollapsed {
+        avatarCollapsed = shouldCollapse
+        avatarView.setCollapsed(shouldCollapse)
+      }
+    } else {
+      // Legacy: send scroll offset for smooth size/position interpolation.
+      avatarView.setScrollOffset(resolvedOffset)
+    }
+
+    // Pen-button tracking — UIKit layer, independent of glass morph.
     let currentAvatarTop = max(
       currentCollapsedTop,
       currentHeroTop - resolvedOffset

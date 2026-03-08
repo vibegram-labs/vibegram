@@ -9,7 +9,9 @@ import {
     TouchableOpacity,
     Modal,
     useWindowDimensions,
-    Keyboard
+    Keyboard,
+    DeviceEventEmitter,
+    Pressable
 } from 'react-native'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import Animated, {
@@ -31,6 +33,7 @@ import { useThemeStore } from '../../lib/stores/theme-store'
 import { useWallpaperStore, resolveThemeVariant } from '../../lib/stores/wallpaper-store'
 import { useAgentStore } from '../../lib/agent/AgentStore'
 import ChatInput from '../../components/shared/ChatInput'
+import { isNativeTabBarAvailable } from '../native/NativeTabBar'
 import StreamingText from '../../components/shared/StreamingText'
 import { KeyboardStickyView } from 'react-native-keyboard-controller'
 import { AgentLoader, ProgressItem } from '../../components/ui/AgentLoader'
@@ -559,6 +562,20 @@ export default function ChatScreen({
         }
     }
 
+    // Use a ref to always point to the fresh handleSend without detaching the listener
+    const handleSendRef = useRef(handleSend)
+    useEffect(() => {
+        handleSendRef.current = handleSend
+    }, [handleSend])
+
+    // Bind Native Tab Bar 'Message Vibe' to this local handleSend 
+    useEffect(() => {
+        const sub = DeviceEventEmitter.addListener('onVibeSubmit', (text: string) => {
+            void handleSendRef.current(text)
+        })
+        return () => sub.remove()
+    }, [])
+
     const handleSelectConversation = (id: string) => {
         setActiveConversation(id)
         navigateToChat()
@@ -729,61 +746,65 @@ export default function ChatScreen({
                         {/* --- PAGE 0: CHAT SCREEN --- */}
                         <View style={{ width: SCREEN_WIDTH, height: '100%' }}>
                             <View style={{ flex: 1, flexDirection: 'column' }}>
-                                <ScrollView ref={scrollViewRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: insets.top + 80, paddingHorizontal: 5, paddingBottom: 140 }} showsVerticalScrollIndicator={false} keyboardDismissMode="on-drag" keyboardShouldPersistTaps="handled">
-                                    {flatListMessages.map((msg, index) => (
-                                        <MessageItem
-                                            key={msg.id || index}
-                                            item={{
-                                                ...msg,
-                                                bubbleTheme
-                                            }}
-                                            index={index}
-                                            prevItem={index > 0 ? flatListMessages[index - 1] : null}
-                                            nextItem={index < flatListMessages.length - 1 ? flatListMessages[index + 1] : null}
-                                            isActive={contextMenu?.messageId === msg.id}
-                                            onLongPress={(e: any, msgItem: any, text: string) => {
-                                                setContextMenu({
-                                                    visible: true,
-                                                    messageId: msgItem.id,
-                                                    isUser: msgItem.role === 'user',
-                                                    content: text,
-                                                    y: e.nativeEvent.pageY
-                                                })
-                                            }}
-                                            renderActionButtons={renderActionButtons}
-                                        />
-                                    ))}
-                                    {renderFooterMessages()}
+                                <ScrollView ref={scrollViewRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: insets.top + 80, paddingHorizontal: 5, paddingBottom: 140, flexGrow: 1 }} showsVerticalScrollIndicator={false} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
+                                    <View style={{ flexGrow: 1, minHeight: '100%' }}>
+                                        <Pressable style={{ flexGrow: 1 }} onPress={() => Keyboard.dismiss()}>
+                                            <Animated.View style={[{ height: spacerHeight }]} />
+                                        </Pressable>
+                                        {flatListMessages.map((msg, index) => (
+                                            <MessageItem
+                                                key={msg.id || index}
+                                                item={{
+                                                    ...msg,
+                                                    bubbleTheme
+                                                }}
+                                                index={index}
+                                                prevItem={index > 0 ? flatListMessages[index - 1] : null}
+                                                nextItem={index < flatListMessages.length - 1 ? flatListMessages[index + 1] : null}
+                                                isActive={contextMenu?.messageId === msg.id}
+                                                onLongPress={(e: any, msgItem: any, text: string) => {
+                                                    setContextMenu({
+                                                        visible: true,
+                                                        messageId: msgItem.id,
+                                                        isUser: msgItem.role === 'user',
+                                                        content: text,
+                                                        y: e.nativeEvent.pageY
+                                                    })
+                                                }}
+                                                renderActionButtons={renderActionButtons}
+                                            />
+                                        ))}
+                                        {renderFooterMessages()}
+                                    </View>
                                 </ScrollView>
 
-                                <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: insets.bottom + 82, pointerEvents: 'none' }} renderToHardwareTextureAndroid={true}>
-                                    <MaskedViewAny style={StyleSheet.absoluteFill} maskElement={<LinearGradient colors={['rgba(0,0,0,0)', 'rgba(0,0,0,1)']} locations={[0, 0.4]} style={StyleSheet.absoluteFill} />}>
-                                        <BlurView
-                                            style={StyleSheet.absoluteFill}
-                                            intensity={25}
-                                            tint={isLight ? 'light' : 'dark'}
-                                            experimentalBlurMethod="dimezisBlurView"
-                                        />
-                                    </MaskedViewAny>
+                                <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: insets.bottom + 82, pointerEvents: 'none' }}>
+                                    <LinearGradient
+                                        colors={['rgba(0,0,0,0)', isLight ? 'rgba(255,255,255,1)' : 'rgba(0,0,0,1)']}
+                                        locations={[0, 0.6]}
+                                        style={StyleSheet.absoluteFill}
+                                    />
                                 </View>
 
-                                <KeyboardStickyView offset={{ closed: -20, opened: -10 }} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20 }}>
-                                    <ChatInput
-                                        value={inputText}
-                                        onChangeText={setInputText}
-                                        onSend={() => { if (inputText.trim()) void handleSend(inputText.trim()) }}
-                                        isStreaming={storeIsStreaming}
-                                        onStopStreaming={handleStopStreaming}
-                                        placeholder={editingMessageId ? "Update message..." : "Message Vibe..."}
-                                        keyboardProgress={keyboardProgress}
-                                        isEditing={!!editingMessageId}
-                                        onCancelEdit={() => { setEditingMessageId(null); setInputText('') }}
-                                        onVoicePress={() => {
-                                            console.log('[Chat] Voice button pressed - opening voice panel')
-                                            haptic.medium()
-                                        }}
-                                    />
-                                </KeyboardStickyView>
+                                {!isNativeTabBarAvailable() && (
+                                    <KeyboardStickyView offset={{ closed: -20, opened: -10 }} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20 }}>
+                                        <ChatInput
+                                            value={inputText}
+                                            onChangeText={setInputText}
+                                            onSend={() => { if (inputText.trim()) void handleSend(inputText.trim()) }}
+                                            isStreaming={storeIsStreaming}
+                                            onStopStreaming={handleStopStreaming}
+                                            placeholder={editingMessageId ? "Update message..." : "Message Vibe..."}
+                                            keyboardProgress={keyboardProgress}
+                                            isEditing={!!editingMessageId}
+                                            onCancelEdit={() => { setEditingMessageId(null); setInputText('') }}
+                                            onVoicePress={() => {
+                                                console.log('[Chat] Voice button pressed - opening voice panel')
+                                                haptic.medium()
+                                            }}
+                                        />
+                                    </KeyboardStickyView>
+                                )}
                             </View>
 
                             <GlassToast visible={toastVisible} onClose={() => setToastVisible(false)} topInset={insets.top} />

@@ -1,6 +1,6 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Dimensions, Keyboard, BackHandler, ActivityIndicator } from 'react-native'
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Dimensions, Keyboard, BackHandler, ActivityIndicator, DeviceEventEmitter } from 'react-native'
 import Animated, {
     useSharedValue,
     useAnimatedStyle,
@@ -29,6 +29,7 @@ import ContactsScreen from './contacts'
 import CallsScreen from './calls'
 import { StoryCamera } from '../story-camera'
 import { AgentChatScreen } from '../../src/components/agent'
+import { useAgentStore } from '../../src/lib/agent/AgentStore'
 import { BlurView } from 'expo-blur'
 import { Image } from 'react-native'
 import MaskedView from '@react-native-masked-view/masked-view'
@@ -126,6 +127,8 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
     activeTintColor,
     inactiveTintColor,
     isDark,
+    isVibeExpanded,
+    onVibeSubmit,
     safeRouterPush,
     bottomBarFadeStyle,
     t,
@@ -137,6 +140,8 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
     activeTintColor: string;
     inactiveTintColor: string;
     isDark: boolean;
+    isVibeExpanded: boolean;
+    onVibeSubmit: (text: string) => void;
     safeRouterPush: (path: string, source: string) => void;
     bottomBarFadeStyle: any;
     t: (key: string) => string;
@@ -182,8 +187,6 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
         {
             key: 'vibe',
             title: 'Vibe',
-            iconSource: require('../../assets/logos/logotransparent.png'),
-            unfocusedIconSource: require('../../assets/logos/logotransparent.png'),
             preventsDefault: true,
         },
     ], [t, totalUnread, settingsIconSource]);
@@ -197,7 +200,9 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
                 activeTintColor={activeTintColor}
                 inactiveTintColor={inactiveTintColor}
                 isDark={isDark}
+                isVibeExpanded={isVibeExpanded}
                 onVibePress={nativeOnVibePress}
+                onVibeSubmit={onVibeSubmit}
             />
         </AnimatedView>
     );
@@ -254,6 +259,15 @@ export default function TabLayout() {
     const storyMountTimerRef = useRef<any>(null)
 
     const router = useRouter()
+
+    // Wire up global input for Agent vibe mode
+    // (We now forward events to AgentChatScreen to use its heavy animations and logic instead of directly hitting the store)
+
+    const handleVibeSubmit = useCallback((text: string) => {
+        if (!text.trim()) return;
+        DeviceEventEmitter.emit('onVibeSubmit', text);
+    }, []);
+
     const safeRouterPush = useCallback((path: string, source: string) => {
         try {
             console.log(`[TabsLayout] ${source} -> ${path}`)
@@ -461,6 +475,8 @@ export default function TabLayout() {
                                 activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
                                 inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
                                 isDark={isDark}
+                                isVibeExpanded={currentTab === 'vibe'}
+                                onVibeSubmit={handleVibeSubmit}
                                 safeRouterPush={safeRouterPush}
                                 bottomBarFadeStyle={bottomBarFadeStyle}
                                 t={t}

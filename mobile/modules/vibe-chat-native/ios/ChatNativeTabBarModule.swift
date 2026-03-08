@@ -11,8 +11,9 @@ private struct ChatNativeTabItem: Equatable {
   let isVibe: Bool
 }
 
-public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
+public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextFieldDelegate {
   public var onIndexChange = EventDispatcher()
+  public var onVibeSubmit = EventDispatcher()
 
   // Custom TabBar that ignores safe-area
   private class FloatingTabBar: UITabBar {
@@ -22,10 +23,16 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
   // Main Tab Bar (natively applies its own glass)
   private let tabBar = FloatingTabBar()
 
-  // Vibe Button
+  // Vibe Button & Input
   private let vibeChromeView = UIVisualEffectView(effect: nil)
   private let vibeIconView = UIImageView()
   private let vibeButton = UIButton(type: .system)
+  private let vibeTextField = UITextField()
+  private let vibeSubmitButton = UIButton(type: .system)
+
+  private var vibeWidthConstraint: NSLayoutConstraint?
+  private var vibeHeightConstraint: NSLayoutConstraint?
+  private var isVibeExpanded = false
 
   private var tabs: [ChatNativeTabItem] = []
 
@@ -41,6 +48,16 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     setupView()
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(keyboardWillShow), name: UIResponder.keyboardWillShowNotification,
+      object: nil)
+    NotificationCenter.default.addObserver(
+      self, selector: #selector(keyboardWillHide), name: UIResponder.keyboardWillHideNotification,
+      object: nil)
+  }
+
+  deinit {
+    NotificationCenter.default.removeObserver(self)
   }
 
   public override var intrinsicContentSize: CGSize {
@@ -75,6 +92,28 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
     vibeButton.addTarget(self, action: #selector(handleVibePress), for: .touchUpInside)
     vibeChromeView.contentView.addSubview(vibeButton)
 
+    // Text Field
+    vibeTextField.translatesAutoresizingMaskIntoConstraints = false
+    vibeTextField.placeholder = "Message Vibe..."
+    vibeTextField.font = .systemFont(ofSize: 16)
+    vibeTextField.alpha = 0
+    vibeTextField.returnKeyType = .send
+    vibeTextField.delegate = self
+    vibeTextField.addTarget(self, action: #selector(textDidChange), for: .editingChanged)
+    vibeChromeView.contentView.addSubview(vibeTextField)
+
+    // Submit Button - Inserted BELOW icon so it acts as background pill and doesn't obscure the SVG!
+    vibeSubmitButton.translatesAutoresizingMaskIntoConstraints = false
+    vibeSubmitButton.backgroundColor = .clear
+    vibeSubmitButton.alpha = 0  // Initially invisible touch target
+    vibeSubmitButton.addTarget(self, action: #selector(handleVibeSubmitAction), for: .touchUpInside)
+    vibeChromeView.contentView.insertSubview(vibeSubmitButton, belowSubview: vibeIconView)
+
+    let widthConstraint = vibeChromeView.widthAnchor.constraint(equalToConstant: 60)
+    let heightConstraint = vibeChromeView.heightAnchor.constraint(equalToConstant: 60)
+    self.vibeWidthConstraint = widthConstraint
+    self.vibeHeightConstraint = heightConstraint
+
     // ── Direct Constraints ──
     NSLayoutConstraint.activate([
       // Shift the bounding box outward by 16pt on leading and 8pt on trailing to translate the invisible box leftward.
@@ -86,14 +125,28 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
       // Vibe chrome explicitly sized to ~60pt to exactly match Apple's iOS 18 floating pill limits
       vibeChromeView.trailingAnchor.constraint(equalTo: trailingAnchor),
       vibeChromeView.topAnchor.constraint(equalTo: tabBar.topAnchor),
-      vibeChromeView.heightAnchor.constraint(equalToConstant: 60),
-      vibeChromeView.widthAnchor.constraint(equalToConstant: 60),
+      heightConstraint,
+      widthConstraint,
 
       // Icon inside vibe
       vibeIconView.centerXAnchor.constraint(equalTo: vibeChromeView.contentView.centerXAnchor),
       vibeIconView.centerYAnchor.constraint(equalTo: vibeChromeView.contentView.centerYAnchor),
       vibeIconView.widthAnchor.constraint(equalToConstant: 24),
       vibeIconView.heightAnchor.constraint(equalToConstant: 24),
+
+      // Text Field Constraints
+      vibeTextField.leadingAnchor.constraint(
+        equalTo: vibeChromeView.contentView.leadingAnchor, constant: 10),
+      vibeTextField.centerYAnchor.constraint(equalTo: vibeChromeView.contentView.centerYAnchor),
+      vibeTextField.trailingAnchor.constraint(
+        equalTo: vibeSubmitButton.leadingAnchor, constant: -8),
+
+      // Submit Button Constraints
+      vibeSubmitButton.trailingAnchor.constraint(
+        equalTo: vibeChromeView.contentView.trailingAnchor, constant: -6),
+      vibeSubmitButton.centerYAnchor.constraint(equalTo: vibeChromeView.contentView.centerYAnchor),
+      vibeSubmitButton.widthAnchor.constraint(equalToConstant: 38),
+      vibeSubmitButton.heightAnchor.constraint(equalToConstant: 38),
 
       // Tap area fills vibe
       vibeButton.leadingAnchor.constraint(equalTo: vibeChromeView.contentView.leadingAnchor),
@@ -255,6 +308,142 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
     }
   }
 
+  func setVibeExpanded(_ expanded: Bool) {
+    guard self.isVibeExpanded != expanded else { return }
+    self.isVibeExpanded = expanded
+
+    UIView.animate(
+      withDuration: 0.4, delay: 0, usingSpringWithDamping: 0.8, initialSpringVelocity: 0.2,
+      options: .curveEaseInOut,
+      animations: {
+        if expanded {
+          let fullWidth = self.bounds.width  // span entire width inherently aligning to outer container padding
+          self.vibeWidthConstraint?.constant = fullWidth
+          self.vibeHeightConstraint?.constant = 50
+          self.vibeChromeView.layer.cornerRadius = 25
+          self.tabBar.alpha = 0.0
+          self.tabBar.transform = CGAffineTransform(translationX: -40, y: 0)
+
+          // Center of the layout shifts natively to fullWidth/2.
+          // Target position of the center is fullWidth - 26.
+          // Translation          // Translation = targetCenter - currentLayoutCenter
+          // center of submit button = fullWidth - 6 - (38/2) = fullWidth - 25.
+          let translationX = (fullWidth / 2.0) - 25.0
+          self.vibeIconView.transform = CGAffineTransform(translationX: translationX, y: 0)
+            .scaledBy(x: 0.85, y: 0.85)
+
+          self.vibeSubmitButton.layer.cornerRadius = 19
+          self.textDidChange()  // dynamically apply colors based on text
+
+          self.vibeIconView.alpha = 1.0
+          self.vibeTextField.alpha = 1.0
+          self.vibeSubmitButton.alpha = 1.0  // Becomes visible colored pill
+          self.vibeButton.isUserInteractionEnabled = false
+        } else {
+          self.vibeWidthConstraint?.constant = 60
+          self.vibeHeightConstraint?.constant = 60
+          self.vibeChromeView.layer.cornerRadius = 30
+          self.tabBar.alpha = 1.0
+          self.tabBar.transform = .identity
+
+          self.vibeIconView.transform = .identity
+          self.vibeIconView.alpha = 1.0
+          self.vibeIconView.tintColor = .white
+
+          self.vibeTextField.alpha = 0.0
+          self.vibeSubmitButton.alpha = 0.0
+          self.vibeSubmitButton.backgroundColor = .clear
+          self.vibeButton.isUserInteractionEnabled = true
+          self.vibeTextField.resignFirstResponder()
+        }
+        self.layoutIfNeeded()
+      }
+    ) { _ in
+      self.updateVibeButton(for: self.tabs.first(where: \.isVibe))
+    }
+  }
+
+  @objc private func handleVibeSubmitAction() {
+    print("[VibeTabBar] Submit native pressed! Text length: \(vibeTextField.text?.count ?? 0)")
+    guard let text = vibeTextField.text,
+      !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    else { return }
+    onVibeSubmit(["text": text])
+    vibeTextField.text = ""
+    vibeTextField.resignFirstResponder()
+    textDidChange()  // reset colors
+  }
+
+  public func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+    handleVibeSubmitAction()
+    return true
+  }
+
+  @objc private func textDidChange() {
+    guard self.isVibeExpanded else { return }
+    let text = vibeTextField.text ?? ""
+    let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+    UIView.animate(withDuration: 0.2) {
+      if hasText {
+        self.vibeSubmitButton.backgroundColor = self.activeTintColor
+        self.vibeIconView.tintColor = .white
+      } else {
+        self.vibeSubmitButton.backgroundColor =
+          self.isDark
+          ? UIColor.white.withAlphaComponent(0.12) : UIColor.black.withAlphaComponent(0.06)
+        self.vibeIconView.tintColor =
+          self.isDark
+          ? UIColor.white.withAlphaComponent(0.6) : UIColor.black.withAlphaComponent(0.4)
+      }
+    }
+  }
+
+  // MARK: - Keyboard Handling
+
+  @objc private func keyboardWillShow(notification: NSNotification) {
+    guard let userInfo = notification.userInfo,
+      let keyboardFrame = (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?
+        .cgRectValue,
+      let viewFrameInWindow = self.superview?.convert(self.frame, to: nil)
+    else { return }
+
+    // Calculate overlap to push the container up exactly enough
+    let overlap = viewFrameInWindow.maxY - keyboardFrame.minY
+    if overlap > 0 {
+      let duration =
+        (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue
+        ?? 0.3
+      let curveValue =
+        userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int
+        ?? UIView.AnimationCurve.easeInOut.rawValue
+      let options = UIView.AnimationOptions(rawValue: UInt(curveValue << 16))
+
+      UIView.animate(
+        withDuration: duration, delay: 0, options: options,
+        animations: {
+          // Push it up, but leave some less negative room so it sits perfectly visually flush over the keyboard
+          self.transform = CGAffineTransform(translationX: 0, y: -overlap + 12)
+        }, completion: nil)
+    }
+  }
+
+  @objc private func keyboardWillHide(notification: NSNotification) {
+    guard let userInfo = notification.userInfo else { return }
+    let duration =
+      (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.3
+    let curveValue =
+      userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int
+      ?? UIView.AnimationCurve.easeInOut.rawValue
+    let options = UIView.AnimationOptions(rawValue: UInt(curveValue << 16))
+
+    UIView.animate(
+      withDuration: duration, delay: 0, options: options,
+      animations: {
+        self.transform = .identity
+      }, completion: nil)
+  }
+
   private func applyChrome() {
     let blurStyle: UIBlurEffect.Style =
       isDark ? .systemChromeMaterialDark : .systemChromeMaterialLight
@@ -319,23 +508,14 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate {
     let isActive = currentIndex == tab.index
     let foregroundColor = isActive ? activeTintColor : inactiveTintColor
 
-    // Try to load the image they passed from JS first (e.g. logotransparent.png)
-    var image: UIImage? = nil
-    if let customIcon = resolvedIcon(for: tab) {
-      print("[VibeTabBar] Successfully resolved JS image for vibe tab: \(customIcon)")
-      image = resizeImage(image: customIcon, targetSize: CGSize(width: 26, height: 26))?
-        .withRenderingMode(.alwaysTemplate)
-    }
-
-    // Fall back to the SVG drawing if no image was fetched
-    if image == nil {
-      print("[VibeTabBar] Falling back to SVG path for vibe logo")
-      image = resolveLogoImage(targetSize: CGSize(width: 26, height: 26))?.withRenderingMode(
-        .alwaysTemplate)
-    }
+    // Exclusively rely on the optimized Native SVG path.
+    // This allows it to scale crisply when it transforms into a send button!
+    print("[VibeTabBar] Drawing native SVG path for vibe logo")
+    let image = resolveLogoImage(targetSize: CGSize(width: 26, height: 26))?.withRenderingMode(
+      .alwaysTemplate)
 
     vibeIconView.image = image
-    vibeIconView.tintColor = foregroundColor
+    vibeIconView.tintColor = .white
 
     vibeButton.setTitle(nil, for: .normal)
     vibeButton.setImage(nil, for: .normal)
@@ -542,7 +722,10 @@ public class ChatNativeTabBarModule: Module {
         view.setInactiveTintColor(color)
       }
       Prop("isDark") { (view: ChatNativeTabBarView, isDark: Bool) in view.setIsDark(isDark) }
-      Events("onIndexChange")
+      Prop("isVibeExpanded") { (view: ChatNativeTabBarView, expanded: Bool) in
+        view.setVibeExpanded(expanded)
+      }
+      Events("onIndexChange", "onVibeSubmit")
     }
   }
 }
