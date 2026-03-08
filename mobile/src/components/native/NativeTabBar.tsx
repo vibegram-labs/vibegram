@@ -160,6 +160,14 @@ export default function NativeTabBar({
                 isVibe: isVibeTab(tab),
             };
         }), [tabs]);
+        const nativeDockStyle = React.useMemo(
+            () => [styles.nativeTabsDock, isVibeExpanded && styles.nativeTabsDockExpanded],
+            [isVibeExpanded],
+        );
+        const nativeBarStyle = React.useMemo(
+            () => [styles.nativeTabsBar, isVibeExpanded && styles.nativeTabsBarExpanded],
+            [isVibeExpanded],
+        );
 
         const handleNativeIndexChange = React.useCallback((event: NativeSyntheticEvent<NativeTabPressPayload>) => {
             const payload: any = event?.nativeEvent ?? event;
@@ -178,9 +186,9 @@ export default function NativeTabBar({
         }, [tabs, handleSeparateVibePress, onIndexChange]);
 
         return (
-            <View pointerEvents="box-none" style={styles.nativeTabsDock}>
+            <View pointerEvents="box-none" style={nativeDockStyle}>
                 <NativeTabsComponent
-                    style={styles.nativeTabsBar}
+                    style={nativeBarStyle}
                     tabs={nativeTabs}
                     currentIndex={normalizedIndex}
                     activeTintColor={nativeActiveTintColor}
@@ -682,10 +690,16 @@ const styles = StyleSheet.create({
         justifyContent: 'flex-end',
         backgroundColor: 'transparent',
     },
+    nativeTabsDockExpanded: {
+        paddingBottom: 0,
+    },
     nativeTabsBar: {
         width: '100%',
         height: 64,
         backgroundColor: 'transparent',
+    },
+    nativeTabsBarExpanded: {
+        height: 50,
     },
 });
 

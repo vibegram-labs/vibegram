@@ -5259,6 +5259,372 @@ final class ChatEngine {
     }
   }
 
+  private func parseSavedMessagesServerItems(_ data: Data) -> [[String: Any]] {
+    let json = (try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed])) ?? []
+    if let items = json as? [[String: Any]] {
+      return items
+    }
+    if let dict = json as? [String: Any], let items = dict["data"] as? [[String: Any]] {
+      return items
+    }
+    if let dict = json as? [String: Any], let items = dict["messages"] as? [[String: Any]] {
+      return items
+    }
+    return []
+  }
+
+  private func parseJSONObjectString(_ raw: Any?) -> [String: Any] {
+    guard let text = normalizedString(raw), let data = text.data(using: .utf8) else { return [:] }
+    guard let json = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]) else {
+      return [:]
+    }
+    return json as? [String: Any] ?? [:]
+  }
+
+  private func normalizeSavedMessagesLocked(_ rawItems: [[String: Any]]) -> [[String: Any]] {
+    let privateKey = decryptPrivateKeyLocked()
+    let currentUserId = currentUserIdLocked()
+
+    return rawItems.compactMap { raw in
+      guard
+        let messageId = normalizedString(
+          raw["original_message_id"] ?? raw["messageId"] ?? raw["message_id"] ?? raw["id"])
+      else { return nil }
+
+      let fromId =
+        normalizedString(raw["from_id"] ?? raw["fromId"])
+        ?? normalizedString(getConfigValueLocked("userId"))
+      let type = normalizedString(raw["type"])?.lowercased() ?? "text"
+      let timestampMs =
+        parseLongValue(raw["timestamp"] ?? raw["timestampMs"] ?? raw["timestamp_ms"])
+        ?? Int64(nowMs())
+      let encryptedContent =
+        normalizedString(raw["encrypted_content"] ?? raw["encryptedContent"])
+      let parsedExtra = parseJSONObjectString(raw["extra"])
+      var decryptedFields = parsedExtra
+
+      let plaintextFallback =
+        normalizedString(raw["content"] ?? raw["plaintext"] ?? raw["text"]) ?? ""
+      if !plaintextFallback.isEmpty {
+        decryptedFields["text"] = plaintextFallback
+      }
+
+      if let encryptedContent, !encryptedContent.isEmpty {
+        let isMe = normalizedUpper(fromId) != nil && normalizedUpper(fromId) == currentUserId
+        let parsedEncryptedFields: [String: Any]
+        if !isLikelyHybridCiphertext(encryptedContent) {
+          parsedEncryptedFields = parseDecryptedMessagePayload(encryptedContent)
+        } else if let privateKey {
+          let decrypted = chatEngineDecryptHybridMessage(
+            privateKey: privateKey,
+            ciphertext: encryptedContent,
+            isMyMessage: isMe
+          )
+          parsedEncryptedFields = parseDecryptedMessagePayload(decrypted)
+        } else {
+          parsedEncryptedFields = [:]
+        }
+        for (key, value) in parsedEncryptedFields where decryptedFields[key] == nil {
+          decryptedFields[key] = value
+        }
+      }
+
+      let resolvedText = normalizedString(decryptedFields["text"]) ?? plaintextFallback
+      let resolvedMediaUrl =
+        normalizedString(
+          decryptedFields["mediaUrl"] ?? raw["media_url"] ?? raw["mediaUrl"])
+      let resolvedFileName =
+        normalizedString(
+          decryptedFields["fileName"] ?? raw["file_name"] ?? raw["fileName"])
+      let resolvedMediaKey = normalizedString(decryptedFields["mediaKey"])
+      let resolvedLatitude = parseDoubleValue(decryptedFields["latitude"])
+      let resolvedLongitude = parseDoubleValue(decryptedFields["longitude"])
+      let resolvedDuration = parseDoubleValue(decryptedFields["duration"])
+      let resolvedEditedAt = parseLongValue(decryptedFields["editedAt"] ?? raw["edited_at"] ?? raw["editedAt"])
+
+      var normalized: [String: Any] = [
+        "id": messageId,
+        "chatId": "saved_messages",
+        "timestamp": timestampMs,
+        "timestampMs": timestampMs,
+        "type": type,
+        "extra": parsedExtra,
+      ]
+      if let fromId { normalized["fromId"] = fromId }
+      if let encryptedContent { normalized["encryptedContent"] = encryptedContent }
+      if !resolvedText.isEmpty {
+        normalized["plaintext"] = resolvedText
+        normalized["text"] = resolvedText
+      }
+      if let resolvedMediaUrl { normalized["mediaUrl"] = resolvedMediaUrl }
+      if let resolvedFileName { normalized["fileName"] = resolvedFileName }
+      if let resolvedMediaKey { normalized["mediaKey"] = resolvedMediaKey }
+      if let resolvedLatitude { normalized["latitude"] = resolvedLatitude }
+      if let resolvedLongitude { normalized["longitude"] = resolvedLongitude }
+      if let resolvedDuration { normalized["duration"] = resolvedDuration }
+      if let resolvedEditedAt { normalized["editedAt"] = resolvedEditedAt }
+      if let status = normalizedString(raw["status"])?.lowercased() {
+        normalized["status"] = status
+      } else if normalizedUpper(fromId) == currentUserId {
+        normalized["status"] = "sent"
+      }
+      if let isEdited = raw["isEdited"] as? Bool {
+        normalized["isEdited"] = isEdited
+      }
+      if let replyToId = normalizedString(decryptedFields["replyToId"]) {
+        normalized["replyToId"] = replyToId
+      }
+      if let width = decryptedFields["width"] { normalized["width"] = width }
+      if let height = decryptedFields["height"] { normalized["height"] = height }
+      if let waveform = decryptedFields["waveform"] { normalized["waveform"] = waveform }
+      if let isVideoNote = decryptedFields["isVideoNote"] {
+        normalized["isVideoNote"] = isVideoNote
+      }
+      if let contact = decryptedFields["contact"] {
+        normalized["contact"] = contact
+      }
+      return normalized
+    }
+  }
+
+  func fetchSavedMessages(_ payload: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      guard let (apiBase, token) = self.requestContext else {
+        DispatchQueue.main.async {
+          completion(["success": false, "reason": "missing_config", "messages": []])
+        }
+        return
+      }
+      guard
+        let userId =
+          normalizedString(payload["userId"] ?? payload["user_id"] ?? getConfigValueLocked("userId"))
+      else {
+        DispatchQueue.main.async {
+          completion(["success": false, "reason": "missing_user_id", "messages": []])
+        }
+        return
+      }
+
+      var request = URLRequest(
+        url: apiBase.appendingPathComponent("api").appendingPathComponent("saved_messages")
+          .appendingPathComponent(userId))
+      request.httpMethod = "GET"
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+      if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+
+      let session = ChatPhoenixClient.makePinnedURLSession()
+      session.dataTask(with: request) { [weak self] data, response, error in
+        guard let self else { return }
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        guard let data, error == nil, (200...299).contains(statusCode) else {
+          DispatchQueue.main.async {
+            completion([
+              "success": false,
+              "reason": "http_\(statusCode)",
+              "messages": [],
+            ])
+          }
+          return
+        }
+        let rawItems = self.syncOnQueue { self.parseSavedMessagesServerItems(data) }
+        let messages = self.syncOnQueue { self.normalizeSavedMessagesLocked(rawItems) }
+        DispatchQueue.main.async {
+          completion(["success": true, "messages": messages])
+        }
+      }.resume()
+    }
+  }
+
+  func sendSavedMessage(_ payload: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      guard let (apiBase, token) = self.requestContext else {
+        DispatchQueue.main.async { completion(["success": false, "reason": "missing_config"]) }
+        return
+      }
+      guard let userId = normalizedString(getConfigValueLocked("userId")) else {
+        DispatchQueue.main.async { completion(["success": false, "reason": "missing_user_id"]) }
+        return
+      }
+
+      let type = normalizedString(payload["type"])?.lowercased() ?? "text"
+      let text = normalizedString(payload["text"]) ?? ""
+      let messageId =
+        normalizedString(payload["messageId"] ?? payload["message_id"] ?? payload["id"])
+        ?? UUID().uuidString.lowercased()
+      let metadata = (payload["metadata"] as? [String: Any]) ?? [:]
+      var mediaUrl =
+        normalizedString(
+          metadata["mediaUrl"] ?? metadata["media_url"] ?? payload["mediaUrl"] ?? payload["media_url"])
+      var fileName =
+        normalizedString(metadata["fileName"] ?? metadata["file_name"] ?? payload["fileName"])
+      var fileSize = parseLongValue(metadata["fileSize"] ?? metadata["file_size"] ?? payload["fileSize"])
+      let latitude = parseDoubleValue(metadata["latitude"] ?? payload["latitude"])
+      let longitude = parseDoubleValue(metadata["longitude"] ?? payload["longitude"])
+      let duration = parseDoubleValue(metadata["duration"] ?? payload["duration"])
+      let width = parseLongValue(metadata["width"] ?? payload["width"])
+      let height = parseLongValue(metadata["height"] ?? payload["height"])
+      let replyToId =
+        normalizedString(metadata["replyToId"] ?? metadata["reply_to_id"] ?? payload["replyToId"])
+      let contact = metadata["contact"] ?? payload["contact"]
+      let isVideoNote = metadata["isVideoNote"] ?? payload["isVideoNote"]
+      let myPublicKeyPem = normalizedString(
+        getConfigValueLocked("publicKeyPem") ?? getConfigValueLocked("publicKey"))
+
+      if type == "text" && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        DispatchQueue.main.async { completion(["success": false, "reason": "empty_text"]) }
+        return
+      }
+
+      let uploadableTypes: Set<String> = ["image", "voice", "video", "file", "sticker", "music"]
+      if let currentMediaUrl = mediaUrl, uploadableTypes.contains(type), isLocalMediaURI(currentMediaUrl) {
+        let uploadOutcome = uploadLocalMediaLocked(
+          localUri: currentMediaUrl,
+          messageType: type,
+          fileNameHint: fileName,
+          userId: userId,
+          token: token,
+          apiBase: apiBase
+        )
+        guard let uploadResult = uploadOutcome.result else {
+          DispatchQueue.main.async {
+            completion([
+              "success": false,
+              "reason": uploadOutcome.reason ?? "upload_failed",
+              "messageId": messageId,
+            ])
+          }
+          return
+        }
+        mediaUrl = uploadResult.remoteUrl
+        if fileName == nil { fileName = uploadResult.fileName }
+        if fileSize == nil { fileSize = uploadResult.fileSize }
+      }
+
+      var encryptedContent = ""
+      if let myPublicKeyPem, !myPublicKeyPem.isEmpty {
+        var encryptedPayload: [String: Any] = ["text": text]
+        if let mediaUrl { encryptedPayload["mediaUrl"] = mediaUrl }
+        if let fileName { encryptedPayload["fileName"] = fileName }
+        if let fileSize { encryptedPayload["fileSize"] = fileSize }
+        if let latitude { encryptedPayload["latitude"] = latitude }
+        if let longitude { encryptedPayload["longitude"] = longitude }
+        if let width { encryptedPayload["width"] = width }
+        if let height { encryptedPayload["height"] = height }
+        if let duration { encryptedPayload["duration"] = duration }
+        if let replyToId { encryptedPayload["replyToId"] = replyToId }
+        if let contact { encryptedPayload["contact"] = contact }
+        if let isVideoNote { encryptedPayload["isVideoNote"] = isVideoNote }
+        if let payloadString = try? JSONSerialization.data(
+          withJSONObject: makeJSONSafeMap(encryptedPayload), options: []),
+          let messageString = String(data: payloadString, encoding: .utf8),
+          let sealed = try? chatEngineEncryptHybridMessage(
+            recipientPublicKeyPem: myPublicKeyPem,
+            message: messageString,
+            myPublicKeyPem: myPublicKeyPem
+          )
+        {
+          encryptedContent = sealed
+        }
+      }
+
+      var extraPayload: [String: Any] = [:]
+      if let fileName { extraPayload["fileName"] = fileName }
+      if let fileSize { extraPayload["fileSize"] = fileSize }
+      if let latitude { extraPayload["latitude"] = latitude }
+      if let longitude { extraPayload["longitude"] = longitude }
+      if let width { extraPayload["width"] = width }
+      if let height { extraPayload["height"] = height }
+      if let duration { extraPayload["duration"] = duration }
+      if let replyToId { extraPayload["replyToId"] = replyToId }
+      if let isVideoNote { extraPayload["isVideoNote"] = isVideoNote }
+
+      let requestBody = makeJSONSafeMap([
+        "user_id": userId,
+        "original_message_id": messageId,
+        "chat_id": "saved_messages",
+        "from_id": userId,
+        "encrypted_content": encryptedContent,
+        "content": "",
+        "type": type,
+        "media_url": NSNull(),
+        "timestamp": Int64(nowMs()),
+        "extra": String(
+          data: (try? JSONSerialization.data(withJSONObject: extraPayload, options: [])) ?? Data("{}".utf8),
+          encoding: .utf8
+        ) ?? "{}",
+      ])
+
+      var request = URLRequest(
+        url: apiBase.appendingPathComponent("api").appendingPathComponent("saved_messages"))
+      request.httpMethod = "POST"
+      request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+      if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+      request.httpBody = try? JSONSerialization.data(withJSONObject: requestBody, options: [])
+
+      let session = ChatPhoenixClient.makePinnedURLSession()
+      session.dataTask(with: request) { data, response, error in
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        let success = error == nil && (200...299).contains(statusCode)
+        DispatchQueue.main.async {
+          completion([
+            "success": success,
+            "status": statusCode,
+            "messageId": messageId,
+          ])
+        }
+      }.resume()
+    }
+  }
+
+  func deleteSavedMessage(_ payload: [String: Any], completion: @escaping ([String: Any]) -> Void) {
+    queue.async { [weak self] in
+      guard let self else { return }
+      guard let (apiBase, token) = self.requestContext else {
+        DispatchQueue.main.async { completion(["success": false, "reason": "missing_config"]) }
+        return
+      }
+      guard
+        let userId =
+          normalizedString(payload["userId"] ?? payload["user_id"] ?? getConfigValueLocked("userId"))
+      else {
+        DispatchQueue.main.async { completion(["success": false, "reason": "missing_user_id"]) }
+        return
+      }
+      guard
+        let messageId =
+          normalizedString(payload["messageId"] ?? payload["message_id"] ?? payload["id"])
+      else {
+        DispatchQueue.main.async { completion(["success": false, "reason": "missing_message_id"]) }
+        return
+      }
+
+      var request = URLRequest(
+        url: apiBase.appendingPathComponent("api").appendingPathComponent("saved_messages")
+          .appendingPathComponent(userId).appendingPathComponent(messageId))
+      request.httpMethod = "DELETE"
+      request.setValue("application/json", forHTTPHeaderField: "Accept")
+      request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+      if !token.isEmpty { request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization") }
+
+      let session = ChatPhoenixClient.makePinnedURLSession()
+      session.dataTask(with: request) { _, response, error in
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+        DispatchQueue.main.async {
+          completion([
+            "success": error == nil && (200...299).contains(statusCode),
+            "status": statusCode,
+            "messageId": messageId,
+          ])
+        }
+      }.resume()
+    }
+  }
+
   // MARK: - Agent Config (Native HTTP)
 
   func fetchAgentConfig(chatId: String, completion: @escaping ([String: Any]?) -> Void) {

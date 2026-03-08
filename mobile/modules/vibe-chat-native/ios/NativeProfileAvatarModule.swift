@@ -12,6 +12,7 @@ private final class NativeProfileAvatarModel: ObservableObject {
   @Published var expandedTopInset: CGFloat = 0.0
   @Published var collapsedTopInset: CGFloat = 0.0
   @Published var scrollOffset: CGFloat = 0.0
+  @Published var islandCoverColor: UIColor = UIColor(red: 0.071, green: 0.071, blue: 0.075, alpha: 1.0)  // #121212
 
   private var imageUri: String?
   private var imageTask: Task<Void, Never>?
@@ -48,8 +49,8 @@ private final class NativeProfileAvatarModel: ObservableObject {
   }
 }
 
-private extension String {
-  var nilIfEmpty: String? {
+extension String {
+  fileprivate var nilIfEmpty: String? {
     isEmpty ? nil : self
   }
 }
@@ -149,53 +150,99 @@ private struct NativeProfileAvatarInnerContent: View {
 @available(iOS 26.0, *)
 private struct NativeProfileAvatarGlassMorphView: View {
   @ObservedObject var model: NativeProfileAvatarModel
-  @Namespace private var namespace
-  @State private var showExpanded: Bool = true
 
-  /// Distance between anchor bottom and expanded top — matches the
-  /// GlassEffectContainer spacing exactly so effects stay separate at
-  /// rest but morph during transitions (Apple pattern: container spacing
-  /// == layout container spacing).
-  private var gap: CGFloat {
-    max(1, model.expandedTopInset - model.collapsedTopInset - model.collapsedSize)
+  /// Scroll-driven progress 0…1.
+  private var progress: CGFloat {
+    let travel = max(1, model.expandedTopInset - model.collapsedTopInset)
+    return max(0, min(1, model.scrollOffset / travel))
+  }
+
+  /// Avatar shrinks as it scrolls toward anchor.
+  private var currentSize: CGFloat {
+    model.expandedSize + (model.collapsedSize - model.expandedSize) * progress
+  }
+
+  /// Avatar Y position moves toward anchor with scroll.
+  private var currentTop: CGFloat {
+    model.expandedTopInset + (model.collapsedTopInset - model.expandedTopInset) * progress
+  }
+
+  /// Glass elements fade out near full collapse so nothing lingers at the island.
+  private var glassOpacity: CGFloat {
+    progress < 0.85 ? 1.0 : max(0, 1.0 - (progress - 0.85) / 0.15)
   }
 
   var body: some View {
-    GlassEffectContainer(spacing: gap) {
-      // VStack spacing MUST equal container spacing — if container
-      // spacing > VStack spacing, effects merge at rest.
-      VStack(spacing: gap) {
-        // Anchor: always-present morph target at collapsed position
-        NativeProfileAvatarInnerContent(
-          image: model.loadedImage,
-          fallbackText: model.fallbackText,
-          size: model.collapsedSize
-        )
-        .frame(width: model.collapsedSize, height: model.collapsedSize)
-        .clipShape(Circle())
-        .glassEffect()
-        .glassEffectID("avatar-anchor", in: namespace)
+    ZStack(alignment: .top) {
+      // ── 1. LIQUID GLASS METABALL LAYER ──
+      // Solid black shapes only – Image stays outside to avoid GPU shader flicker.
+      GlassEffectContainer(spacing: 40.0) {
+        ZStack(alignment: .top) {
+          // Anchor: capsule at Dynamic Island position.
+          // Hidden by the island cover but still participates in metaball merge.
+          Capsule()
+            .fill(Color.black)
+            .frame(width: 126, height: 37)
+            .glassEffect(in: .capsule)
+            .opacity(progress > 0.05 ? glassOpacity : 0.0)
+            .offset(y: 11)
 
-        if showExpanded {
-          // Expanded avatar — morphs into/out of anchor
-          NativeProfileAvatarInnerContent(
-            image: model.loadedImage,
-            fallbackText: model.fallbackText,
-            size: model.expandedSize
-          )
-          .frame(width: model.expandedSize, height: model.expandedSize)
-          .clipShape(Circle())
-          .glassEffect()
-          .glassEffectID("avatar-main", in: namespace)
+          // Avatar base circle that merges toward the anchor.
+          Circle()
+            .fill(Color.black)
+            .frame(width: currentSize, height: currentSize)
+            .glassEffect(in: .circle)
+            .opacity(glassOpacity)
+            .offset(y: currentTop)
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
       }
-      .padding(.top, model.collapsedTopInset)
-      .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+      .environment(\.colorScheme, .dark)
+
+      // ── 2. ISLAND COVER ──
+      // Capsule matching page background color sits permanently over
+      // the Dynamic Island anchor so the glass shape never shows through.
+      Capsule()
+        .fill(Color(uiColor: model.islandCoverColor))
+        .frame(width: 130, height: 40)
+        .offset(y: 9)
+
+      // ── 3. IMAGE CONTENT LAYER ──
+      // Rendered outside the glass container to avoid GPU shader collision.
+      ZStack {
+        // Solid black base ensures the glass underneath never bleeds through.
+        Circle()
+          .fill(Color.black)
+
+        avatarContent
+          .drawingGroup()                    // rasterize → eliminates blur flicker
+          .blur(radius: progress * 20)
+
+        // Dark overlay – starts early for Telegram-style black glass look
+        Circle()
+          .fill(Color.black.opacity(max(0, min(1.0, (progress - 0.15) * 1.4))))
+      }
+      .frame(width: currentSize, height: currentSize)
+      .clipShape(Circle())
+      .offset(y: currentTop)
+      .opacity(glassOpacity)
     }
     .frame(maxWidth: .infinity, maxHeight: .infinity)
-    .onChange(of: model.collapsed) { _, isCollapsed in
-      withAnimation(.bouncy) {
-        showExpanded = !isCollapsed
+  }
+
+  @ViewBuilder
+  private var avatarContent: some View {
+    if let image = model.loadedImage {
+      Image(uiImage: image)
+        .resizable()
+        .scaledToFill()
+    } else {
+      ZStack {
+        Circle()
+          .fill(Color(white: 0.16))
+        Text(String(model.fallbackText.prefix(1)).uppercased())
+          .font(.system(size: max(14.0, currentSize * 0.34), weight: .semibold))
+          .foregroundStyle(.white)
       }
     }
   }
@@ -290,9 +337,10 @@ final class NativeProfileAvatarView: ExpoView {
   }
 
   func setFallbackText(_ value: String?) {
-    let nextValue = (value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
-      ? value
-      : "U") ?? "U"
+    let nextValue =
+      (value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+        ? value
+        : "U") ?? "U"
     guard model.fallbackText != nextValue else { return }
     model.fallbackText = nextValue
   }
@@ -300,7 +348,9 @@ final class NativeProfileAvatarView: ExpoView {
   func setCollapsed(_ value: Bool?) {
     let resolved = value ?? false
     guard model.collapsed != resolved else { return }
-    model.collapsed = resolved
+    withAnimation(.bouncy) {
+      model.collapsed = resolved
+    }
   }
 
   func setExpandedSize(_ value: CGFloat?) {
@@ -331,6 +381,13 @@ final class NativeProfileAvatarView: ExpoView {
     let resolved = max(0.0, value ?? 0.0)
     guard model.scrollOffset != resolved else { return }
     model.scrollOffset = resolved
+  }
+
+  func setIslandCoverColor(_ value: String?) {
+    guard let value else { return }
+    if let color = UIColor.nativeProfileAvatarColor(from: value) {
+      model.islandCoverColor = color
+    }
   }
 }
 
@@ -370,6 +427,33 @@ public final class NativeProfileAvatarModule: Module {
       Prop("scrollOffset") { (view: NativeProfileAvatarView, value: Double?) in
         view.setScrollOffset(value.map { CGFloat($0) })
       }
+
+      Prop("islandCoverColor") { (view: NativeProfileAvatarView, value: String?) in
+        view.setIslandCoverColor(value)
+      }
     }
+  }
+}
+
+extension UIColor {
+  fileprivate static func nativeProfileAvatarColor(from raw: String?) -> UIColor? {
+    guard let raw else { return nil }
+    let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !value.isEmpty else { return nil }
+
+    // Parse hex color (#RRGGBB)
+    if value.hasPrefix("#") {
+      let hexString = String(value.dropFirst())
+      guard hexString.count == 6 else { return nil }
+      let scanner = Scanner(string: hexString)
+      var hexValue: UInt64 = 0
+      guard scanner.scanHexInt64(&hexValue) else { return nil }
+      let red = CGFloat((hexValue >> 16) & 0xFF) / 255.0
+      let green = CGFloat((hexValue >> 8) & 0xFF) / 255.0
+      let blue = CGFloat(hexValue & 0xFF) / 255.0
+      return UIColor(red: red, green: green, blue: blue, alpha: 1.0)
+    }
+
+    return nil
   }
 }

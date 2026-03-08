@@ -16,6 +16,7 @@ import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
 import { useThemeStore } from '../../src/lib/stores/theme-store'
 import { useUIStore } from '../../src/lib/stores/ui-store'
+import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wallpaper-store'
 import SafeLiquidGlass from '../../src/components/native/SafeLiquidGlass'
 import NativeTabBar, { isNativeTabBarAvailable } from '../../src/components/native/NativeTabBar'
 import AndroidBottomTabBar from '../../src/components/native/AndroidBottomTabBar'
@@ -30,6 +31,8 @@ import CallsScreen from './calls'
 import { StoryCamera } from '../story-camera'
 import { AgentChatScreen } from '../../src/components/agent'
 import { useAgentStore } from '../../src/lib/agent/AgentStore'
+import { NativeAgentChatSurface, type NativeAgentChatSurfaceRef, getNativeChatAgentModule } from '../../src/native/chat'
+import { KeyboardStickyView } from 'react-native-keyboard-controller'
 import { BlurView } from 'expo-blur'
 import { Image } from 'react-native'
 import MaskedView from '@react-native-masked-view/masked-view'
@@ -210,6 +213,7 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
 
 export default function TabLayout() {
     const { colors, effectiveTheme } = useThemeStore()
+    const activeWallpaperTheme = useWallpaperStore(s => s.activeTheme)
     const { user } = useAuthStore()
     const { t } = useTranslation()
     const activeChatId = useChatStore(s => s.activeChatId)
@@ -237,9 +241,6 @@ export default function TabLayout() {
     // Local State for Active Tab (Defaults to 'home')
     const [currentTab, setCurrentTab] = useState<PageName>('home')
 
-    // Animation Values
-    const pageIndex = useSharedValue<number>(PAGES['home'])
-
     // Fallback tab bar indicator
     const translateX = useSharedValue(-PAGES['home'] * SCREEN_WIDTH)
 
@@ -257,16 +258,61 @@ export default function TabLayout() {
     const [shouldRenderStoryCamera, setShouldRenderStoryCamera] = useState(false)
     const storyProgress = useSharedValue(0)
     const storyMountTimerRef = useRef<any>(null)
+    const nativeAgentSurfaceRef = useRef<NativeAgentChatSurfaceRef | null>(null)
+    const nativeAgentSurfaceId = useMemo(() => 'tabs-native-agent-surface', [])
+    const nativeAgentModule = useMemo(() => getNativeChatAgentModule(), [])
+    const nativeAgentAvailable = Platform.OS === 'ios' && !!nativeAgentModule && (nativeAgentModule.isSupported?.() ?? true)
 
     const router = useRouter()
 
-    // Wire up global input for Agent vibe mode
-    // (We now forward events to AgentChatScreen to use its heavy animations and logic instead of directly hitting the store)
+    const resolvedWallpaperTheme = useMemo(() => {
+        const resolved = resolveThemeVariant(activeWallpaperTheme, effectiveTheme === 'dark')
+        const bg = Array.isArray(resolved.backgroundGradient) ? resolved.backgroundGradient : []
+        return {
+            ...resolved,
+            backgroundGradient: bg.length >= 2 ? bg : [colors.background, colors.background],
+        }
+    }, [activeWallpaperTheme, colors.background, effectiveTheme])
+
+    const nativeAgentAppearance = useMemo(() => ({
+        backgroundMode: 'solid' as const,
+        nativeThemeId: `agent-${effectiveTheme}`,
+        nativeThemeIsDark: effectiveTheme === 'dark',
+        wallpaperGradient: [colors.background, colors.background],
+        wallpaperOpacity: 1,
+        wallpaperPatternGradient: [],
+        wallpaperPatternLocations: undefined,
+        wallpaperPatternOpacity: 0,
+        wallpaperMaskKey: undefined,
+        bubbleMeGradient: resolvedWallpaperTheme.bubbleMeGradient || [resolvedWallpaperTheme.bubbleMe, resolvedWallpaperTheme.bubbleMe],
+        bubbleThemColor: resolvedWallpaperTheme.bubbleThem || colors.card,
+        textColorMe: resolvedWallpaperTheme.textColorMe || colors.text,
+        textColorThem: resolvedWallpaperTheme.textColorThem || colors.text,
+        timeColorThem: colors.textSecondary,
+    }), [colors.card, colors.text, colors.textSecondary, effectiveTheme, resolvedWallpaperTheme])
+
+    // Wire up global input for Agent vibe mode.
+    // On iOS native builds we forward into the native surface; other platforms keep the JS path.
 
     const handleVibeSubmit = useCallback((text: string) => {
         if (!text.trim()) return;
+        console.log("[TabsLayout] received global submit for Vibe text:", text);
+        if (nativeAgentAvailable && nativeAgentSurfaceRef.current) {
+            void nativeAgentSurfaceRef.current.submitText(text.trim());
+            return;
+        }
+        try {
+            const store = useAgentStore.getState();
+            if (!store.activeConversationId) {
+                store.createConversation(text.substring(0, 20));
+            }
+            store.sendMessage(text);
+        } catch (e) {
+            console.error("[TabsLayout] Vibe send error:", e);
+        }
+        // Then emit globally so AgentChatScreen can clear input and jump to bottom
         DeviceEventEmitter.emit('onVibeSubmit', text);
-    }, []);
+    }, [nativeAgentAvailable]);
 
     const safeRouterPush = useCallback((path: string, source: string) => {
         try {
@@ -286,7 +332,6 @@ export default function TabLayout() {
             Keyboard.dismiss()
             setMountedPages(prev => prev[page] ? prev : { ...prev, [page]: true })
             setCurrentTab(page)
-            pageIndex.value = PAGES[page]
             translateX.value = withTiming(-PAGES[page] * SCREEN_WIDTH, { duration: 240 })
         } catch (error) {
             console.error('[TabsLayout] handleTabPress failed', error)
@@ -370,29 +415,6 @@ export default function TabLayout() {
         return Math.max(50, Math.min(70, Math.floor(available / FALLBACK_TAB_COUNT)))
     }, [])
 
-    const animatedPageStyles = {
-        contacts: useAnimatedStyle(() => ({
-            opacity: withTiming(pageIndex.value === PAGES.contacts ? 1 : 0, { duration: 250, easing: Easing.out(Easing.cubic) }),
-            zIndex: pageIndex.value === PAGES.contacts ? 1 : 0,
-        })),
-        calls: useAnimatedStyle(() => ({
-            opacity: withTiming(pageIndex.value === PAGES.calls ? 1 : 0, { duration: 250, easing: Easing.out(Easing.cubic) }),
-            zIndex: pageIndex.value === PAGES.calls ? 1 : 0,
-        })),
-        home: useAnimatedStyle(() => ({
-            opacity: withTiming(pageIndex.value === PAGES.home ? 1 : 0, { duration: 250, easing: Easing.out(Easing.cubic) }),
-            zIndex: pageIndex.value === PAGES.home ? 1 : 0,
-        })),
-        settings: useAnimatedStyle(() => ({
-            opacity: withTiming(pageIndex.value === PAGES.settings ? 1 : 0, { duration: 250, easing: Easing.out(Easing.cubic) }),
-            zIndex: pageIndex.value === PAGES.settings ? 1 : 0,
-        })),
-        vibe: useAnimatedStyle(() => ({
-            opacity: withTiming(pageIndex.value === PAGES.vibe ? 1 : 0, { duration: 250, easing: Easing.out(Easing.cubic) }),
-            zIndex: pageIndex.value === PAGES.vibe ? 1 : 0,
-        })),
-    }
-
     // ────────────────────────────────────────────────────────────────────────
     // MAIN LAYOUT (Supports both Native Tabs and Fallback Tabs)
     // ────────────────────────────────────────────────────────────────────────
@@ -422,7 +444,7 @@ export default function TabLayout() {
                 {mountedPages.contacts && (
                     <AnimatedView
                         pointerEvents={currentTab === 'contacts' ? 'auto' : 'none'}
-                        style={[StyleSheet.absoluteFill, animatedPageStyles.contacts]}
+                        style={[StyleSheet.absoluteFill, currentTab === 'contacts' ? styles.pageVisible : styles.pageHidden]}
                     >
                         <ContactsScreen />
                     </AnimatedView>
@@ -430,7 +452,7 @@ export default function TabLayout() {
                 {mountedPages.calls && (
                     <AnimatedView
                         pointerEvents={currentTab === 'calls' ? 'auto' : 'none'}
-                        style={[StyleSheet.absoluteFill, animatedPageStyles.calls]}
+                        style={[StyleSheet.absoluteFill, currentTab === 'calls' ? styles.pageVisible : styles.pageHidden]}
                     >
                         <CallsScreen />
                     </AnimatedView>
@@ -438,7 +460,7 @@ export default function TabLayout() {
                 {mountedPages.home && (
                     <AnimatedView
                         pointerEvents={currentTab === 'home' ? 'auto' : 'none'}
-                        style={[StyleSheet.absoluteFill, animatedPageStyles.home]}
+                        style={[StyleSheet.absoluteFill, currentTab === 'home' ? styles.pageVisible : styles.pageHidden]}
                     >
                         <HomeScreen
                             onChatSelect={(id) => setActiveChat(id)}
@@ -449,7 +471,7 @@ export default function TabLayout() {
                 {mountedPages.settings && (
                     <AnimatedView
                         pointerEvents={currentTab === 'settings' ? 'auto' : 'none'}
-                        style={[StyleSheet.absoluteFill, animatedPageStyles.settings]}
+                        style={[StyleSheet.absoluteFill, currentTab === 'settings' ? styles.pageVisible : styles.pageHidden]}
                     >
                         <SettingsScreen />
                     </AnimatedView>
@@ -457,15 +479,36 @@ export default function TabLayout() {
                 {mountedPages.vibe && (
                     <AnimatedView
                         pointerEvents={currentTab === 'vibe' ? 'auto' : 'none'}
-                        style={[StyleSheet.absoluteFill, animatedPageStyles.vibe]}
+                        style={[StyleSheet.absoluteFill, currentTab === 'vibe' ? styles.pageVisible : styles.pageHidden]}
                     >
-                        <AgentChatScreen onBack={() => handleTabPress('home')} />
+                        {nativeAgentAvailable ? (
+                            <NativeAgentChatSurface
+                                ref={nativeAgentSurfaceRef}
+                                forceRender
+                                surfaceId={nativeAgentSurfaceId}
+                                appearance={nativeAgentAppearance}
+                                onNativeEvent={(event: any) => {
+                                    const payload = event?.nativeEvent ?? event ?? {};
+                                    if (payload?.type === 'headerBack') {
+                                        handleTabPress('home')
+                                    }
+                                }}
+                                onNativeError={(error, context) => {
+                                    console.warn('[tabs/native-agent]', context, error)
+                                }}
+                            />
+                        ) : (
+                            <AgentChatScreen onBack={() => handleTabPress('home')} />
+                        )}
                     </AnimatedView>
                 )}
 
                 {/* Bottom Navigation */}
                 {showBottomBar && (
-                    <>
+                    <KeyboardStickyView
+                        offset={{ closed: 0, opened: 0 }}
+                        style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 10 }}
+                    >
                         {nativeTabsAvailable ? (
                             <NativeTabsMemo
                                 currentTab={currentTab}
@@ -674,7 +717,7 @@ export default function TabLayout() {
                                 )}
                             </AnimatedView>
                         )}
-                    </>
+                    </KeyboardStickyView>
                 )}
             </AnimatedView>
 
@@ -698,6 +741,14 @@ const styles = StyleSheet.create({
     },
     nativePageContainerWithTabs: {
         paddingBottom: 0,
+    },
+    pageVisible: {
+        display: 'flex',
+        zIndex: 1,
+    },
+    pageHidden: {
+        display: 'none',
+        zIndex: 0,
     },
     nativeBottomBarWrapper: {
         position: 'absolute',

@@ -562,16 +562,21 @@ export default function ChatScreen({
         }
     }
 
-    // Use a ref to always point to the fresh handleSend without detaching the listener
-    const handleSendRef = useRef(handleSend)
-    useEffect(() => {
-        handleSendRef.current = handleSend
-    }, [handleSend])
+    // (handleSendRef removed as dispatch is globalized)
 
-    // Bind Native Tab Bar 'Message Vibe' to this local handleSend 
+    // Bind Native Tab Bar 'Message Vibe' to UI effects 
     useEffect(() => {
         const sub = DeviceEventEmitter.addListener('onVibeSubmit', (text: string) => {
-            void handleSendRef.current(text)
+            console.log('[AgentChatScreen] Updating UI after native submit:', text)
+            setInputText('')
+            setProgressHistory([])
+            setAnimationComplete(false)
+            haptic.selection()
+
+            // Adjust spacers to allow scroll view to bump down to keyboard height comfortably
+            userMessageCountRef.current += 1
+            setSpacerHeight(userMessageCountRef.current === 1 ? SCREEN_HEIGHT * 0.2 : SCREEN_HEIGHT * 0.65)
+            setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100)
         })
         return () => sub.remove()
     }, [])
@@ -623,9 +628,9 @@ export default function ChatScreen({
     )
 
     const renderFooterMessages = () => {
-        if (footerMessages.length === 0 && spacerHeight === 0) return null
+        if (footerMessages.length === 0) return null
         return (
-            <View style={{ minHeight: spacerHeight }}>
+            <View>
                 {footerMessages.map((msg, idx) => {
                     if (msg.role === 'user') return null
                     const messageText = msg.content || msg.message || ''
@@ -749,7 +754,7 @@ export default function ChatScreen({
                                 <ScrollView ref={scrollViewRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: insets.top + 80, paddingHorizontal: 5, paddingBottom: 140, flexGrow: 1 }} showsVerticalScrollIndicator={false} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
                                     <View style={{ flexGrow: 1, minHeight: '100%' }}>
                                         <Pressable style={{ flexGrow: 1 }} onPress={() => Keyboard.dismiss()}>
-                                            <Animated.View style={[{ height: spacerHeight }]} />
+                                            <AnimatedView style={[{ height: spacerHeight }]} />
                                         </Pressable>
                                         {flatListMessages.map((msg, index) => (
                                             <MessageItem

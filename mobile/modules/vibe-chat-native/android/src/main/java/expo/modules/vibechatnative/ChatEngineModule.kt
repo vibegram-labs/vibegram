@@ -136,6 +136,18 @@ class ChatEngineModule : Module() {
       ChatEngine.fetchAgentConfig(payload)
     }
 
+    AsyncFunction("fetchSavedMessages") { payload: Map<String, Any?> ->
+      ChatEngine.fetchSavedMessages(payload)
+    }
+
+    AsyncFunction("sendSavedMessage") { payload: Map<String, Any?> ->
+      ChatEngine.sendSavedMessage(payload)
+    }
+
+    AsyncFunction("deleteSavedMessage") { payload: Map<String, Any?> ->
+      ChatEngine.deleteSavedMessage(payload)
+    }
+
     AsyncFunction("saveAgentConfig") { payload: Map<String, Any?> ->
       ChatEngine.saveAgentConfig(payload)
     }

@@ -66,6 +66,7 @@ class ChatMainView(
   private val chatAvatarFallback = TextView(context)
   private val chatVideoButton = ImageView(context)
   private val chatPhoneButton = ImageView(context)
+  private val chatSearchButton = ImageView(context)
 
   private val profileHeader = FrameLayout(context)
   private val profileBackButton = TextView(context)
@@ -89,6 +90,7 @@ class ChatMainView(
   private val profileInfoSubtitle = TextView(context)
 
   private var surfaceId: String = ""
+  private var headerMode: String = "default"
   private var headerTitle: String = "Chat"
   private var headerSubtitle: String = ""
   private var profileName: String = "User"
@@ -269,6 +271,14 @@ class ChatMainView(
 
   fun setNativeSendEnabled(enabled: Boolean) {
     chatListView.setNativeSendEnabled(enabled)
+  }
+
+  fun setHeaderMode(value: String) {
+    val next = value.trim().lowercase(Locale.ROOT).ifBlank { "default" }
+    if (headerMode == next) return
+    headerMode = next
+    updateChatHeaderControls()
+    updateHeaderTexts()
   }
 
   fun setHeaderTitle(value: String) {
@@ -734,6 +744,7 @@ class ChatMainView(
     chatProfileGroup.orientation = LinearLayout.HORIZONTAL
     chatProfileGroup.gravity = Gravity.CENTER_VERTICAL
     chatProfileGroup.setOnClickListener {
+      if (isSavedMessagesHeaderMode()) return@setOnClickListener
       if (currentPage != "chat") return@setOnClickListener
       onNativeEvent(mapOf("type" to "headerAvatarPressed"))
     }
@@ -814,6 +825,11 @@ class ChatMainView(
       onNativeEvent(mapOf("type" to "headerAudioCallPressed"))
     }
 
+    styleHeaderActionButton(chatSearchButton, android.R.drawable.ic_menu_search)
+    chatSearchButton.setOnClickListener {
+      onNativeEvent(mapOf("type" to "headerSearchPressed"))
+    }
+
     chatHeaderRight.addView(
       chatVideoButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
@@ -822,6 +838,11 @@ class ChatMainView(
       chatPhoneButton,
       LinearLayout.LayoutParams(dp(40), dp(40)),
     )
+    chatHeaderRight.addView(
+      chatSearchButton,
+      LinearLayout.LayoutParams(dp(40), dp(40)),
+    )
+    updateChatHeaderControls()
 
     pinnedBannerView.visibility = View.GONE
     pinnedBannerView.alpha = 0f
@@ -1108,6 +1129,7 @@ class ChatMainView(
     chatBackButton.setTextColor(headerActionColor)
     chatVideoButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
     chatPhoneButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
+    chatSearchButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
     profileBackButton.setTextColor(headerActionColor)
     chatTitleView.setTextColor(textColor)
     chatSubtitleView.setTextColor(if (shouldHighlightStatus) Color.parseColor("#53E08A") else secondaryTextColor)
@@ -1132,11 +1154,17 @@ class ChatMainView(
         background = withAlpha(surfaceColor, 0.92f),
       )
     }
+    updateChatHeaderControls()
     updateProfileActionState()
   }
 
   private fun updateHeaderTexts() {
-    val resolvedTitle = if (headerTitle.isBlank()) "Chat" else headerTitle
+    val resolvedTitle =
+      if (isSavedMessagesHeaderMode()) {
+        if (headerTitle.isBlank()) "Saved Messages" else headerTitle
+      } else {
+        if (headerTitle.isBlank()) "Chat" else headerTitle
+      }
     val groupTypingSubtitle = resolvedGroupTypingSubtitle()
     val engineSubtitle = resolveEnginePresenceSubtitle()
     val jsSubtitle = headerSubtitle.trim()
@@ -1149,15 +1177,20 @@ class ChatMainView(
         jsSubtitle
       }
     val resolvedSubtitle =
-      groupTypingSubtitle
-        ?: engineSubtitle
-        ?: if (isOnline && (jsSubtitle.isBlank() || jsSubtitleLower.startsWith("last seen") || jsSubtitleLower == "offline")) {
-          "online"
-        } else {
-          groupFallbackSubtitle
-        }
+      if (isSavedMessagesHeaderMode()) {
+        ""
+      } else {
+        groupTypingSubtitle
+          ?: engineSubtitle
+          ?: if (isOnline && (jsSubtitle.isBlank() || jsSubtitleLower.startsWith("last seen") || jsSubtitleLower == "offline")) {
+            "online"
+          } else {
+            groupFallbackSubtitle
+          }
+      }
     chatTitleView.text = resolvedTitle
     chatSubtitleView.text = resolvedSubtitle
+    chatSubtitleView.visibility = if (resolvedSubtitle.isBlank()) View.GONE else View.VISIBLE
     applyTheme()
   }
 
@@ -1468,6 +1501,21 @@ class ChatMainView(
       profileMuteAction.setIcon(android.R.drawable.ic_lock_silent_mode)
       profileMuteAction.setTitle("Mute")
     }
+  }
+
+  private fun isSavedMessagesHeaderMode(): Boolean {
+    return headerMode == "savedmessages"
+  }
+
+  private fun updateChatHeaderControls() {
+    val savedMessagesMode = isSavedMessagesHeaderMode()
+    chatVideoButton.visibility = if (savedMessagesMode) View.GONE else View.VISIBLE
+    chatPhoneButton.visibility = if (savedMessagesMode) View.GONE else View.VISIBLE
+    chatSearchButton.visibility = if (savedMessagesMode) View.VISIBLE else View.GONE
+    chatAvatarButton.visibility = if (savedMessagesMode) View.GONE else View.VISIBLE
+    chatProfileGroup.isClickable = !savedMessagesMode
+    chatProfileGroup.isFocusable = !savedMessagesMode
+    chatProfileGroup.alpha = if (savedMessagesMode) 1f else 1f
   }
 
   private fun setTouchAlphaPress(view: View) {

@@ -37,6 +37,11 @@ private enum ChatMainPage: String {
   case agent
 }
 
+private enum ChatMainHeaderMode: String {
+  case `default` = "default"
+  case savedMessages = "savedmessages"
+}
+
 private enum ChatMainProfileTab: String, CaseIterable {
   case media
   case music
@@ -83,7 +88,8 @@ private struct ChatMainPinnedBannerContent: Equatable {
 
 public final class ChatMainView: ExpoView,
   UIGestureRecognizerDelegate,
-  ChatMainProfileAgentPromptNodeDelegate
+  ChatMainProfileAgentPromptNodeDelegate,
+  UITextFieldDelegate
 {
   public var onViewportChanged = EventDispatcher() {
     didSet { syncListDispatchers() }
@@ -126,6 +132,9 @@ public final class ChatMainView: ExpoView,
   private let avatarFallbackIconView = UIImageView()
   private let menuGlassView = UIVisualEffectView(effect: nil)
   private let menuButton = UIButton(type: .system)
+  private let savedSearchField = UITextField()
+  private let savedSearchCancelButton = UIButton(type: .system)
+  private var savedSearchExpanded = false
 
   private let profileHeaderContainer = UIView()
   private let profileHeaderMaskView = UIView()
@@ -187,6 +196,7 @@ public final class ChatMainView: ExpoView,
   private var isGroupOrChannel = false
 
   private var appearance = ChatListAppearance.fallback
+  private var headerMode: ChatMainHeaderMode = .default
   private var isOnline = false
   private var surfacePresenceOnline: Bool?
   private var chatTitleText: String = "Chat"
@@ -408,6 +418,17 @@ public final class ChatMainView: ExpoView,
   }
 
   // MARK: - Main view inputs
+
+  func setHeaderMode(_ value: String) {
+    let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    let nextMode = ChatMainHeaderMode(rawValue: normalized) ?? .default
+    if headerMode == nextMode { return }
+    headerMode = nextMode
+    updateChatModeHeaderControls()
+    updateHeaderTexts()
+    setNeedsLayout()
+    applyPageState(animated: false, emitEvent: false)
+  }
 
   func setHeaderTitle(_ value: String) {
     chatTitleText = value.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -685,6 +706,8 @@ public final class ChatMainView: ExpoView,
     titleGlassView.contentView.addSubview(titleButton)
     avatarGlassView.contentView.addSubview(avatarButton)
     menuGlassView.contentView.addSubview(menuButton)
+    menuGlassView.contentView.addSubview(savedSearchField)
+    menuGlassView.contentView.addSubview(savedSearchCancelButton)
 
     profileHeaderContentView.addSubview(profileBackGlassView)
     profileHeaderContentView.addSubview(profileMenuGlassView)
@@ -697,7 +720,6 @@ public final class ChatMainView: ExpoView,
       button.contentHorizontalAlignment = .center
       button.contentVerticalAlignment = .center
       button.clipsToBounds = true
-      button.adjustsImageWhenHighlighted = true
     }
 
     titleButton.addSubview(chatHeaderStack)
@@ -718,6 +740,30 @@ public final class ChatMainView: ExpoView,
     menuButton.addTarget(self, action: #selector(handleMenuPressed), for: .touchUpInside)
     menuButton.isHidden = true
     menuGlassView.isHidden = true
+    savedSearchField.borderStyle = .none
+    savedSearchField.backgroundColor = .clear
+    savedSearchField.alpha = 0.0
+    savedSearchField.font = UIFont.systemFont(ofSize: 15, weight: .medium)
+    savedSearchField.clearButtonMode = .never
+    savedSearchField.returnKeyType = .search
+    savedSearchField.enablesReturnKeyAutomatically = false
+    savedSearchField.autocapitalizationType = .none
+    savedSearchField.autocorrectionType = .no
+    savedSearchField.spellCheckingType = .no
+    savedSearchField.delegate = self
+    savedSearchField.addTarget(
+      self,
+      action: #selector(handleSavedSearchTextChanged),
+      for: .editingChanged
+    )
+    savedSearchCancelButton.setTitle("Cancel", for: .normal)
+    savedSearchCancelButton.titleLabel?.font = UIFont.systemFont(ofSize: 15, weight: .semibold)
+    savedSearchCancelButton.alpha = 0.0
+    savedSearchCancelButton.addTarget(
+      self,
+      action: #selector(handleSavedSearchCancelPressed),
+      for: .touchUpInside
+    )
 
     profileBackButton.setImage(UIImage(systemName: "chevron.left"), for: .normal)
     profileBackButton.addTarget(self, action: #selector(handleBackPressed), for: .touchUpInside)
@@ -903,11 +949,23 @@ public final class ChatMainView: ExpoView,
   }
 
   private func updateChatModeHeaderControls() {
-    // Avatar is always visible in the header; tapping it navigates to profile
-    // only when standaloneProfileMode is enabled (otherwise JS handles navigation).
-    avatarButton.isHidden = false
-    avatarButton.isUserInteractionEnabled = true
-    titleButton.isUserInteractionEnabled = true
+    let usesSavedMessagesHeader = headerMode == .savedMessages
+    if !usesSavedMessagesHeader {
+      savedSearchExpanded = false
+      savedSearchField.text = nil
+      savedSearchField.resignFirstResponder()
+    }
+    avatarButton.isHidden = usesSavedMessagesHeader
+    avatarGlassView.isHidden = usesSavedMessagesHeader
+    avatarButton.isUserInteractionEnabled = !usesSavedMessagesHeader
+    titleButton.isUserInteractionEnabled = !usesSavedMessagesHeader
+    menuButton.isHidden = !usesSavedMessagesHeader
+    menuGlassView.isHidden = !usesSavedMessagesHeader
+    menuButton.setImage(
+      UIImage(systemName: usesSavedMessagesHeader ? "magnifyingglass" : "ellipsis"),
+      for: .normal
+    )
+    applySavedMessagesSearchPresentation()
   }
 
   private func startObservingChatEngine() {
@@ -1958,9 +2016,21 @@ public final class ChatMainView: ExpoView,
       x: 12.0, y: contentY, width: max(0.0, bounds.width - 24.0), height: 44.0)
 
     backGlassView.frame = CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
-    avatarGlassView.frame = CGRect(
+    let trailingHeaderFrame = CGRect(
       x: max(0.0, headerContentView.bounds.width - 44.0), y: 0.0, width: 44.0, height: 44.0)
-    menuGlassView.frame = .zero
+    if headerMode == .savedMessages {
+      avatarGlassView.frame = .zero
+      let searchWidth = savedSearchExpanded ? headerContentView.bounds.width : 44.0
+      menuGlassView.frame = CGRect(
+        x: max(0.0, headerContentView.bounds.width - searchWidth),
+        y: 0.0,
+        width: searchWidth,
+        height: 44.0
+      )
+    } else {
+      avatarGlassView.frame = trailingHeaderFrame
+      menuGlassView.frame = .zero
+    }
 
     let maxCenterWidth = max(0.0, headerContentView.bounds.width * 0.65)
     let chatReq = max(
@@ -1978,7 +2048,30 @@ public final class ChatMainView: ExpoView,
     backButton.frame = backGlassView.bounds
     titleButton.frame = titleGlassView.bounds
     avatarButton.frame = avatarGlassView.bounds
-    menuButton.frame = menuGlassView.bounds
+    if headerMode == .savedMessages {
+      menuButton.frame = savedSearchExpanded
+        ? CGRect(x: 6.0, y: 0.0, width: 38.0, height: 44.0)
+        : CGRect(x: 0.0, y: 0.0, width: 44.0, height: 44.0)
+      let cancelWidth: CGFloat = 64.0
+      savedSearchCancelButton.frame = CGRect(
+        x: max(0.0, menuGlassView.bounds.width - cancelWidth),
+        y: 0.0,
+        width: cancelWidth,
+        height: 44.0
+      )
+      let fieldMinX: CGFloat = 38.0
+      let fieldMaxX = max(fieldMinX, savedSearchCancelButton.frame.minX - 8.0)
+      savedSearchField.frame = CGRect(
+        x: fieldMinX,
+        y: 0.0,
+        width: max(0.0, fieldMaxX - fieldMinX),
+        height: 44.0
+      )
+    } else {
+      menuButton.frame = menuGlassView.bounds
+      savedSearchField.frame = .zero
+      savedSearchCancelButton.frame = .zero
+    }
 
     [backButton, avatarButton, titleButton, menuButton].forEach { control in
       control.layer.cornerRadius = control.bounds.height / 2.0
@@ -1993,6 +2086,7 @@ public final class ChatMainView: ExpoView,
 
     let titleBounds = titleButton.bounds.insetBy(dx: 12.0, dy: 4.0)
     chatHeaderStack.frame = titleBounds
+    applySavedMessagesSearchPresentation()
 
     profileHeaderContainer.frame = CGRect(x: 0.0, y: 0.0, width: bounds.width, height: headerHeight)
     profileHeaderMaskView.frame = profileHeaderContainer.bounds
@@ -2027,6 +2121,76 @@ public final class ChatMainView: ExpoView,
     }
     [profileBackGlassView, profileMenuGlassView].forEach { view in
       view.layer.cornerRadius = view.bounds.height / 2.0
+    }
+  }
+
+  private func applySavedMessagesSearchPresentation() {
+    let usesSavedMessagesSearch = headerMode == .savedMessages && currentPage == .chat
+    let controlsAlpha: CGFloat = usesSavedMessagesSearch && savedSearchExpanded ? 0.0 : 1.0
+    let controlsTransform =
+      usesSavedMessagesSearch && savedSearchExpanded
+      ? CGAffineTransform(translationX: -28.0, y: 0.0).scaledBy(x: 0.94, y: 0.94)
+      : .identity
+
+    backGlassView.alpha = controlsAlpha
+    titleGlassView.alpha = controlsAlpha
+    backGlassView.transform = controlsTransform
+    titleGlassView.transform = controlsTransform
+    chatHeaderStack.alpha = controlsAlpha
+    chatHeaderStack.transform = usesSavedMessagesSearch && savedSearchExpanded
+      ? CGAffineTransform(translationX: 0.0, y: -8.0)
+      : .identity
+    savedSearchField.alpha = usesSavedMessagesSearch && savedSearchExpanded ? 1.0 : 0.0
+    savedSearchCancelButton.alpha = usesSavedMessagesSearch && savedSearchExpanded ? 1.0 : 0.0
+    savedSearchField.isUserInteractionEnabled = usesSavedMessagesSearch && savedSearchExpanded
+    savedSearchCancelButton.isUserInteractionEnabled = usesSavedMessagesSearch && savedSearchExpanded
+    menuButton.contentHorizontalAlignment = savedSearchExpanded ? .left : .center
+  }
+
+  private func setSavedMessagesSearchExpanded(
+    _ expanded: Bool,
+    animated: Bool,
+    emitPressed: Bool = false,
+    emitDismissed: Bool = false
+  ) {
+    guard headerMode == .savedMessages else { return }
+    guard currentPage == .chat else {
+      savedSearchExpanded = false
+      savedSearchField.resignFirstResponder()
+      savedSearchField.text = nil
+      return
+    }
+
+    let applyUpdates = {
+      self.savedSearchExpanded = expanded
+      self.layoutChrome()
+    }
+
+    if animated {
+      UIView.animate(
+        withDuration: 0.4,
+        delay: 0.0,
+        usingSpringWithDamping: 0.8,
+        initialSpringVelocity: 0.2,
+        options: [.curveEaseInOut, .beginFromCurrentState, .allowUserInteraction],
+        animations: applyUpdates
+      )
+    } else {
+      applyUpdates()
+    }
+
+    if expanded {
+      if emitPressed {
+        onNativeEvent(["type": "headerSearchPressed"])
+      }
+      DispatchQueue.main.async { [weak self] in
+        self?.savedSearchField.becomeFirstResponder()
+      }
+    } else {
+      savedSearchField.resignFirstResponder()
+      if emitDismissed {
+        onNativeEvent(["type": "headerSearchDismissed"])
+      }
     }
   }
 
@@ -2281,6 +2445,13 @@ public final class ChatMainView: ExpoView,
 
     backButton.tintColor = text
     menuButton.tintColor = text
+    savedSearchField.textColor = text
+    savedSearchField.tintColor = text
+    savedSearchField.attributedPlaceholder = NSAttributedString(
+      string: "Search messages...",
+      attributes: [.foregroundColor: secondary.withAlphaComponent(0.7)]
+    )
+    savedSearchCancelButton.tintColor = appearance.bubbleMeGradient.first ?? text
     profileBackButton.tintColor = text
     profileMenuButton.tintColor = text
     chatTitleLabel.textColor = text
@@ -2418,7 +2589,12 @@ public final class ChatMainView: ExpoView,
   }
 
   private func updateHeaderTexts() {
-    let resolvedTitle = chatTitleText.isEmpty ? "Chat" : chatTitleText
+    let resolvedTitle: String =
+      if headerMode == .savedMessages {
+        chatTitleText.isEmpty ? "Saved Messages" : chatTitleText
+      } else {
+        chatTitleText.isEmpty ? "Chat" : chatTitleText
+      }
     let resolvedAgentProgress = resolvedAgentProgressSubtitle()
     let resolvedDirectTyping = resolvedDirectTypingSubtitle()
     let groupTypingSubtitle = resolvedGroupTypingSubtitle()
@@ -2427,7 +2603,9 @@ public final class ChatMainView: ExpoView,
     let trimmedSubtitle = chatSubtitleText.trimmingCharacters(in: .whitespacesAndNewlines)
     let subtitleLower = trimmedSubtitle.lowercased()
     let resolvedSubtitle: String
-    if let resolvedAgentProgress {
+    if headerMode == .savedMessages {
+      resolvedSubtitle = ""
+    } else if let resolvedAgentProgress {
       resolvedSubtitle = resolvedAgentProgress
     } else if let resolvedDirectTyping {
       resolvedSubtitle = resolvedDirectTyping
@@ -2451,6 +2629,9 @@ public final class ChatMainView: ExpoView,
     profileSubtitleLabel.text = isGroupOrChannel ? "Group Profile" : "Profile"
     chatSubtitleLabel.textColor =
       {
+        if headerMode == .savedMessages {
+          return appearance.timeColorThem.withAlphaComponent(0.0)
+        }
         if resolvedAgentProgress != nil
           || resolvedDirectTyping != nil
           || groupTypingSubtitle != nil
@@ -2783,7 +2964,8 @@ public final class ChatMainView: ExpoView,
 
     let chatHeaderAlpha: CGFloat = isChat ? 1.0 : 0.0
     let profileHeaderAlpha: CGFloat = isChat ? 0.0 : 1.0
-    let avatarAlpha: CGFloat = isChat ? 1.0 : 0.0
+    let avatarAlpha: CGFloat = (isChat && headerMode != .savedMessages) ? 1.0 : 0.0
+    let menuAlpha: CGFloat = (isChat && headerMode == .savedMessages) ? 1.0 : 0.0
     let chatHeaderTransform =
       isChat
       ? CGAffineTransform.identity : CGAffineTransform(translationX: -14.0, y: 0.0)
@@ -2816,6 +2998,7 @@ public final class ChatMainView: ExpoView,
     let agentTargetTransform = isAgent ? CGAffineTransform.identity : agentOffscreenRight
 
     let apply = {
+      self.layoutChrome()
       if isChat {
         self.bringSubviewToFront(self.headerContainer)
       } else {
@@ -2830,10 +3013,11 @@ public final class ChatMainView: ExpoView,
       self.chatHeaderStack.transform = chatHeaderTransform
       self.profileHeaderStack.transform = profileHeaderTransform
       self.avatarGlassView.alpha = avatarAlpha
+      self.menuGlassView.alpha = menuAlpha
       self.pinnedBannerView.alpha = (isChat && !self.pinnedBannerView.isHidden) ? 1.0 : 0.0
-      self.menuGlassView.alpha = 0.0
       self.profileMenuGlassView.alpha = isProfile ? 1.0 : 0.0
       self.applyHeaderGlassMorph(chatFactor: isChat ? 1.0 : 0.0)
+      self.applySavedMessagesSearchPresentation()
     }
 
     if animated {
@@ -2974,11 +3158,20 @@ public final class ChatMainView: ExpoView,
   }
 
   @objc private func handleAvatarPressed() {
+    guard headerMode != .savedMessages else { return }
     guard currentPage == .chat else { return }
     onNativeEvent(["type": "headerAvatarPressed"])
   }
 
   @objc private func handleMenuPressed() {
+    if headerMode == .savedMessages && currentPage == .chat {
+      if savedSearchExpanded {
+        savedSearchField.becomeFirstResponder()
+      } else {
+        setSavedMessagesSearchExpanded(true, animated: true, emitPressed: true)
+      }
+      return
+    }
     guard currentPage == .profile else { return }
     guard let presenter = topMostViewController() else { return }
 
@@ -3025,6 +3218,27 @@ public final class ChatMainView: ExpoView,
 
   @objc private func handleProfileSearchPressed() {
     onNativeEvent(["type": "headerSearchPressed"])
+  }
+
+  @objc private func handleSavedSearchTextChanged() {
+    onNativeEvent([
+      "type": "headerSearchChanged",
+      "text": savedSearchField.text ?? "",
+    ])
+  }
+
+  @objc private func handleSavedSearchCancelPressed() {
+    savedSearchField.text = nil
+    onNativeEvent(["type": "headerSearchChanged", "text": ""])
+    setSavedMessagesSearchExpanded(false, animated: true, emitDismissed: true)
+  }
+
+  public func textFieldShouldReturn(_ textField: UITextField) -> Bool {
+    if textField === savedSearchField {
+      textField.resignFirstResponder()
+      return true
+    }
+    return false
   }
 
   @objc private func handleProfileAudioCallPressed() {

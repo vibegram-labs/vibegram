@@ -554,6 +554,156 @@ private func bubbleDisplayAttributedString(
   return parseAgentMarkdown(text: t, font: font, textColor: textColor)
 }
 
+private final class AgentStreamingLabel: UILabel {
+  private static let revealInterval: CFTimeInterval = 0.01
+  private static let tokenRegex = try! NSRegularExpression(pattern: "\\S+|\\s+")
+
+  private var fullAttributedValue: NSAttributedString?
+  private var tokenRanges: [NSRange] = []
+  private var revealedTokenCount = 0
+  private var displayLink: CADisplayLink?
+  private var nextRevealTime: CFTimeInterval = 0
+
+  required init?(coder: NSCoder) {
+    return nil
+  }
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+  }
+
+  deinit {
+    stopStreamingAnimation()
+  }
+
+  func applyAgentText(_ attributedText: NSAttributedString, isStreaming: Bool) {
+    let previousFullText = fullAttributedValue?.string ?? ""
+    let nextFullText = attributedText.string
+    let shouldContinueExistingAnimation =
+      isStreaming
+      && !previousFullText.isEmpty
+      && nextFullText.hasPrefix(previousFullText)
+
+    fullAttributedValue = attributedText
+    tokenRanges = Self.tokenize(nextFullText)
+
+    if !shouldContinueExistingAnimation {
+      revealedTokenCount = isStreaming ? 0 : tokenRanges.count
+      nextRevealTime = 0
+    }
+
+    revealedTokenCount = min(revealedTokenCount, tokenRanges.count)
+    applyVisibleTokenState()
+
+    if isStreaming {
+      startStreamingAnimation()
+    } else {
+      stopStreamingAnimation()
+    }
+  }
+
+  func resetStreamingState() {
+    stopStreamingAnimation()
+    fullAttributedValue = nil
+    tokenRanges = []
+    revealedTokenCount = 0
+    super.attributedText = nil
+  }
+
+  private func startStreamingAnimation() {
+    guard !tokenRanges.isEmpty else { return }
+    guard revealedTokenCount < tokenRanges.count else {
+      stopStreamingAnimation()
+      return
+    }
+    guard displayLink == nil else { return }
+    let link = CADisplayLink(target: self, selector: #selector(handleDisplayLink))
+    link.add(to: .main, forMode: .common)
+    displayLink = link
+  }
+
+  private func stopStreamingAnimation() {
+    displayLink?.invalidate()
+    displayLink = nil
+    nextRevealTime = 0
+  }
+
+  @objc private func handleDisplayLink() {
+    guard !tokenRanges.isEmpty else {
+      stopStreamingAnimation()
+      return
+    }
+
+    let now = CACurrentMediaTime()
+    if nextRevealTime <= 0 {
+      nextRevealTime = now
+    }
+
+    var didReveal = false
+    while revealedTokenCount < tokenRanges.count, now >= nextRevealTime {
+      revealedTokenCount += 1
+      nextRevealTime += Self.revealInterval
+      didReveal = true
+    }
+
+    if didReveal {
+      applyVisibleTokenState()
+    }
+
+    if revealedTokenCount >= tokenRanges.count {
+      stopStreamingAnimation()
+    }
+  }
+
+  private func applyVisibleTokenState() {
+    guard let fullAttributedValue else {
+      super.attributedText = nil
+      return
+    }
+
+    guard revealedTokenCount < tokenRanges.count else {
+      super.attributedText = fullAttributedValue
+      return
+    }
+
+    let mutable = NSMutableAttributedString(attributedString: fullAttributedValue)
+    for index in revealedTokenCount..<tokenRanges.count {
+      let range = tokenRanges[index]
+      guard range.location != NSNotFound, range.length > 0, range.location < mutable.length else {
+        continue
+      }
+
+      var appliedForeground = false
+      mutable.enumerateAttribute(.foregroundColor, in: range, options: []) { value, subrange, _ in
+        let baseColor = (value as? UIColor) ?? self.textColor ?? .white
+        mutable.addAttribute(
+          .foregroundColor,
+          value: baseColor.withAlphaComponent(0.0),
+          range: subrange
+        )
+        appliedForeground = true
+      }
+
+      if !appliedForeground {
+        let fallbackColor = (textColor ?? .white).withAlphaComponent(0.0)
+        mutable.addAttribute(.foregroundColor, value: fallbackColor, range: range)
+      }
+    }
+    super.attributedText = mutable
+  }
+
+  private static func tokenize(_ string: String) -> [NSRange] {
+    guard !string.isEmpty else { return [] }
+    let nsString = string as NSString
+    let fullRange = NSRange(location: 0, length: nsString.length)
+    let matches = tokenRegex.matches(in: string, range: fullRange).map(\.range)
+    if matches.isEmpty {
+      return [fullRange]
+    }
+    return matches
+  }
+}
+
 func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   -> ChatMessageBubbleLayoutMetrics
 {
@@ -1519,7 +1669,7 @@ final class ChatListCell: UICollectionViewCell {
   let bubbleView = BubbleBackgroundView()
   let tailView = BubbleTailView()
 
-  private let messageLabel = UILabel()
+  private let messageLabel = AgentStreamingLabel()
   private let mediaContainerView = UIView()
   private let mediaImageView = UIImageView()
   private let mediaPrimaryIconView = UIImageView()
@@ -1788,8 +1938,12 @@ final class ChatListCell: UICollectionViewCell {
       let messageFont =
         isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
       let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
-      messageLabel.attributedText = bubbleDisplayAttributedString(
+      let displayText = bubbleDisplayAttributedString(
         for: row, font: messageFont, textColor: resolveTextColor)
+      messageLabel.applyAgentText(
+        displayText,
+        isStreaming: row.isAgentMessage && row.isStreamingText && row.messageType != "typing"
+      )
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
       editedLabel.isHidden = !row.isEdited
@@ -1922,6 +2076,7 @@ final class ChatListCell: UICollectionViewCell {
     layer.removeAllAnimations()
     contentView.layer.removeAllAnimations()
     stopTypingShimmer()
+    messageLabel.resetStreamingState()
   }
 
   private func startTypingShimmer() {

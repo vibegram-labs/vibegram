@@ -172,6 +172,13 @@ export interface NativeChatMainModule {
   playReactionFx?: (surfaceId: string, payload: NativeReactionFxPayload) => Promise<void>;
 }
 
+export type NativeChatHeaderMode = 'default' | 'savedMessages';
+
+export interface NativeChatAgentModule {
+  isSupported?: () => boolean;
+  submitText?: (surfaceId: string, text: string) => Promise<void>;
+}
+
 export interface NativeChatEngineModule {
   isSupported?: () => boolean;
   setChatEngineConfig?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
@@ -201,6 +208,9 @@ export interface NativeChatEngineModule {
   getChatProfileSummary?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   getPinnedMessages?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   pinMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  fetchSavedMessages?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  sendSavedMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  deleteSavedMessage?: (payload: Record<string, unknown>) => Promise<Record<string, unknown>> | Record<string, unknown>;
   getChatJournal?: () => Promise<Record<string, unknown>[]> | Record<string, unknown>[];
   clearChatJournal?: () => Promise<Record<string, unknown>> | Record<string, unknown>;
   isTyping?: (payload: Record<string, unknown>) => Promise<boolean> | boolean;

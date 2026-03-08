@@ -17,7 +17,8 @@
       "NativeSettingsMainModule",
       "ChatNativeTabBarModule",
       "ChatNativeHomeModule",
-      "ChatNativeHomeListModule"
+      "ChatNativeHomeListModule",
+      "ChatNativeAgentModule"
     ],
     "podspecPath": "ChatNative.podspec"
   },

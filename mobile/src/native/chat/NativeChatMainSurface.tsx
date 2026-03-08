@@ -6,6 +6,7 @@ import type {
   NativeChatAgentConfig,
   NativeChatAppearance,
   NativeChatGroupMember,
+  NativeChatHeaderMode,
   NativeChatRow,
   NativeReactionFxPayload,
   NativeSendTransitionPayload,
@@ -55,6 +56,7 @@ interface NativeChatMainSurfaceProps {
   inputPlaceholder?: string;
   nativeSendEnabled?: boolean;
   debugAnimationPanel?: boolean;
+  headerMode?: NativeChatHeaderMode;
   headerTitle?: string;
   headerSubtitle?: string;
   profileName?: string;
@@ -92,6 +94,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
     inputPlaceholder,
     nativeSendEnabled,
     debugAnimationPanel,
+    headerMode,
     headerTitle,
     headerSubtitle,
     profileName,
@@ -205,6 +208,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         inputPlaceholder={inputPlaceholder}
         nativeSendEnabled={nativeSendEnabled}
         debugAnimationPanel={debugAnimationPanel}
+        headerMode={headerMode}
         headerTitle={headerTitle}
         headerSubtitle={headerSubtitle}
         profileName={profileName}

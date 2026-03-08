@@ -106,6 +106,10 @@ class ChatNativeMainModule : Module() {
         view.setNativeSendEnabled(enabled)
       }
 
+      Prop("headerMode") { view: ChatMainView, value: String? ->
+        view.setHeaderMode(value ?: "default")
+      }
+
       Prop("headerTitle") { view: ChatMainView, value: String? ->
         view.setHeaderTitle(value ?: "")
       }

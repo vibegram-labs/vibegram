@@ -12,6 +12,7 @@ import { PlusCircleVibeIcon, AnimatedShieldIcon, EditChatVibeIcon, VibeLogoIcon,
 import * as Clipboard from 'expo-clipboard'
 import * as Haptics from 'expo-haptics'
 import { useRouter, Stack } from 'expo-router'
+import { useFocusEffect } from '@react-navigation/native'
 import MaskedView from '@react-native-masked-view/masked-view'
 import { LinearGradient } from 'expo-linear-gradient'
 import LottieView from 'lottie-react-native'
@@ -28,6 +29,7 @@ import ConnectionModal, { ConnectionModalRef } from '../../src/components/settin
 import ChatPreviewModal from '../../src/components/chat/ChatPreviewModal'
 import { useSavedMessagesStore } from '../../src/lib/stores/saved-messages-store'
 import NativeHomeListSurface, { isNativeHomeListAvailable, type NativeHomeListRow } from '../../src/native/home/NativeHomeListSurface'
+import { getNativeChatEngineModule } from '../../src/native/chat'
 import { mapMessagesToNativeRows, type RuntimeChatMessage } from '../../src/native/chat/mapper'
 import { theme } from '../../src/lib/theme'
 
@@ -176,6 +178,24 @@ const toFiniteNumber = (value: unknown): number | undefined => {
         return Number.isFinite(parsed) ? parsed : undefined
     }
     return undefined
+}
+
+const extractNativeSavedMessages = (result: unknown): any[] => {
+    if (!result || typeof result !== 'object') return []
+    const payload = result as Record<string, unknown>
+    if (Array.isArray(payload.messages)) return payload.messages as any[]
+    if (Array.isArray(payload.data)) return payload.data as any[]
+    return []
+}
+
+const getSavedMessageSortTimestamp = (message: any): number => {
+    return toTimestampMs(
+        message?.timestamp
+        ?? message?.timestampMs
+        ?? message?.createdAt
+        ?? message?.created_at
+        ?? message?.savedAt
+    )
 }
 
 const normalizeChatType = (value: unknown): 'dm' | 'group' | 'channel' => {
@@ -519,10 +539,15 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const { colors, effectiveTheme } = useThemeStore()
     const activeWallpaperTheme = useWallpaperStore((s) => s.activeTheme)
     const { setActiveChat, chats, isLoading, loadChats, deleteChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected } = useChatStore()
-    const { savedMessages } = useSavedMessagesStore()
+    const { savedMessages, sync: syncSavedMessages } = useSavedMessagesStore()
     const { callStatus, remoteUser, callDuration, callType } = useCallStore()
     const { feed, myStories } = useStoryStore()
     const onlineUsersList = onlineUsers ? Array.from(onlineUsers) : [];
+    const nativeEngineModule = useMemo(() => getNativeChatEngineModule(), [])
+    const nativeSavedMessagesEnabled = !!nativeEngineModule?.fetchSavedMessages
+    const [nativeSavedMessages, setNativeSavedMessages] = useState<any[]>([])
+    const [usesNativeSavedMessagesPreview, setUsesNativeSavedMessagesPreview] = useState(false)
+    const [savedMessagesPreviewLoaded, setSavedMessagesPreviewLoaded] = useState(false)
 
 
 
@@ -591,12 +616,54 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const searchInputRef = useRef<TextInput>(null);
     const [isPullRefreshing, setIsPullRefreshing] = useState(false)
     const hasStories = feed.length > 0 || myStories.length > 0
+    const homeSavedMessages = useMemo(() => {
+        const source = usesNativeSavedMessagesPreview ? nativeSavedMessages : savedMessages
+        return [...source].sort((a, b) => getSavedMessageSortTimestamp(b) - getSavedMessageSortTimestamp(a))
+    }, [nativeSavedMessages, savedMessages, usesNativeSavedMessagesPreview])
     const estimatedNativeHeaderHeight = useMemo(
         () => {
-            if (chats.length === 0 && savedMessages.length === 0) return 0;
+            if (chats.length === 0 && homeSavedMessages.length === 0) return 0;
             return SEARCH_BAR_BLOCK_HEIGHT + (hasStories ? 108 : 0);
         },
-        [hasStories, chats.length, savedMessages.length]
+        [hasStories, chats.length, homeSavedMessages.length]
+    )
+
+    const loadSavedMessagesPreview = useCallback(async () => {
+        if (!user?.userId) {
+            setNativeSavedMessages([])
+            setUsesNativeSavedMessagesPreview(false)
+            setSavedMessagesPreviewLoaded(false)
+            return
+        }
+
+        if (nativeSavedMessagesEnabled && nativeEngineModule?.fetchSavedMessages) {
+            try {
+                const result = await Promise.resolve(nativeEngineModule.fetchSavedMessages({ userId: user.userId }))
+                const nextMessages = extractNativeSavedMessages(result)
+                    .sort((a, b) => getSavedMessageSortTimestamp(b) - getSavedMessageSortTimestamp(a))
+                setNativeSavedMessages(nextMessages)
+                setUsesNativeSavedMessagesPreview(true)
+                setSavedMessagesPreviewLoaded(true)
+                return
+            } catch (error) {
+                console.warn('[home/native-saved] fetchSavedMessages failed', error)
+            }
+        }
+
+        try {
+            setUsesNativeSavedMessagesPreview(false)
+            await Promise.resolve(syncSavedMessages())
+        } catch (error) {
+            console.warn('[home] sync saved messages failed', error)
+        } finally {
+            setSavedMessagesPreviewLoaded(true)
+        }
+    }, [nativeEngineModule, nativeSavedMessagesEnabled, syncSavedMessages, user?.userId])
+
+    useFocusEffect(
+        useCallback(() => {
+            void loadSavedMessagesPreview()
+        }, [loadSavedMessagesPreview])
     )
 
 
@@ -610,8 +677,8 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             if (chat.friendId && typingUsers.has(chat.friendId.toUpperCase())) return true;
             return false;
         });
-        if (savedMessages.length > 0) {
-            const lastMsg = savedMessages[0] as any;
+        if (homeSavedMessages.length > 0) {
+            const lastMsg = homeSavedMessages[0] as any;
             const savedChat = {
                 chatId: 'saved_messages',
                 name: 'Saved Messages',
@@ -628,7 +695,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             }
         }
         return list.sort((a: any, b: any) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
-    }, [chats, savedMessages, user?.userId, typingUsers]);
+    }, [chats, homeSavedMessages, user?.userId, typingUsers]);
 
     const filteredChats = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
@@ -971,6 +1038,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                     // console.log('[HomeScreen] App became active, reloading chats...');
                     lastReloadRef.current = now;
                     loadChats();
+                    void loadSavedMessagesPreview();
                     // Ensure connection is active upon resume
                     if (!useChatStore.getState().isConnected) {
                         useChatStore.getState().disconnect();
@@ -985,7 +1053,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         return () => {
             subscription.remove();
         };
-    }, []); // loadChats is stable from Zustand, no need in deps
+    }, [loadChats, loadSavedMessagesPreview]);
 
     const handleChatPress = useCallback((item: any) => {
         safePress(`openChat:${item?.chatId || 'unknown'}`, () => {
@@ -1069,11 +1137,14 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         if (isPullRefreshing) return
         setIsPullRefreshing(true)
         try {
-            await Promise.resolve(loadChats())
+            await Promise.all([
+                Promise.resolve(loadChats()),
+                Promise.resolve(loadSavedMessagesPreview()),
+            ])
         } finally {
             setIsPullRefreshing(false)
         }
-    }, [isPullRefreshing, loadChats])
+    }, [isPullRefreshing, loadChats, loadSavedMessagesPreview])
 
     const handleNativeHomeEvent = useCallback((event: any) => {
         const payload = event?.nativeEvent ?? event ?? {}
@@ -1398,7 +1469,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                 >
                                     {renderHomeListHeader()}
                                 </Animated.View>
-                                {filteredChats.length === 0 && (
+                                {filteredChats.length === 0 && savedMessagesPreviewLoaded && (
                                     <View style={StyleSheet.absoluteFill} pointerEvents="box-none">
                                         {renderHomeEmptyState()}
                                     </View>
@@ -1409,7 +1480,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         <Animated.FlatList
                             data={filteredChats}
                             renderItem={renderItem}
-                            extraData={[typingUsers, onlineUsers, selectedConversations, isEditing, chats.length]}
+                            extraData={[typingUsers, onlineUsers, selectedConversations, isEditing, chats.length, homeSavedMessages.length, savedMessagesPreviewLoaded]}
                             keyExtractor={item => item.chatId}
                             contentContainerStyle={[styles.listContent, { paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }]}
                             showsVerticalScrollIndicator={false}
@@ -1420,7 +1491,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                             }
                             ListHeaderComponent={renderHomeListHeader}
                             ListFooterComponent={<View style={{ height: 100 + (Platform.OS === 'android' ? insets.bottom : 0) }} />}
-                            ListEmptyComponent={renderHomeEmptyState}
+                            ListEmptyComponent={savedMessagesPreviewLoaded ? renderHomeEmptyState : null}
                         />
                     )}
 
@@ -1665,6 +1736,10 @@ const styles = StyleSheet.create({
     headerTextBtn: {
         fontSize: 15,
         fontWeight: '600'
+    },
+    textBtnTouch: {
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     headerTitle: {
         fontSize: 17,

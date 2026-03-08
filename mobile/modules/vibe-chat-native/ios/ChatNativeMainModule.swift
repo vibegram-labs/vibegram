@@ -110,6 +110,10 @@ public class ChatNativeMainModule: Module {
         view.setDebugAnimationPanel(enabled)
       }
 
+      Prop("headerMode") { (view: ChatMainView, value: String?) in
+        view.setHeaderMode(value ?? "default")
+      }
+
       Prop("headerTitle") { (view: ChatMainView, value: String?) in
         view.setHeaderTitle(value ?? "")
       }

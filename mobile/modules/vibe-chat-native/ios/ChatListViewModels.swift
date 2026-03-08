@@ -99,6 +99,7 @@ struct ChatListRow {
   let isAgentMessage: Bool
   let agentName: String?
   let plainContent: String?
+  let isStreamingText: Bool
 
   var isAgentMention: Bool {
     return isMe && text.lowercased().contains("@vibe")
@@ -260,6 +261,7 @@ struct ChatListRow {
       isAgentMessage = false
       agentName = nil
       plainContent = nil
+      isStreamingText = false
       return
     }
 
@@ -344,6 +346,10 @@ struct ChatListRow {
     isAgentMessage = (message["isAgentMessage"] as? Bool) ?? false
     agentName = message["agentName"] as? String
     plainContent = message["plainContent"] as? String
+    isStreamingText =
+      (message["isStreaming"] as? Bool)
+      ?? (metadata?["isStreaming"] as? Bool)
+      ?? false
   }
 }
 
@@ -460,6 +466,7 @@ func chatListRowContentEqual(_ lhs: ChatListRow, _ rhs: ChatListRow) -> Bool {
     && lhs.isAgentMessage == rhs.isAgentMessage
     && lhs.agentName == rhs.agentName
     && lhs.plainContent == rhs.plainContent
+    && lhs.isStreamingText == rhs.isStreamingText
 }
 
 struct SendTransitionPayload {

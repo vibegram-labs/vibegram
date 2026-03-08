@@ -134,6 +134,24 @@ public final class ChatEngineModule: Module {
       }
     }
 
+    AsyncFunction("fetchSavedMessages") { (payload: [String: Any], promise: Promise) in
+      ChatEngine.shared.fetchSavedMessages(payload) { result in
+        promise.resolve(result)
+      }
+    }
+
+    AsyncFunction("sendSavedMessage") { (payload: [String: Any], promise: Promise) in
+      ChatEngine.shared.sendSavedMessage(payload) { result in
+        promise.resolve(result)
+      }
+    }
+
+    AsyncFunction("deleteSavedMessage") { (payload: [String: Any], promise: Promise) in
+      ChatEngine.shared.deleteSavedMessage(payload) { result in
+        promise.resolve(result)
+      }
+    }
+
     AsyncFunction("saveAgentConfig") { (chatId: String, config: [String: Any], promise: Promise) in
       ChatEngine.shared.saveAgentConfig(chatId: chatId, config: config) { success in
         promise.resolve(["success": success])

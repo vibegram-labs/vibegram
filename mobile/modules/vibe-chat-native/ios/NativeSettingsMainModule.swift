@@ -23,7 +23,8 @@ private struct NativeSettingsRow {
     let id = (raw["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     let icon = (raw["icon"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     let label = (raw["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-    let kindValue = (raw["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "link"
+    let kindValue =
+      (raw["type"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "link"
     guard !id.isEmpty, !label.isEmpty, let kind = NativeSettingsRowKind(rawValue: kindValue) else {
       return nil
     }
@@ -84,8 +85,8 @@ private struct NativeSettingsSection {
   }
 }
 
-private extension String {
-  var nilIfEmpty: String? {
+extension String {
+  fileprivate var nilIfEmpty: String? {
     let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)
     return trimmed.isEmpty ? nil : trimmed
   }
@@ -208,7 +209,8 @@ private final class NativeSettingsGlassButton: UIControl {
     didSet {
       UIView.animate(withDuration: 0.16) {
         self.overlayView.alpha = self.isHighlighted ? 1.0 : 0.0
-        self.transform = self.isHighlighted
+        self.transform =
+          self.isHighlighted
           ? CGAffineTransform(scaleX: 0.96, y: 0.96)
           : .identity
       }
@@ -226,7 +228,8 @@ private final class NativeSettingsGlassButton: UIControl {
     }
 
     if let text = titleLabelView.text, !text.isEmpty {
-      let textWidth = ceil((text as NSString).size(withAttributes: [.font: titleLabelView.font as Any]).width)
+      let textWidth = ceil(
+        (text as NSString).size(withAttributes: [.font: titleLabelView.font as Any]).width)
       return CGSize(width: max(56, textWidth + 28), height: height)
     }
 
@@ -284,8 +287,10 @@ private final class NativeSettingsGlassButton: UIControl {
       iconView.centerXAnchor.constraint(equalTo: effectView.contentView.centerXAnchor),
       iconView.centerYAnchor.constraint(equalTo: effectView.contentView.centerYAnchor),
 
-      titleLabelView.leadingAnchor.constraint(equalTo: effectView.contentView.leadingAnchor, constant: 14),
-      titleLabelView.trailingAnchor.constraint(equalTo: effectView.contentView.trailingAnchor, constant: -14),
+      titleLabelView.leadingAnchor.constraint(
+        equalTo: effectView.contentView.leadingAnchor, constant: 14),
+      titleLabelView.trailingAnchor.constraint(
+        equalTo: effectView.contentView.trailingAnchor, constant: -14),
       titleLabelView.centerYAnchor.constraint(equalTo: effectView.contentView.centerYAnchor),
 
       spinner.centerXAnchor.constraint(equalTo: effectView.contentView.centerXAnchor),
@@ -371,7 +376,8 @@ private final class NativeSettingsRowView: UIControl {
 
   override var isHighlighted: Bool {
     didSet {
-      backgroundColor = isHighlighted
+      backgroundColor =
+        isHighlighted
         ? (theme.isDark ? UIColor(white: 1.0, alpha: 0.06) : UIColor(white: 0.0, alpha: 0.04))
         : .clear
     }
@@ -449,13 +455,15 @@ private final class NativeSettingsRowView: UIControl {
       chevronImageView.widthAnchor.constraint(equalToConstant: 14),
       chevronImageView.heightAnchor.constraint(equalToConstant: 14),
 
-      valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
+      valueLabel.leadingAnchor.constraint(
+        greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
       valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
       valueLabel.trailingAnchor.constraint(equalTo: chevronImageView.leadingAnchor, constant: -8),
 
       switchControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
       switchControl.centerYAnchor.constraint(equalTo: centerYAnchor),
-      switchControl.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
+      switchControl.leadingAnchor.constraint(
+        greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
 
       dividerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 64),
       dividerView.trailingAnchor.constraint(equalTo: trailingAnchor),
@@ -477,14 +485,17 @@ private final class NativeSettingsRowView: UIControl {
     currentRow = row
     self.theme = theme
 
-    iconBackgroundView.backgroundColor = row.iconColor.withAlphaComponent(theme.isDark ? 0.18 : 0.12)
+    iconBackgroundView.backgroundColor = row.iconColor.withAlphaComponent(
+      theme.isDark ? 0.18 : 0.12)
     iconView.image = UIImage(
       systemName: row.icon,
       withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     )
     iconView.tintColor = row.iconColor
     titleLabel.text = row.label
-    titleLabel.textColor = row.destructive ? UIColor(red: 239 / 255, green: 68 / 255, blue: 68 / 255, alpha: 1.0) : theme.text
+    titleLabel.textColor =
+      row.destructive
+      ? UIColor(red: 239 / 255, green: 68 / 255, blue: 68 / 255, alpha: 1.0) : theme.text
     valueLabel.textColor = theme.secondaryText
     valueLabel.text = row.detailText
     dividerView.isHidden = !row.divider
@@ -782,14 +793,18 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
       scrollView.topAnchor.constraint(equalTo: topAnchor),
       scrollView.bottomAnchor.constraint(equalTo: bottomAnchor),
 
-      scrollContentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
-      scrollContentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+      scrollContentView.leadingAnchor.constraint(
+        equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+      scrollContentView.trailingAnchor.constraint(
+        equalTo: scrollView.contentLayoutGuide.trailingAnchor),
       scrollContentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
-      scrollContentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+      scrollContentView.bottomAnchor.constraint(
+        equalTo: scrollView.contentLayoutGuide.bottomAnchor),
       scrollContentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
       contentStack.leadingAnchor.constraint(equalTo: scrollContentView.leadingAnchor, constant: 16),
-      contentStack.trailingAnchor.constraint(equalTo: scrollContentView.trailingAnchor, constant: -16),
+      contentStack.trailingAnchor.constraint(
+        equalTo: scrollContentView.trailingAnchor, constant: -16),
       contentStack.topAnchor.constraint(equalTo: scrollContentView.topAnchor),
       contentStack.bottomAnchor.constraint(equalTo: scrollContentView.bottomAnchor, constant: -100),
 
@@ -832,13 +847,16 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     avatarHeightConstraint = avatarView.heightAnchor.constraint(equalToConstant: 220)
     avatarHeightConstraint?.isActive = true
 
-    avatarPenTopConstraint = avatarActionHost.topAnchor.constraint(equalTo: topAnchor, constant: 120)
+    avatarPenTopConstraint = avatarActionHost.topAnchor.constraint(
+      equalTo: topAnchor, constant: 120)
     avatarPenTopConstraint?.isActive = true
 
-    avatarActionWidthConstraint = avatarActionHost.widthAnchor.constraint(equalToConstant: heroExpandedAvatarSize)
+    avatarActionWidthConstraint = avatarActionHost.widthAnchor.constraint(
+      equalToConstant: heroExpandedAvatarSize)
     avatarActionWidthConstraint?.isActive = true
 
-    avatarActionHeightConstraint = avatarActionHost.heightAnchor.constraint(equalToConstant: heroExpandedAvatarSize)
+    avatarActionHeightConstraint = avatarActionHost.heightAnchor.constraint(
+      equalToConstant: heroExpandedAvatarSize)
     avatarActionHeightConstraint?.isActive = true
 
     heroSpacerHeightConstraint = heroSpacerView.heightAnchor.constraint(equalToConstant: 220)
@@ -951,7 +969,8 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     qrButton.setGlassTheme(isDark: theme.isDark)
     editButton.setGlassTheme(isDark: theme.isDark)
     penButton.setGlassTheme(isDark: theme.isDark)
-    headerBlurView.effect = UIBlurEffect(style: theme.isDark ? .systemUltraThinMaterialDark : .systemUltraThinMaterialLight)
+    headerBlurView.effect = UIBlurEffect(
+      style: theme.isDark ? .systemUltraThinMaterialDark : .systemUltraThinMaterialLight)
     badgeView.configure(tier: currentBadgeTier)
     rebuildSections()
   }
@@ -977,11 +996,7 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     avatarView.setExpandedTopInset(heroTop)
     avatarView.setCollapsedTopInset(collapsedTop)
 
-    if #available(iOS 26.0, *) {
-      // Glass morph: don't send scrollOffset — layout is driven by collapsed toggle.
-    } else {
-      avatarView.setScrollOffset(scrollView.contentOffset.y)
-    }
+    avatarView.setScrollOffset(scrollView.contentOffset.y)
   }
 
   private func updateScrollAnimations(offsetY: CGFloat) {
@@ -989,18 +1004,8 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     let travelDistance = max(1.0, currentHeroTop - currentCollapsedTop)
     let progress = max(0.0, min(1.0, resolvedOffset / travelDistance))
 
-    if #available(iOS 26.0, *) {
-      // Glass morph: toggle collapsed at threshold — no scrollOffset to
-      // keep the glass layout 100 % static between state changes.
-      let shouldCollapse = progress > 0.75
-      if shouldCollapse != avatarCollapsed {
-        avatarCollapsed = shouldCollapse
-        avatarView.setCollapsed(shouldCollapse)
-      }
-    } else {
-      // Legacy: send scroll offset for smooth size/position interpolation.
-      avatarView.setScrollOffset(resolvedOffset)
-    }
+    // Smooth scroll tracking on all iOS versions.
+    avatarView.setScrollOffset(resolvedOffset)
 
     // Pen-button tracking — UIKit layer, independent of glass morph.
     let currentAvatarTop = max(
@@ -1037,8 +1042,8 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
   }
 }
 
-private extension UIColor {
-  static func nativeSettingsColor(from raw: String?) -> UIColor? {
+extension UIColor {
+  fileprivate static func nativeSettingsColor(from raw: String?) -> UIColor? {
     guard let raw else { return nil }
     let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !value.isEmpty else { return nil }
@@ -1047,10 +1052,12 @@ private extension UIColor {
       return nativeSettingsHexColor(from: value)
     }
 
-    if value.hasPrefix("rgba"), let match = nativeSettingsMatchPattern(
-      "^rgba\\s*\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*([0-9]*\\.?[0-9]+)\\)$",
-      in: value
-    ) {
+    if value.hasPrefix("rgba"),
+      let match = nativeSettingsMatchPattern(
+        "^rgba\\s*\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*([0-9]*\\.?[0-9]+)\\)$",
+        in: value
+      )
+    {
       let red = CGFloat((match[1] as NSString).doubleValue) / 255.0
       let green = CGFloat((match[2] as NSString).doubleValue) / 255.0
       let blue = CGFloat((match[3] as NSString).doubleValue) / 255.0
@@ -1058,10 +1065,12 @@ private extension UIColor {
       return UIColor(red: red, green: green, blue: blue, alpha: alpha)
     }
 
-    if value.hasPrefix("rgb"), let match = nativeSettingsMatchPattern(
-      "^rgb\\s*\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\)$",
-      in: value
-    ) {
+    if value.hasPrefix("rgb"),
+      let match = nativeSettingsMatchPattern(
+        "^rgb\\s*\\((\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\)$",
+        in: value
+      )
+    {
       let red = CGFloat((match[1] as NSString).doubleValue) / 255.0
       let green = CGFloat((match[2] as NSString).doubleValue) / 255.0
       let blue = CGFloat((match[3] as NSString).doubleValue) / 255.0

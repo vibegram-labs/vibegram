@@ -4,4 +4,6 @@ export * from './core';
 export * from './mapper';
 export * from './NativeChatSurface';
 export * from './NativeChatMainSurface';
+export * from './NativeSavedMessagesSurface';
 export * from './NativeChatProfileSurface';
+export * from './NativeAgentChatSurface';

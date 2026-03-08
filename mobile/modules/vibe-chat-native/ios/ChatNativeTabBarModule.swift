@@ -48,17 +48,9 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
     setupView()
-    NotificationCenter.default.addObserver(
-      self, selector: #selector(keyboardWillShow), name: UIResponder.keyboardWillShowNotification,
-      object: nil)
-    NotificationCenter.default.addObserver(
-      self, selector: #selector(keyboardWillHide), name: UIResponder.keyboardWillHideNotification,
-      object: nil)
   }
 
-  deinit {
-    NotificationCenter.default.removeObserver(self)
-  }
+  deinit {}
 
   public override var intrinsicContentSize: CGSize {
     CGSize(width: UIView.noIntrinsicMetric, height: 64)
@@ -85,6 +77,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     // Vibe icon centered
     vibeIconView.translatesAutoresizingMaskIntoConstraints = false
     vibeIconView.contentMode = .scaleAspectFit
+    vibeIconView.isUserInteractionEnabled = false  // Never swallow touches!
     vibeChromeView.contentView.addSubview(vibeIconView)
 
     // Touch target
@@ -136,7 +129,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
 
       // Text Field Constraints
       vibeTextField.leadingAnchor.constraint(
-        equalTo: vibeChromeView.contentView.leadingAnchor, constant: 10),
+        equalTo: vibeChromeView.contentView.leadingAnchor, constant: 14),
       vibeTextField.centerYAnchor.constraint(equalTo: vibeChromeView.contentView.centerYAnchor),
       vibeTextField.trailingAnchor.constraint(
         equalTo: vibeSubmitButton.leadingAnchor, constant: -8),
@@ -324,6 +317,9 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
           self.tabBar.alpha = 0.0
           self.tabBar.transform = CGAffineTransform(translationX: -40, y: 0)
 
+          self.vibeChromeView.contentView.bringSubviewToFront(self.vibeSubmitButton)
+          self.vibeChromeView.contentView.bringSubviewToFront(self.vibeIconView)
+
           // Center of the layout shifts natively to fullWidth/2.
           // Target position of the center is fullWidth - 26.
           // Translation          // Translation = targetCenter - currentLayoutCenter
@@ -370,12 +366,12 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     else { return }
     onVibeSubmit(["text": text])
     vibeTextField.text = ""
-    vibeTextField.resignFirstResponder()
     textDidChange()  // reset colors
   }
 
   public func textFieldShouldReturn(_ textField: UITextField) -> Bool {
     handleVibeSubmitAction()
+    vibeTextField.resignFirstResponder()
     return true
   }
 
@@ -399,50 +395,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     }
   }
 
-  // MARK: - Keyboard Handling
-
-  @objc private func keyboardWillShow(notification: NSNotification) {
-    guard let userInfo = notification.userInfo,
-      let keyboardFrame = (userInfo[UIResponder.keyboardFrameEndUserInfoKey] as? NSValue)?
-        .cgRectValue,
-      let viewFrameInWindow = self.superview?.convert(self.frame, to: nil)
-    else { return }
-
-    // Calculate overlap to push the container up exactly enough
-    let overlap = viewFrameInWindow.maxY - keyboardFrame.minY
-    if overlap > 0 {
-      let duration =
-        (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue
-        ?? 0.3
-      let curveValue =
-        userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int
-        ?? UIView.AnimationCurve.easeInOut.rawValue
-      let options = UIView.AnimationOptions(rawValue: UInt(curveValue << 16))
-
-      UIView.animate(
-        withDuration: duration, delay: 0, options: options,
-        animations: {
-          // Push it up, but leave some less negative room so it sits perfectly visually flush over the keyboard
-          self.transform = CGAffineTransform(translationX: 0, y: -overlap + 12)
-        }, completion: nil)
-    }
-  }
-
-  @objc private func keyboardWillHide(notification: NSNotification) {
-    guard let userInfo = notification.userInfo else { return }
-    let duration =
-      (userInfo[UIResponder.keyboardAnimationDurationUserInfoKey] as? NSNumber)?.doubleValue ?? 0.3
-    let curveValue =
-      userInfo[UIResponder.keyboardAnimationCurveUserInfoKey] as? Int
-      ?? UIView.AnimationCurve.easeInOut.rawValue
-    let options = UIView.AnimationOptions(rawValue: UInt(curveValue << 16))
-
-    UIView.animate(
-      withDuration: duration, delay: 0, options: options,
-      animations: {
-        self.transform = .identity
-      }, completion: nil)
-  }
+  // MARK: - Chrome Application
 
   private func applyChrome() {
     let blurStyle: UIBlurEffect.Style =

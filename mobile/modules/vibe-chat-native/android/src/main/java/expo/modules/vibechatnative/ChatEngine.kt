@@ -1578,6 +1578,344 @@ internal object ChatEngine {
     return mapOf("accepted" to true, "queued" to true, "blockedUserId" to blockedUserId)
   }
 
+  private fun parseSavedMessagesResponse(body: String): List<Map<String, Any?>> {
+    val trimmed = body.trim()
+    if (trimmed.isEmpty()) return emptyList()
+    return try {
+      if (trimmed.startsWith("[")) {
+        jsonArrayToList(JSONArray(trimmed)).mapNotNull { it as? Map<String, Any?> }
+      } else {
+        val root = JSONObject(trimmed)
+        when (val value = root.opt("data") ?: root.opt("messages")) {
+          is JSONArray -> jsonArrayToList(value).mapNotNull { it as? Map<String, Any?> }
+          is JSONObject -> listOf(jsonObjectToMap(value))
+          else -> emptyList()
+        }
+      }
+    } catch (_: Throwable) {
+      emptyList()
+    }
+  }
+
+  private fun normalizeSavedMessagesLocked(rawItems: List<Map<String, Any?>>): List<Map<String, Any?>> {
+    val privateKey = decryptPrivateKeyLocked()
+    val currentUserId = currentUserIdLocked()
+    val rawConfigUserId = normalized(getConfigValueLocked("userId"))
+
+    return rawItems.mapNotNull { raw ->
+      val messageId =
+        normalized(raw["original_message_id"] ?: raw["messageId"] ?: raw["message_id"] ?: raw["id"])
+          ?: return@mapNotNull null
+      val fromId = normalized(raw["from_id"] ?: raw["fromId"]) ?: rawConfigUserId
+      val type = normalized(raw["type"])?.lowercase(Locale.ROOT) ?: "text"
+      val timestampMs =
+        parseLongValue(raw["timestamp"] ?: raw["timestampMs"] ?: raw["timestamp_ms"])
+          ?: System.currentTimeMillis()
+      val encryptedContent = normalized(raw["encrypted_content"] ?: raw["encryptedContent"])
+      val parsedExtra = parseJsonToMap(normalized(raw["extra"]).orEmpty())
+      val decryptedFields = LinkedHashMap<String, Any?>(parsedExtra)
+
+      val plaintextFallback = normalized(raw["content"] ?: raw["plaintext"] ?: raw["text"]).orEmpty()
+      if (plaintextFallback.isNotBlank()) {
+        decryptedFields["text"] = plaintextFallback
+      }
+
+      if (!encryptedContent.isNullOrBlank()) {
+        val isMe = normalizedUpper(fromId) != null && normalizedUpper(fromId) == currentUserId
+        val parsedEncryptedFields =
+          if (!isLikelyHybridCiphertext(encryptedContent)) {
+            parseDecryptedMessagePayload(encryptedContent)
+          } else {
+            val decrypted = privateKey?.let { chatEngineDecryptHybridMessage(it, encryptedContent, isMe) }.orEmpty()
+            if (decrypted.isBlank()) emptyMap() else parseDecryptedMessagePayload(decrypted)
+          }
+        parsedEncryptedFields.forEach { (key, value) ->
+          if (!decryptedFields.containsKey(key)) {
+            decryptedFields[key] = value
+          }
+        }
+      }
+
+      val normalizedMessage = linkedMapOf<String, Any?>(
+        "id" to messageId,
+        "chatId" to "saved_messages",
+        "timestamp" to timestampMs,
+        "timestampMs" to timestampMs,
+        "type" to type,
+        "extra" to parsedExtra,
+      )
+      if (!fromId.isNullOrBlank()) normalizedMessage["fromId"] = fromId
+      if (!encryptedContent.isNullOrBlank()) normalizedMessage["encryptedContent"] = encryptedContent
+
+      val resolvedText = normalized(decryptedFields["text"]) ?: plaintextFallback
+      if (resolvedText.isNotBlank()) {
+        normalizedMessage["plaintext"] = resolvedText
+        normalizedMessage["text"] = resolvedText
+      }
+
+      normalized(decryptedFields["mediaUrl"] ?: raw["media_url"] ?: raw["mediaUrl"])?.let {
+        normalizedMessage["mediaUrl"] = it
+      }
+      normalized(decryptedFields["fileName"] ?: raw["file_name"] ?: raw["fileName"])?.let {
+        normalizedMessage["fileName"] = it
+      }
+      normalized(decryptedFields["mediaKey"])?.let { normalizedMessage["mediaKey"] = it }
+      parseDoubleValue(decryptedFields["latitude"])?.let { normalizedMessage["latitude"] = it }
+      parseDoubleValue(decryptedFields["longitude"])?.let { normalizedMessage["longitude"] = it }
+      parseDoubleValue(decryptedFields["duration"])?.let { normalizedMessage["duration"] = it }
+      parseLongValue(decryptedFields["editedAt"] ?: raw["editedAt"] ?: raw["edited_at"])?.let {
+        normalizedMessage["editedAt"] = it
+      }
+      normalized(raw["status"])?.lowercase(Locale.ROOT)?.let { normalizedMessage["status"] = it }
+        ?: run {
+          if (normalizedUpper(fromId) == currentUserId) {
+            normalizedMessage["status"] = "sent"
+          }
+        }
+      (raw["isEdited"] as? Boolean)?.let { normalizedMessage["isEdited"] = it }
+      normalized(decryptedFields["replyToId"])?.let { normalizedMessage["replyToId"] = it }
+      decryptedFields["width"]?.let { normalizedMessage["width"] = it }
+      decryptedFields["height"]?.let { normalizedMessage["height"] = it }
+      decryptedFields["waveform"]?.let { normalizedMessage["waveform"] = it }
+      decryptedFields["isVideoNote"]?.let { normalizedMessage["isVideoNote"] = it }
+      decryptedFields["contact"]?.let { normalizedMessage["contact"] = it }
+      normalizedMessage
+    }
+  }
+
+  fun fetchSavedMessages(payload: Map<String, Any?>): Map<String, Any?> {
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config", "messages" to emptyList<Map<String, Any?>>())
+
+    val userId =
+      normalized(payload["userId"] ?: payload["user_id"])
+        ?: synchronized(lock) { normalized(getConfigValueLocked("userId")) }
+        ?: return mapOf("success" to false, "reason" to "missing_user_id", "messages" to emptyList<Map<String, Any?>>())
+
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/saved_messages/${Uri.encode(userId)}")
+      .get()
+      .header("Accept", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    return try {
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        val body = res.body?.string().orEmpty()
+        if (!res.isSuccessful) {
+          mapOf("success" to false, "status" to res.code, "reason" to "http_${res.code}", "messages" to emptyList<Map<String, Any?>>())
+        } else {
+          val rawItems = synchronized(lock) { parseSavedMessagesResponse(body) }
+          val messages = synchronized(lock) { normalizeSavedMessagesLocked(rawItems) }
+          mapOf("success" to true, "messages" to messages)
+        }
+      }
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+        "messages" to emptyList<Map<String, Any?>>(),
+      )
+    }
+  }
+
+  fun sendSavedMessage(payload: Map<String, Any?>): Map<String, Any?> {
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      val userId = normalized(getConfigValueLocked("userId"))
+      val publicKeyPem = normalized(getConfigValueLocked("publicKeyPem") ?: getConfigValueLocked("publicKey"))
+      if (apiBaseUrl.isNullOrBlank() || userId.isNullOrBlank()) {
+        null
+      } else {
+        Triple(apiBaseUrl, authHeaderTokenLocked().orEmpty(), userId) to publicKeyPem
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config")
+
+    val (requestContext, myPublicKeyPem) = preflight
+    val apiBaseUrl = requestContext.first
+    val token = requestContext.second
+    val userId = requestContext.third
+
+    val type = normalized(payload["type"])?.lowercase(Locale.ROOT) ?: "text"
+    val text = normalized(payload["text"]).orEmpty()
+    if (type == "text" && text.isBlank()) {
+      return mapOf("success" to false, "reason" to "empty_text")
+    }
+
+    val metadata = payload["metadata"] as? Map<*, *> ?: emptyMap<String, Any?>()
+    val messageId =
+      normalized(payload["messageId"] ?: payload["message_id"] ?: payload["id"])
+        ?: java.util.UUID.randomUUID().toString().lowercase(Locale.ROOT)
+    var mediaUrl =
+      normalized(metadata["mediaUrl"] ?: metadata["media_url"] ?: payload["mediaUrl"] ?: payload["media_url"])
+    var fileName =
+      normalized(metadata["fileName"] ?: metadata["file_name"] ?: payload["fileName"])
+    var fileSize = parseLongValue(metadata["fileSize"] ?: metadata["file_size"] ?: payload["fileSize"])
+    val latitude = parseDoubleValue(metadata["latitude"] ?: payload["latitude"])
+    val longitude = parseDoubleValue(metadata["longitude"] ?: payload["longitude"])
+    val duration = parseDoubleValue(metadata["duration"] ?: payload["duration"])
+    val width = parseLongValue(metadata["width"] ?: payload["width"])
+    val height = parseLongValue(metadata["height"] ?: payload["height"])
+    val replyToId = normalized(metadata["replyToId"] ?: metadata["reply_to_id"] ?: payload["replyToId"])
+    val contact = metadata["contact"] ?: payload["contact"]
+    val isVideoNote = metadata["isVideoNote"] ?: payload["isVideoNote"]
+
+    val uploadableTypes = setOf("image", "voice", "video", "file", "sticker", "music")
+    val currentMediaUrl = mediaUrl
+    if (!currentMediaUrl.isNullOrBlank() && uploadableTypes.contains(type) && isLocalMediaUri(currentMediaUrl)) {
+      val uploadOutcome = uploadLocalMediaLocked(
+        localUri = currentMediaUrl,
+        messageType = type,
+        fileNameHint = fileName,
+        userId = userId,
+        token = token,
+        apiBaseUrl = apiBaseUrl,
+      )
+      when (uploadOutcome) {
+        is LocalMediaUploadOutcome.Failure -> {
+          return mapOf(
+            "success" to false,
+            "reason" to uploadOutcome.reason,
+            "messageId" to messageId,
+          )
+        }
+        is LocalMediaUploadOutcome.Success -> {
+          mediaUrl = uploadOutcome.result.remoteUrl
+          if (fileName.isNullOrBlank()) fileName = uploadOutcome.result.fileName
+          if (fileSize == null) fileSize = uploadOutcome.result.fileSize
+        }
+      }
+    }
+
+    var encryptedContent = ""
+    if (!myPublicKeyPem.isNullOrBlank()) {
+      val encryptedPayload = linkedMapOf<String, Any?>("text" to text)
+      if (!mediaUrl.isNullOrBlank()) encryptedPayload["mediaUrl"] = mediaUrl
+      if (!fileName.isNullOrBlank()) encryptedPayload["fileName"] = fileName
+      if (fileSize != null) encryptedPayload["fileSize"] = fileSize
+      if (latitude != null) encryptedPayload["latitude"] = latitude
+      if (longitude != null) encryptedPayload["longitude"] = longitude
+      if (width != null) encryptedPayload["width"] = width
+      if (height != null) encryptedPayload["height"] = height
+      if (duration != null) encryptedPayload["duration"] = duration
+      if (!replyToId.isNullOrBlank()) encryptedPayload["replyToId"] = replyToId
+      if (contact != null) encryptedPayload["contact"] = contact
+      if (isVideoNote != null) encryptedPayload["isVideoNote"] = isVideoNote
+      encryptedContent = try {
+        chatEngineEncryptHybridMessage(
+          recipientPublicKeyPem = myPublicKeyPem,
+          message = JSONObject(encryptedPayload).toString(),
+          myPublicKeyPem = myPublicKeyPem,
+        )
+      } catch (_: Throwable) {
+        ""
+      }
+    }
+
+    val extraPayload = linkedMapOf<String, Any?>()
+    if (!fileName.isNullOrBlank()) extraPayload["fileName"] = fileName
+    if (fileSize != null) extraPayload["fileSize"] = fileSize
+    if (latitude != null) extraPayload["latitude"] = latitude
+    if (longitude != null) extraPayload["longitude"] = longitude
+    if (width != null) extraPayload["width"] = width
+    if (height != null) extraPayload["height"] = height
+    if (duration != null) extraPayload["duration"] = duration
+    if (!replyToId.isNullOrBlank()) extraPayload["replyToId"] = replyToId
+    if (isVideoNote != null) extraPayload["isVideoNote"] = isVideoNote
+
+    val requestBody = JSONObject(
+      linkedMapOf<String, Any?>(
+        "user_id" to userId,
+        "original_message_id" to messageId,
+        "chat_id" to "saved_messages",
+        "from_id" to userId,
+        "encrypted_content" to encryptedContent,
+        "content" to "",
+        "type" to type,
+        "media_url" to JSONObject.NULL,
+        "timestamp" to System.currentTimeMillis(),
+        "extra" to JSONObject(extraPayload).toString(),
+      ),
+    ).toString().toRequestBody("application/json".toMediaTypeOrNull())
+
+    val requestBuilder = Request.Builder()
+      .url("$apiBaseUrl/api/saved_messages")
+      .post(requestBody)
+      .header("Accept", "application/json")
+      .header("Content-Type", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    if (token.isNotBlank()) {
+      requestBuilder.header("Authorization", "Bearer $token")
+    }
+
+    return try {
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        mapOf(
+          "success" to res.isSuccessful,
+          "status" to res.code,
+          "messageId" to messageId,
+        )
+      }
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+        "messageId" to messageId,
+      )
+    }
+  }
+
+  fun deleteSavedMessage(payload: Map<String, Any?>): Map<String, Any?> {
+    val preflight = synchronized(lock) {
+      val apiBaseUrl = apiBaseUrlLocked()
+      if (apiBaseUrl.isNullOrBlank()) {
+        null
+      } else {
+        Pair(apiBaseUrl, authHeaderTokenLocked())
+      }
+    } ?: return mapOf("success" to false, "reason" to "missing_config")
+
+    val userId =
+      normalized(payload["userId"] ?: payload["user_id"])
+        ?: synchronized(lock) { normalized(getConfigValueLocked("userId")) }
+        ?: return mapOf("success" to false, "reason" to "missing_user_id")
+    val messageId =
+      normalized(payload["messageId"] ?: payload["message_id"] ?: payload["id"])
+        ?: return mapOf("success" to false, "reason" to "missing_message_id")
+
+    val requestBuilder = Request.Builder()
+      .url("${preflight.first}/api/saved_messages/${Uri.encode(userId)}/${Uri.encode(messageId)}")
+      .delete()
+      .header("Accept", "application/json")
+      .header("ngrok-skip-browser-warning", "true")
+    preflight.second?.takeIf { it.isNotBlank() }?.let {
+      requestBuilder.header("Authorization", "Bearer $it")
+    }
+
+    return try {
+      historyHttpClient.newCall(requestBuilder.build()).execute().use { res ->
+        mapOf("success" to res.isSuccessful, "status" to res.code, "messageId" to messageId)
+      }
+    } catch (error: Throwable) {
+      mapOf(
+        "success" to false,
+        "reason" to "network_error",
+        "error" to (error.message ?: "unknown"),
+        "messageId" to messageId,
+      )
+    }
+  }
+
   // MARK: - Agent Config (Native HTTP)
 
   fun fetchAgentConfig(payload: Map<String, Any?>): Map<String, Any?> {
