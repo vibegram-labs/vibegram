@@ -20,6 +20,7 @@ interface NativeProfileAvatarViewProps extends ViewProps {
   collapsedSize?: number
   expandedTopInset?: number
   collapsedTopInset?: number
+  islandCoverColor?: string
 }
 
 let NativeProfileAvatarView: React.ComponentType<NativeProfileAvatarViewProps> | null = null
@@ -47,6 +48,7 @@ interface ProfileAvatarProps extends ViewProps {
   collapsedSize?: number
   expandedTopInset?: number
   collapsedTopInset?: number
+  islandCoverColor?: string
   style?: StyleProp<ViewStyle>
 }
 
@@ -58,6 +60,7 @@ export default function NativeProfileAvatar({
   collapsedSize,
   expandedTopInset,
   collapsedTopInset,
+  islandCoverColor,
   style,
   ...props
 }: ProfileAvatarProps) {
@@ -73,6 +76,7 @@ export default function NativeProfileAvatar({
         collapsedSize={collapsedSize}
         expandedTopInset={expandedTopInset}
         collapsedTopInset={collapsedTopInset}
+        islandCoverColor={islandCoverColor}
         {...props}
       />
     )

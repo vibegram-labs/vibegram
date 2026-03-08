@@ -1010,6 +1010,7 @@ export default function SettingsScreen() {
                                         collapsedSize={32}
                                         expandedTopInset={HERO_TOP}
                                         collapsedTopInset={HERO_NATIVE_COLLAPSED_TOP}
+                                        islandCoverColor={colors.background}
                                     />
 
                                     <View
