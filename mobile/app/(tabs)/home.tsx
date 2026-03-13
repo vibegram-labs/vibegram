@@ -7,7 +7,7 @@ import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wal
 import { useChatStore } from '../../src/lib/ChatStore'
 import { useCallStore } from '../../src/lib/stores/CallStore'
 import { useUIStore } from '../../src/lib/stores/ui-store'
-import { Copy, Check, Pin, VolumeX, Trash2, Pencil, Settings, User, Search, Circle, CheckCircle, Smartphone, Plus, X, Shield, Bookmark } from 'lucide-react-native'
+import { Copy, Check, Pin, VolumeX, Trash2, Pencil, Settings, User, Search, CheckCircle, Smartphone, Plus, X, Shield, Bookmark, Archive } from 'lucide-react-native'
 import { PlusCircleVibeIcon, AnimatedShieldIcon, EditChatVibeIcon, VibeLogoIcon, VibeAgentLogo } from '../../src/components/Icons'
 import * as Clipboard from 'expo-clipboard'
 import * as Haptics from 'expo-haptics'
@@ -210,12 +210,23 @@ interface HomeScreenProps {
     onOpenStoryCamera?: () => void;
 }
 
+type PendingHomeActionKind = 'delete' | 'clear';
+
+interface PendingHomeAction {
+    id: string;
+    kind: PendingHomeActionKind;
+    chatId: string;
+    chatName: string;
+    expiresAt: number;
+}
+
 const SEARCH_BAR_HEIGHT = 44;
 const SEARCH_BAR_VERTICAL_PADDING = 14;
 const SEARCH_BAR_BLOCK_HEIGHT = SEARCH_BAR_HEIGHT + (SEARCH_BAR_VERTICAL_PADDING * 2);
+const HOME_UNDO_WINDOW_MS = 10_000;
 
 // Swipeable Chat Row Component 
-const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onDelete, onPin, onMute, isEditing, isSelected, isTyping, isOnline }: any) => {
+const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onDelete, onPin, onMute, onMarkRead, isEditing, isSelected, isTyping, isOnline }: any) => {
     const shiftX = useSharedValue(0);
     const swipeableRef = useRef<any>(null);
     const rowRef = useRef<View>(null);
@@ -247,29 +258,42 @@ const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onD
         }
     });
 
-    const renderRightActions = (progress: any, dragX: any) => {
+    const renderRightActions = (_progress: any, dragX: any) => {
         if (isEditing) return null;
         const trans = dragX.interpolate({
-            inputRange: [-140, 0],
-            outputRange: [0, 140],
+            inputRange: [-222, 0],
+            outputRange: [0, 222],
         });
-        const iconScale = dragX.interpolate({
-            inputRange: [-100, -50, 0],
-            outputRange: [1, 0.5, 0.01],
+        const contentOpacity = dragX.interpolate({
+            inputRange: [-222, -96, -24, 0],
+            outputRange: [1, 0.92, 0.18, 0],
+            extrapolate: 'clamp',
+        });
+        const contentTranslate = dragX.interpolate({
+            inputRange: [-222, -96, -24, 0],
+            outputRange: [0, 8, 18, 26],
             extrapolate: 'clamp',
         });
 
         return (
-            <RNAnimated.View style={{ width: 140, transform: [{ translateX: trans }] }}>
-                <View style={{ flex: 1, flexDirection: 'row' }}>
-                    <TouchableOpacity onPress={() => { onMute(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#f97316' }]}>
-                        <RNAnimated.View style={{ transform: [{ scale: iconScale }] }}>
-                            <VolumeX color="white" size={24} />
+            <RNAnimated.View style={{ width: 222, transform: [{ translateX: trans }] }}>
+                <View style={styles.swipeActionRow}>
+                    <TouchableOpacity onPress={() => { onMute(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#d68500' }]}>
+                        <RNAnimated.View style={[styles.swipeActionContent, { opacity: contentOpacity, transform: [{ translateX: contentTranslate }] }]}>
+                            <VolumeX color="white" size={22} />
+                            <Text style={styles.swipeActionLabel}>{chat.muted ? 'Unmute' : 'Mute'}</Text>
                         </RNAnimated.View>
                     </TouchableOpacity>
-                    <TouchableOpacity onPress={() => { onDelete(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#ef4444' }]}>
-                        <RNAnimated.View style={{ transform: [{ scale: iconScale }] }}>
-                            <Trash2 color="white" size={24} />
+                    <TouchableOpacity onPress={() => { onDelete(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#df1010' }]}>
+                        <RNAnimated.View style={[styles.swipeActionContent, { opacity: contentOpacity, transform: [{ translateX: contentTranslate }] }]}>
+                            <Trash2 color="white" size={22} />
+                            <Text style={styles.swipeActionLabel}>Delete</Text>
+                        </RNAnimated.View>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => { onDelete(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#7c7c82' }]}>
+                        <RNAnimated.View style={[styles.swipeActionContent, { opacity: contentOpacity, transform: [{ translateX: contentTranslate }] }]}>
+                            <Archive color="white" size={22} />
+                            <Text style={styles.swipeActionLabel}>Archive</Text>
                         </RNAnimated.View>
                     </TouchableOpacity>
                 </View>
@@ -277,17 +301,38 @@ const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onD
         );
     };
 
-    const renderLeftActions = (progress: any, dragX: any) => {
+    const renderLeftActions = (_progress: any, dragX: any) => {
         if (isEditing) return null;
         const trans = dragX.interpolate({
-            inputRange: [0, 80],
-            outputRange: [-80, 0],
+            inputRange: [0, 148],
+            outputRange: [-148, 0],
+        });
+        const contentOpacity = dragX.interpolate({
+            inputRange: [0, 24, 96, 148],
+            outputRange: [0, 0.18, 0.92, 1],
+            extrapolate: 'clamp',
+        });
+        const contentTranslate = dragX.interpolate({
+            inputRange: [0, 24, 96, 148],
+            outputRange: [-26, -18, -8, 0],
+            extrapolate: 'clamp',
         });
         return (
-            <RNAnimated.View style={{ width: 80, transform: [{ translateX: trans }] }}>
-                <TouchableOpacity onPress={() => { onPin(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#3b82f6', flex: 1 }]}>
-                    <Pin color="white" size={24} fill="white" />
-                </TouchableOpacity>
+            <RNAnimated.View style={{ width: 148, transform: [{ translateX: trans }] }}>
+                <View style={styles.swipeActionRow}>
+                    <TouchableOpacity onPress={() => { onMarkRead(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#3b8fd2' }]}>
+                        <RNAnimated.View style={[styles.swipeActionContent, { opacity: contentOpacity, transform: [{ translateX: contentTranslate }] }]}>
+                            <CheckCircle color="white" size={22} />
+                            <Text style={styles.swipeActionLabel}>{chat.markedUnread || chat.unreadCount > 0 ? 'Read' : 'Unread'}</Text>
+                        </RNAnimated.View>
+                    </TouchableOpacity>
+                    <TouchableOpacity onPress={() => { onPin(); swipeableRef.current?.close(); }} style={[styles.swipeAction, { backgroundColor: '#3777e3' }]}>
+                        <RNAnimated.View style={[styles.swipeActionContent, { opacity: contentOpacity, transform: [{ translateX: contentTranslate }] }]}>
+                            <Pin color="white" size={22} fill="white" />
+                            <Text style={styles.swipeActionLabel}>{chat.pinned ? 'Unpin' : 'Pin'}</Text>
+                        </RNAnimated.View>
+                    </TouchableOpacity>
+                </View>
             </RNAnimated.View>
         )
     }
@@ -362,7 +407,9 @@ const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onD
                     rightThreshold={40}
                     leftThreshold={40}
                     onSwipeableWillOpen={() => Haptics.selectionAsync()}
-                    containerStyle={{ overflow: 'visible' }}
+                    overshootLeft={false}
+                    overshootRight={false}
+                    containerStyle={{ overflow: 'hidden' }}
                     enabled={!isEditing}
                 >
                     <Pressable
@@ -538,7 +585,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const { user } = useAuthStore()
     const { colors, effectiveTheme } = useThemeStore()
     const activeWallpaperTheme = useWallpaperStore((s) => s.activeTheme)
-    const { setActiveChat, chats, isLoading, loadChats, deleteChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected } = useChatStore()
+    const { setActiveChat, chats, isLoading, loadChats, deleteChat, clearChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected } = useChatStore()
     const { savedMessages, sync: syncSavedMessages } = useSavedMessagesStore()
     const { callStatus, remoteUser, callDuration, callType } = useCallStore()
     const { feed, myStories } = useStoryStore()
@@ -556,6 +603,9 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const router = useRouter()
     const [isEditing, setIsEditing] = useState(false)
     const setHomeEditing = useUIStore(s => s.setHomeEditing)
+    const setHomeEditSelectionCount = useUIStore(s => s.setHomeEditSelectionCount)
+    const homeEditAction = useUIStore(s => s.homeEditAction)
+    const homeEditActionRequestId = useUIStore(s => s.homeEditActionRequestId)
     const safePress = useCallback((label: string, action: () => void | Promise<void>) => {
         try {
             // console.log(`[HomeScreen] press:${label}`)
@@ -569,14 +619,25 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             console.error(`[HomeScreen] press failed: ${label}`, error)
         }
     }, [])
+    const lastHandledHomeEditActionIdRef = useRef(0)
+    const [selectedConversations, setSelectedConversations] = useState(new Set<string>())
+    const selectedConversationIds = useMemo(() => Array.from(selectedConversations), [selectedConversations])
+    const [pendingHomeAction, setPendingHomeAction] = useState<PendingHomeAction | null>(null)
+    const [pendingHomeActionClock, setPendingHomeActionClock] = useState(Date.now())
+    const pendingHomeActionRef = useRef<PendingHomeAction | null>(null)
 
     // Sync editing state
     useEffect(() => {
         setHomeEditing(isEditing)
-        return () => setHomeEditing(false)
-    }, [isEditing])
+        setHomeEditSelectionCount(isEditing ? selectedConversationIds.length : 0)
+    }, [isEditing, selectedConversationIds.length, setHomeEditing, setHomeEditSelectionCount])
 
-    const [selectedConversations, setSelectedConversations] = useState(new Set<string>())
+    useEffect(() => {
+        return () => {
+            setHomeEditing(false)
+            setHomeEditSelectionCount(0)
+        }
+    }, [setHomeEditing, setHomeEditSelectionCount])
 
     // Context Menu State
     const [contextMenuVisible, setContextMenuVisible] = useState(false);
@@ -674,6 +735,8 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
 
 
     const allChats = useMemo(() => {
+        const pendingDeleteChatId = pendingHomeAction?.kind === 'delete' ? pendingHomeAction.chatId : null
+        const pendingClearChatId = pendingHomeAction?.kind === 'clear' ? pendingHomeAction.chatId : null
         let list = chats.filter((chat: any) => {
             if (chat.chatId === 'saved_messages') return true;
             if (chat.type !== 'dm' && chat.type !== 'direct') return true;
@@ -683,6 +746,9 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             if (chat.friendId && typingUsers.has(chat.friendId.toUpperCase())) return true;
             return false;
         });
+        if (pendingDeleteChatId) {
+            list = list.filter((chat: any) => chat.chatId !== pendingDeleteChatId)
+        }
         if (homeSavedMessages.length > 0) {
             const lastMsg = homeSavedMessages[0] as any;
             const savedChat = {
@@ -700,10 +766,23 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 list.push(savedChat);
             }
         }
-        const sorted = list.sort((a: any, b: any) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
+        const sorted = list
+            .map((chat: any) => (
+                chat.chatId === pendingClearChatId
+                    ? {
+                        ...chat,
+                        messages: [],
+                        lastMessage: undefined,
+                        previewLastMessage: '',
+                        unreadCount: 0,
+                        markedUnread: false,
+                    }
+                    : chat
+            ))
+            .sort((a: any, b: any) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         console.log(`[home/allChats] chats=${chats.length} homeSaved=${homeSavedMessages.length} final=${sorted.length}`);
         return sorted;
-    }, [chats, homeSavedMessages, user?.userId, typingUsers]);
+    }, [chats, homeSavedMessages, pendingHomeAction, typingUsers, user?.userId]);
 
     const filteredChats = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
@@ -812,6 +891,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                     (typeof message?.file_name === 'string' ? message.file_name : undefined)
                             ),
                             duration: toFiniteNumber(message?.duration),
+                            metadata: message?.extra && typeof message.extra === 'object' ? message.extra : undefined,
                             waveform: Array.isArray(message?.waveform)
                                 ? message.waveform.filter((n: any) => typeof n === 'number' && Number.isFinite(n))
                                 : undefined,
@@ -851,6 +931,24 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             }
         })
     }, [filteredChats, typingUsers, onlineUsers, user?.userId])
+
+    const pendingHomeActionRemainingSeconds = useMemo(() => {
+        if (!pendingHomeAction) return 0
+        return Math.max(0, Math.ceil((pendingHomeAction.expiresAt - pendingHomeActionClock) / 1000))
+    }, [pendingHomeAction, pendingHomeActionClock])
+
+    const nativeHomeUndoBanner = useMemo(() => {
+        if (!pendingHomeAction) return undefined
+        const title = pendingHomeAction.kind === 'delete' ? 'Chat deleted' : 'Chat cleared'
+        return {
+            visible: true,
+            title,
+            body: pendingHomeAction.chatName,
+            actionLabel: 'Undo',
+            timerLabel: `${pendingHomeActionRemainingSeconds}s`,
+            destructive: true,
+        }
+    }, [pendingHomeAction, pendingHomeActionRemainingSeconds])
 
     const handleSearchFocus = () => {
         setIsSearchActive(true);
@@ -1117,6 +1215,138 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
         })
     }
 
+    const clearSelectedConversations = useCallback(() => {
+        setSelectedConversations(new Set())
+    }, [])
+
+    const resolveChatTitle = useCallback((chat: any) => {
+        if (!chat) return 'Chat'
+        return chat.chatId === 'saved_messages'
+            ? 'Saved Messages'
+            : (chat.name || chat.friendName || chat.friendId || 'Chat')
+    }, [])
+
+    const commitPendingHomeAction = useCallback((action: PendingHomeAction | null) => {
+        if (!action) return
+
+        if (action.kind === 'delete') {
+            void Promise.resolve(deleteChat(action.chatId))
+        } else {
+            void Promise.resolve(clearChat(action.chatId))
+        }
+
+        pendingHomeActionRef.current = null
+        setPendingHomeAction(null)
+    }, [clearChat, deleteChat])
+
+    const dismissPendingHomeAction = useCallback(() => {
+        pendingHomeActionRef.current = null
+        setPendingHomeAction(null)
+    }, [])
+
+    const schedulePendingHomeAction = useCallback((kind: PendingHomeActionKind, chat: any) => {
+        if (!chat?.chatId) return
+
+        if (pendingHomeActionRef.current) {
+            commitPendingHomeAction(pendingHomeActionRef.current)
+        }
+
+        const now = Date.now()
+        const nextAction: PendingHomeAction = {
+            id: `${kind}:${chat.chatId}:${now}`,
+            kind,
+            chatId: chat.chatId,
+            chatName: resolveChatTitle(chat),
+            expiresAt: now + HOME_UNDO_WINDOW_MS,
+        }
+
+        pendingHomeActionRef.current = nextAction
+        setPendingHomeAction(nextAction)
+        setPendingHomeActionClock(now)
+    }, [commitPendingHomeAction, resolveChatTitle])
+
+    useEffect(() => {
+        pendingHomeActionRef.current = pendingHomeAction
+    }, [pendingHomeAction])
+
+    useEffect(() => {
+        if (!pendingHomeAction) return
+
+        setPendingHomeActionClock(Date.now())
+        const interval = setInterval(() => {
+            setPendingHomeActionClock(Date.now())
+        }, 250)
+        const timeout = setTimeout(() => {
+            commitPendingHomeAction(pendingHomeAction)
+        }, Math.max(0, pendingHomeAction.expiresAt - Date.now()))
+
+        return () => {
+            clearInterval(interval)
+            clearTimeout(timeout)
+        }
+    }, [commitPendingHomeAction, pendingHomeAction])
+
+    const handleEditModeChange = useCallback((nextEditing: boolean) => {
+        setIsEditing(nextEditing)
+        if (!nextEditing) {
+            clearSelectedConversations()
+        }
+    }, [clearSelectedConversations])
+
+    const markChatsReadLocally = useCallback((chatIds: string[]) => {
+        const targetIds = new Set(chatIds.filter((chatId) => chatId && chatId !== 'saved_messages'))
+        if (targetIds.size === 0) return
+
+        useChatStore.setState((state: any) => ({
+            chats: state.chats.map((chat: any) => (
+                targetIds.has(chat.chatId)
+                    ? {
+                        ...chat,
+                        unreadCount: 0,
+                        markedUnread: false,
+                    }
+                    : chat
+            )),
+        }))
+    }, [])
+
+    const handleReadSelectedChats = useCallback(() => {
+        const targetIds = selectedConversationIds.length > 0
+            ? selectedConversationIds
+            : allChats.map((chat: any) => chat.chatId)
+        markChatsReadLocally(targetIds)
+        if (selectedConversationIds.length > 0) {
+            clearSelectedConversations()
+        }
+    }, [allChats, clearSelectedConversations, markChatsReadLocally, selectedConversationIds])
+
+    const handleDeleteSelectedChats = useCallback(() => {
+        const targetIds = selectedConversationIds.filter((chatId) => chatId !== 'saved_messages')
+        if (targetIds.length === 0) return
+
+        clearSelectedConversations()
+        targetIds.forEach((chatId) => {
+            void Promise.resolve(deleteChat(chatId))
+        })
+    }, [clearSelectedConversations, deleteChat, selectedConversationIds])
+
+    useEffect(() => {
+        if (!isEditing) return
+        if (homeEditActionRequestId === 0) return
+        if (lastHandledHomeEditActionIdRef.current === homeEditActionRequestId) return
+
+        lastHandledHomeEditActionIdRef.current = homeEditActionRequestId
+
+        if (homeEditAction === 'readAll' || homeEditAction === 'read') {
+            handleReadSelectedChats()
+            return
+        }
+
+        if (homeEditAction === 'delete') {
+            handleDeleteSelectedChats()
+        }
+    }, [handleDeleteSelectedChats, handleReadSelectedChats, homeEditAction, homeEditActionRequestId, isEditing])
+
     const renderItem = useCallback(({ item, index }: any) => {
         const friendId = (item.friendId || '').toUpperCase();
         const chatType = normalizeChatType(item?.type);
@@ -1142,13 +1372,14 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         else handleChatPress(item)
                     }}
                     onLongPress={(c: any, layout: any) => handleLongPress(c, layout)}
-                    onDelete={() => deleteChat(item.chatId)}
+                    onDelete={() => schedulePendingHomeAction('delete', item)}
                     onPin={() => pinChat(item.chatId)}
                     onMute={() => toggleMuteChat(item.chatId)}
+                    onMarkRead={() => toggleMarkUnread(item.chatId)}
                 />
             </Animated.View>
         );
-    }, [colors, isEditing, selectedConversations, typingUsers, onlineUsers, chats, handleChatPress])
+    }, [colors, isEditing, selectedConversations, typingUsers, onlineUsers, chats, handleChatPress, pinChat, schedulePendingHomeAction, toggleMuteChat, toggleMarkUnread])
 
     const handlePullRefresh = useCallback(async () => {
         if (isPullRefreshing) return
@@ -1179,11 +1410,25 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             return
         }
 
+        if (type === 'undoPendingHomeAction') {
+            dismissPendingHomeAction()
+            return
+        }
+
         if (!chatId) return
         const chat = chatsById.get(chatId) || filteredChats.find((entry: any) => entry.chatId === chatId)
         if (!chat) return
 
+        if (type === 'editToggleSelect') {
+            toggleSelection(chat.chatId)
+            return
+        }
+
         if (type === 'press') {
+            if (isEditing) {
+                toggleSelection(chat.chatId)
+                return
+            }
             handleChatPress(chat)
             return
         }
@@ -1198,11 +1443,32 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             return
         }
 
+        if (type === 'swipeDelete') {
+            schedulePendingHomeAction('delete', chat)
+            return
+        }
+
+        if (type === 'swipeMarkRead') {
+            toggleMarkUnread(chat.chatId)
+            return
+        }
+
+        if (type === 'clearChat') {
+            schedulePendingHomeAction('clear', chat)
+            return
+        }
+
+        if (type === 'swipeArchive') {
+            // Archive = delete for now (archive not yet implemented separately)
+            schedulePendingHomeAction('delete', chat)
+            return
+        }
+
         if (type === 'longPress') {
             // Native preview is rendered on the native side for native-home list.
             return
         }
-    }, [chatsById, filteredChats, handleChatPress, handlePullRefresh, pinChat, toggleMuteChat, scrollY])
+    }, [chatsById, dismissPendingHomeAction, filteredChats, handleChatPress, handlePullRefresh, isEditing, pinChat, schedulePendingHomeAction, scrollY, toggleMuteChat, toggleMarkUnread])
 
     const containerAnimatedStyle = useAnimatedStyle(() => ({
         transform: [
@@ -1214,7 +1480,10 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     }))
 
     const shouldUseNativeHomeList = useMemo(() => {
-        return (Platform.OS === 'ios' || Platform.OS === 'android') && isNativeHomeListAvailable() && !isEditing
+        if (!(Platform.OS === 'ios' || Platform.OS === 'android')) return false
+        if (!isNativeHomeListAvailable()) return false
+        if (Platform.OS === 'ios') return true
+        return !isEditing
     }, [isEditing])
 
     const renderHomeListHeader = () => {
@@ -1367,7 +1636,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                         onPress={() => {
                                             safePress('toggleEdit', () => {
                                                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                                                setIsEditing(!isEditing);
+                                                handleEditModeChange(!isEditing);
                                             });
                                         }}
                                         activeOpacity={0.7}
@@ -1394,7 +1663,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                         onResponderRelease={() => {
                                             safePress('toggleEdit', () => {
                                                 Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
-                                                setIsEditing(!isEditing);
+                                                handleEditModeChange(!isEditing);
                                             });
                                         }}
                                     >
@@ -1468,6 +1737,9 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                                     previewAppearance={nativePreviewAppearance}
                                     contentTopInset={nativeHomeContentTopInset}
                                     contentBottomInset={100 + (Platform.OS === 'android' ? insets.bottom : 0)}
+                                    isEditing={Platform.OS === 'ios' ? isEditing : undefined}
+                                    selectedChatIds={Platform.OS === 'ios' ? selectedConversationIds : undefined}
+                                    undoBanner={nativeHomeUndoBanner}
                                     onNativeEvent={handleNativeHomeEvent}
                                 />
                                 <Animated.View
@@ -1520,39 +1792,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         onClose={() => setContextMenuVisible(false)}
                         onPin={() => { if (selectedChat) pinChat(selectedChat.chatId); setContextMenuVisible(false); }}
                         onMute={() => { if (selectedChat) toggleMuteChat(selectedChat.chatId); setContextMenuVisible(false); }}
-                        onDelete={() => { if (selectedChat) deleteChat(selectedChat.chatId); setContextMenuVisible(false); }}
+                        onDelete={() => {
+                            if (selectedChat) schedulePendingHomeAction('delete', selectedChat);
+                            setContextMenuVisible(false);
+                        }}
                     />
-
-                    {/* Editing Bottom Bar */}
-                    {isEditing && (
-                        <Animated.View
-                            entering={FadeIn.duration(250)}
-                            exiting={FadeOut.duration(200)}
-                            style={[styles.bottomBarEdit, { bottom: insets.bottom + 0 }]}
-                        >
-                            <View style={styles.editActionsContainer}>
-                                <SafeLiquidGlass
-                                    style={styles.glassActionBtn}
-                                    blurIntensity={20}
-                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                    onStartShouldSetResponder={() => true}
-                                    onResponderRelease={() => setSelectedConversations(new Set())}
-                                >
-                                    <X size={24} color={colors.primary} />
-                                </SafeLiquidGlass>
-
-                                <SafeLiquidGlass
-                                    style={[styles.glassActionBtn, { backgroundColor: withAlpha('#ef4444', 0.15) }]}
-                                    blurIntensity={20}
-                                    tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                    onStartShouldSetResponder={() => true}
-                                    onResponderRelease={() => {/* Delete logic */ }}
-                                >
-                                    <Trash2 size={24} color="#ef4444" />
-                                </SafeLiquidGlass>
-                            </View>
-                        </Animated.View>
-                    )}
 
                     {/* Story Modals */}
                     <StoryViewer
@@ -1775,9 +2019,26 @@ const styles = StyleSheet.create({
         minHeight: 76,
     },
     swipeAction: {
+        width: 74,
         alignItems: 'center',
         justifyContent: 'center',
+        height: '100%',
+    },
+    swipeActionRow: {
         flex: 1,
+        flexDirection: 'row',
+        gap: 0,
+    },
+    swipeActionContent: {
+        flex: 1,
+        alignItems: 'center',
+        justifyContent: 'center',
+    },
+    swipeActionLabel: {
+        color: '#fff',
+        fontSize: 13,
+        fontWeight: '500',
+        marginTop: 6,
     },
     avatarContainer: {
         marginRight: 14,
@@ -1875,30 +2136,6 @@ const styles = StyleSheet.create({
         minWidth: 160
     },
 
-    bottomBarEdit: {
-        position: 'absolute',
-        left: 0,
-        right: 0,
-        height: 80,
-        zIndex: 200,
-        paddingHorizontal: 24,
-        justifyContent: 'center',
-    },
-    editActionsContainer: {
-        flexDirection: 'row',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        width: '100%',
-    },
-    glassActionBtn: {
-        width: 54,
-        height: 54,
-        borderRadius: 27,
-        overflow: 'hidden',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'rgba(255, 255, 255, 0.08)',
-    },
     onlineIndicator: {
         position: 'absolute',
         bottom: 2,

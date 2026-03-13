@@ -3,10 +3,10 @@ import { PixelRatio, StyleSheet, View, useWindowDimensions } from 'react-native'
 import { Canvas, Rect, Shader, Skia } from '@shopify/react-native-skia'
 import { useDerivedValue } from 'react-native-reanimated'
 
-export const AUTH_SIGNUP_GLOW = '#B9826B'
-export const AUTH_SIGNUP_CYAN = '#2E5D8A'
-export const AUTH_SIGNIN_GLOW = '#7B8FA6'
-export const AUTH_SIGNIN_CYAN = '#365D7C'
+export const AUTH_SIGNUP_GLOW = '#8274B2' // Next-Gen Amethyst
+export const AUTH_SIGNUP_CYAN = '#436B95' // Deep Titanium Blue
+export const AUTH_SIGNIN_GLOW = '#8274B2'
+export const AUTH_SIGNIN_CYAN = '#436B95'
 
 const SKSL_SHADER = `
 uniform float2 iResolution;
@@ -23,8 +23,6 @@ uniform float2 veilAnchor;
 uniform float2 blobScale;
 uniform float2 veilScale;
 uniform float rotation;
-uniform float verticalMaskStart;
-uniform float verticalMaskEnd;
 
 vec2 fluidWarp(vec2 p, float t, float amount) {
     vec2 q = p;
@@ -55,19 +53,18 @@ half4 main(float2 fragCoord) {
 
     float angle = atan(d.y, d.x);
     float dist = length(d);
-    dist -= sin(angle * 5.0 + 0.92) * 0.14;
+    dist -= sin(angle * 3.0 + 0.92) * 0.06;
 
-    float blob = smoothstep(0.54, 0.0, dist);
-    blob = pow(blob, 1.3);
+    float blob = smoothstep(0.9, 0.0, dist);
+    blob = pow(blob, 1.8);
 
     vec2 veilVec = uv - veilAnchor;
     veilVec.x *= veilScale.x;
     veilVec.y *= veilScale.y;
-    float veil = smoothstep(0.96, 0.0, length(veilVec));
-    veil = pow(veil, 2.0);
+    float veil = smoothstep(1.1, 0.0, length(veilVec));
+    veil = pow(veil, 2.2);
 
-    float verticalMask = smoothstep(verticalMaskStart, verticalMaskEnd, uv.y);
-    float materialMask = max(blob, veil * 0.22) * verticalMask;
+    float materialMask = max(blob, veil * 0.3);
 
     if (materialMask > 0.001) {
         float colorShift = 0.34;
@@ -112,8 +109,6 @@ interface AuthFlowBackgroundProps {
     blobScale?: [number, number]
     veilScale?: [number, number]
     rotation?: number
-    verticalMaskStart?: number
-    verticalMaskEnd?: number
 }
 
 export const AuthFlowBackground = ({
@@ -129,8 +124,6 @@ export const AuthFlowBackground = ({
     blobScale = [0.94, 1.22],
     veilScale = [0.86, 1.46],
     rotation = -0.54,
-    verticalMaskStart = 0.48,
-    verticalMaskEnd = 0.76,
 }: AuthFlowBackgroundProps) => {
     const { width, height } = useWindowDimensions()
     const pixelRatio = PixelRatio.get()
@@ -157,8 +150,6 @@ export const AuthFlowBackground = ({
             blobScale,
             veilScale,
             rotation,
-            verticalMaskStart,
-            verticalMaskEnd,
         }),
         [
             width,
@@ -176,8 +167,6 @@ export const AuthFlowBackground = ({
             blobScale,
             veilScale,
             rotation,
-            verticalMaskStart,
-            verticalMaskEnd,
         ]
     )
 

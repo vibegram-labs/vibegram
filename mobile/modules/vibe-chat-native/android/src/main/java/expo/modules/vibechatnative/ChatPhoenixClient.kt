@@ -19,20 +19,8 @@ internal class ChatPhoenixClient(
   private val socketUrl: String,
   private val params: Map<String, String>,
   private val authToken: String? = null,
-  private val callbacks: Callbacks,
-) {
-  interface Callbacks {
-    fun onOpen()
-    fun onClosed(code: Int, reason: String?)
-    fun onError(error: String)
-    fun onEvent(
-      topic: String,
-      event: String,
-      payload: Map<String, Any?>,
-      ref: String?,
-      joinRef: String?,
-    )
-  }
+  private val callbacks: ChatTransportCallbacks,
+) : ChatRealtimeTransport {
 
   companion object {
     /// SPKI SHA-256 hashes for certificate pinning.
@@ -72,7 +60,7 @@ internal class ChatPhoenixClient(
   @Volatile private var isClosing = false
   private var heartbeatRunnable: Runnable? = null
 
-  fun connect() {
+  override fun connect() {
     val httpUrl = buildUrl() ?: run {
       callbacks.onError("invalid_socket_url")
       return
@@ -90,7 +78,7 @@ internal class ChatPhoenixClient(
       object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
           startHeartbeat()
-          callbacks.onOpen()
+        callbacks.onOpen()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
@@ -119,26 +107,26 @@ internal class ChatPhoenixClient(
     )
   }
 
-  fun disconnect() {
+  override fun disconnect() {
     isClosing = true
     stopHeartbeat()
     webSocket?.close(1000, "client_disconnect")
     webSocket = null
   }
 
-  fun join(topic: String, payload: Map<String, Any?> = emptyMap()): String {
+  override fun join(topic: String, payload: Map<String, Any?>): String {
     val ref = nextRef()
     sendFrame(joinRef = ref, ref = ref, topic = topic, event = "phx_join", payload = payload)
     return ref
   }
 
-  fun leave(topic: String): String {
+  override fun leave(topic: String): String {
     val ref = nextRef()
     sendFrame(joinRef = ref, ref = ref, topic = topic, event = "phx_leave", payload = emptyMap())
     return ref
   }
 
-  fun push(topic: String, event: String, payload: Map<String, Any?> = emptyMap()): String {
+  override fun push(topic: String, event: String, payload: Map<String, Any?>): String {
     val ref = nextRef()
     sendFrame(joinRef = null, ref = ref, topic = topic, event = event, payload = payload)
     return ref
@@ -236,7 +224,15 @@ internal class ChatPhoenixClient(
         }?.filterKeys { it.isNotBlank() } ?: emptyMap()
         val joinRef = if (!obj.isNull("join_ref")) obj.optString("join_ref") else null
         val ref = if (!obj.isNull("ref")) obj.optString("ref") else null
-        callbacks.onEvent(topic, event, payload, ref, joinRef)
+        callbacks.onEvent(
+          ChatTransportEvent(
+            topic = topic,
+            event = event,
+            payload = payload,
+            ref = ref,
+            joinRef = joinRef,
+          ),
+        )
         return
       }
 
@@ -250,7 +246,15 @@ internal class ChatPhoenixClient(
       }?.filterKeys { it.isNotBlank() } ?: emptyMap()
       val joinRef = arr.optNullableString(0)
       val ref = arr.optNullableString(1)
-      callbacks.onEvent(topic, event, payload, ref, joinRef)
+      callbacks.onEvent(
+        ChatTransportEvent(
+          topic = topic,
+          event = event,
+          payload = payload,
+          ref = ref,
+          joinRef = joinRef,
+        ),
+      )
     } catch (_: Throwable) {
       callbacks.onError("parse_frame_failed")
     }

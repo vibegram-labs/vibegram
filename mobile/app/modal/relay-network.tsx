@@ -21,6 +21,7 @@ import RelayDirectory from '../../src/lib/relay/RelayDirectory';
 import type { DirectoryRelay } from '../../src/lib/relay/RelayDirectory';
 import type { RelayStatus } from '../../src/lib/relay/RelayNode';
 import type { ConnectionStatus } from '../../src/lib/relay/RelayClient';
+import { getPhoenixSocket } from '../../src/lib/ChatStore';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -164,8 +165,7 @@ export default function RelayNetworkScreen() {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
         const client = RelayClient.getInstance();
-        // Note: In production, pass actual Phoenix socket
-        const result = await client.connectWithCode(connectCode.trim(), null);
+        const result = await client.connectWithCode(connectCode.trim(), getPhoenixSocket());
 
         setIsConnecting(false);
         if (result.success) {
@@ -203,8 +203,12 @@ export default function RelayNetworkScreen() {
             name: relay.name,
             inviteCode: relay.inviteCode,
             inviteKey: relay.inviteKey,
+            externalIp: relay.externalIp,
+            bridgeUrl: relay.bridgeUrl,
+            shareLink: relay.shareLink,
+            bridgeDescriptor: relay.bridgeDescriptor,
             isPublic: true,
-        });
+        }, getPhoenixSocket());
 
         if (result.success) {
             setConnectedRelayName(relay.name);
@@ -343,7 +347,7 @@ export default function RelayNetworkScreen() {
                                                     key={relay.relayId}
                                                     style={[styles.relayRow, i > 0 && { borderTopWidth: 1, borderTopColor: withAlpha(colors.text, 0.06) }]}
                                                     onPress={() => {
-                                                        RelayClient.getInstance().connectToRelay(relay);
+                                                        RelayClient.getInstance().connectToRelay(relay, getPhoenixSocket());
                                                     }}
                                                 >
                                                     <Server size={18} color={colors.primary} />

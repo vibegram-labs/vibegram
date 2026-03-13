@@ -129,13 +129,11 @@ export default function SignInScreen() {
                 contrast={0.74}
                 grainAmount={0.3}
                 darken={0.08}
-                anchor={[0.86, 0.84]}
-                veilAnchor={[0.8, 0.9]}
-                blobScale={[0.94, 1.16]}
-                veilScale={[0.88, 1.38]}
-                rotation={0.4}
-                verticalMaskStart={0.52}
-                verticalMaskEnd={0.8}
+                anchor={[0.85, -0.1]}
+                veilAnchor={[0.85, -0.15]}
+                blobScale={[1.2, 1.2]}
+                veilScale={[1.2, 1.2]}
+                rotation={0.1}
             />
 
             <View style={[styles.navbar, { paddingTop: insets.top + 10, direction: 'ltr', flexDirection: 'row' }]}>

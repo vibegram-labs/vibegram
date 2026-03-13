@@ -14,10 +14,12 @@ import { useChatStore } from '../../lib/ChatStore';
 import { useToastStore } from '../../lib/stores/toast-store';
 import SafeLiquidGlass from '../../components/native/SafeLiquidGlass';
 import AnimatedGlassButton from '../../components/native/AnimatedGlassButton';
+import { interpolate } from 'react-native-reanimated';
 import { useAuthStore } from '../../lib/stores/auth-store';
 import { X, MessageCircle, Phone, UserCheck, Check, Search, ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, UserPlus, UserMinus, User } from 'lucide-react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LayoutAnimation, Platform, UIManager } from 'react-native';
+import WallpaperBackground from './WallpaperBackground';
 
 if (Platform.OS === 'android') {
     if (UIManager.setLayoutAnimationEnabledExperimental) {
@@ -56,6 +58,67 @@ interface NewChatModalProps {
     onClose: () => void;
     onFullClose?: () => void;
 }
+
+const ActionPill = ({ icon, label, onPress, disabled, success, successLabel }: any) => {
+    const { colors, effectiveTheme } = useThemeStore();
+    const progress = useSharedValue(success ? 1 : 0);
+
+    useEffect(() => {
+        progress.value = withTiming(success ? 1 : 0, { duration: 300 });
+    }, [success]);
+
+    const iconStyle = useAnimatedStyle(() => ({
+        transform: [{ scale: interpolate(progress.value, [0, 0.5, 1], [1, 0, 1]) }],
+        opacity: interpolate(progress.value, [0, 0.45, 0.55, 1], [1, 0, 0, 1]),
+    }));
+
+    const textStyle = useAnimatedStyle(() => ({
+        opacity: interpolate(progress.value, [0, 0.45, 0.55, 1], [1, 0, 0, 1]),
+    }));
+
+    return (
+        <TouchableOpacity
+            onPress={onPress}
+            disabled={disabled || !onPress || success}
+            activeOpacity={0.7}
+            style={[{ flex: 1 }, disabled && { opacity: 0.45 }]}
+        >
+            <SafeLiquidGlass
+                blurIntensity={10}
+                tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                style={{
+                    height: 64,
+                    borderRadius: 16,
+                    backgroundColor: withAlpha(success ? '#22c55e' : colors.card, success ? 0.2 : 0.5),
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    borderWidth: success ? 1 : 0,
+                    borderColor: withAlpha('#22c55e', 0.3),
+                    gap: 6,
+                    overflow: 'hidden'
+                }}
+            >
+                <Animated.View style={[{ alignItems: 'center', justifyContent: 'center' }, iconStyle]}>
+                    {success ? (
+                        <Check size={24} color="#22c55e" strokeWidth={3} />
+                    ) : (
+                        React.cloneElement(icon, { size: 24, color: colors.text, strokeWidth: 2 })
+                    )}
+                </Animated.View>
+                <Animated.View style={textStyle}>
+                    <Text style={{ 
+                        color: success ? '#22c55e' : colors.text, 
+                        fontSize: 13, 
+                        fontWeight: success ? '700' : '500', 
+                        letterSpacing: 0.2 
+                    }}>
+                        {success ? (successLabel || 'Added') : label}
+                    </Text>
+                </Animated.View>
+            </SafeLiquidGlass>
+        </TouchableOpacity>
+    );
+};
 
 export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps) {
     const router = useRouter();
@@ -222,12 +285,38 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
 
     const isAdded = !!(foundUser && foundUser.userId && isContact(foundUser.userId));
 
+    // Pre-resolve chatId in background as soon as we find a user
+    const preResolvedChatIdRef = useRef<string | null>(null);
+    const preResolveSeqRef = useRef(0);
+    useEffect(() => {
+        const seq = ++preResolveSeqRef.current;
+        preResolvedChatIdRef.current = null;
+        if (!foundUser?.userId) return;
+
+        const friendId = foundUser.userId;
+        const existing = chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase());
+        if (existing?.chatId) {
+            preResolvedChatIdRef.current = existing.chatId;
+            return;
+        }
+
+        // Fire startChat in background so the chatId is ready when user taps "Chat"
+        startChat(friendId, {
+            username: foundUser.username,
+            profileImage: foundUser.profileImage,
+            publicKey: foundUser.publicKey,
+        }).then(chatId => {
+            if (seq === preResolveSeqRef.current) {
+                preResolvedChatIdRef.current = chatId;
+            }
+        }).catch(() => { });
+    }, [foundUser?.userId]);
+
     // Slide to user card page
     const goToCard = () => {
         Keyboard.dismiss();
         if (!foundUser?.userId) return;
 
-        // No longer saving here automatically
         setView('card');
         contentTranslateX.value = withTiming(-SCREEN_WIDTH, SMOOTH_TIMING);
         headerProgress.value = withTiming(1, SMOOTH_TIMING);
@@ -248,6 +337,7 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
             friendImage: foundUser.profileImage
         });
 
+        setIsAddingContact(false);
         showToast('Saved to contacts', 'success');
     };
 
@@ -260,28 +350,13 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
         headerProgress.value = withTiming(0, SMOOTH_TIMING);
     };
 
-    const handleMessage = async () => {
+    const handleMessage = () => {
         if (!foundUser?.userId) return;
 
         const friendId = foundUser.userId;
         const friendName = contactDisplayName;
         const friendImage = foundUser.profileImage || '';
         const friendPublicKey = foundUser.publicKey || '';
-        const existingChat = chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase());
-
-        // Resolve chatId before closing the modal so we always navigate to the right chat
-        let targetChatId = existingChat?.chatId || null;
-        if (!targetChatId) {
-            try {
-                targetChatId = await startChat(friendId, {
-                    username: friendName,
-                    profileImage: friendImage,
-                    publicKey: friendPublicKey,
-                });
-            } catch (e) {
-                console.warn('[NewChatModal] startChat failed, navigating with friendId fallback', e);
-            }
-        }
 
         // Close modal (slide down)
         if (onFullClose) {
@@ -290,27 +365,22 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
             handleCloseInternal();
         }
 
-        // Wait for animation to finish then navigate
-        setTimeout(() => {
-            if (targetChatId) {
-                setActiveChat(targetChatId);
-                router.push({ pathname: '/chat', params: { id: targetChatId } });
-            } else {
-                // Last-resort fallback: look up the chat again in case startChat populated it
-                const freshChat = useChatStore.getState().chats.find(
-                    c => (c.friendId || '').toUpperCase() === friendId.toUpperCase()
-                );
-                if (freshChat?.chatId) {
-                    setActiveChat(freshChat.chatId);
-                    router.push({ pathname: '/chat', params: { id: freshChat.chatId } });
-                } else {
-                    router.push({
-                        pathname: '/chat',
-                        params: { friendId, friendName, friendImage, friendPublicKey }
-                    });
-                }
-            }
-        }, 300);
+        // Use pre-resolved chatId if available (background fetch started when user appeared),
+        // existing chat, or fall back to friendId params for the chat screen to resolve.
+        const resolvedChatId =
+            preResolvedChatIdRef.current
+            || chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase())?.chatId
+            || null;
+
+        if (resolvedChatId) {
+            setActiveChat(resolvedChatId);
+            router.push({ pathname: '/chat', params: { id: resolvedChatId } });
+        } else {
+            router.push({
+                pathname: '/chat',
+                params: { friendId, friendName, friendImage, friendPublicKey }
+            });
+        }
     };
 
     const sliderStyle = useAnimatedStyle(() => ({
@@ -319,6 +389,13 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
 
     return (
         <View style={styles.container}>
+            {/* Wallpaper background - covers full modal, only visible on card view */}
+            {view === 'card' && (
+                <View style={StyleSheet.absoluteFill} pointerEvents="none">
+                    <WallpaperBackground />
+                </View>
+            )}
+
             {/* Handle */}
             <View style={styles.handleContainer}>
                 <View style={[styles.handle, { backgroundColor: withAlpha(colors.text, 0.15) }]} />
@@ -345,7 +422,13 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                 </Text>
 
                 <SafeLiquidGlass
-                    style={[styles.glassBtnCircle, { opacity: (view === 'search' && (!foundUser || loading)) ? 0.3 : 1 }]}
+                    style={[
+                        styles.glassBtnCircle,
+                        {
+                            opacity: (view === 'search' && (!foundUser || loading)) ? 0.3 : 1,
+                            backgroundColor: (view === 'search' && (!foundUser || loading)) ? 'transparent' : colors.primary
+                        }
+                    ]}
                     blurIntensity={15}
                     tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
                 >
@@ -356,9 +439,9 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                         activeOpacity={0.85}
                     >
                         {view === 'card' ? (
-                            <Check size={20} color={colors.primary} strokeWidth={2.5} />
+                            <Check size={20} color="#fff" strokeWidth={2.5} />
                         ) : (
-                            <ArrowRight size={20} color={colors.primary} strokeWidth={2.5} />
+                            <ArrowRight size={20} color="#fff" strokeWidth={2.5} />
                         )}
                     </TouchableOpacity>
                 </SafeLiquidGlass>
@@ -405,153 +488,138 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                                             </TouchableOpacity>
                                         ) : null}
                                     </View>
+
+                                    {!!foundUser && (
+                                        <Animated.View entering={FadeIn}>
+                                            <View style={{ height: 1, backgroundColor: withAlpha(colors.text, 0.05) }} />
+                                            <TouchableOpacity
+                                                onPress={goToCard}
+                                                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20 }}
+                                                activeOpacity={0.7}
+                                            >
+                                                <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }}>
+                                                    {foundUser.profileImage ? (
+                                                        <Image source={{ uri: foundUser.profileImage }} style={{ width: 44, height: 44 }} />
+                                                    ) : (
+                                                        <Text style={{ fontSize: 18, fontWeight: '600', color: '#fff' }}>
+                                                            {(foundUser.username || '?')[0].toUpperCase()}
+                                                        </Text>
+                                                    )}
+                                                </View>
+                                                <View style={{ flex: 1, marginLeft: 12 }}>
+                                                    <Text style={{ fontSize: 16, fontWeight: '600', color: colors.text }}>{foundUser.username}</Text>
+                                                    <Text style={{ fontSize: 14, color: colors.textSecondary }}>
+                                                        {foundUser.phoneNumber ? foundUser.phoneNumber : `@${foundUser.username}`}
+                                                    </Text>
+                                                </View>
+                                                <ChevronRight size={20} color={colors.textSecondary} />
+                                            </TouchableOpacity>
+                                        </Animated.View>
+                                    )}
                                 </SafeLiquidGlass>
                             </View>
 
                             {error ? <Text style={styles.errorText}>{error}</Text> : null}
                         </View>
-
-                        {/* Found User Result */}
-                        {!!foundUser && (
-                            <Animated.View entering={FadeIn.duration(400)} style={{ marginTop: 32, alignItems: 'center' }}>
-                                <View style={[styles.avatar, { backgroundColor: colors.primary, width: 80, height: 80, borderRadius: 40, marginBottom: 16 }]}>
-                                    {foundUser.profileImage ? (
-                                        <Image source={{ uri: foundUser.profileImage }} style={styles.avatarImg} />
-                                    ) : (
-                                        <Text style={{ fontSize: 32, fontWeight: '700', color: '#fff' }}>
-                                            {(foundUser.username || '?')[0].toUpperCase()}
-                                        </Text>
-                                    )}
-                                </View>
-                                <Text style={{ fontSize: 20, fontWeight: '700', color: colors.text, marginBottom: 4 }}>
-                                    {foundUser.username}
-                                </Text>
-                                <View style={styles.inlineFoundBadge}>
-                                    <Check size={14} color={colors.primary} strokeWidth={3} />
-                                    <Text style={[styles.inlineFoundText, { color: colors.primary }]}>User Available</Text>
-                                </View>
-                            </Animated.View>
-                        )}
                     </Animated.View>
 
                     {/* --- PAGE 1: USER CARD --- */}
                     <Animated.View entering={FadeIn} style={[styles.page, { width: SCREEN_WIDTH }]}>
                         <View style={{ paddingHorizontal: 16 }}>
                             {!!foundUser ? (
-                                <View style={{ paddingTop: 24 }}>
-                                    {/* Profile Header */}
-                                    <View style={styles.profileHeader}>
-                                        <View style={[styles.profileAvatar, { backgroundColor: withAlpha(colors.primary, 0.1) }]}>
+                                <View style={{ paddingTop: 20 }}>
+                                    {/* Profile Header (Modern) */}
+                                    <View style={{ alignItems: 'center', marginBottom: 24 }}>
+                                        <SafeLiquidGlass
+                                            blurIntensity={20}
+                                            style={{ width: 118, height: 118, borderRadius: 59, backgroundColor: withAlpha(colors.text, 0.1), overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}
+                                        >
                                             {foundUser.profileImage ? (
-                                                <Image source={{ uri: foundUser.profileImage }} style={styles.fullImage} />
+                                                <Image source={{ uri: foundUser.profileImage }} style={{ width: 118, height: 118 }} />
                                             ) : (
-                                                <Text style={[styles.profileAvatarText, { color: colors.primary }]}>
+                                                <Text style={{ fontSize: 44, fontWeight: '700', color: colors.text }}>
                                                     {(contactDisplayName || '?').substring(0, 1).toUpperCase()}
                                                 </Text>
                                             )}
-                                        </View>
-                                        <Text style={[styles.profileName, { color: colors.text }]} numberOfLines={1}>
+                                        </SafeLiquidGlass>
+
+                                        <Text style={{ fontSize: 30, fontWeight: '700', letterSpacing: -0.6, color: colors.text }}>
                                             {contactDisplayName}
                                         </Text>
-                                        <Text style={[styles.tagText, { color: colors.textSecondary }]}>@{foundUser.username}</Text>
+
+                                        <Text style={{ fontSize: 18, fontWeight: '500', color: colors.primary, marginTop: 4 }}>
+                                            @{foundUser.username}
+                                        </Text>
+
+                                        {foundUser.phoneNumber && (
+                                            <Text style={{ fontSize: 14, color: colors.textSecondary, marginTop: 10 }}>
+                                                {foundUser.phoneNumber}
+                                            </Text>
+                                        )}
                                     </View>
 
-                                    {/* Actions Section */}
-                                    <View style={[styles.sectionWrapper, { marginTop: 20 }]}>
-                                        <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>ACTIONS</Text>
-                                        <View style={styles.sectionContainer}>
-                                            <View style={[styles.glassCard, { backgroundColor: colors.card }]}>
-                                                <TouchableOpacity onPress={handleMessage} style={styles.settingRow}>
-                                                    <View style={[styles.settingIconContainer, { backgroundColor: withAlpha(colors.primary, 0.1) }]}>
-                                                        <MessageCircle size={20} color={colors.primary} strokeWidth={2} />
-                                                    </View>
-                                                    <Text style={[styles.settingLabel, { color: colors.text }]}>Chat</Text>
-                                                    <ChevronRight size={18} color={colors.textSecondary} />
-                                                </TouchableOpacity>
-
-                                                <View style={[styles.divider, { backgroundColor: withAlpha(colors.text, 0.05) }]} />
-
-                                                <TouchableOpacity onPress={() => showToast('Coming soon!', 'info')} style={styles.settingRow}>
-                                                    <View style={[styles.settingIconContainer, { backgroundColor: withAlpha(colors.text, 0.05) }]}>
-                                                        <Phone size={20} color={colors.text} strokeWidth={2} />
-                                                    </View>
-                                                    <Text style={[styles.settingLabel, { color: colors.text }]}>Call</Text>
-                                                    <ChevronRight size={18} color={colors.textSecondary} />
-                                                </TouchableOpacity>
-
-                                                <View style={[styles.divider, { backgroundColor: withAlpha(colors.text, 0.05) }]} />
-
-                                                {!isAdded && (
-                                                    <View>
-                                                        <TouchableOpacity
-                                                            onPress={() => {
-                                                                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                                                                setIsAddingContact(!isAddingContact);
-                                                            }}
-                                                            style={styles.settingRow}
-                                                        >
-                                                            <View style={[styles.settingIconContainer, { backgroundColor: withAlpha(colors.text, 0.05) }]}>
-                                                                <UserPlus size={20} color={colors.text} strokeWidth={2} />
-                                                            </View>
-                                                            <Text style={[styles.settingLabel, { color: colors.text }]}>Add to Contacts</Text>
-                                                            {isAddingContact ? null : <ChevronRight size={18} color={colors.textSecondary} />}
-                                                        </TouchableOpacity>
-
-                                                        {isAddingContact && (
-                                                            <View style={{ padding: 16, backgroundColor: withAlpha(colors.background, 0.3) }}>
-                                                                <Text style={{ fontSize: 13, color: colors.textSecondary, marginBottom: 8, fontWeight: '600' }}>FIRST NAME</Text>
-                                                                <TextInput
-                                                                    style={[styles.miniInput, { color: colors.text, backgroundColor: withAlpha(colors.text, 0.05) }]}
-                                                                    value={firstName}
-                                                                    onChangeText={setFirstName}
-                                                                    placeholder="Required"
-                                                                    placeholderTextColor={withAlpha(colors.text, 0.3)}
-                                                                />
-                                                                <Text style={{ fontSize: 13, color: colors.textSecondary, marginBottom: 8, marginTop: 12, fontWeight: '600' }}>LAST NAME</Text>
-                                                                <TextInput
-                                                                    style={[styles.miniInput, { color: colors.text, backgroundColor: withAlpha(colors.text, 0.05) }]}
-                                                                    value={lastName}
-                                                                    onChangeText={setLastName}
-                                                                    placeholder="Optional"
-                                                                    placeholderTextColor={withAlpha(colors.text, 0.3)}
-                                                                />
-                                                                <TouchableOpacity
-                                                                    onPress={handleSaveContact}
-                                                                    style={[styles.saveBtn, { backgroundColor: colors.primary }]}
-                                                                >
-                                                                    <Text style={{ color: '#fff', fontWeight: '600' }}>Save Contact</Text>
-                                                                </TouchableOpacity>
-                                                            </View>
-                                                        )}
-                                                    </View>
-                                                )}
-
-                                                {isAdded && (
-                                                    <View style={styles.settingRow}>
-                                                        <View style={[styles.settingIconContainer, { backgroundColor: withAlpha('#22c55e', 0.1) }]}>
-                                                            <UserCheck size={20} color="#22c55e" strokeWidth={2} />
-                                                        </View>
-                                                        <Text style={[styles.settingLabel, { color: colors.text }]}>Already in Contacts</Text>
-                                                    </View>
-                                                )}
-                                            </View>
-                                        </View>
+                                    {/* Action Pills */}
+                                    <View style={{ flexDirection: 'row', gap: 8, marginBottom: 20 }}>
+                                        <ActionPill
+                                            icon={<MessageCircle />}
+                                            label="Message"
+                                            onPress={handleMessage}
+                                        />
+                                        <ActionPill
+                                            icon={<Phone />}
+                                            label="Call"
+                                            onPress={() => showToast('Coming soon!', 'info')}
+                                        />
+                                        <ActionPill
+                                            icon={<UserPlus />}
+                                            label="Add Contact"
+                                            success={isAdded}
+                                            successLabel="Saved"
+                                            onPress={() => {
+                                                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
+                                                setIsAddingContact(!isAddingContact);
+                                            }}
+                                        />
                                     </View>
 
-                                    {/* Info section */}
-                                    {foundUser.phoneNumber && (
-                                        <View style={[styles.sectionWrapper, { marginTop: 20 }]}>
-                                            <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>USER INFO</Text>
-                                            <View style={styles.sectionContainer}>
-                                                <View style={[styles.glassCard, { backgroundColor: colors.card }]}>
-                                                    <View style={styles.row}>
-                                                        <Text style={[styles.rowLabel, { color: colors.text }]}>Phone</Text>
-                                                        <Text style={[styles.rowValue, { color: colors.textSecondary }]} numberOfLines={1}>
-                                                            {foundUser.phoneNumber}
-                                                        </Text>
-                                                    </View>
+                                    {isAddingContact && !isAdded && (
+                                        <View style={{ marginTop: 8 }}>
+                                            <Text style={[styles.sectionHeader, { color: colors.textSecondary, marginLeft: 0 }]}>CONTACT NAME</Text>
+                                            <View style={[styles.sectionContainer, { backgroundColor: withAlpha(colors.card, 0.6) }]}>
+                                                <View style={styles.row}>
+                                                    <Text style={[styles.rowLabel, { color: colors.text }]}>First Name</Text>
+                                                    <TextInput
+                                                        style={[styles.rowInput, { color: colors.text }]}
+                                                        value={firstName}
+                                                        onChangeText={setFirstName}
+                                                        placeholder="Required"
+                                                        placeholderTextColor={withAlpha(colors.text, 0.3)}
+                                                    />
+                                                </View>
+                                                <View style={[styles.divider, { backgroundColor: withAlpha(colors.text, 0.06) }]} />
+                                                <View style={styles.row}>
+                                                    <Text style={[styles.rowLabel, { color: colors.text }]}>Last Name</Text>
+                                                    <TextInput
+                                                        style={[styles.rowInput, { color: colors.text }]}
+                                                        value={lastName}
+                                                        onChangeText={setLastName}
+                                                        placeholder="Optional"
+                                                        placeholderTextColor={withAlpha(colors.text, 0.3)}
+                                                    />
                                                 </View>
                                             </View>
+                                            
+                                            <TouchableOpacity
+                                                onPress={handleSaveContact}
+                                                disabled={!firstName.trim()}
+                                                style={[styles.saveBtn, { 
+                                                    backgroundColor: colors.primary, 
+                                                    marginTop: 16,
+                                                    opacity: firstName.trim() ? 1 : 0.6
+                                                }]}
+                                            >
+                                                <Text style={{ color: '#fff', fontWeight: '600', fontSize: 16 }}>Save Contact</Text>
+                                            </TouchableOpacity>
                                         </View>
                                     )}
                                 </View>

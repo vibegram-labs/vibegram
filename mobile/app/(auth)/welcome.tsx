@@ -3,7 +3,7 @@ import { View, Text, StyleSheet, Pressable, Platform } from 'react-native'
 import { useRouter } from 'expo-router'
 import { StatusBar } from 'expo-status-bar'
 import { LinearGradient } from 'expo-linear-gradient'
-import { BlurMask, Canvas, LinearGradient as SkiaLinearGradient, Path, Rect, Group, Mask, vec, Skia } from '@shopify/react-native-skia'
+import { BlurMask, Canvas, LinearGradient as SkiaLinearGradient, Path, Rect, RoundedRect, Group, Mask, vec, Skia } from '@shopify/react-native-skia'
 import Animated, {
     Extrapolation,
     Easing,
@@ -39,6 +39,7 @@ const SLIDES = [
         detail: 'Your personal intelligent assistant is ready to help you draft, summarize, and translate.',
     },
 ]
+
 
 function hexToRgba(color: string, alpha: number): string {
     'worklet';
@@ -176,33 +177,36 @@ function HeaderLightBeam({
                     )}
                 </Group>
                 <Group transform={[{ translateX: GLOW_OVERFLOW }, { translateY: GLOW_OVERFLOW }]}>
-                    <Rect
+                    <RoundedRect
                         x={0}
-                        y={height * 0.12}
-                        width={8}
-                        height={height * 0.76}
+                        y={height * 0.08}
+                        width={6}
+                        height={height * 0.84}
+                        r={3}
                         color={hexToRgba('#FFF6F1', 0.4)}
                     >
                         <BlurMask blur={8} style="normal" />
-                    </Rect>
-                    <Rect
-                        x={1}
-                        y={height * 0.14}
+                    </RoundedRect>
+                    <RoundedRect
+                        x={0.5}
+                        y={height * 0.12}
                         width={4.5}
-                        height={height * 0.72}
+                        height={height * 0.76}
+                        r={2.25}
                         color={activeColor}
                     >
                         <BlurMask blur={4} style="normal" />
-                    </Rect>
-                    <Rect
-                        x={2}
-                        y={height * 0.16}
-                        width={2.4}
-                        height={height * 0.68}
+                    </RoundedRect>
+                    <RoundedRect
+                        x={1.5}
+                        y={height * 0.18}
+                        width={2.5}
+                        height={height * 0.64}
+                        r={1.25}
                         color="#FFFFFF"
                     >
-                        <BlurMask blur={1} style="normal" />
-                    </Rect>
+                        <BlurMask blur={1.5} style="normal" />
+                    </RoundedRect>
                 </Group>
             </Canvas>
         </Animated.View>
@@ -261,7 +265,7 @@ const AnimatedDetailWord = React.memo(({
 
         return {
             opacity: isFirst ? (opacitySlide * introOpacity) : opacitySlide,
-            transform: [{ translateX: isFirst ? (translateXSlide + introTx) : translateXSlide }],
+            transform: [{ translateX: Platform.OS === 'android' ? 0 : (isFirst ? (translateXSlide + introTx) : translateXSlide) }],
         };
     });
 
@@ -351,7 +355,7 @@ const AnimatedHeaderWord = React.memo(({
 
         return {
             opacity: mergedOpacity,
-            transform: [{ translateX: mergedTx }],
+            transform: [{ translateX: Platform.OS === 'android' ? 0 : mergedTx }],
         };
     });
 
@@ -426,10 +430,7 @@ function FeatureSlide({
                 onLayout={(event) => {
                     if (!isFirst || !onHeaderLayout) return
                     const { width, height } = event.nativeEvent.layout
-                    const adjustedHeight = Platform.OS === 'ios'
-                        ? Math.max(28, height - 6)
-                        : Math.max(24, height - 8)
-                    onHeaderLayout({ width, height: adjustedHeight })
+                    onHeaderLayout({ width, height })
                 }}
             >
                 <AnimatedHeaderLetters
@@ -440,7 +441,7 @@ function FeatureSlide({
                     isFirst={isFirst}
                     textStyle={[
                         styles.headerText,
-                        { color: hexToRgba(textColor, 0.9) }
+                        { color: textColor }
                     ]}
                 />
             </View>
@@ -488,15 +489,15 @@ export default function WelcomeScreen() {
     }, [slideProgress, introProgress])
 
     const backgroundBase = colors.background
-    const shaderGlow = isDark ? '#B9826B' : colors.palette.orange
-    const shaderCyan = isDark ? '#2E5D8A' : colors.palette.sky
+    const shaderGlow = isDark ? '#8274B2' : '#C2B6E2' // Amethyst Pearl
+    const shaderCyan = isDark ? '#436B95' : '#90A6C9' // Titanium Blue
     const primaryTextColor = colors.text
-    const mutedTextColor = hexToRgba(colors.text, isDark ? 0.6 : 0.72)
-    const buttonGlassColor = hexToRgba(colors.button.background, isDark ? 0.18 : 0.7)
-    const buttonWashStrong = hexToRgba(colors.button.background, isDark ? 0.28 : 0.26)
-    const buttonWashSoft = hexToRgba(colors.button.background, isDark ? 0.12 : 0.14)
+    const mutedTextColor = colors.textSecondary
+    const buttonGlassColor = Platform.OS === 'ios' ? hexToRgba(colors.button, isDark ? 0.18 : 0.7) : colors.button
+    const buttonWashStrong = Platform.OS === 'ios' ? hexToRgba(colors.button, isDark ? 0.28 : 0.26) : colors.button
+    const buttonWashSoft = Platform.OS === 'ios' ? hexToRgba(colors.button, isDark ? 0.12 : 0.14) : colors.button
     const slideAccents = [
-        isDark ? colors.palette.orange : colors.palette.rose,
+        isDark ? colors.palette.violet : colors.palette.mauve,
         colors.primary,
         isDark ? colors.palette.sky : colors.palette.blue,
     ]
@@ -535,8 +536,8 @@ export default function WelcomeScreen() {
 
             <View pointerEvents="none" style={StyleSheet.absoluteFill}>
                 <LinearGradient
-                    colors={['transparent', hexToRgba(backgroundBase, isDark ? 0.6 : 0.7), backgroundBase]}
-                    locations={[0, 0.6, 1]}
+                    colors={['transparent', backgroundBase]}
+                    locations={[0.4, 1]}
                     style={StyleSheet.absoluteFill}
                 />
             </View>
@@ -610,12 +611,12 @@ export default function WelcomeScreen() {
                             end={{ x: 0.92, y: 1 }}
                             style={StyleSheet.absoluteFill}
                         />
-                        <Text style={[styles.mainButtonText, { color: colors.button.text }]}>Create account</Text>
+                        <Text style={[styles.mainButtonText, { color: colors.buttonText }]}>Create account</Text>
                     </Pressable>
                 </SafeLiquidGlass>
 
                 <Pressable onPress={() => router.push('/(auth)/signin')} style={{ paddingVertical: 12 }}>
-                    <Text style={[styles.signInTextBase, { color: hexToRgba(colors.text, 0.6) }]}>
+                    <Text style={[styles.signInTextBase, { color: colors.textSecondary }]}>
                         Already have an account? <Text style={[styles.signInTextHighlight, { color: colors.primary }]}>Sign in</Text>
                     </Text>
                 </Pressable>
@@ -654,11 +655,11 @@ const styles = StyleSheet.create({
     },
     beamWord: {
         alignSelf: 'flex-start',
-        height: Platform.OS === 'ios' ? 32 : 28,
-        paddingLeft: 10,
+        minHeight: Platform.OS === 'ios' ? 32 : 28,
+        paddingLeft: 14,
         paddingTop: 0,
         paddingBottom: 0,
-        justifyContent: 'flex-start',
+        justifyContent: 'center',
     },
     headerText: {
         fontSize: Platform.OS === 'ios' ? 26 : 22,

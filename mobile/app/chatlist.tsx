@@ -122,6 +122,7 @@ export default function ChatListRoute() {
         mediaUrl: typeof message?.mediaUrl === 'string' ? message.mediaUrl : undefined,
         fileName: typeof message?.fileName === 'string' ? message.fileName : undefined,
         duration: toNumber(message?.duration),
+        metadata: message?.extra && typeof message.extra === 'object' ? message.extra : undefined,
         waveform: Array.isArray(message?.waveform) ? message.waveform.filter((n: any) => typeof n === 'number') : undefined,
         isVideoNote: message?.isVideoNote === true,
         uploadProgress: typeof messageUploadProgress === 'number' ? messageUploadProgress : undefined,

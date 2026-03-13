@@ -12,6 +12,9 @@ import Animated, {
 } from 'react-native-reanimated'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
 import type { TabConfig } from './NativeTabBar'
+import { useAuthStore } from '../../lib/stores/auth-store'
+import { ContactsIcon, CallsIcon, SettingsIcon, VibeAgentLogo } from '../Icons'
+import DoubleChatIcon from '../icons/DoubleChatIcon'
 
 export interface AndroidBottomTabBarProps {
   currentIndex: number
@@ -64,6 +67,7 @@ function AndroidTabItem({
   onPressOut,
 }: AndroidTabItemProps) {
   const pressProgress = useSharedValue(0)
+  const user = useAuthStore(s => s.user)
 
   const animatedContentStyle = useAnimatedStyle(() => {
     const scale = interpolate(pressProgress.value, [0, 1], [1, 0.965])
@@ -80,7 +84,8 @@ function AndroidTabItem({
 
   const renderFallbackIcon = () => {
     const key = tab.key.trim().toLowerCase()
-    const symbol = (focused ? tab.sfSymbol : (tab.unfocusedSfSymbol ?? tab.sfSymbol) ?? '').toLowerCase()
+    const rawSymbol = focused ? tab.sfSymbol : (tab.unfocusedSfSymbol ?? tab.sfSymbol)
+    const symbol = (rawSymbol ?? '').toLowerCase()
 
     if (tab.renderIcon) {
       return tab.renderIcon({ focused, color, size: iconSize })
@@ -100,19 +105,35 @@ function AndroidTabItem({
     }
 
     if (key === 'contacts' || symbol.includes('person.2')) {
-      return <Users size={iconSize} color={color} strokeWidth={2.2} />
+      return <ContactsIcon size={iconSize} color={color} focused={focused} />
     }
     if (key === 'calls' || symbol.includes('phone')) {
-      return <Phone size={iconSize} color={color} strokeWidth={2.2} />
+      return <CallsIcon size={iconSize} color={color} focused={focused} />
     }
     if (key === 'home' || symbol.includes('bubble.left')) {
-      return <MessageCircle size={iconSize} color={color} strokeWidth={2.2} />
+      return <DoubleChatIcon size={iconSize} color={color} focused={focused} />
     }
     if (key === 'settings' || symbol.includes('person.crop.circle')) {
-      return <Settings size={iconSize} color={color} strokeWidth={2.2} />
+      let extractedUri: string | undefined
+      if (imageSource && typeof imageSource === 'object' && 'uri' in imageSource) {
+        extractedUri = imageSource.uri as string
+      }
+      return (
+        <SettingsIcon 
+          size={iconSize} 
+          color={color} 
+          focused={focused} 
+          imageUri={extractedUri || user?.profileImage}
+          name={user?.name || user?.username}
+        />
+      )
     }
     if (key === 'vibe' || symbol.includes('sparkles')) {
-      return <Sparkles size={iconSize} color={color} strokeWidth={2.2} />
+      return (
+        <View style={{ width: iconSize, height: iconSize, alignItems: 'center', justifyContent: 'center' }}>
+          <VibeAgentLogo size={iconSize} color={color} />
+        </View>
+      )
     }
     return <Circle size={iconSize - 2} color={color} strokeWidth={2.2} />
   }

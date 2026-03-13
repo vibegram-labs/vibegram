@@ -500,6 +500,7 @@ export default function SavedMessagesScreen() {
                 mediaUrl: typeof message?.mediaUrl === 'string' ? message.mediaUrl : undefined,
                 fileName: typeof message?.fileName === 'string' ? message.fileName : undefined,
                 duration: typeof message?.duration === 'number' ? message.duration : undefined,
+                metadata: message?.extra && typeof message.extra === 'object' ? message.extra : undefined,
                 waveform: Array.isArray(message?.extra?.waveform)
                     ? message.extra.waveform.filter((n: unknown) => typeof n === 'number')
                     : undefined,

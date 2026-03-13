@@ -13,6 +13,8 @@ private let chatMediaNaturalSizeCache = NSCache<NSString, NSValue>()
 
 private let chatMediaDiskCacheQueue = DispatchQueue(label: "chat.media.disk-cache", qos: .utility)
 private var chatMediaFailedURLs = Set<String>()
+private var chatMediaRetryCount: [String: Int] = [:]
+private let chatMediaMaxRetries = 3
 
 private func chatMediaDiskCacheDir() -> URL {
   let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
@@ -21,13 +23,28 @@ private func chatMediaDiskCacheDir() -> URL {
   return dir
 }
 
+/// Strips tracking query params from Giphy (and similar CDN) URLs so the same
+/// media content always maps to the same cache key regardless of session tokens.
+private func chatMediaNormalizedKey(_ urlString: String) -> String {
+  guard var comps = URLComponents(string: urlString),
+    let host = comps.host?.lowercased(),
+    host.contains("giphy.com")
+  else { return urlString }
+  // Remove Giphy tracking params — content is identified by path alone
+  let trackingParams: Set<String> = ["cid", "rid", "ct", "ep", "r"]
+  comps.queryItems = comps.queryItems?.filter { !trackingParams.contains($0.name) }
+  if comps.queryItems?.isEmpty == true { comps.queryItems = nil }
+  return comps.string ?? urlString
+}
+
 private func chatMediaDiskCacheKey(_ urlString: String) -> String {
+  let normalized = chatMediaNormalizedKey(urlString)
   // Stable hash — use SHA-like approach via hashValue but make it hex
-  let hash = UInt64(bitPattern: Int64(urlString.hashValue))
+  let hash = UInt64(bitPattern: Int64(normalized.hashValue))
   // Preserve extension for correct UIImage decoding
   let ext = (urlString as NSString).pathExtension.lowercased()
   let suffix = ["jpg", "jpeg", "png", "gif", "webp", "heic"].contains(ext) ? ".\(ext)" : ".img"
-  return String(format: "%016llx", hash) + suffix
+  return "v2-" + String(format: "%016llx", hash) + suffix
 }
 
 private func chatMediaShouldAnimate(urlString: String, messageType: String? = nil) -> Bool {
@@ -123,6 +140,31 @@ func chatMediaDiskCacheLoad(_ urlString: String) -> Data? {
   let fileURL = dir.appendingPathComponent(filename)
   guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
   return try? Data(contentsOf: fileURL, options: [.mappedIfSafe])
+}
+
+/// Pre-fetches a media URL into the in-memory + disk cache so the cell can
+/// display it instantly when the optimistic row appears.
+func chatMediaPrefetch(urlString: String, animated: Bool) {
+  let cacheKey = chatMediaNormalizedKey(urlString)
+  guard !urlString.isEmpty,
+    chatMediaImageCache.object(forKey: cacheKey as NSString) == nil,
+    !chatMediaFailedURLs.contains(cacheKey),
+    let url = URL(string: urlString)
+  else { return }
+  // Check disk cache first
+  if let diskData = chatMediaDiskCacheLoad(cacheKey),
+    let diskImage = chatMediaDecodedImage(from: diskData, shouldAnimate: animated)
+  {
+    chatMediaImageCache.setObject(diskImage, forKey: cacheKey as NSString)
+    return
+  }
+  URLSession.shared.dataTask(with: url) { data, _, error in
+    guard error == nil, let data, !data.isEmpty,
+      let image = chatMediaDecodedImage(from: data, shouldAnimate: animated)
+    else { return }
+    chatMediaImageCache.setObject(image, forKey: cacheKey as NSString)
+    chatMediaDiskCacheSave(data, forKey: cacheKey)
+  }.resume()
 }
 
 final class ChatCollectionFlowLayout: UICollectionViewFlowLayout {
@@ -490,6 +532,11 @@ private func bubbleMetaWidths(for row: ChatListRow) -> ChatBubbleMetaWidths {
 
 private let inlineAttachmentHeight: CGFloat = 48.0
 private let inlineAttachmentSpacing: CGFloat = 8.0
+private let stickerMinDisplaySide: CGFloat = 72.0
+private let stickerDefaultDisplaySide: CGFloat = 136.0
+private let stickerMaxDisplayWidth: CGFloat = 152.0
+private let stickerMaxDisplayHeight: CGFloat = 184.0
+private let stickerMetaTopSpacing: CGFloat = 1.0
 
 private func hasInlineFileAttachment(_ row: ChatListRow) -> Bool {
   guard let mediaUrl = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
@@ -628,6 +675,10 @@ private func usesFullBleedMediaLayout(_ row: ChatListRow) -> Bool {
   }
   return (row.visualKind == .media && row.messageType != "file") || row.visualKind == .video
     || row.visualKind == .videoNote
+}
+
+private func effectiveMetaTopSpacing(for row: ChatListRow) -> CGFloat {
+  isTransparentStickerMessage(row) ? stickerMetaTopSpacing : bubbleMetaTopSpacing
 }
 
 private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? = nil)
@@ -863,18 +914,20 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
         naturalSize.height > 1.0
       {
         let ratio = max(0.2, min(5.0, naturalSize.height / naturalSize.width))
-        let sizeLimit: CGFloat = row.visualKind == .sticker ? 160.0 : maxContentWidth
-        targetWidth = max(120.0, min(sizeLimit, naturalSize.width))
-        mediaHeight = max(84.0, targetWidth * ratio)
-        let heightLimit: CGFloat = row.visualKind == .sticker ? 200.0 : 380.0
+        let sizeLimit: CGFloat = row.visualKind == .sticker ? stickerMaxDisplayWidth : maxContentWidth
+        let minWidth: CGFloat = row.visualKind == .sticker ? stickerMinDisplaySide : 120.0
+        let minHeight: CGFloat = row.visualKind == .sticker ? stickerMinDisplaySide : 84.0
+        targetWidth = max(minWidth, min(sizeLimit, naturalSize.width))
+        mediaHeight = max(minHeight, targetWidth * ratio)
+        let heightLimit: CGFloat = row.visualKind == .sticker ? stickerMaxDisplayHeight : 380.0
         if mediaHeight > heightLimit {
           mediaHeight = heightLimit
           targetWidth = mediaHeight / ratio
         }
       } else if row.visualKind == .sticker {
-        // Sticker default: compact square like Telegram
-        targetWidth = 160.0
-        mediaHeight = 160.0
+        // Sticker default: compact square like Telegram, but smaller than generic media.
+        targetWidth = stickerDefaultDisplaySide
+        mediaHeight = stickerDefaultDisplaySide
       } else {
         targetWidth = max(120.0, maxContentWidth)
         mediaHeight = targetWidth
@@ -886,6 +939,7 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
 
     let isTransparentSticker = isTransparentStickerMessage(row)
     let isFullBleed = usesFullBleedMediaLayout(row)
+    let metaTopSpacing = effectiveMetaTopSpacing(for: row)
     let contentWidth = min(maxContentWidth, targetWidth)
     let hasReaction = row.reactionEmoji != nil && row.reactionEmoji?.isEmpty == false
     let reactionHeightOffset: CGFloat = hasReaction ? 28.0 : 0.0
@@ -893,12 +947,12 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     let bubbleWidth: CGFloat
     let bubbleHeight: CGFloat
     if isTransparentSticker {
-      bodyHeight = mediaHeight + bubbleMetaTopSpacing + bubbleMetaHeight
+      bodyHeight = mediaHeight + metaTopSpacing + bubbleMetaHeight
       bubbleWidth = max(meta.total, contentWidth)
       bubbleHeight = bodyHeight + reactionHeightOffset
     } else {
       bodyHeight =
-        isFullBleed ? mediaHeight : (mediaHeight + bubbleMetaTopSpacing + bubbleMetaHeight)
+        isFullBleed ? mediaHeight : (mediaHeight + metaTopSpacing + bubbleMetaHeight)
       bubbleWidth =
         isFullBleed
         ? max(bubbleMinWidth, contentWidth)
@@ -2162,7 +2216,8 @@ final class ChatListCell: UICollectionViewCell {
         tailView.clearAgentTailStyle()
         let hideBubbleForTyping = row.messageType == "typing"
         let hideBubbleForSticker = isTransparentStickerMessage(row)
-        let hideBubbleChrome = hideBubbleForTyping || hideBubbleForSticker
+        let hideBubbleForFullBleedMedia = usesFullBleedMediaLayout(row)
+        let hideBubbleChrome = hideBubbleForTyping || hideBubbleForSticker || hideBubbleForFullBleedMedia
         bubbleView.configure(
           isMe: row.isMe, shape: row.shape, hidden: isGhostHidden || hideBubbleChrome,
           appearance: appearance)
@@ -2345,8 +2400,11 @@ final class ChatListCell: UICollectionViewCell {
     let isTransparentSticker = isTransparentStickerMessage(row)
     let hideBubbleChrome = row.messageType == "typing" || isTransparentSticker
     let isFullBleed = metrics.isMediaLayout && usesFullBleedMediaLayout(row)
+    let metaTopSpacing = effectiveMetaTopSpacing(for: row)
 
-    if row.shape.showTail && !isGhostHidden && !hideBubbleChrome {
+    let showTail = row.shape.showTail && !isGhostHidden
+      && !(row.messageType == "typing" || isTransparentStickerMessage(row))
+    if showTail {
       // IMPORTANT: tailView has a rotation+flip transform applied, so we MUST NOT
       // set .frame (undefined behavior per Apple docs). Use bounds + center instead.
       let tailSize: CGFloat = 29
@@ -2356,7 +2414,10 @@ final class ChatListCell: UICollectionViewCell {
       tailView.center = CGPoint(x: tailX + tailSize * 0.5, y: tailY + tailSize * 0.5)
       tailView.isHidden = false
       if isFullBleed {
-        tailView.setImage(mediaImageView.image)
+        let img = mediaImageView.image
+        tailView.setImage(img)
+        // Hide tail until media image loads to avoid bubble-colored tail flash
+        if img == nil { tailView.isHidden = true }
       } else {
         tailView.setImage(nil)
         tailView.configure(isMe: row.isMe, visible: true, appearance: appearance)
@@ -2389,6 +2450,18 @@ final class ChatListCell: UICollectionViewCell {
           ))
       }
       mediaContainerView.frame = mediaFrame
+      if let r = self.row, r.visualKind != .text && r.visualKind != .voice {
+        NSLog(
+          "[ChatMediaLayout] msgId=%@ containerFrame=%@ hidden=%@ alpha=%.2f imgHidden=%@ hasImg=%@ bubbleFrame=%@",
+          r.messageId ?? "-",
+          NSCoder.string(for: mediaFrame),
+          mediaContainerView.isHidden ? "Y" : "N",
+          mediaContainerView.alpha,
+          mediaImageView.isHidden ? "Y" : "N",
+          mediaImageView.image != nil ? "Y" : "N",
+          NSCoder.string(for: bubbleFrame)
+        )
+      }
 
       messageLabel.frame = .zero
       let metaX =
@@ -2401,7 +2474,7 @@ final class ChatListCell: UICollectionViewCell {
       if isFullBleed {
         metaY = bubbleFrame.maxY - bubbleMetaHeight - 8
       } else {
-        metaY = mediaFrame.maxY + bubbleMetaTopSpacing
+        metaY = mediaFrame.maxY + metaTopSpacing
       }
 
       metaContainerView.frame = pixelAlignedRect(
@@ -2559,10 +2632,37 @@ final class ChatListCell: UICollectionViewCell {
     mediaDetailLabel.textAlignment = .right
     mediaDetailLabel.font = UIFont.systemFont(ofSize: 11, weight: .regular)
     mediaContainerView.clipsToBounds = !isTransparentSticker
+    let isFullBleedMedia = usesFullBleedMediaLayout(row)
     mediaContainerView.backgroundColor =
-      isTransparentSticker ? .clear : UIColor(white: 0.0, alpha: 0.16)
+      isTransparentSticker ? .clear
+      : isFullBleedMedia ? UIColor(white: 0.0, alpha: 0.28)
+      : UIColor(white: 0.0, alpha: 0.16)
     mediaImageView.contentMode = isTransparentSticker ? .scaleAspectFit : .scaleAspectFill
     mediaImageView.clipsToBounds = !isTransparentSticker
+
+    do {
+      let vkName: String
+      switch row.visualKind {
+      case .text: vkName = "text"
+      case .voice: vkName = "voice"
+      case .video: vkName = "video"
+      case .videoNote: vkName = "videoNote"
+      case .media: vkName = "media"
+      case .sticker: vkName = "sticker"
+      }
+      NSLog(
+        "[ChatMediaCfg] msgId=%@ type=%@ vk=%@ isGhost=%@ containerHidden=%@ containerAlpha=%.2f bubbleHidden=%@ fullBleed=%@ mediaUrl=%@",
+        row.messageId ?? "-",
+        row.messageType,
+        vkName,
+        isGhostHidden ? "Y" : "N",
+        mediaContainerView.isHidden ? "Y" : "N",
+        mediaContainerView.alpha,
+        bubbleView.isHidden ? "Y" : "N",
+        isFullBleedMedia ? "Y" : "N",
+        (row.mediaUrl?.prefix(80)).map(String.init) ?? "nil"
+      )
+    }
 
     guard row.visualKind != .text else {
       mediaProgressOverlayView.isHidden = true
@@ -2655,30 +2755,47 @@ final class ChatListCell: UICollectionViewCell {
           // Lottie loaded — hide static image
           mediaImageView.isHidden = true
         } else if row.mediaUrl == nil || row.mediaUrl?.isEmpty == true {
-          // No Lottie + no image URL → show emoji fallback in the title label
           mediaImageView.isHidden = true
-          let emoji = row.text.isEmpty ? "🎭" : row.text
-          mediaTitleLabel.isHidden = false
-          mediaTitleLabel.text = emoji
-          mediaTitleLabel.font = .systemFont(ofSize: 72)
-          mediaTitleLabel.textAlignment = .center
+          mediaTitleLabel.isHidden = true
           NSLog(
-            "[ChatStickerCell] fallback emoji for msgId=%@ stickerId=%@ bundle=%@",
+            "[ChatStickerCell] missing sticker asset msgId=%@ stickerId=%@ bundle=%@ packId=%@ mediaUrl=%@",
             row.messageId ?? "-",
             row.stickerId ?? "-",
-            row.stickerBundleFileName ?? "-"
+            row.stickerBundleFileName ?? "-",
+            row.stickerPackId ?? "-",
+            row.mediaUrl ?? "-"
           )
         }
       } else {
         mediaPrimaryIconView.isHidden = true
-        mediaContainerView.backgroundColor = .clear
       }
 
     case .text:
       break
     }
 
+    NSLog(
+      "[ChatMediaCfg] POST-SWITCH msgId=%@ imgViewHidden=%@ imgViewImage=%@ containerBg=%@ containerFrame=%@",
+      row.messageId ?? "-",
+      mediaImageView.isHidden ? "Y" : "N",
+      mediaImageView.image != nil ? "hasImage" : "nil",
+      String(describing: mediaContainerView.backgroundColor),
+      NSCoder.string(for: mediaContainerView.frame)
+    )
+
+    if mediaImageView.isHidden || row.mediaUrl == nil {
+      if row.visualKind != .text && row.visualKind != .voice && row.visualKind != .sticker {
+        NSLog(
+          "[ChatMediaLoad] SKIP-LOAD msgId=%@ type=%@ imgHidden=%@ mediaUrl=%@",
+          row.messageId ?? "-",
+          row.messageType,
+          mediaImageView.isHidden ? "Y" : "N",
+          row.mediaUrl == nil ? "nil" : (row.mediaUrl?.isEmpty == true ? "empty" : "present")
+        )
+      }
+    }
     if !mediaImageView.isHidden, let urlStr = row.mediaUrl {
+      let cacheKey = chatMediaNormalizedKey(urlStr)
       let shortUrl = urlStr.count > 80 ? String(urlStr.prefix(77)) + "..." : urlStr
       let encodedUrlStr =
         urlStr.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? urlStr
@@ -2687,27 +2804,46 @@ final class ChatListCell: UICollectionViewCell {
         messageType: row.messageType
       )
       if let url = URL(string: urlStr) ?? URL(string: encodedUrlStr) {
-        if let cachedImage = chatMediaImageCache.object(forKey: urlStr as NSString) {
+        let inMemory = chatMediaImageCache.object(forKey: cacheKey as NSString) != nil
+        let isLocal = url.isFileURL || urlStr.hasPrefix("/")
+        let onDisk: Bool = {
+          guard !isLocal else { return false }
+          let dir = chatMediaDiskCacheDir()
+          let filename = chatMediaDiskCacheKey(cacheKey)
+          return FileManager.default.fileExists(atPath: dir.appendingPathComponent(filename).path)
+        }()
+        let isFailed = chatMediaFailedURLs.contains(cacheKey)
+        NSLog(
+          "[ChatMediaLoad] RESOLVE msgId=%@ inMemory=%@ isLocal=%@ onDisk=%@ isFailed=%@ animate=%@ url=%@",
+          row.messageId ?? "-",
+          inMemory ? "Y" : "N",
+          isLocal ? "Y" : "N",
+          onDisk ? "Y" : "N",
+          isFailed ? "Y" : "N",
+          shouldAnimateMedia ? "Y" : "N",
+          shortUrl
+        )
+        if let cachedImage = chatMediaImageCache.object(forKey: cacheKey as NSString) {
           mediaImageView.image = cachedImage
           reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: cachedImage)
         } else if url.isFileURL || urlStr.hasPrefix("/") {
           let path = url.isFileURL ? url.path : urlStr
           if let image = chatMediaLoadImageFromFile(at: path, shouldAnimate: shouldAnimateMedia) {
             NSLog("[ChatMediaLoad] local file OK msgId=%@ url=%@", row.messageId ?? "-", shortUrl)
-            chatMediaImageCache.setObject(image, forKey: urlStr as NSString)
+            chatMediaImageCache.setObject(image, forKey: cacheKey as NSString)
             mediaImageView.image = image
             reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: image)
           } else {
             NSLog("[ChatMediaLoad] local file MISSING msgId=%@ path=%@", row.messageId ?? "-", path)
           }
-        } else if let diskData = chatMediaDiskCacheLoad(urlStr),
+        } else if let diskData = chatMediaDiskCacheLoad(cacheKey),
           let diskImage = chatMediaDecodedImage(from: diskData, shouldAnimate: shouldAnimateMedia)
         {
           // Found on disk - restore to memory cache and display immediately.
-          chatMediaImageCache.setObject(diskImage, forKey: urlStr as NSString)
+          chatMediaImageCache.setObject(diskImage, forKey: cacheKey as NSString)
           mediaImageView.image = diskImage
           reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: diskImage)
-        } else if chatMediaFailedURLs.contains(urlStr) {
+        } else if chatMediaFailedURLs.contains(cacheKey) {
           NSLog("[ChatMediaLoad] skipping previously failed url=%@", shortUrl)
         } else {
           NSLog(
@@ -2715,10 +2851,18 @@ final class ChatListCell: UICollectionViewCell {
           mediaImageTask = URLSession.shared.dataTask(with: url) {
             [weak self] data, response, error in
             if let error {
+              let nsErr = error as NSError
+              let isCancelled = nsErr.code == NSURLErrorCancelled
               NSLog(
-                "[ChatMediaLoad] network fetch FAIL msgId=%@ error=%@", row.messageId ?? "-",
-                error.localizedDescription)
-              chatMediaFailedURLs.insert(urlStr)
+                "[ChatMediaLoad] network fetch FAIL msgId=%@ error=%@ cancelled=%@",
+                row.messageId ?? "-", error.localizedDescription, isCancelled ? "Y" : "N")
+              if !isCancelled {
+                let count = (chatMediaRetryCount[cacheKey] ?? 0) + 1
+                chatMediaRetryCount[cacheKey] = count
+                if count >= chatMediaMaxRetries {
+                  chatMediaFailedURLs.insert(cacheKey)
+                }
+              }
               return
             }
             guard let self = self, let data = data,
@@ -2730,22 +2874,26 @@ final class ChatListCell: UICollectionViewCell {
                 "[ChatMediaLoad] network fetch NO_IMAGE msgId=%@ dataLen=%d status=%d url=%@ body=%@",
                 row.messageId ?? "-",
                 data?.count ?? 0, statusCode, urlStr, String(bodyPreview.prefix(200)))
-              chatMediaFailedURLs.insert(urlStr)
+              chatMediaFailedURLs.insert(cacheKey)
               return
             }
             NSLog(
               "[ChatMediaLoad] network fetch OK msgId=%@ bytes=%d", row.messageId ?? "-", data.count
             )
             // Save to both memory and disk cache
-            chatMediaImageCache.setObject(image, forKey: urlStr as NSString)
-            chatMediaDiskCacheSave(data, forKey: urlStr)
+            chatMediaImageCache.setObject(image, forKey: cacheKey as NSString)
+            chatMediaDiskCacheSave(data, forKey: cacheKey)
             DispatchQueue.main.async {
               self.mediaImageView.image = image
               self.reportNaturalMediaSizeIfNeeded(for: row, mediaURL: urlStr, image: image)
-              if self.tailView.isHidden == false, let metrics = self.cachedLayoutMetrics,
+              if let metrics = self.cachedLayoutMetrics,
                 metrics.isMediaLayout, usesFullBleedMediaLayout(row)
               {
                 self.tailView.setImage(image)
+                // Reveal tail now that media has loaded
+                if let currentRow = self.row, currentRow.shape.showTail {
+                  self.tailView.isHidden = false
+                }
               }
             }
           }
@@ -2782,6 +2930,16 @@ final class ChatListCell: UICollectionViewCell {
       mediaProgressSpinner.stopAnimating()
     }
 
+    NSLog(
+      "[ChatMediaCfg] FINAL msgId=%@ imgHidden=%@ hasImg=%@ containerHidden=%@ containerAlpha=%.2f containerBg=%@ containerFrame=%@",
+      row.messageId ?? "-",
+      mediaImageView.isHidden ? "Y" : "N",
+      mediaImageView.image != nil ? "Y" : "N",
+      mediaContainerView.isHidden ? "Y" : "N",
+      mediaContainerView.alpha,
+      String(describing: mediaContainerView.backgroundColor),
+      NSCoder.string(for: mediaContainerView.frame)
+    )
     updateStickerAnimationPlayback()
   }
 
@@ -2945,11 +3103,13 @@ final class ChatListCell: UICollectionViewCell {
       let filePath = resolvedStickerAnimationFilePath(for: row)
     else {
       NSLog(
-        "[ChatStickerCell] no Lottie path for msgId=%@ stickerId=%@ bundle=%@ packId=%@",
+        "[ChatStickerCell] no Lottie path for msgId=%@ stickerId=%@ bundle=%@ packId=%@ mediaUrl=%@ text=%@",
         row.messageId ?? "-",
         row.stickerId ?? "-",
         row.stickerBundleFileName ?? "-",
-        row.stickerPackId ?? "-"
+        row.stickerPackId ?? "-",
+        row.mediaUrl ?? "-",
+        row.text
       )
       resetStickerAnimation()
       return false

@@ -13,6 +13,7 @@ import * as Clipboard from 'expo-clipboard';
 import { Buffer } from 'buffer';
 import SafeLiquidGlass from '../native/SafeLiquidGlass';
 import { Globe, Server, Shield, Link, ChevronDown, ChevronRight, ArrowLeft } from 'lucide-react-native';
+import { importBridgeFromLink, isBridgeLink } from '../../lib/relay/RelayBridgeLink';
 
 // ─── Helper Components ──────────────────────────────────────────────
 
@@ -124,7 +125,22 @@ export const AddServerModal = ({ visible, onClose, onAdded, parentScale, mode = 
         try {
             if (mode === 'relay') {
                 if (!relayCode.trim()) return;
-                const res = await RelayClient.getInstance().connectWithCode(relayCode.trim(), getPhoenixSocket());
+                const trimmed = relayCode.trim();
+
+                // If this is a bridge link (direct or universal), handle it!
+                if (isBridgeLink(trimmed) || trimmed.length > 50) {
+                    const res = await importBridgeFromLink(trimmed);
+                    if (res.success) {
+                        Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+                        onAdded();
+                        onClose();
+                        setRelayCode('');
+                        return;
+                    }
+                }
+
+                // Normal relay connection attempt
+                const res = await RelayClient.getInstance().connectWithCode(trimmed, getPhoenixSocket());
                 if (res.success) {
                     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
                     onAdded();

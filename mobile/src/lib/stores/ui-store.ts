@@ -1,5 +1,7 @@
 import { create } from 'zustand'
 
+export type HomeEditAction = 'readAll' | 'read' | 'delete'
+
 interface UIState {
     headerOpacity: number
     headerTranslateY: number
@@ -8,6 +10,9 @@ interface UIState {
     isHistoryPanelOpen: boolean
     isModalOpen: boolean
     isHomeEditing: boolean
+    homeEditSelectionCount: number
+    homeEditActionRequestId: number
+    homeEditAction: HomeEditAction | null
     setHeaderOpacity: (opacity: number) => void
     setHeaderTranslateY: (y: number) => void
     setDrawerOpen: (open: boolean) => void
@@ -15,6 +20,8 @@ interface UIState {
     setHistoryPanelOpen: (open: boolean) => void
     setModalOpen: (open: boolean) => void
     setHomeEditing: (editing: boolean) => void
+    setHomeEditSelectionCount: (count: number) => void
+    requestHomeEditAction: (action: HomeEditAction) => void
 }
 
 export const useUIStore = create<UIState>((set) => ({
@@ -25,6 +32,9 @@ export const useUIStore = create<UIState>((set) => ({
     isHistoryPanelOpen: false,
     isModalOpen: false,
     isHomeEditing: false,
+    homeEditSelectionCount: 0,
+    homeEditActionRequestId: 0,
+    homeEditAction: null,
     setHeaderOpacity: (headerOpacity) => set({ headerOpacity }),
     setHeaderTranslateY: (headerTranslateY) => set({ headerTranslateY }),
     setDrawerOpen: (isDrawerOpen) => set({ isDrawerOpen }),
@@ -32,4 +42,10 @@ export const useUIStore = create<UIState>((set) => ({
     setHistoryPanelOpen: (isHistoryPanelOpen) => set({ isHistoryPanelOpen }),
     setModalOpen: (isModalOpen) => set({ isModalOpen }),
     setHomeEditing: (isHomeEditing) => set({ isHomeEditing }),
+    setHomeEditSelectionCount: (homeEditSelectionCount) => set({ homeEditSelectionCount }),
+    requestHomeEditAction: (homeEditAction) =>
+        set((state) => ({
+            homeEditAction,
+            homeEditActionRequestId: state.homeEditActionRequestId + 1,
+        })),
 }))

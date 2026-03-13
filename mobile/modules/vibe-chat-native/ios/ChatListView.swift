@@ -617,7 +617,50 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
 
     if deletions.isEmpty && insertions.isEmpty && !safeReloads.isEmpty {
+      let rowWidth = max(0.0, bounds.width - (messageHorizontalInset * 2.0))
+      let requiresLayoutReload = safeReloads.contains { indexPath in
+        guard indexPath.item < previousRows.count, indexPath.item < parsed.count else {
+          return true
+        }
+        let previousRow = previousRows[indexPath.item]
+        let nextRow = parsed[indexPath.item]
+        guard previousRow.kind == nextRow.kind else {
+          return true
+        }
+        guard previousRow.kind == .message else {
+          return false
+        }
+        return abs(
+          estimateMessageHeight(previousRow, rowWidth: rowWidth)
+            - estimateMessageHeight(nextRow, rowWidth: rowWidth)
+        ) > 0.5
+      }
+
       applyDataSource()
+
+      // Reactions add badge height to the bubble, so a content-only reconfigure
+      // is not enough. Force a targeted relayout for height-changing reloads.
+      if requiresLayoutReload {
+        UIView.performWithoutAnimation {
+          CATransaction.begin()
+          CATransaction.setDisableActions(true)
+          flowLayout.invalidateLayout()
+          collectionView.performBatchUpdates(
+            {
+              collectionView.reloadItems(at: safeReloads)
+            },
+            completion: nil)
+          CATransaction.commit()
+        }
+        UIView.performWithoutAnimation {
+          CATransaction.begin()
+          CATransaction.setDisableActions(true)
+          finalize(false)
+          CATransaction.commit()
+        }
+        return
+      }
+
       // Telegram approach: content updates are INSTANT — no opacity, no
       // crossfade, no animation of any kind. Just swap the content.
       UIView.performWithoutAnimation {
@@ -914,6 +957,13 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
           {
             continue
           }
+          // Skip slide animation for media/GIF/sticker — just appear in place.
+          if ip.item < rows.count {
+            let vk = rows[ip.item].visualKind
+            if vk == .media || vk == .sticker || vk == .video || vk == .videoNote {
+              continue
+            }
+          }
           let slideUp = CABasicAnimation(keyPath: "position.y")
           slideUp.fromValue = pixelAlignedValue(debugAnimSlideOffset) as NSNumber
           slideUp.toValue = 0.0 as NSNumber
@@ -997,18 +1047,26 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
               dbgShifted += 1
             }
           } else if !info.isHiddenForSend {
-            // Additive path fallback (only reached during send transitions
-            // where shouldAnimateScroll is false). For normal receives, the
-            // animated-scroll path above handles the visual transition.
-            let slideAnim = CABasicAnimation(keyPath: "position.y")
-            slideAnim.fromValue = newCellSlideOffset as NSNumber
-            slideAnim.toValue = 0.0 as NSNumber
-            slideAnim.isAdditive = true
-            slideAnim.duration = animDuration
-            slideAnim.timingFunction = animTiming
-            slideAnim.isRemovedOnCompletion = true
-            info.cell.layer.add(slideAnim, forKey: "insertSlideUp")
-            dbgNewSlide += 1
+            // Skip slide animation for media/GIF/sticker — just appear in place.
+            let skipSlide: Bool = {
+              guard info.indexPath.item < rows.count else { return false }
+              let vk = rows[info.indexPath.item].visualKind
+              return vk == .media || vk == .sticker || vk == .video || vk == .videoNote
+            }()
+            if !skipSlide {
+              // Additive path fallback (only reached during send transitions
+              // where shouldAnimateScroll is false). For normal receives, the
+              // animated-scroll path above handles the visual transition.
+              let slideAnim = CABasicAnimation(keyPath: "position.y")
+              slideAnim.fromValue = newCellSlideOffset as NSNumber
+              slideAnim.toValue = 0.0 as NSNumber
+              slideAnim.isAdditive = true
+              slideAnim.duration = animDuration
+              slideAnim.timingFunction = animTiming
+              slideAnim.isRemovedOnCompletion = true
+              info.cell.layer.add(slideAnim, forKey: "insertSlideUp")
+              dbgNewSlide += 1
+            }
           }
         }
 
@@ -2696,6 +2754,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let options = UIView.AnimationOptions(rawValue: curveRaw << 16)
 
     keyboardHeight = 0
+    inputBar?.keyboardHeightForPanels = 0
     inputBar?.keyboardProgress = 0.0
     UIView.animate(withDuration: duration, delay: 0, options: options) { [weak self] in
       self?.layoutInputBarAndInset()
@@ -2711,9 +2770,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let distanceBeforeInsetChange = currentDistanceFromBottom()
     let wasNearBottom = distanceBeforeInsetChange <= listBottomThreshold
 
-    // When GIF panel is shown, the input bar itself owns the keyboard-sized
-    // area and we must not also offset by keyboardHeight.
-    let effectiveKeyboardHeight: CGFloat = bar.isGifPanelPresented ? 0 : keyboardHeight
+    // The composer can reserve either the native keyboard area or a custom
+    // bottom accessory surface like the GIF panel overlay.
+    let effectiveKeyboardHeight = max(keyboardHeight, bar.presentedBottomAccessoryHeight)
 
     // If keyboard is effectively visible, safe area is handled by keyboard height.
     // Otherwise, account for bottom safe area in the bar layout.
@@ -3432,6 +3491,12 @@ extension ChatListView: ChatInputBarDelegate {
     width: Int,
     height: Int
   ) {
+    // Prefetch the GIF into the media cache so it displays instantly
+    // when the optimistic row appears.
+    chatMediaPrefetch(urlString: url, animated: true)
+    if previewUrl != url {
+      chatMediaPrefetch(urlString: previewUrl, animated: true)
+    }
     onNativeEvent([
       "type": "attachmentGif",
       "id": id,

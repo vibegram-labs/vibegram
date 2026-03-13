@@ -18,11 +18,10 @@ import { useThemeStore } from '../../src/lib/stores/theme-store'
 import { useUIStore } from '../../src/lib/stores/ui-store'
 import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wallpaper-store'
 import SafeLiquidGlass from '../../src/components/native/SafeLiquidGlass'
-import NativeTabBar, { isNativeTabBarAvailable } from '../../src/components/native/NativeTabBar'
-import AndroidBottomTabBar from '../../src/components/native/AndroidBottomTabBar'
+import NativeTabBar, { isNativeTabBarAvailable, type NativeTabBarEditMode } from '../../src/components/native/NativeTabBar'
 import { useChatStore } from '../../src/lib/ChatStore'
 import { useAuthStore } from '../../src/lib/stores/auth-store'
-import { ContactsIcon, CallsIcon, SettingsIcon, VibeLogoIcon } from '../../src/components/Icons'
+import { ContactsIcon, CallsIcon, SettingsIcon } from '../../src/components/Icons'
 import DoubleChatIcon from '../../src/components/icons/DoubleChatIcon'
 import HomeScreen from './home'
 import SettingsScreen from './settings'
@@ -34,6 +33,7 @@ import { useAgentStore } from '../../src/lib/agent/AgentStore'
 import { NativeAgentChatSurface, type NativeAgentChatSurfaceRef, getNativeChatAgentModule } from '../../src/native/chat'
 import { KeyboardStickyView } from 'react-native-keyboard-controller'
 import { BlurView } from 'expo-blur'
+import { File as ExpoFile, Paths } from 'expo-file-system'
 import { Image } from 'react-native'
 import MaskedView from '@react-native-masked-view/masked-view'
 
@@ -69,6 +69,25 @@ const normalizeProfileImageUri = (value?: string | null) => {
         return value
     }
     return `data:image/jpeg;base64,${value}`
+}
+
+const withAlpha = (color: string, alpha: number): string => {
+    if (!color) return `rgba(127, 127, 127, ${alpha})`
+    if (color.startsWith('#')) {
+        const hex = color.replace('#', '')
+        const normalizedHex = hex.length === 3
+            ? hex.split('').map((char) => char + char).join('')
+            : hex
+        if (normalizedHex.length !== 6) return color
+        const r = parseInt(normalizedHex.substring(0, 2), 16)
+        const g = parseInt(normalizedHex.substring(2, 4), 16)
+        const b = parseInt(normalizedHex.substring(4, 6), 16)
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`
+    }
+    if (color.startsWith('rgba')) {
+        return color.replace(/[\d\.]+\)$/g, `${alpha})`)
+    }
+    return color
 }
 
 const VibeButton = ({ onPress, isDark }: { onPress: () => void, isDark: boolean }) => {
@@ -132,9 +151,9 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
     isDark,
     isVibeExpanded,
     onVibeSubmit,
-    safeRouterPush,
     bottomBarFadeStyle,
     t,
+    editMode,
 }: {
     currentTab: PageName;
     handleTabPress: (page: PageName) => void;
@@ -145,9 +164,9 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
     isDark: boolean;
     isVibeExpanded: boolean;
     onVibeSubmit: (text: string) => void;
-    safeRouterPush: (path: string, source: string) => void;
     bottomBarFadeStyle: any;
     t: (key: string) => string;
+    editMode?: NativeTabBarEditMode;
 }) {
     const nativeOnIndexChange = useCallback((index: number) => {
         const page = PAGE_NAMES[index];
@@ -206,6 +225,7 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
                 isVibeExpanded={isVibeExpanded}
                 onVibePress={nativeOnVibePress}
                 onVibeSubmit={onVibeSubmit}
+                editMode={editMode}
             />
         </AnimatedView>
     );
@@ -216,9 +236,10 @@ export default function TabLayout() {
     const activeWallpaperTheme = useWallpaperStore(s => s.activeTheme)
     const { user } = useAuthStore()
     const { t } = useTranslation()
-    const activeChatId = useChatStore(s => s.activeChatId)
     const setActiveChat = useChatStore(s => s.setActiveChat)
     const isHomeEditing = useUIStore(s => s.isHomeEditing)
+    const homeEditSelectionCount = useUIStore(s => s.homeEditSelectionCount)
+    const requestHomeEditAction = useUIStore(s => s.requestHomeEditAction)
 
     // Total Unread
     const totalUnread = useChatStore(s =>
@@ -226,10 +247,76 @@ export default function TabLayout() {
     )
 
     const isDark = effectiveTheme === 'dark'
-    const settingsProfileUri = useMemo(
+    const normalizedSettingsProfileUri = useMemo(
         () => normalizeProfileImageUri(user?.profileImage),
         [user?.profileImage]
     )
+    const [settingsProfileUri, setSettingsProfileUri] = useState<string | undefined>(normalizedSettingsProfileUri)
+
+    useEffect(() => {
+        let cancelled = false
+
+        const resolveSettingsProfileUri = async () => {
+            if (!normalizedSettingsProfileUri) {
+                if (!cancelled) {
+                    setSettingsProfileUri(undefined)
+                }
+                return
+            }
+
+            if (!normalizedSettingsProfileUri.startsWith('data:')) {
+                if (!cancelled) {
+                    setSettingsProfileUri(normalizedSettingsProfileUri)
+                }
+                return
+            }
+
+            const commaIndex = normalizedSettingsProfileUri.indexOf(',')
+            if (commaIndex === -1) {
+                console.warn('[TabsLayout] settings tab avatar data URI is malformed, using inline source')
+                if (!cancelled) {
+                    setSettingsProfileUri(normalizedSettingsProfileUri)
+                }
+                return
+            }
+
+            const metadata = normalizedSettingsProfileUri.slice(0, commaIndex)
+            const base64Payload = normalizedSettingsProfileUri.slice(commaIndex + 1)
+            const fileExtension = metadata.includes('image/png')
+                ? 'png'
+                : metadata.includes('image/webp')
+                    ? 'webp'
+                    : 'jpg'
+            const cacheFile = new ExpoFile(
+                Paths.cache,
+                `native-tab-settings-avatar-${user?.userId || 'current'}.${fileExtension}`
+            )
+
+            try {
+                cacheFile.create({ overwrite: true, intermediates: true })
+                cacheFile.write(base64Payload, { encoding: 'base64' })
+                console.log('[TabsLayout] cached settings tab avatar for native tab bar', {
+                    cacheUri: cacheFile.uri,
+                    fileExtension,
+                })
+                if (!cancelled) {
+                    setSettingsProfileUri(cacheFile.uri)
+                }
+            } catch (error) {
+                console.warn('[TabsLayout] failed to cache settings tab avatar, using inline source', error)
+                if (!cancelled) {
+                    setSettingsProfileUri(normalizedSettingsProfileUri)
+                }
+            }
+        }
+
+        void resolveSettingsProfileUri()
+
+        return () => {
+            cancelled = true
+        }
+    }, [normalizedSettingsProfileUri, user?.userId])
+
     const settingsIconSource = useMemo(
         () => (settingsProfileUri ? { uri: settingsProfileUri } : undefined),
         [settingsProfileUri]
@@ -323,8 +410,8 @@ export default function TabLayout() {
         }
     }, [router])
 
-    // Bottom bar always visible now unless editing
-    const showBottomBar = !isHomeEditing
+    // Bottom bar stays mounted so edit actions can replace the main tabs in place.
+    const showBottomBar = true
 
     // Tab Press Handler — instant switch with lazy mount
     const handleTabPress = useCallback((page: PageName) => {
@@ -399,6 +486,29 @@ export default function TabLayout() {
     const bottomBarFadeStyle = useAnimatedStyle(() => ({
         opacity: interpolate(storyProgress.value, [0, 0.12], [1, 0], Extrapolation.CLAMP),
     }))
+
+    const isHomeEditActionMode = currentTab === 'home' && isHomeEditing
+    const editActionGlassTintColor = useMemo(() => {
+        const baseColor = resolvedWallpaperTheme.backgroundGradient?.[0] || colors.background
+        return withAlpha(baseColor, effectiveTheme === 'dark' ? 0.16 : 0.2)
+    }, [colors.background, effectiveTheme, resolvedWallpaperTheme.backgroundGradient])
+    const homeEditMode = useMemo<NativeTabBarEditMode>(() => {
+        const hasSelection = homeEditSelectionCount > 0
+
+        return {
+            isActive: isHomeEditActionMode,
+            primaryTitle: hasSelection ? 'Read' : 'Read All',
+            secondaryTitle: 'Delete',
+            primaryEnabled: true,
+            secondaryEnabled: hasSelection,
+            glassTintColor: editActionGlassTintColor,
+            onPrimaryActionPress: () => requestHomeEditAction(hasSelection ? 'read' : 'readAll'),
+            onSecondaryActionPress: () => {
+                if (!hasSelection) return
+                requestHomeEditAction('delete')
+            },
+        }
+    }, [editActionGlassTintColor, homeEditSelectionCount, isHomeEditActionMode, requestHomeEditAction])
 
 
     // Conditional Rendering logic removed in favor of Overlay below
@@ -520,9 +630,9 @@ export default function TabLayout() {
                                 isDark={isDark}
                                 isVibeExpanded={currentTab === 'vibe'}
                                 onVibeSubmit={handleVibeSubmit}
-                                safeRouterPush={safeRouterPush}
                                 bottomBarFadeStyle={bottomBarFadeStyle}
                                 t={t}
+                                editMode={homeEditMode}
                             />
                         ) : (
                             <AnimatedView
@@ -537,7 +647,7 @@ export default function TabLayout() {
                             >
                                 {/* Main Tab Bar - Fallback mode */}
                                 {Platform.OS === 'android' ? (
-                                    <AndroidBottomTabBar
+                                    <NativeTabBar
                                         currentIndex={PAGES[currentTab]}
                                         onIndexChange={(index) => {
                                             try {
@@ -618,6 +728,7 @@ export default function TabLayout() {
                                         activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
                                         inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
                                         isDark={isDark}
+                                        editMode={homeEditMode}
                                         onVibePress={() => safeRouterPush('/agent', 'android-bottom-vibe-tab')}
                                     />
                                 ) : (
@@ -706,6 +817,7 @@ export default function TabLayout() {
                                         translateX={translateX}
                                         screenWidth={SCREEN_WIDTH}
                                         fallbackTabWidth={fallbackTabWidth}
+                                        editMode={homeEditMode}
                                         onVibePress={() => handleTabPress('vibe')}
                                     />
                                 )}

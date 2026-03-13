@@ -29,6 +29,18 @@ public class ChatNativeHomeListModule: Module {
         view.setContentBottomInset(value)
       }
 
+      Prop("isEditing") { (view: ChatNativeHomeListView, isEditing: Bool) in
+        view.setIsEditing(isEditing)
+      }
+
+      Prop("selectedChatIds") { (view: ChatNativeHomeListView, selectedChatIds: [String]) in
+        view.setSelectedChatIds(selectedChatIds)
+      }
+
+      Prop("undoBanner") { (view: ChatNativeHomeListView, undoBanner: [String: Any]?) in
+        view.setUndoBanner(undoBanner)
+      }
+
       Events("onNativeEvent")
     }
   }

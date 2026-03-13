@@ -12,6 +12,7 @@
 
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Buffer } from 'buffer';
+import type { BridgeDescriptor } from '../transport/types';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -27,6 +28,10 @@ export interface DirectoryRelay {
     uptime: number; // percentage
     inviteCode?: string;
     inviteKey?: string;
+    externalIp?: string;
+    bridgeUrl?: string;
+    shareLink?: string;
+    bridgeDescriptor?: BridgeDescriptor;
     tags: string[];
 }
 
@@ -252,6 +257,10 @@ class RelayDirectory {
                         uptime: r.uptime || 0,
                         inviteCode: r.invite_code || undefined,
                         inviteKey: r.invite_key || undefined,
+                        externalIp: r.external_ip || undefined,
+                        bridgeUrl: r.bridge_url || undefined,
+                        shareLink: r.share_link || undefined,
+                        bridgeDescriptor: r.bridge_descriptor || undefined,
                         tags: r.tags || [],
                     }));
                     if (relays.length > 0) {
@@ -391,6 +400,10 @@ class RelayDirectory {
                 name: payload.name || this.relays[idx].name,
                 inviteCode: payload.invite_code || this.relays[idx].inviteCode,
                 inviteKey: payload.invite_key || this.relays[idx].inviteKey,
+                externalIp: payload.external_ip || this.relays[idx].externalIp,
+                bridgeUrl: payload.bridge_url || this.relays[idx].bridgeUrl,
+                shareLink: payload.share_link || this.relays[idx].shareLink,
+                bridgeDescriptor: payload.bridge_descriptor || this.relays[idx].bridgeDescriptor,
                 lastSeen: Date.now(),
             };
             this.emit('relays-updated', this.getRelays());
@@ -412,6 +425,10 @@ class RelayDirectory {
                 uptime: 0,
                 inviteCode: payload.invite_code || undefined,
                 inviteKey: payload.invite_key || undefined,
+                externalIp: payload.external_ip || undefined,
+                bridgeUrl: payload.bridge_url || undefined,
+                shareLink: payload.share_link || undefined,
+                bridgeDescriptor: payload.bridge_descriptor || undefined,
                 tags: payload.tags || [],
             });
             this.emit('relays-updated', this.getRelays());

@@ -29,6 +29,7 @@ export interface RuntimeChatMessage {
   encryptedContent?: string;
   plainContent?: string;
   agentName?: string;
+  metadata?: Record<string, unknown>;
 }
 
 const toDayKey = (timestampMs: number) => {
@@ -112,6 +113,13 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
 
     const isAgentMessage = current.fromId === AGENT_USER_ID;
 
+    const metadata: Record<string, unknown> = current.metadata && typeof current.metadata === 'object'
+      ? { ...current.metadata }
+      : {};
+    if (current.waveform && current.waveform.length > 0) {
+      metadata.waveform = current.waveform;
+    }
+
     const payload: NativeChatMessagePayload = {
       id: normalizedId,
       chatId: current.chatId,
@@ -133,9 +141,7 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
       replyToId: current.replyToId,
       reactionEmoji: current.reactionEmoji,
       encryptedContent: isAgentMessage ? undefined : current.encryptedContent,
-      metadata: current.waveform && current.waveform.length > 0
-        ? { waveform: current.waveform }
-        : undefined,
+      metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       bubbleShape: resolveBubbleShape(current.isMe, isSequenceStart, isSequenceEnd, current.type),
       isAgentMessage,
       agentName: isAgentMessage ? (current.agentName || 'Vibe AI') : undefined,

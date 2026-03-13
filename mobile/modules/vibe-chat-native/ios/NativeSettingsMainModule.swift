@@ -362,6 +362,7 @@ private final class NativeSettingsGlassButton: UIControl {
 }
 
 private final class NativeSettingsRowView: UIControl {
+  private let highlightOverlayView = UIView()
   private let iconBackgroundView = UIView()
   private let iconView = UIImageView()
   private let titleLabel = UILabel()
@@ -376,10 +377,7 @@ private final class NativeSettingsRowView: UIControl {
 
   override var isHighlighted: Bool {
     didSet {
-      backgroundColor =
-        isHighlighted
-        ? (theme.isDark ? UIColor(white: 1.0, alpha: 0.06) : UIColor(white: 0.0, alpha: 0.04))
-        : .clear
+      updateHighlightAppearance(animated: true)
     }
   }
 
@@ -399,6 +397,11 @@ private final class NativeSettingsRowView: UIControl {
     backgroundColor = .clear
 
     addTarget(self, action: #selector(handleTap), for: .touchUpInside)
+
+    highlightOverlayView.translatesAutoresizingMaskIntoConstraints = false
+    highlightOverlayView.isUserInteractionEnabled = false
+    highlightOverlayView.alpha = 0
+    addSubview(highlightOverlayView)
 
     iconBackgroundView.translatesAutoresizingMaskIntoConstraints = false
     iconBackgroundView.layer.cornerRadius = 8
@@ -437,20 +440,25 @@ private final class NativeSettingsRowView: UIControl {
     NSLayoutConstraint.activate([
       heightAnchor.constraint(greaterThanOrEqualToConstant: 58),
 
-      iconBackgroundView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 18),
+      highlightOverlayView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      highlightOverlayView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      highlightOverlayView.topAnchor.constraint(equalTo: topAnchor),
+      highlightOverlayView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+      iconBackgroundView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
       iconBackgroundView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      iconBackgroundView.widthAnchor.constraint(equalToConstant: 30),
-      iconBackgroundView.heightAnchor.constraint(equalToConstant: 30),
+      iconBackgroundView.widthAnchor.constraint(equalToConstant: 32),
+      iconBackgroundView.heightAnchor.constraint(equalToConstant: 32),
 
       iconView.centerXAnchor.constraint(equalTo: iconBackgroundView.centerXAnchor),
       iconView.centerYAnchor.constraint(equalTo: iconBackgroundView.centerYAnchor),
-      iconView.widthAnchor.constraint(equalToConstant: 18),
-      iconView.heightAnchor.constraint(equalToConstant: 18),
+      iconView.widthAnchor.constraint(equalToConstant: 20),
+      iconView.heightAnchor.constraint(equalToConstant: 20),
 
-      titleLabel.leadingAnchor.constraint(equalTo: iconBackgroundView.trailingAnchor, constant: 14),
+      titleLabel.leadingAnchor.constraint(equalTo: iconBackgroundView.trailingAnchor, constant: 12),
       titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
 
-      chevronImageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+      chevronImageView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
       chevronImageView.centerYAnchor.constraint(equalTo: centerYAnchor),
       chevronImageView.widthAnchor.constraint(equalToConstant: 14),
       chevronImageView.heightAnchor.constraint(equalToConstant: 14),
@@ -460,12 +468,12 @@ private final class NativeSettingsRowView: UIControl {
       valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
       valueLabel.trailingAnchor.constraint(equalTo: chevronImageView.leadingAnchor, constant: -8),
 
-      switchControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -18),
+      switchControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
       switchControl.centerYAnchor.constraint(equalTo: centerYAnchor),
       switchControl.leadingAnchor.constraint(
         greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12),
 
-      dividerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 64),
+      dividerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 60),
       dividerView.trailingAnchor.constraint(equalTo: trailingAnchor),
       dividerView.bottomAnchor.constraint(equalTo: bottomAnchor),
       dividerView.heightAnchor.constraint(equalToConstant: 1.0 / UIScreen.main.scale),
@@ -485,13 +493,12 @@ private final class NativeSettingsRowView: UIControl {
     currentRow = row
     self.theme = theme
 
-    iconBackgroundView.backgroundColor = row.iconColor.withAlphaComponent(
-      theme.isDark ? 0.18 : 0.12)
+    iconBackgroundView.backgroundColor = row.iconColor
     iconView.image = UIImage(
       systemName: row.icon,
       withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
     )
-    iconView.tintColor = row.iconColor
+    iconView.tintColor = .white
     titleLabel.text = row.label
     titleLabel.textColor =
       row.destructive
@@ -525,6 +532,7 @@ private final class NativeSettingsRowView: UIControl {
 
     chevronImageView.tintColor =
       (theme.isDark ? UIColor.white : UIColor.black).withAlphaComponent(theme.isDark ? 0.5 : 0.32)
+    updateHighlightAppearance(animated: false)
   }
 
   @objc private func handleTap() {
@@ -540,6 +548,35 @@ private final class NativeSettingsRowView: UIControl {
 
   @objc private func handleSwitchChanged() {
     onToggle?(currentRow.id, switchControl.isOn)
+  }
+
+  private func updateHighlightAppearance(animated: Bool) {
+    let targetAlpha: CGFloat = currentRow.kind == .toggle ? 0 : (isHighlighted ? 1 : 0)
+    let targetTransform: CGAffineTransform =
+      currentRow.kind == .toggle || !isHighlighted
+      ? .identity
+      : CGAffineTransform(scaleX: 0.97, y: 0.97)
+    let targetOverlayColor =
+      theme.isDark
+      ? UIColor.white.withAlphaComponent(0.08)
+      : UIColor.black.withAlphaComponent(0.05)
+
+    let updates = {
+      self.highlightOverlayView.backgroundColor = targetOverlayColor
+      self.highlightOverlayView.alpha = targetAlpha
+      self.iconBackgroundView.transform = targetTransform
+    }
+
+    if animated {
+      UIView.animate(
+        withDuration: 0.16,
+        delay: 0,
+        options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState],
+        animations: updates
+      )
+    } else {
+      updates()
+    }
   }
 }
 

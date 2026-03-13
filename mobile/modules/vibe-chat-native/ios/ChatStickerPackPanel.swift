@@ -182,17 +182,15 @@ final class ChatStickerPackPanel: UIView {
     case pack(String)
   }
 
-  private enum Section: Int, CaseIterable {
-    case recent = 0
-    case packStickers = 1
-  }
-
   // UI
   private let packStripScrollView = UIScrollView()
   private let packStripStack = UIStackView()
   private let collectionView: UICollectionView
   private let emptyLabel = UILabel()
   private let selectionFeedback = UISelectionFeedbackGenerator()
+  private var searchQuery: String = ""
+
+  var contentScrollView: UIScrollView { collectionView }
 
   override init(frame: CGRect) {
     let layout = UICollectionViewFlowLayout()
@@ -219,6 +217,7 @@ final class ChatStickerPackPanel: UIView {
     packStripScrollView.showsHorizontalScrollIndicator = false
     packStripScrollView.alwaysBounceHorizontal = true
     packStripScrollView.backgroundColor = .clear
+    packStripScrollView.isHidden = true
     addSubview(packStripScrollView)
 
     packStripStack.translatesAutoresizingMaskIntoConstraints = false
@@ -251,11 +250,13 @@ final class ChatStickerPackPanel: UIView {
     emptyLabel.isHidden = true
     addSubview(emptyLabel)
 
+    let packStripHeightConstraint = packStripScrollView.heightAnchor.constraint(equalToConstant: 0)
+
     NSLayoutConstraint.activate([
       packStripScrollView.topAnchor.constraint(equalTo: topAnchor),
       packStripScrollView.leadingAnchor.constraint(equalTo: leadingAnchor),
       packStripScrollView.trailingAnchor.constraint(equalTo: trailingAnchor),
-      packStripScrollView.heightAnchor.constraint(equalToConstant: 44),
+      packStripHeightConstraint,
 
       packStripStack.leadingAnchor.constraint(
         equalTo: packStripScrollView.contentLayoutGuide.leadingAnchor, constant: 12),
@@ -378,17 +379,22 @@ final class ChatStickerPackPanel: UIView {
       isDark
       ? UIColor(white: 0.84, alpha: 0.62) : UIColor(white: 0.12, alpha: 0.42)
 
-    if isEmpty && displayMode.isRecent {
-      emptyLabel.text = "Send a sticker to see it here"
-      // Auto-switch to first pack
-      if let firstPack = store.installedPacks.first {
-        displayMode = .pack(firstPack.id)
-        selectedPackId = firstPack.id
-        rebuildPackStrip()
-        displayedStickers = firstPack.stickers
-        sectionTitle = firstPack.name
-        emptyLabel.isHidden = !displayedStickers.isEmpty
+    if !searchQuery.isEmpty {
+      if displayMode.isRecent {
+        displayedRecents = displayedRecents.filter { matchesSearch(recent: $0) }
+      } else {
+        displayedStickers = displayedStickers.filter { matchesSearch(sticker: $0) }
       }
+    }
+
+    let filteredIsEmpty = displayedStickers.isEmpty && displayedRecents.isEmpty
+    emptyLabel.isHidden = !filteredIsEmpty
+
+    if filteredIsEmpty && displayMode.isRecent {
+      emptyLabel.text =
+        searchQuery.isEmpty ? "Send a sticker to see it here" : "No recent stickers match."
+    } else if filteredIsEmpty {
+      emptyLabel.text = searchQuery.isEmpty ? "No stickers yet" : "No stickers found."
     }
 
     collectionView.reloadData()
@@ -397,6 +403,56 @@ final class ChatStickerPackPanel: UIView {
   func refreshContent() {
     rebuildPackStrip()
     reloadDisplayedStickers()
+  }
+
+  func setDisplayModeRecent() {
+    displayMode = .recent
+    selectedPackId = nil
+    refreshContent()
+  }
+
+  func setDisplayedPack(id packId: String?) {
+    let resolvedPackId = packId ?? store.installedPacks.first?.id
+    guard let resolvedPackId else {
+      setDisplayModeRecent()
+      return
+    }
+    displayMode = .pack(resolvedPackId)
+    selectedPackId = resolvedPackId
+    refreshContent()
+  }
+
+  func setSearchQuery(_ query: String) {
+    let normalized = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard normalized != searchQuery else { return }
+    searchQuery = normalized
+    reloadDisplayedStickers()
+  }
+
+  private func matchesSearch(sticker: StickerPackSticker) -> Bool {
+    guard !searchQuery.isEmpty else { return true }
+    let packName = store.pack(byId: sticker.packId)?.name ?? ""
+    let haystack = [
+      sticker.id,
+      sticker.bundleFileName ?? "",
+      sticker.emoji ?? "",
+      sticker.packId,
+      packName,
+    ].joined(separator: " ").lowercased()
+    return haystack.contains(searchQuery)
+  }
+
+  private func matchesSearch(recent: RecentSticker) -> Bool {
+    if let sticker = store.sticker(byId: recent.stickerId) {
+      return matchesSearch(sticker: sticker)
+    }
+    guard !searchQuery.isEmpty else { return true }
+    let haystack = [
+      recent.stickerId,
+      recent.bundleFileName ?? "",
+      recent.packId,
+    ].joined(separator: " ").lowercased()
+    return haystack.contains(searchQuery)
   }
 }
 

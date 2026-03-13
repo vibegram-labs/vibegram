@@ -32,6 +32,15 @@ export interface NativeHomeListRow {
   previewRows?: NativeChatRow[];
 }
 
+export interface NativeHomeUndoBanner {
+  visible: boolean;
+  title: string;
+  body: string;
+  actionLabel?: string;
+  timerLabel?: string;
+  destructive?: boolean;
+}
+
 interface NativeHomeListSurfaceProps {
   rows: NativeHomeListRow[];
   refreshing?: boolean;
@@ -39,6 +48,9 @@ interface NativeHomeListSurfaceProps {
   previewAppearance?: NativeChatAppearance;
   contentTopInset?: number;
   contentBottomInset?: number;
+  isEditing?: boolean;
+  selectedChatIds?: string[];
+  undoBanner?: NativeHomeUndoBanner;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
 }
 
@@ -53,6 +65,9 @@ export default function NativeHomeListSurface({
   previewAppearance,
   contentTopInset = 0,
   contentBottomInset = 0,
+  isEditing = false,
+  selectedChatIds,
+  undoBanner,
   onNativeEvent,
 }: NativeHomeListSurfaceProps) {
   const canRender = useMemo(() => isNativeHomeListAvailable(), []);
@@ -70,6 +85,9 @@ export default function NativeHomeListSurface({
       previewAppearance={previewAppearance}
       contentTopInset={contentTopInset}
       contentBottomInset={contentBottomInset}
+      isEditing={isEditing}
+      selectedChatIds={selectedChatIds}
+      undoBanner={undoBanner}
       onNativeEvent={onNativeEvent}
     />
   );

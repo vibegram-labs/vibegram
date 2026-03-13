@@ -105,6 +105,15 @@ final class ChatPinnedBannerView: UIControl {
     iconGlowView.frame = iconContainer.bounds
     iconImageView.frame = iconContainer.bounds.insetBy(dx: 7.0, dy: 7.0)
 
+    let hasTextLayoutSpace = bounds.width > 0.0 && bounds.height > 12.0
+    textStack.isHidden = !hasTextLayoutSpace
+    titleLabel.isHidden = !hasTextLayoutSpace
+    bodyLabel.isHidden = !hasTextLayoutSpace
+    guard hasTextLayoutSpace else {
+      textStack.frame = .zero
+      return
+    }
+
     let textX = iconContainer.frame.maxX + 10.0
     textStack.frame = CGRect(
       x: textX,

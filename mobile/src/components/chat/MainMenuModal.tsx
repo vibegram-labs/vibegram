@@ -289,113 +289,24 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
         const existingChat = chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase())
 
         handleCloseInternal()
-        setTimeout(() => {
-            if (existingChat?.chatId) {
-                setActiveChat(existingChat.chatId)
-                router.push({ pathname: '/chat', params: { id: existingChat.chatId } })
-            } else {
-                router.push({
-                    pathname: '/chat',
-                    params: {
-                        friendId,
-                        friendName: contact?.username || friendId,
-                        friendImage: contact?.profileImage || '',
-                    }
-                })
-            }
-        }, 280)
+        
+        if (existingChat?.chatId) {
+            setActiveChat(existingChat.chatId)
+            router.push({ pathname: '/chat', params: { id: existingChat.chatId } })
+        } else {
+            router.push({
+                pathname: '/chat',
+                params: {
+                    friendId,
+                    friendName: contact?.username || friendId,
+                    friendImage: contact?.profileImage || '',
+                }
+            })
+        }
     }
 
     const handleNewChatPress = async () => {
-        if (Platform.OS !== 'ios') {
-            openChildView('newChat')
-            return
-        }
-        if (openingNativeNewChatRef.current) {
-            return
-        }
-        if (!nativeHomeModule?.presentNativeNewChat) {
-            console.warn('[MainMenuModal] native new chat module unavailable on iOS')
-            showToast('Native New Chat unavailable. Rebuild iOS app.', 'error')
-            return
-        }
-
-        try {
-            openingNativeNewChatRef.current = true
-            const nativeResult = await nativeHomeModule.presentNativeNewChat({
-                userId: user?.userId || '',
-                authToken: user?.loginToken || undefined,
-                theme: {
-                    isDark,
-                    background: colors.background,
-                    surface: colors.card,
-                    text: colors.text,
-                    textSecondary: colors.textSecondary,
-                    primary: colors.primary,
-                }
-            })
-            if (!nativeResult) {
-                return
-            }
-            if (nativeResult.action === 'busy') {
-                showToast('New Chat is already open', 'info')
-                return
-            }
-            if (nativeResult.action === 'error') {
-                showToast(nativeResult.error || 'Could not open New Chat', 'error')
-                return
-            }
-            if (nativeResult.action !== 'select') {
-                return
-            }
-
-            const selectedUser = normalizeFoundUser(nativeResult.user)
-            const friendId = resolveFoundUserId(selectedUser)
-            if (!friendId) {
-                return
-            }
-
-            const friendName = selectedUser?.username || friendId
-            const friendImage = selectedUser?.profileImage || ''
-            const friendPublicKey = selectedUser?.publicKey || ''
-
-            const existingChat = chats.find(c => (c.friendId || '').toUpperCase() === friendId.toUpperCase())
-            let targetChatId = existingChat?.chatId || null
-
-            if (!targetChatId) {
-                try {
-                    targetChatId = await startChat(friendId, {
-                        username: friendName,
-                        profileImage: friendImage,
-                        publicKey: friendPublicKey,
-                    })
-                } catch (error) {
-                    console.warn('[MainMenuModal] native new chat startChat failed', error)
-                }
-            }
-
-            handleCloseInternal()
-            setTimeout(() => {
-                if (targetChatId) {
-                    setActiveChat(targetChatId)
-                    router.push({ pathname: '/chat', params: { id: targetChatId } })
-                    return
-                }
-                router.push({
-                    pathname: '/chat',
-                    params: {
-                        friendId,
-                        friendName,
-                        friendImage,
-                        friendPublicKey,
-                    },
-                })
-            }, 280)
-        } catch (error) {
-            console.warn('[MainMenuModal] native new chat modal failed', error)
-        } finally {
-            openingNativeNewChatRef.current = false
-        }
+        openChildView('newChat')
     }
 
 

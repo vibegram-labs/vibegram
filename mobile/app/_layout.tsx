@@ -27,6 +27,7 @@ import { getUserChannel } from '../src/lib/ChatStore';
 import SessionExpiredBanner from '../src/components/shared/SessionExpiredBanner';
 import { addNativeCallUiListener, getNativeCallModule } from '../src/native/call/runtime';
 import { configureNativeGifApiKey } from '../src/native/gif/runtime';
+import { registerBridgeLinkHandler } from '../src/lib/transport/BridgeLinkHandler';
 
 SplashScreen.preventAutoHideAsync()
 
@@ -105,6 +106,8 @@ export default function RootLayout() {
 
   useEffect(() => {
     configureNativeGifApiKey();
+    const unsub = registerBridgeLinkHandler();
+    return () => unsub();
   }, []);
 
   const waitForCallSignalingChannel = async (timeoutMs = 12000) => {

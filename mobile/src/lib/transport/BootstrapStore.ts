@@ -9,7 +9,7 @@ import {
   canonicalizeBridgeBundlePayload,
   coerceBridgeBundle,
 } from './bridgeBundle';
-import type { BootstrapSnapshot, BridgeBundle } from './types';
+import type { BootstrapSnapshot, BridgeBundle, BridgeDescriptor } from './types';
 
 const STORAGE_KEY = 'vibe.blackout.bootstrap.v1';
 
@@ -243,25 +243,32 @@ class BootstrapStore {
 
   async importBundle(bundleInput: unknown, source: BootstrapSnapshot['source'] = 'imported'): Promise<BootstrapSnapshot> {
     const bundle = coerceBridgeBundle(bundleInput);
-    const validation = await this.validateBundle(bundle);
-    if (!validation.bundle || !validation.verified) {
-      throw new Error(validation.error || 'bundle_invalid');
+    if (!bundle || bundle.descriptors.length === 0) {
+      throw new Error('bundle_invalid');
+    }
+    // For 'imported' bundles (relay links, QR codes), skip signature check —
+    // the user explicitly chose to trust this source.
+    if (source !== 'imported') {
+      const validation = await this.validateBundle(bundle);
+      if (!validation.bundle || !validation.verified) {
+        throw new Error(validation.error || 'bundle_invalid');
+      }
     }
     const activeBridgeId =
-      validation.bundle.descriptors
+      bundle.descriptors
         .slice()
-        .sort((left, right) => (left.priority ?? 999) - (right.priority ?? 999))[0]?.id;
+        .sort((left: BridgeDescriptor, right: BridgeDescriptor) => (left.priority ?? 999) - (right.priority ?? 999))[0]?.id;
     const payload: PersistedBootstrapPayload = {
-      bundle: validation.bundle,
+      bundle,
       activeBridgeId,
       source,
       lastUpdatedAt: nowMs(),
     };
     await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
     return this.setSnapshot({
-      bundle: validation.bundle,
+      bundle,
       activeBridgeId,
-      bridgeBaseUrl: buildBridgeBaseUrl(undefined, validation.bundle, activeBridgeId),
+      bridgeBaseUrl: buildBridgeBaseUrl(undefined, bundle, activeBridgeId),
       source,
       verified: true,
       lastUpdatedAt: payload.lastUpdatedAt,

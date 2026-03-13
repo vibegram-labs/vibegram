@@ -346,6 +346,7 @@ struct ChatListRow {
       ?? parseDouble(metadata?["upload_progress"])
 
     let extra = message["extra"] as? [String: Any]
+    let stickerContainers: [[String: Any]?] = [message, metadata, extra]
     mediaWidth =
       parseDouble(message["width"]) ?? parseDouble(metadata?["width"])
       ?? parseDouble(extra?["width"])
@@ -354,17 +355,33 @@ struct ChatListRow {
       ?? parseDouble(extra?["height"])
 
     // Sticker pack fields
-    stickerId =
-      (message["stickerId"] as? String)
-      ?? (metadata?["stickerId"] as? String)
-    stickerPackId =
-      (message["stickerPackId"] as? String)
-      ?? (metadata?["stickerPackId"] as? String)
-      ?? (metadata?["packId"] as? String)
-    stickerBundleFileName =
-      (message["stickerBundleFileName"] as? String)
-      ?? (metadata?["stickerBundleFileName"] as? String)
-      ?? (metadata?["bundleFileName"] as? String)
+    stickerId = firstNonEmptyString(
+      in: stickerContainers,
+      keys: ["stickerId", "sticker_id"]
+    )
+    stickerPackId = firstNonEmptyString(
+      in: stickerContainers,
+      keys: ["stickerPackId", "packId", "pack_id"]
+    )
+    stickerBundleFileName = firstNonEmptyString(
+      in: stickerContainers,
+      keys: ["stickerBundleFileName", "bundleFileName", "bundle_file_name"]
+    )
+
+    if messageType == "sticker", stickerId == nil || stickerPackId == nil {
+      let metadataKeys = metadata?.keys.sorted().joined(separator: ",") ?? "-"
+      let extraKeys = extra?.keys.sorted().joined(separator: ",") ?? "-"
+      NSLog(
+        "[ChatStickerRow] metadata incomplete msgId=%@ stickerId=%@ packId=%@ bundle=%@ mediaUrl=%@ metadataKeys=%@ extraKeys=%@",
+        messageId ?? "-",
+        stickerId ?? "-",
+        stickerPackId ?? "-",
+        stickerBundleFileName ?? "-",
+        mediaUrl ?? "-",
+        metadataKeys,
+        extraKeys
+      )
+    }
 
     // Agent message fields
     isAgentMessage = (message["isAgentMessage"] as? Bool) ?? false
@@ -415,6 +432,21 @@ private func parseNonEmptyString(_ raw: Any?) -> String? {
   }
   if let value = raw as? Double, value.isFinite {
     return String(value)
+  }
+  return nil
+}
+
+private func firstNonEmptyString(
+  in containers: [[String: Any]?],
+  keys: [String]
+) -> String? {
+  for container in containers {
+    guard let container else { continue }
+    for key in keys {
+      if let value = parseNonEmptyString(container[key]) {
+        return value
+      }
+    }
   }
   return nil
 }

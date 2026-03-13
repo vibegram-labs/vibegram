@@ -29,6 +29,12 @@ import {
     encodeWSFrame,
     decodeWSFrame,
 } from './VibeNetProtocol';
+import type { BridgeDescriptor } from '../transport/types';
+import {
+    activateBridgeDescriptor,
+    deactivateBridgeTransport,
+    resolveBridgeByInviteCode,
+} from './RelayBridgeLink';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -44,6 +50,10 @@ export interface RelayInfo {
     latency?: number;
     peerCount?: number;
     maxPeers?: number;
+    externalIp?: string;
+    bridgeUrl?: string;
+    shareLink?: string;
+    bridgeDescriptor?: BridgeDescriptor;
 }
 
 export interface PendingRequest {
@@ -81,6 +91,7 @@ class RelayClient {
     private lastPingSent: number = 0;
     private currentLatency: number | null = null;
     private missedPings: number = 0;
+    private connectedViaBridge: boolean = false;
 
     private constructor() {
         this.loadSavedRelays();
@@ -145,12 +156,13 @@ class RelayClient {
     }
 
     async addSavedRelay(relay: RelayInfo) {
-        // Don't duplicate
-        const exists = this.savedRelays.find(r => r.relayId === relay.relayId);
-        if (!exists) {
+        const index = this.savedRelays.findIndex(r => r.relayId === relay.relayId);
+        if (index >= 0) {
+            this.savedRelays[index] = { ...this.savedRelays[index], ...relay };
+        } else {
             this.savedRelays.push(relay);
-            await this.saveSavedRelays();
         }
+        await this.saveSavedRelays();
     }
 
     async removeSavedRelay(relayId: string) {
@@ -163,7 +175,7 @@ class RelayClient {
     /**
      * Connect to a relay using an invite code
      */
-    async connectWithCode(inviteCode: string, socket: any): Promise<{ success: boolean; error?: string }> {
+    async connectWithCode(inviteCode: string, socket: any): Promise<{ success: boolean; error?: string; mode?: 'relay' | 'bridge' }> {
         if (this.status === 'connected' || this.status === 'connecting') {
             await this.disconnect();
         }
@@ -175,6 +187,31 @@ class RelayClient {
         try {
             // Normalize code
             const code = inviteCode.toUpperCase().replace(/[^A-Z0-9-]/g, '');
+
+            const bridgeResolution = await resolveBridgeByInviteCode(code);
+            if (bridgeResolution.success && bridgeResolution.descriptor) {
+                const bridgeResult = await this.connectToRelay({
+                    relayId: bridgeResolution.descriptor.id || code,
+                    name: bridgeResolution.descriptor.id || 'Relay Bridge',
+                    inviteCode: code,
+                    isPublic: false,
+                    bridgeDescriptor: bridgeResolution.descriptor,
+                    bridgeUrl: bridgeResolution.descriptor.baseUrl,
+                    externalIp: bridgeResolution.descriptor.host,
+                }, socket, true);
+                if (bridgeResult.success || !socket) {
+                    return bridgeResult;
+                }
+            }
+
+            if (!socket) {
+                this.status = 'error';
+                this.emit('status-changed', this.status);
+                return {
+                    success: false,
+                    error: bridgeResolution.error || 'Phoenix socket not connected',
+                };
+            }
 
             // Connect to the signaling channel to find the relay
             const lookupChannel = socket.channel('relay:lookup', { invite_code: code });
@@ -191,11 +228,15 @@ class RelayClient {
                             inviteKey: invite_key,
                             isPublic: is_public,
                             region: region || undefined,
+                            externalIp: response.external_ip || undefined,
+                            bridgeUrl: response.bridge_url || undefined,
+                            shareLink: response.share_link || undefined,
+                            bridgeDescriptor: response.bridge_descriptor || undefined,
                         };
 
                         // Now connect to the actual relay
                         lookupChannel.leave();
-                        this.connectToRelay(relayInfo, undefined, true)
+                        this.connectToRelay(relayInfo, socket, true)
                             .then(resolve)
                             .catch(e => resolve({ success: false, error: e.message }));
                     })
@@ -217,14 +258,60 @@ class RelayClient {
     /**
      * Connect to a relay from the directory (public relay)
      */
-    async connectToRelay(relay: RelayInfo, socket?: any, save: boolean = true): Promise<{ success: boolean; error?: string }> {
+    async connectToRelay(
+        relay: RelayInfo,
+        socket?: any,
+        save: boolean = true,
+    ): Promise<{ success: boolean; error?: string; mode?: 'relay' | 'bridge' }> {
         if (this.status === 'connected' || this.status === 'handshaking' || this.status === 'connecting') {
             await this.disconnect();
         }
 
+        const bridgeDescriptor =
+            relay.bridgeDescriptor
+            || this.buildBridgeDescriptor(relay);
+        const resolvedRelay: RelayInfo = bridgeDescriptor
+            ? {
+                ...relay,
+                bridgeDescriptor,
+                bridgeUrl: bridgeDescriptor.baseUrl || relay.bridgeUrl,
+                externalIp: bridgeDescriptor.host || relay.externalIp,
+            }
+            : relay;
+
+        if (bridgeDescriptor) {
+            this.status = 'handshaking';
+            this.currentRelay = resolvedRelay;
+            this.emit('status-changed', this.status);
+
+            const activation = await activateBridgeDescriptor(bridgeDescriptor);
+            if (!activation.success) {
+                const fallbackSocket = socket || this.socket;
+                if (!fallbackSocket || !fallbackSocket.isConnected()) {
+                    this.status = 'error';
+                    this.emit('status-changed', this.status);
+                    return { success: false, error: activation.error };
+                }
+                console.warn('[RelayClient] Bridge activation failed, falling back to Phoenix relay:', activation.error);
+            }
+            else {
+                this.connectedViaBridge = true;
+                this.sessionKeys = null;
+                this.signalingChannel = null;
+                this.status = 'connected';
+                this.currentLatency = null;
+                this.emit('status-changed', this.status);
+                if (save && this.currentRelay) {
+                    await this.addSavedRelay(this.currentRelay);
+                }
+                return { success: true, mode: 'bridge' };
+            }
+        }
+
         if (socket) this.socket = socket;
+        this.connectedViaBridge = false;
         this.status = 'handshaking';
-        this.currentRelay = relay;
+        this.currentRelay = resolvedRelay;
         this.emit('status-changed', this.status);
 
         try {
@@ -318,7 +405,7 @@ class RelayClient {
 
                             // Save this relay
                             if (save) {
-                                this.addSavedRelay(relay);
+                                this.addSavedRelay(this.currentRelay || resolvedRelay);
                             }
 
                             // Start keepalive
@@ -342,7 +429,7 @@ class RelayClient {
                             if (this.status === 'connected' && !resolved) {
                                 resolved = true;
                                 clearInterval(checkConnected);
-                                resolve({ success: true });
+                            resolve({ success: true, mode: 'relay' });
                             }
                         }, 100);
 
@@ -390,7 +477,16 @@ class RelayClient {
             this.signalingChannel = null;
         }
 
+        if (this.connectedViaBridge) {
+            try {
+                await deactivateBridgeTransport();
+            } catch (error) {
+                console.warn('[RelayClient] Failed to deactivate bridge transport:', error);
+            }
+        }
+
         this.sessionKeys = null;
+        this.connectedViaBridge = false;
         this.status = 'disconnected';
         this.currentRelay = null;
         this.sequence = 0;
@@ -400,6 +496,21 @@ class RelayClient {
         this.lastPingSent = 0;
         this.missedPings = 0;
         this.emit('status-changed', this.status);
+    }
+
+    private buildBridgeDescriptor(relay: RelayInfo): BridgeDescriptor | null {
+        if (relay.bridgeDescriptor) return relay.bridgeDescriptor;
+        if (!relay.bridgeUrl && !relay.externalIp) return null;
+        return {
+            id: relay.relayId || relay.inviteCode || relay.bridgeUrl || relay.externalIp || 'relay_bridge',
+            host: relay.externalIp,
+            port: 443,
+            transport: 'https',
+            origin: 'community',
+            priority: 50,
+            weight: 100,
+            baseUrl: relay.bridgeUrl || undefined,
+        };
     }
 
     // ─── HTTP Proxying ────────────────────────────────────────────

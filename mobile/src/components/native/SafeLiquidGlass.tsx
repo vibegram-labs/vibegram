@@ -138,31 +138,28 @@ export default function SafeLiquidGlass({
     )
   }
 
-  // ═══════════════════════════════════════════════════════════════
-  // Android: Clean Liquid Glass using expo-blur
+  // Android: Clean Liquid Glass Fallback
   // ═══════════════════════════════════════════════════════════════
   //
-  // IMPORTANT: expo-blur's BlurView on Android blurs the content
-  // BEHIND the component (what's underneath in z-order), not its children.
-  // Children rendered inside BlurView appear on top of the blur.
-  //
-  // If children are getting blurred, it means they're somehow being
-  // rendered behind the blur layer. The fix is to ensure children
-  // are direct children of BlurView so they render ON TOP of the blur effect.
+  // IMPORTANT: BlurView on Android has rendering issues that can blur 
+  // children (like text) unexpectedly depending on the view hierarchy.
+  // We use a clean, performant semi-transparent fallback instead.
+  
+  const androidFallbackBg = isDark ? 'rgba(25, 25, 30, 0.85)' : 'rgba(255, 255, 255, 0.85)'
+  const androidBorder = isDark ? 'rgba(255, 255, 255, 0.12)' : 'rgba(0, 0, 0, 0.08)'
 
-  // IMPORTANT: On Android, we must render the BlurView as a background 
-  // layer to avoid blurring the children (text, etc.) and remove 
-  // hardware texture rendering which causes shadows/artifacts.
   return (
-    <View style={[style, { overflow: 'hidden' }]} {...props}>
-      <BlurView
-        intensity={blurIntensity}
-        tint={blurTint}
-        experimentalBlurMethod="dimezisBlurView"
-        blurReductionFactor={blurReductionFactor}
-        style={[StyleSheet.absoluteFill, { backgroundColor: 'transparent' }]}
-        removeClippedSubviews={false}
-      />
+    <View 
+      style={[
+        style, 
+        { 
+          backgroundColor: tintColor || styleBackgroundColor || androidFallbackBg,
+          borderColor: androidBorder,
+          borderWidth: StyleSheet.hairlineWidth,
+        }
+      ]} 
+      {...props}
+    >
       {children}
     </View>
   )

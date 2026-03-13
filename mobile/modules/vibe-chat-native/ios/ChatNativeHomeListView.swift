@@ -1,18 +1,55 @@
 import ExpoModulesCore
 import UIKit
 
-public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITableViewDelegate {
+private struct ChatNativeHomeUndoBannerPayload {
+  let visible: Bool
+  let title: String
+  let body: String
+  let actionLabel: String
+  let timerLabel: String
+  let destructive: Bool
+
+  static func parse(_ raw: [String: Any]?) -> ChatNativeHomeUndoBannerPayload? {
+    guard let raw else { return nil }
+    let visible = (raw["visible"] as? Bool) ?? true
+    guard visible else { return nil }
+    let title = (raw["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let body = (raw["body"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    guard !title.isEmpty || !body.isEmpty else { return nil }
+    return ChatNativeHomeUndoBannerPayload(
+      visible: visible,
+      title: title.isEmpty ? "Pending action" : title,
+      body: body.isEmpty ? "Tap undo to restore" : body,
+      actionLabel:
+        (raw["actionLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Undo",
+      timerLabel:
+        (raw["timerLabel"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "",
+      destructive: (raw["destructive"] as? Bool) ?? true
+    )
+  }
+}
+
+public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITableViewDelegate,
+  ChatNativeHomeCardCellSwipeDelegate
+{
   public var onNativeEvent = EventDispatcher()
 
   private let tableView = UITableView(frame: .zero, style: .plain)
   private let refreshControl = UIRefreshControl()
   private let contextMenuBackdropView = UIVisualEffectView(effect: nil)
   private let contextMenuBackdropTintView = UIView()
+  private let undoBannerView = ChatNativeHomeUndoBannerView()
   private var rows: [ChatNativeHomeListRow] = []
   private var isDark = false
   private var previewAppearance: [String: Any]?
   private var contentTopInset: CGFloat = 0
   private var contentBottomInset: CGFloat = 0
+  private var isEditingMode = false
+  private var selectedChatIds = Set<String>()
+  private var mediaPrefetchedChatIds = Set<String>()
+  private var lastPrefetchedScrollIndex: Int = 0
+  private weak var openSwipeCell: ChatNativeHomeCardCell?
+  private var currentUndoBanner: ChatNativeHomeUndoBannerPayload?
 
   required init(appContext: AppContext? = nil) {
     super.init(appContext: appContext)
@@ -38,6 +75,8 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
 
   func setRows(_ rawRows: [[String: Any]]) {
     let previousChatIds = Set(rows.map(\.chatId))
+    openSwipeCell?.closeSwipe(animated: false)
+    openSwipeCell = nil
     rows = rawRows.compactMap(ChatNativeHomeListRow.parse)
     tableView.reloadData()
     // Pre-fetch chat histories for visible chats so messages are ready
@@ -45,15 +84,86 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     // when the chat list changes to avoid redundant requests.
     let currentChatIds = Set(rows.map(\.chatId))
     if previousChatIds != currentChatIds {
+      mediaPrefetchedChatIds.removeAll()
+      lastPrefetchedScrollIndex = 0
       prefetchTopChatHistories()
     }
   }
 
   private func prefetchTopChatHistories() {
-    // Preload the top chats so opening them is instant.
-    let chatIds = rows.prefix(8).map(\.chatId)
+    // Only preload the top few chats initially — the rest are loaded
+    // progressively as the user scrolls via scrollViewDidScroll.
+    let initialCount = 5
+    let chatIds = rows.prefix(initialCount).map(\.chatId)
     guard !chatIds.isEmpty else { return }
     ChatEngine.shared.prefetchChatHistories(chatIds: chatIds)
+    // Warm avatar image cache for visible rows so cells display instantly.
+    prefetchAvatars()
+    // Warm media cache only for the initially visible chats.
+    prefetchMediaForRows(start: 0, end: initialCount)
+  }
+
+  /// Prefetch media URLs from preview rows in the given [start, end) range.
+  /// Skips chats already prefetched. Runs on current thread but downloads
+  /// happen asynchronously inside chatMediaPrefetch.
+  private func prefetchMediaForRows(start: Int, end: Int) {
+    let transportStatus = ChatEngine.shared.getTransportStatus()
+    let transportMode = (transportStatus["transportMode"] as? String) ?? "direct"
+    let disableMedia = (transportStatus["disableMedia"] as? Bool) ?? false
+    if transportMode == "bridge_text" || disableMedia {
+      return
+    }
+    let clampedEnd = min(end, rows.count)
+    guard start < clampedEnd else { return }
+    for i in start..<clampedEnd {
+      let row = rows[i]
+      guard !mediaPrefetchedChatIds.contains(row.chatId) else { continue }
+      mediaPrefetchedChatIds.insert(row.chatId)
+      for jsRow in row.previewRows {
+        guard let message = jsRow["message"] as? [String: Any] else { continue }
+        if let mediaUrl = (message["mediaUrl"] as? String ?? message["media_url"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !mediaUrl.isEmpty {
+          let type = message["type"] as? String ?? "text"
+          let isAnimated = ["gif", "sticker"].contains(type.lowercased())
+          chatMediaPrefetch(urlString: mediaUrl, animated: isAnimated)
+        }
+      }
+    }
+  }
+
+  private func prefetchAvatars() {
+    let transportStatus = ChatEngine.shared.getTransportStatus()
+    let transportMode = (transportStatus["transportMode"] as? String) ?? "direct"
+    let disableRemoteAvatars = (transportStatus["disableRemoteAvatars"] as? Bool) ?? false
+    if transportMode == "bridge_text" || disableRemoteAvatars {
+      return
+    }
+    let urls = rows.prefix(15).compactMap { $0.avatarUri }
+    let session: URLSession = {
+      if #available(iOS 13.0, *) {
+        return ChatPhoenixClient.makePinnedURLSession()
+      }
+      return URLSession.shared
+    }()
+    for urlString in urls {
+      let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
+      guard !trimmed.isEmpty,
+        ChatNativeHomeCardCell.avatarCached(forKey: trimmed) == nil,
+        let url = URL(string: trimmed),
+        let scheme = url.scheme?.lowercased(),
+        scheme == "https" || scheme == "http"
+      else { continue }
+      var request = URLRequest(url: url)
+      request.cachePolicy = .returnCacheDataElseLoad
+      request.timeoutInterval = 10
+      request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+      request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+      session.dataTask(with: request) { data, response, _ in
+        guard let code = (response as? HTTPURLResponse)?.statusCode, (200...299).contains(code),
+          let data, let image = UIImage(data: data)
+        else { return }
+        ChatNativeHomeCardCell.cacheAvatar(image, forKey: trimmed)
+      }.resume()
+    }
   }
 
   func setRefreshing(_ refreshing: Bool) {
@@ -69,6 +179,7 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
   func setIsDark(_ value: Bool) {
     guard isDark != value else { return }
     isDark = value
+    updateUndoBanner(animated: false)
     tableView.reloadData()
   }
 
@@ -86,6 +197,28 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     applyContentInsets()
   }
 
+  func setIsEditing(_ value: Bool) {
+    guard isEditingMode != value else { return }
+    isEditingMode = value
+    openSwipeCell?.closeSwipe(animated: false)
+    openSwipeCell = nil
+    tableView.setEditing(false, animated: false)
+    tableView.reloadData()
+  }
+
+  func setSelectedChatIds(_ value: [String]) {
+    let nextSelectedChatIds = Set(
+      value.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+    guard nextSelectedChatIds != selectedChatIds else { return }
+    selectedChatIds = nextSelectedChatIds
+    tableView.reloadData()
+  }
+
+  func setUndoBanner(_ raw: [String: Any]?) {
+    currentUndoBanner = ChatNativeHomeUndoBannerPayload.parse(raw)
+    updateUndoBanner(animated: true)
+  }
+
   private func applyContentInsets() {
     tableView.contentInset = UIEdgeInsets(
       top: contentTopInset,
@@ -99,6 +232,52 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
       bottom: contentBottomInset,
       right: 0
     )
+  }
+
+  private func updateUndoBanner(animated: Bool) {
+    let textColor = isDark ? UIColor.white : UIColor(red: 22 / 255, green: 28 / 255, blue: 36 / 255, alpha: 1)
+    let surfaceColor = isDark ? UIColor.white : UIColor.black
+
+    if let currentUndoBanner {
+      undoBannerView.configure(
+        title: currentUndoBanner.title,
+        body: currentUndoBanner.body,
+        actionTitle: currentUndoBanner.actionLabel,
+        timerText: currentUndoBanner.timerLabel,
+        destructive: currentUndoBanner.destructive
+      )
+      undoBannerView.applyTheme(textColor: textColor, surfaceColor: surfaceColor, isDark: isDark)
+    }
+
+    let shouldShow = currentUndoBanner != nil
+    let updates = {
+      self.undoBannerView.alpha = shouldShow ? 1 : 0
+      self.undoBannerView.transform = shouldShow
+        ? .identity
+        : CGAffineTransform(translationX: 0, y: 18)
+    }
+
+    if shouldShow {
+      bringSubviewToFront(undoBannerView)
+      undoBannerView.isHidden = false
+    }
+
+    if animated {
+      UIView.animate(
+        withDuration: 0.22,
+        delay: 0,
+        options: [.curveEaseOut, .beginFromCurrentState]
+      ) {
+        updates()
+      } completion: { _ in
+        if !shouldShow {
+          self.undoBannerView.isHidden = true
+        }
+      }
+    } else {
+      updates()
+      undoBannerView.isHidden = !shouldShow
+    }
   }
 
   private func configureView() {
@@ -117,16 +296,27 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     tableView.register(
       ChatNativeHomeCardCell.self, forCellReuseIdentifier: ChatNativeHomeCardCell.reuseIdentifier)
     addSubview(tableView)
+    undoBannerView.translatesAutoresizingMaskIntoConstraints = false
+    undoBannerView.alpha = 0
+    undoBannerView.isHidden = true
+    undoBannerView.transform = CGAffineTransform(translationX: 0, y: 18)
+    undoBannerView.addTarget(self, action: #selector(handleUndoBannerPressed), for: .touchUpInside)
+    addSubview(undoBannerView)
 
     NSLayoutConstraint.activate([
       tableView.leadingAnchor.constraint(equalTo: leadingAnchor),
       tableView.trailingAnchor.constraint(equalTo: trailingAnchor),
       tableView.topAnchor.constraint(equalTo: topAnchor),
       tableView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      undoBannerView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 14),
+      undoBannerView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -14),
+      undoBannerView.bottomAnchor.constraint(equalTo: safeAreaLayoutGuide.bottomAnchor, constant: -14),
+      undoBannerView.heightAnchor.constraint(equalToConstant: ChatNativeHomeUndoBannerView.preferredHeight),
     ])
 
     refreshControl.addTarget(self, action: #selector(handleRefresh), for: .valueChanged)
     tableView.refreshControl = refreshControl
+    updateUndoBanner(animated: false)
   }
 
   @objc private func handleChatEngineDidChange(_ notification: Notification) {
@@ -179,6 +369,10 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     onNativeEvent(["type": "refresh"])
   }
 
+  @objc private func handleUndoBannerPressed() {
+    onNativeEvent(["type": "undoPendingHomeAction"])
+  }
+
   private func ensureContextMenuBackdropInWindow() -> UIVisualEffectView? {
     guard let hostWindow = window ?? tableView.window else { return nil }
     let effectStyle: UIBlurEffect.Style = isDark ? .systemMaterialDark : .systemMaterialLight
@@ -214,6 +408,7 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     contextMenuConfigurationForRowAt indexPath: IndexPath,
     point: CGPoint
   ) -> UIContextMenuConfiguration? {
+    guard !isEditingMode else { return nil }
     guard indexPath.row < rows.count else { return nil }
     let row = rows[indexPath.row]
 
@@ -228,6 +423,13 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
         _ in
         self?.onNativeEvent(["type": "press", "chatId": row.chatId])
       }
+      let hasUnread = row.unreadCount > 0 || row.markedUnread
+      let readAction = UIAction(
+        title: hasUnread ? "Mark as Read" : "Mark as Unread",
+        image: UIImage(systemName: hasUnread ? "message.fill" : "circle.fill")
+      ) { _ in
+        self?.onNativeEvent(["type": "swipeMarkRead", "chatId": row.chatId])
+      }
       let pinAction = UIAction(
         title: row.pinned ? "Unpin" : "Pin",
         image: UIImage(systemName: row.pinned ? "pin.slash" : "pin")
@@ -236,11 +438,33 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
       }
       let muteAction = UIAction(
         title: row.muted ? "Unmute" : "Mute",
-        image: UIImage(systemName: row.muted ? "bell.slash" : "bell")
+        image: UIImage(systemName: row.muted ? "speaker.wave.2" : "speaker.slash")
       ) { _ in
         self?.onNativeEvent(["type": "swipeMute", "chatId": row.chatId])
       }
-      return UIMenu(title: "", children: [openAction, pinAction, muteAction])
+      let archiveAction = UIAction(
+        title: "Archive",
+        image: UIImage(systemName: "archivebox")
+      ) { _ in
+        self?.onNativeEvent(["type": "swipeArchive", "chatId": row.chatId])
+      }
+      let clearAction = UIAction(
+        title: "Clear Chat",
+        image: UIImage(systemName: "eraser")
+      ) { _ in
+        self?.onNativeEvent(["type": "clearChat", "chatId": row.chatId])
+      }
+      let deleteAction = UIAction(
+        title: "Delete",
+        image: UIImage(systemName: "trash"),
+        attributes: .destructive
+      ) { _ in
+        self?.onNativeEvent(["type": "swipeDelete", "chatId": row.chatId])
+      }
+      return UIMenu(
+        title: "",
+        children: [openAction, readAction, pinAction, muteAction, archiveAction, clearAction, deleteAction]
+      )
     }
   }
 
@@ -315,52 +539,34 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
       return UITableViewCell()
     }
     let displayRow = resolvedPresenceRow(for: rows[indexPath.row])
+    cell.swipeDelegate = self
     cell.configure(
       row: displayRow,
       isDark: isDark,
-      avatarBackgroundColor: resolvedAvatarBackgroundColor()
+      avatarBackgroundColor: resolvedAvatarBackgroundColor(),
+      isEditing: isEditingMode,
+      isEditSelected: selectedChatIds.contains(displayRow.chatId)
     )
     return cell
   }
 
   public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
     guard indexPath.row < rows.count else { return }
-    onNativeEvent(["type": "press", "chatId": rows[indexPath.row].chatId])
+    openSwipeCell?.closeSwipe(animated: true)
+    openSwipeCell = nil
+    let row = rows[indexPath.row]
+    if isEditingMode {
+      onNativeEvent(["type": "editToggleSelect", "chatId": row.chatId])
+      tableView.deselectRow(at: indexPath, animated: false)
+      return
+    }
+    onNativeEvent(["type": "press", "chatId": row.chatId])
     tableView.deselectRow(at: indexPath, animated: true)
   }
 
-  public func tableView(
-    _ tableView: UITableView,
-    leadingSwipeActionsConfigurationForRowAt indexPath: IndexPath
-  ) -> UISwipeActionsConfiguration? {
-    guard indexPath.row < rows.count else { return nil }
-    let row = rows[indexPath.row]
-    let pinAction = UIContextualAction(style: .normal, title: "Pin") {
-      [weak self] _, _, completion in
-      self?.onNativeEvent(["type": "swipePin", "chatId": row.chatId])
-      completion(true)
-    }
-    pinAction.backgroundColor = UIColor(red: 61 / 255, green: 130 / 255, blue: 247 / 255, alpha: 1)
-    let config = UISwipeActionsConfiguration(actions: [pinAction])
-    config.performsFirstActionWithFullSwipe = false
-    return config
-  }
-
-  public func tableView(
-    _ tableView: UITableView,
-    trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath
-  ) -> UISwipeActionsConfiguration? {
-    guard indexPath.row < rows.count else { return nil }
-    let row = rows[indexPath.row]
-    let muteAction = UIContextualAction(style: .normal, title: "Mute") {
-      [weak self] _, _, completion in
-      self?.onNativeEvent(["type": "swipeMute", "chatId": row.chatId])
-      completion(true)
-    }
-    muteAction.backgroundColor = UIColor(red: 247 / 255, green: 135 / 255, blue: 51 / 255, alpha: 1)
-    let config = UISwipeActionsConfiguration(actions: [muteAction])
-    config.performsFirstActionWithFullSwipe = false
-    return config
+  public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    openSwipeCell?.closeSwipe(animated: true)
+    openSwipeCell = nil
   }
 
   public func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -368,6 +574,44 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     onNativeEvent([
       "type": "scroll",
       "offsetY": max(0, normalizedOffsetY),
+    ])
+    // Progressive prefetch: as the user scrolls, warm media for the next
+    // batch of rows that are about to become visible.
+    let visibleRows = tableView.indexPathsForVisibleRows ?? []
+    guard let maxVisible = visibleRows.map(\.row).max() else { return }
+    let prefetchHorizon = maxVisible + 3  // look-ahead of 3 rows
+    if prefetchHorizon > lastPrefetchedScrollIndex {
+      let batchSize = 4
+      let batchEnd = min(prefetchHorizon + batchSize, rows.count)
+      prefetchMediaForRows(start: lastPrefetchedScrollIndex, end: batchEnd)
+      lastPrefetchedScrollIndex = batchEnd
+    }
+  }
+
+  func homeCardCellDidBeginSwipe(_ cell: ChatNativeHomeCardCell) {
+    if openSwipeCell !== cell {
+      openSwipeCell?.closeSwipe(animated: true)
+    }
+    openSwipeCell = cell
+  }
+
+  func homeCardCellDidCloseSwipe(_ cell: ChatNativeHomeCardCell) {
+    if openSwipeCell === cell {
+      openSwipeCell = nil
+    }
+  }
+
+  func homeCardCell(
+    _ cell: ChatNativeHomeCardCell,
+    didTriggerSwipeEvent eventType: String,
+    chatId: String
+  ) {
+    if openSwipeCell === cell {
+      openSwipeCell = nil
+    }
+    onNativeEvent([
+      "type": eventType,
+      "chatId": chatId,
     ])
   }
 

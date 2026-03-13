@@ -11,9 +11,120 @@ private struct ChatNativeTabItem: Equatable {
   let isVibe: Bool
 }
 
+private final class ChatNativeEditActionButton: UIControl {
+  private let chromeView = UIVisualEffectView(effect: nil)
+  private let highlightView = UIView()
+  private let titleLabel = UILabel()
+  private var isDark = false
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    setupView()
+  }
+
+  required init?(coder: NSCoder) {
+    super.init(coder: coder)
+    setupView()
+  }
+
+  override var isEnabled: Bool {
+    didSet {
+      applyAppearance(animated: true)
+    }
+  }
+
+  override var isHighlighted: Bool {
+    didSet {
+      UIView.animate(withDuration: 0.16) {
+        self.transform = self.isHighlighted ? CGAffineTransform(scaleX: 0.985, y: 0.985) : .identity
+        self.highlightView.alpha = self.isHighlighted ? 1 : 0
+      }
+    }
+  }
+
+  func setTitle(_ title: String) {
+    titleLabel.text = title
+  }
+
+  func applyTheme(isDark: Bool) {
+    self.isDark = isDark
+    let blurStyle: UIBlurEffect.Style =
+      isDark ? .systemChromeMaterialDark : .systemChromeMaterialLight
+    chromeView.effect = UIBlurEffect(style: blurStyle)
+    applyAppearance(animated: false)
+  }
+
+  private func setupView() {
+    translatesAutoresizingMaskIntoConstraints = false
+
+    chromeView.translatesAutoresizingMaskIntoConstraints = false
+    chromeView.layer.cornerRadius = 30
+    chromeView.layer.cornerCurve = .continuous
+    chromeView.layer.masksToBounds = true
+    addSubview(chromeView)
+
+    highlightView.translatesAutoresizingMaskIntoConstraints = false
+    highlightView.alpha = 0
+    highlightView.isUserInteractionEnabled = false
+    chromeView.contentView.addSubview(highlightView)
+
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
+    titleLabel.textAlignment = .center
+    titleLabel.adjustsFontSizeToFitWidth = true
+    titleLabel.minimumScaleFactor = 0.82
+    chromeView.contentView.addSubview(titleLabel)
+
+    NSLayoutConstraint.activate([
+      chromeView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      chromeView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      chromeView.topAnchor.constraint(equalTo: topAnchor),
+      chromeView.bottomAnchor.constraint(equalTo: bottomAnchor),
+
+      highlightView.leadingAnchor.constraint(equalTo: chromeView.contentView.leadingAnchor),
+      highlightView.trailingAnchor.constraint(equalTo: chromeView.contentView.trailingAnchor),
+      highlightView.topAnchor.constraint(equalTo: chromeView.contentView.topAnchor),
+      highlightView.bottomAnchor.constraint(equalTo: chromeView.contentView.bottomAnchor),
+
+      titleLabel.leadingAnchor.constraint(equalTo: chromeView.contentView.leadingAnchor, constant: 14),
+      titleLabel.trailingAnchor.constraint(equalTo: chromeView.contentView.trailingAnchor, constant: -14),
+      titleLabel.centerYAnchor.constraint(equalTo: chromeView.contentView.centerYAnchor),
+    ])
+
+    applyTheme(isDark: false)
+  }
+
+  private func applyAppearance(animated: Bool) {
+    let activeTextColor =
+      isDark ? UIColor.white : UIColor(red: 22 / 255, green: 28 / 255, blue: 36 / 255, alpha: 1)
+    let inactiveTextColor = activeTextColor.withAlphaComponent(isDark ? 0.42 : 0.36)
+    let fillColor =
+      isDark ? UIColor.white.withAlphaComponent(0.06) : UIColor.white.withAlphaComponent(0.56)
+    let borderColor =
+      isDark ? UIColor.white.withAlphaComponent(0.12) : UIColor.black.withAlphaComponent(0.06)
+    let highlightColor =
+      isDark ? UIColor.white.withAlphaComponent(0.08) : UIColor.black.withAlphaComponent(0.04)
+
+    let updates = {
+      self.chromeView.contentView.backgroundColor = fillColor
+      self.chromeView.layer.borderWidth = 1
+      self.chromeView.layer.borderColor = borderColor.cgColor
+      self.highlightView.backgroundColor = highlightColor
+      self.titleLabel.textColor = self.isEnabled ? activeTextColor : inactiveTextColor
+    }
+
+    if animated {
+      UIView.animate(withDuration: 0.2, animations: updates)
+    } else {
+      updates()
+    }
+  }
+}
+
 public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextFieldDelegate {
   public var onIndexChange = EventDispatcher()
   public var onVibeSubmit = EventDispatcher()
+  public var onEditActionPress = EventDispatcher()
 
   // Custom TabBar that ignores safe-area
   private class FloatingTabBar: UITabBar {
@@ -29,10 +140,16 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
   private let vibeButton = UIButton(type: .system)
   private let vibeTextField = UITextField()
   private let vibeSubmitButton = UIButton(type: .system)
+  private let editActionsContainer = UIStackView()
+  private let primaryEditActionButton = ChatNativeEditActionButton()
+  private let secondaryEditActionButton = ChatNativeEditActionButton()
 
   private var vibeWidthConstraint: NSLayoutConstraint?
   private var vibeHeightConstraint: NSLayoutConstraint?
+  private var vibeTextFieldLeadingConstraint: NSLayoutConstraint?
+  private var vibeTextFieldTrailingConstraint: NSLayoutConstraint?
   private var isVibeExpanded = false
+  private var isEditActionsActive = false
 
   private var tabs: [ChatNativeTabItem] = []
 
@@ -40,6 +157,10 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
   private var activeTintColor = UIColor.systemBlue
   private var inactiveTintColor = UIColor.systemGray
   private var isDark = false
+  private var editPrimaryTitle = "Read"
+  private var editSecondaryTitle = "Delete"
+  private var editPrimaryEnabled = true
+  private var editSecondaryEnabled = false
 
   private let selectionFeedback = UISelectionFeedbackGenerator()
   private var remoteIconCache: [String: UIImage] = [:]
@@ -54,6 +175,11 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
 
   public override var intrinsicContentSize: CGSize {
     CGSize(width: UIView.noIntrinsicMetric, height: 64)
+  }
+
+  private func nativeTabBarLog(_ message: String) {
+    NSLog("%@", message)
+    print(message)
   }
 
   private func setupView() {
@@ -92,6 +218,8 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     vibeTextField.alpha = 0
     vibeTextField.returnKeyType = .send
     vibeTextField.delegate = self
+    vibeTextField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    vibeTextField.setContentHuggingPriority(.defaultLow, for: .horizontal)
     vibeTextField.addTarget(self, action: #selector(textDidChange), for: .editingChanged)
     vibeChromeView.contentView.addSubview(vibeTextField)
 
@@ -102,12 +230,39 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     vibeSubmitButton.addTarget(self, action: #selector(handleVibeSubmitAction), for: .touchUpInside)
     vibeChromeView.contentView.insertSubview(vibeSubmitButton, belowSubview: vibeIconView)
 
+    editActionsContainer.translatesAutoresizingMaskIntoConstraints = false
+    editActionsContainer.axis = .horizontal
+    editActionsContainer.spacing = 8
+    editActionsContainer.distribution = .fillEqually
+    editActionsContainer.alignment = .fill
+    editActionsContainer.alpha = 0
+    editActionsContainer.isUserInteractionEnabled = false
+    addSubview(editActionsContainer)
+
+    primaryEditActionButton.setTitle(editPrimaryTitle)
+    primaryEditActionButton.addTarget(
+      self, action: #selector(handlePrimaryEditActionPress), for: .touchUpInside)
+    editActionsContainer.addArrangedSubview(primaryEditActionButton)
+
+    secondaryEditActionButton.setTitle(editSecondaryTitle)
+    secondaryEditActionButton.isEnabled = editSecondaryEnabled
+    secondaryEditActionButton.addTarget(
+      self, action: #selector(handleSecondaryEditActionPress), for: .touchUpInside)
+    editActionsContainer.addArrangedSubview(secondaryEditActionButton)
+
     let widthConstraint = vibeChromeView.widthAnchor.constraint(equalToConstant: 60)
     let heightConstraint = vibeChromeView.heightAnchor.constraint(equalToConstant: 60)
     self.vibeWidthConstraint = widthConstraint
     self.vibeHeightConstraint = heightConstraint
 
     // ── Direct Constraints ──
+    let vibeTextFieldLeadingConstraint = vibeTextField.leadingAnchor.constraint(
+      equalTo: vibeChromeView.contentView.leadingAnchor, constant: 14)
+    let vibeTextFieldTrailingConstraint = vibeTextField.trailingAnchor.constraint(
+      equalTo: vibeSubmitButton.leadingAnchor, constant: -8)
+    self.vibeTextFieldLeadingConstraint = vibeTextFieldLeadingConstraint
+    self.vibeTextFieldTrailingConstraint = vibeTextFieldTrailingConstraint
+
     NSLayoutConstraint.activate([
       // Shift the bounding box outward by 16pt on leading and 8pt on trailing to translate the invisible box leftward.
       // This mathematically balances Apple's inner padding so the visible glass pill aligns perfectly with the 10pt JS container padding.
@@ -128,11 +283,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
       vibeIconView.heightAnchor.constraint(equalToConstant: 24),
 
       // Text Field Constraints
-      vibeTextField.leadingAnchor.constraint(
-        equalTo: vibeChromeView.contentView.leadingAnchor, constant: 14),
       vibeTextField.centerYAnchor.constraint(equalTo: vibeChromeView.contentView.centerYAnchor),
-      vibeTextField.trailingAnchor.constraint(
-        equalTo: vibeSubmitButton.leadingAnchor, constant: -8),
 
       // Submit Button Constraints
       vibeSubmitButton.trailingAnchor.constraint(
@@ -146,11 +297,18 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
       vibeButton.trailingAnchor.constraint(equalTo: vibeChromeView.contentView.trailingAnchor),
       vibeButton.topAnchor.constraint(equalTo: vibeChromeView.contentView.topAnchor),
       vibeButton.bottomAnchor.constraint(equalTo: vibeChromeView.contentView.bottomAnchor),
+
+      editActionsContainer.leadingAnchor.constraint(equalTo: leadingAnchor),
+      editActionsContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
+      editActionsContainer.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+      editActionsContainer.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
     ])
 
     tabBar.itemPositioning = .automatic
     selectionFeedback.prepare()
     applyChrome()
+    updateVibeExpandedLayout()
+    updateEditActionsVisibility(active: false, animated: false)
   }
 
   func setTabs(_ rawTabs: [[String: Any]]) {
@@ -170,13 +328,26 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
 
     if tabs == newTabs { return }
 
+    let settingsIconUri =
+      newTabs.first(where: { $0.key.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "settings" })?.iconUri
+      ?? "nil"
+    nativeTabBarLog("[VibeTabBar] setTabs called. settings icon uri: \(settingsIconUri)")
+
     let itemsChanged =
-      tabs.count != newTabs.count || zip(tabs, newTabs).contains { a, b in a.key != b.key }
+      tabs.count != newTabs.count
+      || zip(tabs, newTabs).contains { a, b in
+        a.key != b.key
+          || a.sfSymbol != b.sfSymbol
+          || a.iconUri != b.iconUri
+          || a.isVibe != b.isVibe
+      }
     tabs = newTabs
 
     if itemsChanged {
+      nativeTabBarLog("[VibeTabBar] rebuilding native tab items due to structural/icon change")
       rebuildSegments()
     } else {
+      nativeTabBarLog("[VibeTabBar] updating existing native tab items in place")
       updateExistingSegments()
     }
   }
@@ -208,6 +379,38 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     isDark = value
     applyChrome()
     applySelection()
+  }
+
+  func setEditMode(_ raw: [String: Any]) {
+    let nextIsActive = (raw["isActive"] as? Bool) ?? false
+    let nextPrimaryTitle = (raw["primaryTitle"] as? String) ?? "Read"
+    let nextSecondaryTitle = (raw["secondaryTitle"] as? String) ?? "Delete"
+    let nextPrimaryEnabled = (raw["primaryEnabled"] as? Bool) ?? true
+    let nextSecondaryEnabled = (raw["secondaryEnabled"] as? Bool) ?? false
+
+    let didChangeContent =
+      editPrimaryTitle != nextPrimaryTitle
+      || editSecondaryTitle != nextSecondaryTitle
+      || editPrimaryEnabled != nextPrimaryEnabled
+      || editSecondaryEnabled != nextSecondaryEnabled
+
+    editPrimaryTitle = nextPrimaryTitle
+    editSecondaryTitle = nextSecondaryTitle
+    editPrimaryEnabled = nextPrimaryEnabled
+    editSecondaryEnabled = nextSecondaryEnabled
+
+    if didChangeContent {
+      primaryEditActionButton.setTitle(editPrimaryTitle)
+      primaryEditActionButton.isEnabled = editPrimaryEnabled
+      secondaryEditActionButton.setTitle(editSecondaryTitle)
+      secondaryEditActionButton.isEnabled = editSecondaryEnabled
+    }
+
+    if nextIsActive != isEditActionsActive {
+      updateEditActionsVisibility(active: nextIsActive, animated: true)
+    } else if didChangeContent {
+      applyEditActionButtonTheme()
+    }
   }
 
   public func tabBar(_ tabBar: UITabBar, didSelect item: UITabBarItem) {
@@ -258,8 +461,9 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
         // We resize the avatar image to 24x24 so it aligns perfectly with the standard 24x24 SF Symbols
         let cgSize = CGSize(width: 24, height: 24)
         if let resized = resizeImage(image: customIcon, targetSize: cgSize) {
-          let originalImage = resized.withRenderingMode(.alwaysOriginal)
-          let finalImage = withRoundedCorners(image: originalImage, radius: 12) ?? originalImage
+          let rounded = withRoundedCorners(image: resized, radius: 12) ?? resized
+          // Apply .alwaysOriginal AFTER rounding — UIGraphicsImageRenderer resets rendering mode
+          let finalImage = rounded.withRenderingMode(.alwaysOriginal)
           item.image = finalImage
           item.selectedImage = finalImage
 
@@ -295,9 +499,50 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     tabBar.tintColor = activeTintColor
     tabBar.unselectedItemTintColor = inactiveTintColor
     updateVibeButton(for: tabs.first(where: \.isVibe))
+    applyEditActionButtonTheme()
 
     if let items = tabBar.items {
       tabBar.selectedItem = items.first(where: { $0.tag == currentIndex })
+    }
+  }
+
+  private func applyEditActionButtonTheme() {
+    primaryEditActionButton.applyTheme(isDark: isDark)
+    primaryEditActionButton.isEnabled = editPrimaryEnabled
+    secondaryEditActionButton.applyTheme(isDark: isDark)
+    secondaryEditActionButton.isEnabled = editSecondaryEnabled
+  }
+
+  private func updateEditActionsVisibility(active: Bool, animated: Bool) {
+    isEditActionsActive = active
+    tabBar.isUserInteractionEnabled = !active
+    vibeChromeView.isUserInteractionEnabled = !active
+    editActionsContainer.isUserInteractionEnabled = active
+    applyEditActionButtonTheme()
+
+    let updates = {
+      self.tabBar.alpha = active ? 0 : 1
+      self.tabBar.transform = active ? CGAffineTransform(scaleX: 0.985, y: 0.985) : .identity
+      self.vibeChromeView.alpha = active ? 0 : 1
+      self.vibeChromeView.transform =
+        active ? CGAffineTransform(scaleX: 0.94, y: 0.94) : .identity
+      self.editActionsContainer.alpha = active ? 1 : 0
+      self.editActionsContainer.transform =
+        active ? .identity : CGAffineTransform(scaleX: 0.985, y: 0.985)
+    }
+
+    if animated {
+      UIView.animate(
+        withDuration: 0.24,
+        delay: 0,
+        usingSpringWithDamping: 0.92,
+        initialSpringVelocity: 0.1,
+        options: [.curveEaseInOut]
+      ) {
+        updates()
+      }
+    } else {
+      updates()
     }
   }
 
@@ -313,6 +558,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
           let fullWidth = self.bounds.width  // span entire width inherently aligning to outer container padding
           self.vibeWidthConstraint?.constant = fullWidth
           self.vibeHeightConstraint?.constant = 50
+          self.updateVibeExpandedLayout()
           self.vibeChromeView.layer.cornerRadius = 25
           self.tabBar.alpha = 0.0
           self.tabBar.transform = CGAffineTransform(translationX: -40, y: 0)
@@ -336,6 +582,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
           self.vibeSubmitButton.alpha = 1.0  // Becomes visible colored pill
           self.vibeButton.isUserInteractionEnabled = false
         } else {
+          self.updateVibeExpandedLayout()
           self.vibeWidthConstraint?.constant = 60
           self.vibeHeightConstraint?.constant = 60
           self.vibeChromeView.layer.cornerRadius = 30
@@ -375,6 +622,16 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     return true
   }
 
+  @objc private func handlePrimaryEditActionPress() {
+    guard editPrimaryEnabled else { return }
+    onEditActionPress(["action": "primary"])
+  }
+
+  @objc private func handleSecondaryEditActionPress() {
+    guard editSecondaryEnabled else { return }
+    onEditActionPress(["action": "secondary"])
+  }
+
   @objc private func textDidChange() {
     guard self.isVibeExpanded else { return }
     let text = vibeTextField.text ?? ""
@@ -393,6 +650,11 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
           ? UIColor.white.withAlphaComponent(0.6) : UIColor.black.withAlphaComponent(0.4)
       }
     }
+  }
+
+  private func updateVibeExpandedLayout() {
+    vibeTextFieldLeadingConstraint?.isActive = isVibeExpanded
+    vibeTextFieldTrailingConstraint?.isActive = isVibeExpanded
   }
 
   // MARK: - Chrome Application
@@ -448,6 +710,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     } else {
       vibeChromeView.effect = UIBlurEffect(style: blurStyle)
     }
+    applyEditActionButtonTheme()
   }
 
   private func updateVibeButton(for tab: ChatNativeTabItem?) {
@@ -577,7 +840,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
 
   private func resolvedIcon(for item: ChatNativeTabItem) -> UIImage? {
     guard let iconUri = item.iconUri, !iconUri.isEmpty else { return nil }
-    print("[VibeTabBar] resolving icon for: \(item.key) with uri: \(iconUri)")
+    nativeTabBarLog("[VibeTabBar] resolving icon for: \(item.key) with uri: \(iconUri)")
     if let cachedRemote = remoteIconCache[iconUri] {
       print("[VibeTabBar] Found in remote cache: \(iconUri)")
       return cachedRemote
@@ -602,11 +865,20 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     print("[VibeTabBar] Downloading remote image: \(url)")
     remoteIconRequests.insert(cacheKey)
 
-    URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+    var request = URLRequest(url: url)
+    request.cachePolicy = .returnCacheDataElseLoad
+    request.timeoutInterval = 10
+    request.setValue("image/*,*/*;q=0.8", forHTTPHeaderField: "Accept")
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
       DispatchQueue.main.async {
         guard let self else { return }
         self.remoteIconRequests.remove(cacheKey)
-        guard let data, let image = UIImage(data: data) else {
+        
+        guard let code = (response as? HTTPURLResponse)?.statusCode, (200...299).contains(code),
+              let data, let image = UIImage(data: data) 
+        else {
           print("[VibeTabBar] Failed to create UIImage from downloaded data for: \(url)")
           return
         }
@@ -619,7 +891,43 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
 
   private func localImageFromURI(_ uriString: String) -> UIImage? {
     guard !uriString.isEmpty else { return nil }
-    print("[VibeTabBar] Attempting to load local image from: \(uriString)")
+    nativeTabBarLog("[VibeTabBar] Attempting to load local image from: \(uriString)")
+
+    if uriString.hasPrefix("data:") {
+      nativeTabBarLog("[VibeTabBar] Attempting to decode data URI image")
+      guard let commaIndex = uriString.firstIndex(of: ",") else {
+        nativeTabBarLog("[VibeTabBar] Data URI missing comma separator")
+        return nil
+      }
+
+      let metadata = String(uriString[..<commaIndex])
+      let encodedPayload = String(uriString[uriString.index(after: commaIndex)...])
+
+      if metadata.localizedCaseInsensitiveContains(";base64") {
+        guard let data = Data(base64Encoded: encodedPayload, options: [.ignoreUnknownCharacters])
+        else {
+          nativeTabBarLog("[VibeTabBar] Failed to base64 decode data URI image payload")
+          return nil
+        }
+        guard let image = UIImage(data: data) else {
+          nativeTabBarLog("[VibeTabBar] Failed to create UIImage from decoded data URI payload")
+          return nil
+        }
+        nativeTabBarLog("[VibeTabBar] Decoded data URI image successfully")
+        return image
+      }
+
+      if let decodedPayload = encodedPayload.removingPercentEncoding,
+        let data = decodedPayload.data(using: .utf8),
+        let image = UIImage(data: data)
+      {
+        nativeTabBarLog("[VibeTabBar] Decoded percent-encoded data URI image successfully")
+        return image
+      }
+
+      nativeTabBarLog("[VibeTabBar] Unsupported non-base64 data URI image payload")
+      return nil
+    }
 
     if let url = URL(string: uriString) {
       if url.isFileURL {
@@ -678,7 +986,10 @@ public class ChatNativeTabBarModule: Module {
       Prop("isVibeExpanded") { (view: ChatNativeTabBarView, expanded: Bool) in
         view.setVibeExpanded(expanded)
       }
-      Events("onIndexChange", "onVibeSubmit")
+      Prop("editMode") { (view: ChatNativeTabBarView, editMode: [String: Any]) in
+        view.setEditMode(editMode)
+      }
+      Events("onIndexChange", "onVibeSubmit", "onEditActionPress")
     }
   }
 }

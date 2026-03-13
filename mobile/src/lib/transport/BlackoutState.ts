@@ -267,12 +267,13 @@ class BlackoutStateController {
     });
   }
 
-  async recordBridgeConnecting(): Promise<BlackoutStateSnapshot> {
+  async recordBridgeConnecting(activeBridgeId?: string): Promise<BlackoutStateSnapshot> {
     await this.ensureReady();
     return this.setSnapshot({
       transportMode: 'bridge_text',
       phase: 'bridge_bootstrap',
       bridgeFailureCount: 0,
+      activeBridgeId: activeBridgeId || this.snapshot.activeBridgeId,
     });
   }
 
@@ -329,6 +330,18 @@ class BlackoutStateController {
       disableRemoteAvatars: transportMode !== 'direct',
     };
   }
+
+  async forceDirectMode(reason?: string): Promise<BlackoutStateSnapshot> {
+    await this.ensureReady();
+    return this.setSnapshot({
+      phase: 'normal',
+      transportMode: 'direct',
+      directFailureTimestamps: [],
+      directSuccessStreak: 0,
+      bridgeFailureCount: 0,
+      lastError: reason,
+    });
+  }
 }
 
 const controller = BlackoutStateController.getInstance();
@@ -341,11 +354,14 @@ export const recordDirectTransportFailure = (source: string, error?: string): Pr
   controller.recordDirectFailure(source, error);
 export const recordDirectTransportSuccess = (source: string): Promise<BlackoutStateSnapshot> =>
   controller.recordDirectSuccess(source);
-export const recordBridgeTransportConnecting = (): Promise<BlackoutStateSnapshot> => controller.recordBridgeConnecting();
+export const recordBridgeTransportConnecting = (activeBridgeId?: string): Promise<BlackoutStateSnapshot> =>
+  controller.recordBridgeConnecting(activeBridgeId);
 export const recordBridgeTransportConnected = (activeBridgeId?: string): Promise<BlackoutStateSnapshot> =>
   controller.recordBridgeConnected(activeBridgeId);
 export const recordBridgeTransportFailure = (source: string, error?: string): Promise<BlackoutStateSnapshot> =>
   controller.recordBridgeFailure(source, error);
+export const forceDirectTransportMode = (reason?: string): Promise<BlackoutStateSnapshot> =>
+  controller.forceDirectMode(reason);
 export const ensureBlackoutControlReady = async (): Promise<void> => {
   await ensureBootstrapStoreReady();
   await ensureBlackoutStateReady();

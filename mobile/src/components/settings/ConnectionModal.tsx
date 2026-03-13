@@ -36,6 +36,7 @@ import ParticleVisualizer from '../native/SkiaAnimatedSphere'; // Actually Parti
 
 import RelayNode, { RelayStatus } from '../../lib/relay/RelayNode';
 import { deriveSessionKeys, encodeFrame, decodeFrame, MessageType } from '../../lib/relay/VibeNetProtocol';
+import { encodeBridgeLink, encodeBridgeHttpsLink } from '../../lib/relay/RelayBridgeLink';
 
 const MaskedViewAny = MaskedView as any;
 const AnimatedView = Animated.View as any;
@@ -647,6 +648,34 @@ const ConnectionMainVPN = ({
         }
     };
 
+    const handleShareRelay = async () => {
+        if (!relayConfig?.inviteCode) return;
+
+        const inviteCode = relayConfig.inviteCode;
+        const bridgeLink = relayConfig.bridgeShareLink; // This is vibe://
+        const httpsLink = encodeBridgeHttpsLink({
+            id: relayConfig.relayId || '',
+            host: relayConfig.bridgeExternalIp || undefined,
+            port: 443,
+            transport: 'https',
+            origin: 'community',
+        });
+
+        let message = `Join my private relay on Vibe!\n\nInvite Code: ${inviteCode}`;
+        if (bridgeLink) {
+            message += `\n\nIf you're in a blocked region, tap this link to connect:\n${httpsLink}\n\n(If the link isn't clickable, copy it and paste it into the Invite Code field in Vibe)`;
+        }
+
+        try {
+            await Share.share({
+                message,
+                title: 'Share Vibe Relay',
+            });
+        } catch (error) {
+            console.log('[ConnectionModal] Share error:', error);
+        }
+    };
+
     const handleToggleRelay = async (val: boolean) => {
         Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
         const node = RelayNode.getInstance();
@@ -865,8 +894,16 @@ const ConnectionMainVPN = ({
                                     label="Invite Code"
                                     value={relayConfig?.inviteCode || 'OFFLINE'}
                                     onPress={handleCopyRelayId}
-                                    isLast
+                                    isLast={!relayConfig?.bridgeShareLink}
                                 />
+                                {relayConfig?.bridgeShareLink && (
+                                    <SettingRow
+                                        label="Share Bridge Link"
+                                        onPress={handleShareRelay}
+                                        right={<Share2 size={16} color={primaryColor} />}
+                                        isLast
+                                    />
+                                )}
                             </SettingGroup>
 
                             <View style={[s.groupHeader, { marginTop: 24 }]}>
@@ -1040,6 +1077,10 @@ const ConnectionModal = forwardRef<ConnectionModalRef, ConnectionModalProps>(({ 
         uptime: 0,
         inviteCode: r.inviteCode,
         inviteKey: r.inviteKey,
+        externalIp: r.externalIp,
+        bridgeUrl: r.bridgeUrl,
+        shareLink: r.shareLink,
+        bridgeDescriptor: r.bridgeDescriptor,
         tags: [],
     });
 
@@ -1135,9 +1176,15 @@ const ConnectionModal = forwardRef<ConnectionModalRef, ConnectionModalProps>(({ 
                                 relayId: best.relayId, name: best.name,
                                 isPublic: best.isPublic, region: best.region,
                                 inviteCode: best.inviteCode, inviteKey: best.inviteKey,
+                                externalIp: best.externalIp,
+                                bridgeUrl: best.bridgeUrl,
+                                shareLink: best.shareLink,
+                                bridgeDescriptor: best.bridgeDescriptor,
                             }, getPhoenixSocket());
                             if (result.success) {
-                                ProxyManager.getInstance().setRelayMode();
+                                if (result.mode !== 'bridge') {
+                                    ProxyManager.getInstance().setRelayMode();
+                                }
                                 setCurrentLatency(best.latency ?? null);
                                 setVpnState('connected');
                                 setSessionStart(Date.now());
@@ -1238,10 +1285,16 @@ const ConnectionModal = forwardRef<ConnectionModalRef, ConnectionModalProps>(({ 
                     region: selectedLocation.relay.region,
                     inviteCode: selectedLocation.relay.inviteCode,
                     inviteKey: selectedLocation.relay.inviteKey,
+                    externalIp: selectedLocation.relay.externalIp,
+                    bridgeUrl: selectedLocation.relay.bridgeUrl,
+                    shareLink: selectedLocation.relay.shareLink,
+                    bridgeDescriptor: selectedLocation.relay.bridgeDescriptor,
                 }, getPhoenixSocket());
                 console.log('[Connect] connectToRelay result:', result);
                 if (result.success) {
-                    ProxyManager.getInstance().setRelayMode();
+                    if (result.mode !== 'bridge') {
+                        ProxyManager.getInstance().setRelayMode();
+                    }
                     setCurrentLatency(selectedLocation.latency);
                     setVpnState('connected');
                     setSessionStart(Date.now());
@@ -1279,10 +1332,16 @@ const ConnectionModal = forwardRef<ConnectionModalRef, ConnectionModalProps>(({ 
                         relayId: best.relayId, name: best.name,
                         isPublic: best.isPublic, region: best.region,
                         inviteCode: best.inviteCode, inviteKey: best.inviteKey,
+                        externalIp: best.externalIp,
+                        bridgeUrl: best.bridgeUrl,
+                        shareLink: best.shareLink,
+                        bridgeDescriptor: best.bridgeDescriptor,
                     }, getPhoenixSocket(), false);
                     console.log('[Connect] connectToRelay result:', result);
                     if (result.success) {
-                        ProxyManager.getInstance().setRelayMode();
+                        if (result.mode !== 'bridge') {
+                            ProxyManager.getInstance().setRelayMode();
+                        }
                         setCurrentLatency(best.latency);
                         setVpnState('connected');
                         setSessionStart(Date.now());

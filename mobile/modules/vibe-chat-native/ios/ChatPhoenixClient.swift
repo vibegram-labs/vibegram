@@ -3,21 +3,11 @@ import Foundation
 import Security
 
 @available(iOS 13.0, *)
-final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSessionDelegate {
-  struct EventFrame {
-    let joinRef: String?
-    let ref: String?
-    let topic: String
-    let event: String
-    let payload: [String: Any]
-  }
-
-  struct Callbacks {
-    let onOpen: () -> Void
-    let onClose: (_ code: Int, _ reason: String?) -> Void
-    let onError: (_ error: String) -> Void
-    let onEvent: (_ frame: EventFrame) -> Void
-  }
+final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSessionDelegate,
+  ChatRealtimeTransport
+{
+  typealias EventFrame = ChatTransportFrame
+  typealias Callbacks = ChatTransportCallbacks
 
   // MARK: - Certificate Pinning Configuration
 
@@ -36,7 +26,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   private let baseURL: URL
   private let params: [String: String]
   private let authToken: String?
-  private let callbacks: Callbacks
+  private let callbacks: ChatTransportCallbacks
   private let queue = DispatchQueue(label: "vibe.chat.phoenix.client")
   private let connectRequestTimeout: TimeInterval = 8.0
   private let heartbeatInterval: TimeInterval = 10.0
@@ -46,7 +36,10 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   private var nextRefValue: Int = 1
   private var isClosing = false
 
-  init(baseURL: URL, params: [String: String], authToken: String? = nil, callbacks: Callbacks) {
+  init(
+    baseURL: URL, params: [String: String], authToken: String? = nil,
+    callbacks: ChatTransportCallbacks
+  ) {
     self.baseURL = baseURL
     self.params = params
     self.authToken = authToken
@@ -222,7 +215,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
       let event = map["event"] as? String ?? ""
       guard !topic.isEmpty, !event.isEmpty else { return }
       let payload = (map["payload"] as? [String: Any]) ?? [:]
-      let frame = EventFrame(
+      let frame = ChatTransportFrame(
         joinRef: map["join_ref"] as? String,
         ref: map["ref"] as? String,
         topic: topic,
@@ -239,7 +232,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
       let event = raw[3] as? String ?? ""
       guard !topic.isEmpty, !event.isEmpty else { return }
       let payload = (raw[4] as? [String: Any]) ?? [:]
-      let frame = EventFrame(
+      let frame = ChatTransportFrame(
         joinRef: raw[0] is NSNull ? nil : (raw[0] as? String),
         ref: raw[1] is NSNull ? nil : (raw[1] as? String),
         topic: topic,

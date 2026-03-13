@@ -34,6 +34,7 @@ import {
 import { AppState, AppStateStatus } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import ProxyManager from '../ProxyManager';
+import { registerRelayAsBridge } from './RelayBridgeLink';
 
 // ─── Types ────────────────────────────────────────────────────────
 
@@ -47,6 +48,8 @@ export interface RelayConfig {
     inviteCode: string | null;
     inviteKey: string | null;
     relayId: string | null;
+    bridgeShareLink: string | null;
+    bridgeExternalIp: string | null;
 }
 
 export interface ConnectedPeer {
@@ -72,6 +75,8 @@ const DEFAULT_CONFIG: RelayConfig = {
     inviteCode: null,
     inviteKey: null,
     relayId: null,
+    bridgeShareLink: null,
+    bridgeExternalIp: null,
 };
 
 const STORAGE_KEY = 'vibenet_relay_config';
@@ -269,7 +274,7 @@ class RelayNode {
         }
     }
 
-    async startRelay(socket: any): Promise<{ success: boolean; inviteCode?: string; error?: string }> {
+    async startRelay(socket: any): Promise<{ success: boolean; inviteCode?: string; shareLink?: string; error?: string }> {
         if (this.status === 'running' || this.status === 'starting') {
             return { success: true, inviteCode: this.config.inviteCode || undefined };
         }
@@ -355,12 +360,54 @@ class RelayNode {
             await this.saveConfig();
             this.emit('status-changed', this.status);
 
-            return { success: true, inviteCode: this.config.inviteCode || undefined };
+            // Register as a bridge on the server (async, non-blocking)
+            this.registerAsBridge();
+
+            return {
+                success: true,
+                inviteCode: this.config.inviteCode || undefined,
+                shareLink: this.config.bridgeShareLink || undefined,
+            };
 
         } catch (e: any) {
             this.status = 'error';
             this.emit('status-changed', this.status);
             return { success: false, error: e.message };
+        }
+    }
+
+    getShareLink(): string | null {
+        return this.config.bridgeShareLink;
+    }
+
+    getExternalIp(): string | null {
+        return this.config.bridgeExternalIp;
+    }
+
+    private async registerAsBridge() {
+        try {
+            const result = await registerRelayAsBridge(
+                this.config.relayId || '',
+                this.config.inviteCode,
+                this.config.name || 'Relay Node',
+            );
+
+            if (result.success) {
+                this.config.bridgeShareLink = result.shareLink || null;
+                this.config.bridgeExternalIp = result.externalIp || null;
+                await this.saveConfig();
+                this.emit('config-changed', this.config);
+                this.emit('bridge-registered', {
+                    shareLink: result.shareLink,
+                    externalIp: result.externalIp,
+                    bridgeUrl: result.bridgeUrl,
+                });
+                console.log('[RelayNode] Registered as bridge. Share link:', result.shareLink);
+            } else {
+                console.warn('[RelayNode] Bridge registration failed:', result.error);
+            }
+        } catch (e) {
+            console.warn('[RelayNode] Bridge registration error:', e);
         }
     }
 

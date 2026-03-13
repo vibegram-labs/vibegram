@@ -49,5 +49,9 @@ export interface ChatListBubbleMessage {
         height?: number;
         thumbnailBase64?: string;
         waveform?: number[];
+        stickerId?: string;
+        stickerPackId?: string;
+        stickerBundleFileName?: string;
+        emoji?: string;
     };
 }

@@ -2884,6 +2884,7 @@ export default function ChatListScreen({
             mediaUrl: message.mediaUrl,
             fileName: message.fileName,
             duration: message.duration,
+            metadata: message.extra && typeof message.extra === 'object' ? message.extra : undefined,
             waveform: Array.isArray(message.extra?.waveform)
                 ? message.extra?.waveform.filter((v: unknown) => typeof v === 'number').map((v: number) => Math.max(0, Math.min(1, v)))
                 : undefined,

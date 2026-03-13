@@ -38,6 +38,16 @@
 export { default as RelayNode } from './RelayNode';
 export { default as RelayClient } from './RelayClient';
 export { default as RelayDirectory } from './RelayDirectory';
+export {
+    registerRelayAsBridge,
+    encodeBridgeLink,
+    encodeBridgeHttpsLink,
+    decodeBridgeLink,
+    importBridgeFromLink,
+    encodeBridgeText,
+    decodeBridgeText,
+    getRelayBridgeInfo,
+} from './RelayBridgeLink';
 
 export {
     // Protocol

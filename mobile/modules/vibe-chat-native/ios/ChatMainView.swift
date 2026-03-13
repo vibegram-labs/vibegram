@@ -320,6 +320,9 @@ public final class ChatMainView: ExpoView,
     layoutProfileMembersContent()
     layoutAgentContent()
     applyPageState(animated: false, emitEvent: false)
+    
+    avatarGlassView.contentView.layer.sublayers?.first(where: { $0.name == "savedMessagesGradient" })?.frame = avatarGlassView.contentView.bounds
+    profileAvatarView.layer.sublayers?.first(where: { $0.name == "savedMessagesGradient" })?.frame = profileAvatarView.bounds
   }
 
   // MARK: - Forwarded chat-list APIs
@@ -2930,6 +2933,66 @@ public final class ChatMainView: ExpoView,
 
   private func updateAvatarViews() {
     avatarLoadTask?.cancel()
+
+    if avatarUri.isEmpty && headerMode == .savedMessages {
+      avatarImageView.isHidden = true
+      profileAvatarImageView.isHidden = true
+      avatarFallbackIconView.isHidden = false
+      profileAvatarFallbackIconView.isHidden = false
+      
+      avatarFallbackIconView.image = UIImage(systemName: "bookmark.fill")
+      avatarFallbackIconView.tintColor = .white
+      
+      profileAvatarFallbackIconView.image = UIImage(systemName: "bookmark.fill")
+      profileAvatarFallbackIconView.tintColor = .white
+      
+      let gradientStart =
+        appearance.isDark
+        ? UIColor(red: 77 / 255, green: 217 / 255, blue: 229 / 255, alpha: 1)
+        : UIColor(red: 43 / 255, green: 165 / 255, blue: 181 / 255, alpha: 1)
+      let gradientEnd =
+        appearance.isDark
+        ? UIColor(red: 43 / 255, green: 165 / 255, blue: 181 / 255, alpha: 1)
+        : UIColor(red: 0 / 255, green: 122 / 255, blue: 124 / 255, alpha: 1)
+
+      // Header Gradient
+      var hGradient = avatarGlassView.contentView.layer.sublayers?.first(where: { $0.name == "savedMessagesGradient" }) as? CAGradientLayer
+      if hGradient == nil {
+        hGradient = CAGradientLayer()
+        hGradient?.name = "savedMessagesGradient"
+        avatarGlassView.contentView.layer.insertSublayer(hGradient!, at: 0)
+      }
+      hGradient?.colors = [gradientStart.cgColor, gradientEnd.cgColor]
+      hGradient?.startPoint = CGPoint(x: 0.5, y: 0)
+      hGradient?.endPoint = CGPoint(x: 0.5, y: 1)
+      avatarGlassView.contentView.backgroundColor = .clear
+
+      // Profile Gradient
+      var pGradient = profileAvatarView.layer.sublayers?.first(where: { $0.name == "savedMessagesGradient" }) as? CAGradientLayer
+      if pGradient == nil {
+        pGradient = CAGradientLayer()
+        pGradient?.name = "savedMessagesGradient"
+        profileAvatarView.layer.insertSublayer(pGradient!, at: 0)
+      }
+      pGradient?.colors = [gradientStart.cgColor, gradientEnd.cgColor]
+      pGradient?.startPoint = CGPoint(x: 0.5, y: 0)
+      pGradient?.endPoint = CGPoint(x: 0.5, y: 1)
+      profileAvatarView.backgroundColor = .clear
+      
+      return
+    }
+
+    // Reset default fallback icons for other cases
+    avatarGlassView.contentView.layer.sublayers?.removeAll(where: { $0.name == "savedMessagesGradient" })
+    profileAvatarView.layer.sublayers?.removeAll(where: { $0.name == "savedMessagesGradient" })
+
+    avatarFallbackIconView.image = UIImage(systemName: "person.fill")
+    avatarFallbackIconView.tintColor = appearance.isDark ? .white : .darkText
+    avatarGlassView.contentView.backgroundColor = .clear
+    
+    profileAvatarFallbackIconView.image = UIImage(systemName: "person.fill")
+    profileAvatarFallbackIconView.tintColor = appearance.isDark ? .white : .darkText
+    profileAvatarView.backgroundColor = .clear
 
     guard let url = URL(string: avatarUri), !avatarUri.isEmpty else {
       avatarImageView.isHidden = true

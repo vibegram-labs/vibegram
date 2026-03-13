@@ -27,6 +27,10 @@ interface NativeTabPressPayload {
     index: number;
 }
 
+interface NativeTabEditActionPayload {
+    action: 'primary' | 'secondary';
+}
+
 interface NativeTabViewItem {
     key: string;
     title: string;
@@ -43,8 +47,17 @@ interface NativeChatTabsViewProps {
     inactiveTintColor?: number | null;
     isDark?: boolean;
     isVibeExpanded?: boolean;
+    editMode?: {
+        isActive: boolean;
+        primaryTitle: string;
+        secondaryTitle: string;
+        primaryEnabled?: boolean;
+        secondaryEnabled?: boolean;
+        glassTintColor?: string;
+    };
     onIndexChange?: (event: NativeSyntheticEvent<NativeTabPressPayload>) => void;
     onVibeSubmit?: (event: NativeSyntheticEvent<{ text: string }>) => void;
+    onEditActionPress?: (event: NativeSyntheticEvent<NativeTabEditActionPayload>) => void;
     style?: any;
 }
 
@@ -74,6 +87,17 @@ export interface TabConfig {
     renderIcon?: (props: { focused: boolean; color: string; size: number }) => React.ReactNode;
 }
 
+export interface NativeTabBarEditMode {
+    isActive: boolean;
+    primaryTitle: string;
+    secondaryTitle: string;
+    primaryEnabled?: boolean;
+    secondaryEnabled?: boolean;
+    glassTintColor?: string;
+    onPrimaryActionPress?: () => void;
+    onSecondaryActionPress?: () => void;
+}
+
 export interface NativeTabBarProps {
     currentIndex: number;
     onIndexChange: (index: number) => void;
@@ -91,12 +115,79 @@ export interface NativeTabBarProps {
     fallbackTabWidth?: number;
     isVibeExpanded?: boolean;
     onVibeSubmit?: (text: string) => void;
+    editMode?: NativeTabBarEditMode;
 }
 
 const FALLBACK_TAB_WIDTH = 70;
 
 function isVibeTab(tab: TabConfig): boolean {
     return tab.key.trim().toLowerCase() === 'vibe' || tab.preventsDefault === true;
+}
+
+function FallbackEditActionBar({
+    isDark,
+    editMode,
+}: {
+    isDark: boolean;
+    editMode: NativeTabBarEditMode;
+}) {
+    const activeTextColor = isDark ? '#FFFFFF' : '#111827';
+    const inactiveTextColor = isDark ? 'rgba(255,255,255,0.42)' : 'rgba(17,24,39,0.36)';
+    const buttonBackgroundColor = editMode.glassTintColor
+        ? editMode.glassTintColor
+        : (isDark ? 'rgba(255,255,255,0.12)' : 'rgba(255,255,255,0.72)');
+    const buttonBorderColor = isDark ? 'rgba(255,255,255,0.12)' : 'rgba(17,24,39,0.06)';
+
+    const renderAction = (
+        title: string,
+        enabled: boolean,
+        onPress?: () => void,
+    ) => (
+        <TouchableOpacity
+            activeOpacity={enabled ? 0.9 : 1}
+            disabled={!enabled}
+            onPress={onPress}
+            style={fallbackStyles.editActionTouch}
+        >
+            <SafeLiquidGlass
+                style={[
+                    fallbackStyles.editActionButton,
+                    {
+                        backgroundColor: buttonBackgroundColor,
+                        borderColor: buttonBorderColor,
+                        opacity: enabled ? 1 : 0.78,
+                    },
+                ]}
+                blurIntensity={18}
+                tint={isDark ? 'dark' : 'light'}
+            >
+                <Text
+                    numberOfLines={1}
+                    style={[
+                        fallbackStyles.editActionLabel,
+                        { color: enabled ? activeTextColor : inactiveTextColor },
+                    ]}
+                >
+                    {title}
+                </Text>
+            </SafeLiquidGlass>
+        </TouchableOpacity>
+    );
+
+    return (
+        <View style={fallbackStyles.editActionRow}>
+            {renderAction(
+                editMode.primaryTitle,
+                editMode.primaryEnabled !== false,
+                editMode.onPrimaryActionPress,
+            )}
+            {renderAction(
+                editMode.secondaryTitle,
+                editMode.secondaryEnabled !== false,
+                editMode.onSecondaryActionPress,
+            )}
+        </View>
+    );
 }
 
 export function isNativeTabBarAvailable(): boolean {
@@ -117,6 +208,7 @@ export default function NativeTabBar({
     fallbackTabWidth,
     isVibeExpanded,
     onVibeSubmit,
+    editMode,
 }: NativeTabBarProps) {
     const vibeIndex = tabs.findIndex(isVibeTab);
     const vibeTab = vibeIndex >= 0 ? tabs[vibeIndex] : undefined;
@@ -160,6 +252,36 @@ export default function NativeTabBar({
                 isVibe: isVibeTab(tab),
             };
         }), [tabs]);
+        const settingsTab = nativeTabs.find((tab) => tab.key === 'settings');
+        const settingsIconUri = settingsTab?.iconUri;
+        const settingsIconKind = !settingsIconUri
+            ? 'none'
+            : settingsIconUri.startsWith('data:')
+                ? 'data'
+                : settingsIconUri.startsWith('file://')
+                    ? 'file'
+                    : settingsIconUri.startsWith('http://') || settingsIconUri.startsWith('https://')
+                        ? 'remote'
+                        : 'other';
+        console.log('[NativeTabBar] syncing settings tab icon to native', {
+            hasIconUri: !!settingsIconUri,
+            iconKind: settingsIconKind,
+            iconPreview: settingsIconUri ? `${settingsIconUri.slice(0, 96)}${settingsIconUri.length > 96 ? '…' : ''}` : null,
+        });
+        const nativeViewKey = React.useMemo(
+            () => nativeTabs
+                .map((tab) => {
+                    const iconUri = tab.iconUri ?? '';
+                    const iconToken = iconUri
+                        ? `${iconUri.slice(0, 48)}:${iconUri.length}`
+                        : 'none';
+                    return `${tab.key}:${tab.badge ?? ''}:${iconToken}`;
+                })
+                .join('|'),
+            [nativeTabs]
+        );
+        console.log('[NativeTabBar] native view key', nativeViewKey);
+
         const nativeDockStyle = React.useMemo(
             () => [styles.nativeTabsDock, isVibeExpanded && styles.nativeTabsDockExpanded],
             [isVibeExpanded],
@@ -168,6 +290,18 @@ export default function NativeTabBar({
             () => [styles.nativeTabsBar, isVibeExpanded && styles.nativeTabsBarExpanded],
             [isVibeExpanded],
         );
+        const nativeEditMode = React.useMemo(() => (
+            editMode
+                ? {
+                    isActive: !!editMode.isActive,
+                    primaryTitle: editMode.primaryTitle,
+                    secondaryTitle: editMode.secondaryTitle,
+                    primaryEnabled: editMode.primaryEnabled !== false,
+                    secondaryEnabled: editMode.secondaryEnabled !== false,
+                    glassTintColor: editMode.glassTintColor,
+                }
+                : undefined
+        ), [editMode]);
 
         const handleNativeIndexChange = React.useCallback((event: NativeSyntheticEvent<NativeTabPressPayload>) => {
             const payload: any = event?.nativeEvent ?? event;
@@ -185,9 +319,22 @@ export default function NativeTabBar({
             onIndexChange(next);
         }, [tabs, handleSeparateVibePress, onIndexChange]);
 
+        const handleNativeEditActionPress = React.useCallback((event: NativeSyntheticEvent<NativeTabEditActionPayload>) => {
+            const payload: any = event?.nativeEvent ?? event;
+            const action = payload?.action;
+            if (action === 'primary') {
+                editMode?.onPrimaryActionPress?.();
+                return;
+            }
+            if (action === 'secondary') {
+                editMode?.onSecondaryActionPress?.();
+            }
+        }, [editMode]);
+
         return (
             <View pointerEvents="box-none" style={nativeDockStyle}>
                 <NativeTabsComponent
+                    key={nativeViewKey}
                     style={nativeBarStyle}
                     tabs={nativeTabs}
                     currentIndex={normalizedIndex}
@@ -195,6 +342,7 @@ export default function NativeTabBar({
                     inactiveTintColor={nativeInactiveTintColor}
                     isDark={isDark}
                     isVibeExpanded={isVibeExpanded}
+                    editMode={nativeEditMode}
                     onIndexChange={handleNativeIndexChange}
                     onVibeSubmit={(e: any) => {
                         const payload = e?.nativeEvent ?? e;
@@ -202,8 +350,18 @@ export default function NativeTabBar({
                             onVibeSubmit(payload.text);
                         }
                     }}
+                    onEditActionPress={handleNativeEditActionPress}
                 />
             </View>
+        );
+    }
+
+    if (editMode?.isActive) {
+        return (
+            <FallbackEditActionBar
+                isDark={isDark}
+                editMode={editMode}
+            />
         );
     }
 
@@ -708,6 +866,31 @@ const fallbackStyles = StyleSheet.create({
         flexDirection: 'row',
         alignItems: 'center',
         gap: 8,
+    },
+    editActionRow: {
+        width: '100%',
+        flexDirection: 'row',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+    },
+    editActionTouch: {
+        width: 116,
+        flexGrow: 0,
+        flexShrink: 0,
+    },
+    editActionButton: {
+        height: 40,
+        borderRadius: 20,
+        borderWidth: 1,
+        overflow: 'hidden',
+        alignItems: 'center',
+        justifyContent: 'center',
+        paddingHorizontal: 16,
+    },
+    editActionLabel: {
+        fontSize: 15,
+        fontWeight: '600',
+        letterSpacing: -0.2,
     },
     androidAttachedDock: {
         width: '100%',

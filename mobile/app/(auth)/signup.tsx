@@ -134,13 +134,11 @@ export default function SignUpScreen() {
                 contrast={0.74}
                 grainAmount={0.3}
                 darken={0.06}
-                anchor={[0.14, 0.86]}
-                veilAnchor={[0.2, 0.92]}
-                blobScale={[0.92, 1.18]}
-                veilScale={[0.84, 1.42]}
-                rotation={-0.46}
-                verticalMaskStart={0.54}
-                verticalMaskEnd={0.8}
+                anchor={[0.85, -0.1]}
+                veilAnchor={[0.85, -0.15]}
+                blobScale={[1.2, 1.2]}
+                veilScale={[1.2, 1.2]}
+                rotation={-0.2}
             />
 
             <View style={[styles.navbar, { paddingTop: insets.top + 10, direction: 'ltr', flexDirection: 'row' }]}>

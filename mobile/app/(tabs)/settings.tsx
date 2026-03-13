@@ -286,7 +286,7 @@ export default function SettingsScreen() {
                         icon: 'person.fill',
                         label: t('settings.editProfile'),
                         value: user?.name ? 'Manage' : 'Set up',
-                        color: colors.text,
+                        color: '#3b82f6',
                     },
                     {
                         id: 'saved-messages',
@@ -352,7 +352,7 @@ export default function SettingsScreen() {
                         icon: 'moon.fill',
                         label: 'Appearance',
                         value: theme === 'dark' ? 'Dark' : 'Light',
-                        color: colors.text,
+                        color: '#6366f1',
                         divider: false,
                     },
                 ],
@@ -403,7 +403,7 @@ export default function SettingsScreen() {
         }
 
         return sections;
-    }, [colors.text, notificationsEnabled, stats?.verifiedCount, t, theme, user?.name, userTier]);
+    }, [notificationsEnabled, stats?.verifiedCount, t, theme, user?.name, userTier]);
 
     const useNativeSettingsMain = Platform.OS === 'ios' && activeView === 'main' && isNativeSettingsMainAvailable();
 

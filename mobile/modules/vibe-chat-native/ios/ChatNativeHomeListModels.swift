@@ -1,4 +1,5 @@
 import Foundation
+import UIKit
 
 struct ChatNativeHomeListRow {
   private static let fallbackAPIBaseURL = "https://modest-recreation-production-8329.up.railway.app"
@@ -204,4 +205,85 @@ struct ChatNativeHomeListRow {
     }
     return nil
   }
+}
+
+enum ChatNativeHomeSwipeEdge {
+  case leading
+  case trailing
+}
+
+struct ChatNativeHomeSwipeActionSpec {
+  let eventType: String
+  let title: String
+  let systemImageName: String
+  let backgroundColor: UIColor
+  let foregroundColor: UIColor
+  let style: UIContextualAction.Style
+  let isFullSwipeTarget: Bool
+}
+
+extension ChatNativeHomeListRow {
+  var leadingSwipeActionSpecs: [ChatNativeHomeSwipeActionSpec] {
+    let hasUnread = unreadCount > 0 || markedUnread
+    return [
+      ChatNativeHomeSwipeActionSpec(
+        eventType: "swipePin",
+        title: pinned ? "Unpin" : "Pin",
+        systemImageName: pinned ? "pin.slash.fill" : "pin.fill",
+        backgroundColor: ChatNativeHomeSwipePalette.pin,
+        foregroundColor: .white,
+        style: .normal,
+        isFullSwipeTarget: true
+      ),
+      ChatNativeHomeSwipeActionSpec(
+        eventType: "swipeMarkRead",
+        title: hasUnread ? "Read" : "Unread",
+        systemImageName: hasUnread ? "message.fill" : "circle.fill",
+        backgroundColor: ChatNativeHomeSwipePalette.read,
+        foregroundColor: .white,
+        style: .normal,
+        isFullSwipeTarget: false
+      ),
+    ]
+  }
+
+  var trailingSwipeActionSpecs: [ChatNativeHomeSwipeActionSpec] {
+    [
+      ChatNativeHomeSwipeActionSpec(
+        eventType: "swipeDelete",
+        title: "Delete",
+        systemImageName: "trash.fill",
+        backgroundColor: ChatNativeHomeSwipePalette.delete,
+        foregroundColor: .white,
+        style: .destructive,
+        isFullSwipeTarget: true
+      ),
+      ChatNativeHomeSwipeActionSpec(
+        eventType: "swipeMute",
+        title: muted ? "Unmute" : "Mute",
+        systemImageName: muted ? "speaker.wave.2.fill" : "speaker.slash.fill",
+        backgroundColor: ChatNativeHomeSwipePalette.mute,
+        foregroundColor: .white,
+        style: .normal,
+        isFullSwipeTarget: false
+      ),
+      ChatNativeHomeSwipeActionSpec(
+        eventType: "swipeArchive",
+        title: "Archive",
+        systemImageName: "archivebox.fill",
+        backgroundColor: ChatNativeHomeSwipePalette.archive,
+        foregroundColor: .white,
+        style: .normal,
+        isFullSwipeTarget: false
+      ),
+    ]
+  }
+}
+
+private enum ChatNativeHomeSwipePalette {
+  static let pin = UIColor(red: 0.20, green: 0.47, blue: 0.90, alpha: 1)
+  static let read = UIColor(red: 0.24, green: 0.61, blue: 0.86, alpha: 1)
+  static let mute = UIColor(red: 0.86, green: 0.53, blue: 0.04, alpha: 1)
+  static let delete = UIColor(red: 0.88, green: 0.10, blue: 0.10, alpha: 1)
+  static let archive = UIColor(red: 0.51, green: 0.51, blue: 0.53, alpha: 1)
 }

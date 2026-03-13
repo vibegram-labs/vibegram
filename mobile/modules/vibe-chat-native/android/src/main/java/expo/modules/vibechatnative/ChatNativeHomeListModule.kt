@@ -32,6 +32,10 @@ class ChatNativeHomeListModule : Module() {
         view.setContentBottomInset(value)
       }
 
+      Prop("undoBanner") { view: ChatNativeHomeListView, undoBanner: Map<String, Any?>? ->
+        view.setUndoBanner(undoBanner)
+      }
+
       Events("onNativeEvent")
     }
   }
