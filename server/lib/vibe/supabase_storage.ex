@@ -175,14 +175,7 @@ defmodule Vibe.SupabaseStorage do
   def get_public_url(remote_path, bucket) when is_binary(bucket) do
     config = get_config()
     raw_url = raw_public_url(remote_path, bucket, config)
-    public_url = rewrite_public_url(raw_url, config)
-
-    Logger.info(
-      "[SupabaseStorage][CDN] bucket=#{bucket} remote_path=#{remote_path} " <>
-        "cdn_base=#{inspect(config.media_cdn_base_url)} raw_url=#{raw_url} public_url=#{public_url}"
-    )
-
-    public_url
+    rewrite_public_url(raw_url, config)
   end
 
   @doc """
@@ -212,20 +205,9 @@ defmodule Vibe.SupabaseStorage do
   def rewrite_public_url(other), do: other
 
   defp rewrite_public_url(url, config) when is_binary(url) do
-    raw_url = url
-
     with cdn_base when is_binary(cdn_base) <- normalize_base_url(config.media_cdn_base_url),
          {:ok, bucket, object_path, suffix} <- extract_public_object_components(url) do
-      rewritten_url = "#{cdn_base}/#{bucket}/#{object_path}#{suffix}"
-
-      if rewritten_url != raw_url do
-        Logger.info(
-          "[SupabaseStorage][CDN] rewrite_public_url bucket=#{bucket} " <>
-            "cdn_base=#{cdn_base} raw_url=#{raw_url} rewritten_url=#{rewritten_url}"
-        )
-      end
-
-      rewritten_url
+      "#{cdn_base}/#{bucket}/#{object_path}#{suffix}"
     else
       _ -> url
     end

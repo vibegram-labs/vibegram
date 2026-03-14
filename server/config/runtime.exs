@@ -6,7 +6,6 @@ end
 
 if config_env() == :prod do
   media_cdn_base_url = System.get_env("MEDIA_CDN_BASE_URL")
-  IO.puts("[runtime] MEDIA_CDN_BASE_URL=#{inspect(media_cdn_base_url)}")
 
   # Support DATABASE_URL directly, or construct from SUPABASE_URL + SUPABASE_DB_PASSWORD
   # Support DATABASE_URL directly, or construct from SUPABASE_URL + SUPABASE_DB_PASSWORD
