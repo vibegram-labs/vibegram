@@ -5,6 +5,9 @@ if System.get_env("PHX_SERVER") do
 end
 
 if config_env() == :prod do
+  media_cdn_base_url = System.get_env("MEDIA_CDN_BASE_URL")
+  IO.puts("[runtime] MEDIA_CDN_BASE_URL=#{inspect(media_cdn_base_url)}")
+
   # Support DATABASE_URL directly, or construct from SUPABASE_URL + SUPABASE_DB_PASSWORD
   # Support DATABASE_URL directly, or construct from SUPABASE_URL + SUPABASE_DB_PASSWORD
   database_url = System.get_env("DATABASE_URL")
@@ -45,7 +48,7 @@ if config_env() == :prod do
     url: System.get_env("SUPABASE_URL"),
     key: System.get_env("SUPABASE_KEY"),
     service_key: System.get_env("SUPABASE_SERVICE_KEY"),
-    media_cdn_base_url: System.get_env("MEDIA_CDN_BASE_URL"),
+    media_cdn_base_url: media_cdn_base_url,
     # Optional: allow different buckets per use-case.
     # If unset, code falls back to its default bucket.
     bucket: System.get_env("SUPABASE_BUCKET"),
