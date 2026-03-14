@@ -2,6 +2,7 @@ package expo.modules.vibechatnative
 
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import okhttp3.CertificatePinner
 import okhttp3.ConnectionSpec
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -23,6 +24,8 @@ internal class ChatPhoenixClient(
 ) : ChatRealtimeTransport {
 
   companion object {
+    private const val TAG = "ChatPhoenixClient"
+
     /// SPKI SHA-256 hashes for certificate pinning.
     /// Add your server's leaf cert + at least one backup/intermediate hash.
     /// Generate with: openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64
@@ -62,6 +65,7 @@ internal class ChatPhoenixClient(
 
   override fun connect() {
     val httpUrl = buildUrl() ?: run {
+      Log.e(TAG, "connect aborted: invalid_socket_url raw=${socketUrl.take(200)}")
       callbacks.onError("invalid_socket_url")
       return
     }
@@ -73,23 +77,34 @@ internal class ChatPhoenixClient(
       requestBuilder.header("Authorization", "Bearer $authToken")
     }
     val request = requestBuilder.build()
+    Log.i(
+      TAG,
+      "connect start url=${redactedUrl(httpUrl.toString())} hasAuthHeader=${!authToken.isNullOrBlank()} queryKeys=${httpUrl.queryParameterNames.sorted()}",
+    )
     webSocket = okHttp.newWebSocket(
       request,
       object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+          Log.i(
+            TAG,
+            "onOpen code=${response.code} message=${response.message} url=${redactedUrl(response.request.url.toString())}",
+          )
           startHeartbeat()
-        callbacks.onOpen()
+          callbacks.onOpen()
         }
 
         override fun onMessage(webSocket: WebSocket, text: String) {
+          Log.d(TAG, "onMessage bytes=${text.length} preview=${text.take(220)}")
           handleMessage(text)
         }
 
         override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+          Log.w(TAG, "onClosing code=$code reason=$reason")
           webSocket.close(code, reason)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+          Log.w(TAG, "onClosed code=$code reason=$reason isClosing=$isClosing")
           stopHeartbeat()
           if (!isClosing) {
             callbacks.onClosed(code, reason)
@@ -97,6 +112,11 @@ internal class ChatPhoenixClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+          Log.e(
+            TAG,
+            "onFailure error=${t.message ?: t.javaClass.simpleName} code=${response?.code ?: -1} responseMessage=${response?.message ?: "-"} url=${response?.request?.url?.toString()?.let(::redactedUrl) ?: "-"}",
+            t,
+          )
           stopHeartbeat()
           if (!isClosing) {
             callbacks.onError("ws_failure:${t.message ?: t.javaClass.simpleName}")
@@ -108,6 +128,7 @@ internal class ChatPhoenixClient(
   }
 
   override fun disconnect() {
+    Log.i(TAG, "disconnect requested hasSocket=${webSocket != null}")
     isClosing = true
     stopHeartbeat()
     webSocket?.close(1000, "client_disconnect")
@@ -199,15 +220,24 @@ internal class ChatPhoenixClient(
     event: String,
     payload: Map<String, Any?>,
   ) {
-    val ws = webSocket ?: return
+    val ws = webSocket ?: run {
+      Log.w(TAG, "sendFrame dropped reason=no_socket topic=$topic event=$event ref=${ref ?: "-"} joinRef=${joinRef ?: "-"}")
+      return
+    }
     val obj = JSONObject()
     obj.put("topic", topic)
     obj.put("event", event)
     obj.put("payload", anyToJson(payload))
     if (joinRef != null) obj.put("join_ref", joinRef)
     if (ref != null) obj.put("ref", ref)
-    val ok = ws.send(obj.toString())
+    val body = obj.toString()
+    Log.d(
+      TAG,
+      "sendFrame topic=$topic event=$event ref=${ref ?: "-"} joinRef=${joinRef ?: "-"} bytes=${body.length}",
+    )
+    val ok = ws.send(body)
     if (!ok) {
+      Log.e(TAG, "sendFrame failed topic=$topic event=$event ref=${ref ?: "-"}")
       callbacks.onError("send_failed:$event")
     }
   }
@@ -256,8 +286,20 @@ internal class ChatPhoenixClient(
         ),
       )
     } catch (_: Throwable) {
+      Log.e(TAG, "handleMessage parse_frame_failed preview=${text.take(220)}")
       callbacks.onError("parse_frame_failed")
     }
+  }
+
+  private fun redactedUrl(raw: String): String {
+    val parsed = raw.toHttpUrlOrNull() ?: return raw
+    val rebuilt = parsed.newBuilder().apply {
+      if (parsed.queryParameterNames.contains("token")) {
+        removeAllQueryParameters("token")
+        addQueryParameter("token", "<redacted>")
+      }
+    }.build()
+    return rebuilt.toString()
   }
 
   private fun JSONArray.optNullableString(index: Int): String? {

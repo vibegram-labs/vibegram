@@ -248,6 +248,28 @@ export default function ChatProfileScreen() {
       return;
     }
 
+    if (type === 'profileContentSectionPressed') {
+      const section = typeof payload.section === 'string' ? payload.section.trim() : '';
+      if (effectiveChatId && section) {
+        const routeParams: Record<string, string> = {
+          chatId: effectiveChatId,
+          username: displayName,
+          profileImage: isGroupOrChannel
+            ? ((((activeChat as any)?.avatarUrl as string | undefined) || ''))
+            : (activeChat?.friendImage || ''),
+          isOnline: isOnline ? '1' : '0',
+          initialTab: section,
+        };
+
+        if (!isGroupOrChannel && activeChat?.friendId) {
+          routeParams.userId = activeChat.friendId;
+        }
+
+        router.push({ pathname: '/user-profile', params: routeParams });
+      }
+      return;
+    }
+
     if (type === 'profileContentPressed') {
       const url = typeof payload.url === 'string' ? payload.url.trim() : '';
       if (url) {
@@ -333,11 +355,16 @@ export default function ChatProfileScreen() {
       return;
     }
   }, [
+    activeChat,
     activeChat?.friendId,
+    activeChat?.friendImage,
     activeChat?.muted,
     callNativeEngine,
     deleteChat,
+    displayName,
     effectiveChatId,
+    isGroupOrChannel,
+    isOnline,
     loadChats,
     router,
     user?.userId,

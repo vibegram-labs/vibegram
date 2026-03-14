@@ -6,7 +6,6 @@ import android.graphics.Color
 import android.graphics.PorterDuff
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
-import android.net.Uri
 import android.util.Log
 import android.util.TypedValue
 import android.view.Gravity
@@ -22,9 +21,13 @@ import expo.modules.kotlin.AppContext
 import expo.modules.kotlin.viewevent.EventDispatcher
 import expo.modules.kotlin.views.ExpoView
 import java.text.DateFormat
-import java.net.URL
 import java.util.Calendar
 import java.util.Date
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Request
+import okhttp3.Response
+import java.io.IOException
 import java.util.Locale
 import kotlin.math.abs
 import kotlin.math.max
@@ -41,6 +44,8 @@ class ChatMainView(
     private const val TAG = "ChatMainView"
     private const val PAGE_ANIMATION_DURATION_MS = 260L
     private const val PAGE_STATE_WATCHDOG_DELAY_MS = 360L
+    private const val PROFILE_HEADER_COLLAPSE_DISTANCE_DP = 120f
+    private val LINK_REGEX = Regex("""https?://\S+|www\.\S+""", RegexOption.IGNORE_CASE)
   }
 
   private val onViewportChanged by EventDispatcher<Map<String, Any>>()
@@ -60,23 +65,25 @@ class ChatMainView(
   private val chatTextGroup = LinearLayout(context)
   private val chatTitleView = TextView(context)
   private val chatSubtitleView = TextView(context)
-  private val chatBackButton = TextView(context)
+  private val chatBackButton = ImageView(context)
   private val chatAvatarButton = FrameLayout(context)
   private val chatAvatarImage = ImageView(context)
-  private val chatAvatarFallback = TextView(context)
+  private val chatAvatarFallback = ImageView(context)
   private val chatVideoButton = ImageView(context)
   private val chatPhoneButton = ImageView(context)
   private val chatSearchButton = ImageView(context)
 
   private val profileHeader = FrameLayout(context)
-  private val profileBackButton = TextView(context)
+  private val profileHeaderGlass = LiquidGlassView(context, appContext)
+  private val profileBackButton = ImageView(context)
   private val profileHeaderTitle = TextView(context)
+  private val profileHeaderName = TextView(context)
 
   private val profileScroll = ScrollView(context)
   private val profileContent = LinearLayout(context)
   private val profileHeroAvatar = FrameLayout(context)
   private val profileAvatarImage = ImageView(context)
-  private val profileAvatarFallback = TextView(context)
+  private val profileAvatarFallback = ImageView(context)
   private val profileNameView = TextView(context)
   private val profileHandleView = TextView(context)
   private val profileBioView = TextView(context)
@@ -88,6 +95,12 @@ class ChatMainView(
   private val profileInfoCard = LinearLayout(context)
   private val profileInfoTitle = TextView(context)
   private val profileInfoSubtitle = TextView(context)
+  private val profileMembersRow = ChatMainProfileListRowNode(context)
+  private val profileMediaRow = ChatMainProfileListRowNode(context)
+  private val profileAudioRow = ChatMainProfileListRowNode(context)
+  private val profileFilesRow = ChatMainProfileListRowNode(context)
+  private val profileLinksRow = ChatMainProfileListRowNode(context)
+  private val profilePinnedRow = ChatMainProfileListRowNode(context)
 
   private var surfaceId: String = ""
   private var headerMode: String = "default"
@@ -108,18 +121,24 @@ class ChatMainView(
   private var isOnline: Boolean = false
   private var isChatMuted: Boolean = false
   private var engineChatId: String = ""
+  private var enginePeerUserIdRaw: String = ""
   private var enginePeerUserId: String = ""
   private var engineLastSeenTimestampMs: Long? = null
+  private var profileRows: List<Map<String, Any?>> = emptyList()
   private var profileSummaryMessageCount = 0
   private var profileSummaryMediaCount = 0
+  private var profileSummaryAudioCount = 0
   private var profileSummaryFileCount = 0
   private var profileSummaryLinkCount = 0
+  private var profileSummaryPinnedCount = 0
   private var profileSummaryRecentFiles: List<String> = emptyList()
   private var profileSummaryHistoryLoaded = false
   private var currentPage: String = "chat"
   private var pendingNativePageTarget: String? = null
   private var pendingNativePageLockUntilMs: Long = 0L
   private var standaloneProfileMode = false
+  private val avatarHttpClient by lazy { ChatPhoenixClient.buildPinnedHttpClient() }
+  private var avatarLoadCall: Call? = null
   private var avatarLoadToken = 0
   private var rowsUpdateCount = 0
   private val engineListenerId = "chat-main-view-${System.identityHashCode(this)}"
@@ -192,6 +211,8 @@ class ChatMainView(
 
   fun setRows(rows: List<Map<String, Any?>>) {
     rowsUpdateCount += 1
+    profileRows = rows
+    rebuildProfileSummaryFromRows(rows)
     val shouldLog = rowsUpdateCount <= 6 || rows.isEmpty() || rowsUpdateCount % 20 == 0
     if (shouldLog) {
       val firstKind = normalized(rows.firstOrNull()?.get("kind")) ?: "-"
@@ -201,6 +222,7 @@ class ChatMainView(
       )
     }
     chatListView.setRows(rows)
+    updateProfileTexts()
   }
 
   fun setEngineSurfaceId(value: String) {
@@ -223,18 +245,21 @@ class ChatMainView(
   }
 
   fun setEnginePeerUserId(value: String) {
-    enginePeerUserId = value.trim().uppercase(Locale.ROOT)
+    enginePeerUserIdRaw = value.trim()
+    enginePeerUserId = enginePeerUserIdRaw.uppercase(Locale.ROOT)
     Log.i(TAG, "setEnginePeerUserId peerUserId=$enginePeerUserId")
     chatListView.setEnginePeerUserId(value)
     if (enginePeerUserId.isBlank()) {
       engineLastSeenTimestampMs = null
       updateHeaderTexts()
       updateProfileTexts()
+      updateAvatarViews()
       return
     }
     registerChatEngineListener()
     refreshPresenceFromEngine(force = true)
     refreshTypingStateFromEngine(force = true)
+    updateAvatarViews()
   }
 
   fun setStatusAuthorityEnabled(enabled: Boolean) {
@@ -279,6 +304,7 @@ class ChatMainView(
     headerMode = next
     updateChatHeaderControls()
     updateHeaderTexts()
+    updateAvatarViews()
   }
 
   fun setHeaderTitle(value: String) {
@@ -317,6 +343,7 @@ class ChatMainView(
     refreshTypingStateFromEngine(force = true)
     updateHeaderTexts()
     updateProfileTexts()
+    updateAvatarViews()
   }
 
   fun setGroupMembers(rawMembers: List<Map<String, Any?>>) {
@@ -719,11 +746,9 @@ class ChatMainView(
       ),
     )
 
-    chatBackButton.text = "‹"
-    chatBackButton.gravity = Gravity.CENTER
-    chatBackButton.textSize = 27f
-    chatBackButton.typeface = Typeface.DEFAULT_BOLD
-    chatBackButton.setPadding(0, 0, dp(1), 0)
+    chatBackButton.setImageResource(R.drawable.ic_chevron_left)
+    chatBackButton.scaleType = ImageView.ScaleType.CENTER_INSIDE
+    chatBackButton.setPadding(dp(8), dp(8), dp(8), dp(8))
     chatBackButton.setOnClickListener {
       if (currentPage == "profile") {
         markPendingNativePageChange("chat")
@@ -765,9 +790,9 @@ class ChatMainView(
     chatAvatarImage.scaleType = ImageView.ScaleType.CENTER_CROP
     chatAvatarImage.visibility = View.GONE
 
-    chatAvatarFallback.gravity = Gravity.CENTER
-    chatAvatarFallback.setTypeface(Typeface.DEFAULT_BOLD)
-    chatAvatarFallback.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
+    chatAvatarFallback.scaleType = ImageView.ScaleType.FIT_CENTER
+    chatAvatarFallback.setImageResource(R.drawable.ic_avatar_person)
+    chatAvatarFallback.setPadding(dp(11), dp(11), dp(11), dp(11))
     chatAvatarButton.addView(
       chatAvatarFallback,
       FrameLayout.LayoutParams(
@@ -825,7 +850,7 @@ class ChatMainView(
       onNativeEvent(mapOf("type" to "headerAudioCallPressed"))
     }
 
-    styleHeaderActionButton(chatSearchButton, android.R.drawable.ic_menu_search)
+    styleHeaderActionButton(chatSearchButton, R.drawable.ic_search)
     chatSearchButton.setOnClickListener {
       onNativeEvent(mapOf("type" to "headerSearchPressed"))
     }
@@ -882,13 +907,29 @@ class ChatMainView(
       LinearLayout.LayoutParams.MATCH_PARENT,
       statusTop + dp(56),
     )
-    profileHeader.setPadding(dp(12), statusTop, dp(12), 0)
     profilePage.addView(profileHeader)
 
-    profileBackButton.text = "‹"
-    profileBackButton.gravity = Gravity.CENTER
-    profileBackButton.textSize = 30f
-    profileBackButton.typeface = Typeface.DEFAULT_BOLD
+    profileHeaderGlass.alpha = 0f
+    profileHeaderGlass.setCornerRadius(20.0)
+    profileHeaderGlass.setBlurIntensity(14.0)
+    profileHeaderGlass.setInteractive(false)
+    profileHeaderGlass.setPressFeedbackEnabled(false)
+    profileHeader.addView(
+      profileHeaderGlass,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        dp(44),
+        Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL,
+      ).apply {
+        marginStart = dp(12)
+        marginEnd = dp(12)
+        bottomMargin = dp(6)
+      },
+    )
+
+    profileBackButton.setImageResource(R.drawable.ic_chevron_left)
+    profileBackButton.scaleType = ImageView.ScaleType.CENTER_INSIDE
+    profileBackButton.setPadding(dp(8), dp(8), dp(8), dp(8))
     profileBackButton.setOnClickListener {
       if (standaloneProfileMode) {
         onNativeEvent(mapOf("type" to "headerBack"))
@@ -900,7 +941,10 @@ class ChatMainView(
     }
     profileHeader.addView(
       profileBackButton,
-      FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.CENTER_VERTICAL),
+      FrameLayout.LayoutParams(dp(44), dp(44), Gravity.START or Gravity.BOTTOM).apply {
+        marginStart = dp(12)
+        bottomMargin = dp(6)
+      },
     )
 
     profileHeaderTitle.setTypeface(Typeface.DEFAULT_BOLD)
@@ -912,11 +956,32 @@ class ChatMainView(
       FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.WRAP_CONTENT,
         FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.CENTER,
-      ),
+        Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM,
+      ).apply {
+        bottomMargin = dp(18)
+      },
+    )
+
+    profileHeaderName.setTypeface(Typeface.DEFAULT_BOLD)
+    profileHeaderName.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+    profileHeaderName.gravity = Gravity.CENTER
+    profileHeaderName.alpha = 0f
+    profileHeader.addView(
+      profileHeaderName,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
+        Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM,
+      ).apply {
+        bottomMargin = dp(18)
+      },
     )
 
     profileScroll.overScrollMode = View.OVER_SCROLL_ALWAYS
+    profileScroll.isFillViewport = true
+    profileScroll.setOnScrollChangeListener { _, _, scrollY, _, _ ->
+      updateProfileHeaderChrome(scrollY)
+    }
     profilePage.addView(
       profileScroll,
       LinearLayout.LayoutParams(
@@ -953,9 +1018,9 @@ class ChatMainView(
       ),
     )
 
-    profileAvatarFallback.gravity = Gravity.CENTER
-    profileAvatarFallback.setTypeface(Typeface.DEFAULT_BOLD)
-    profileAvatarFallback.setTextSize(TypedValue.COMPLEX_UNIT_SP, 36f)
+    profileAvatarFallback.scaleType = ImageView.ScaleType.FIT_CENTER
+    profileAvatarFallback.setImageResource(R.drawable.ic_avatar_person)
+    profileAvatarFallback.setPadding(dp(32), dp(32), dp(32), dp(32))
     profileHeroAvatar.addView(
       profileAvatarFallback,
       FrameLayout.LayoutParams(
@@ -991,6 +1056,7 @@ class ChatMainView(
     profileBioView.gravity = Gravity.CENTER
     profileBioView.setLineSpacing(dpF(2f), 1f)
     profileBioView.setPadding(dp(8), dp(12), dp(8), 0)
+    profileBioView.visibility = View.GONE
     profileContent.addView(
       profileBioView,
       LinearLayout.LayoutParams(
@@ -1024,7 +1090,7 @@ class ChatMainView(
 
     profileSearchAction.configure(
       title = "Search",
-      iconRes = android.R.drawable.ic_menu_search,
+      iconRes = R.drawable.ic_search,
     )
     profileSearchAction.setOnClickListener {
       onNativeEvent(mapOf("type" to "headerSearchPressed"))
@@ -1066,7 +1132,6 @@ class ChatMainView(
 
     profileInfoCard.orientation = LinearLayout.VERTICAL
     profileInfoCard.background = roundedShape(surfaceColor, dp(24))
-    profileInfoCard.setPadding(dp(18), dp(14), dp(18), dp(14))
     val cardParams = LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.MATCH_PARENT,
       LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -1075,8 +1140,9 @@ class ChatMainView(
     profileContent.addView(profileInfoCard, cardParams)
 
     profileInfoTitle.setTypeface(Typeface.DEFAULT_BOLD)
-    profileInfoTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
-    profileInfoTitle.text = "Profile"
+    profileInfoTitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
+    profileInfoTitle.text = "Shared Content"
+    profileInfoTitle.setPadding(dp(18), dp(16), dp(18), dp(8))
     profileInfoCard.addView(
       profileInfoTitle,
       LinearLayout.LayoutParams(
@@ -1086,8 +1152,7 @@ class ChatMainView(
     )
 
     profileInfoSubtitle.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-    profileInfoSubtitle.text = "Native profile page hosted with native chat for instant transitions."
-    profileInfoSubtitle.setPadding(0, dp(6), 0, 0)
+    profileInfoSubtitle.visibility = View.GONE
     profileInfoCard.addView(
       profileInfoSubtitle,
       LinearLayout.LayoutParams(
@@ -1095,6 +1160,74 @@ class ChatMainView(
         LinearLayout.LayoutParams.WRAP_CONTENT,
       ),
     )
+
+    profileMembersRow.setOnClickListener {
+      onNativeEvent(mapOf("type" to "profileMembersPressed", "chatId" to engineChatId))
+    }
+    profileInfoCard.addView(
+      profileMembersRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    profileMediaRow.setOnClickListener {
+      onNativeEvent(mapOf("type" to "profileContentSectionPressed", "section" to "media", "chatId" to engineChatId))
+    }
+    profileInfoCard.addView(
+      profileMediaRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    profileAudioRow.setOnClickListener {
+      onNativeEvent(mapOf("type" to "profileContentSectionPressed", "section" to "music", "chatId" to engineChatId))
+    }
+    profileInfoCard.addView(
+      profileAudioRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    profileFilesRow.setOnClickListener {
+      onNativeEvent(mapOf("type" to "profileContentSectionPressed", "section" to "files", "chatId" to engineChatId))
+    }
+    profileInfoCard.addView(
+      profileFilesRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    profileLinksRow.setOnClickListener {
+      onNativeEvent(mapOf("type" to "profileContentSectionPressed", "section" to "links", "chatId" to engineChatId))
+    }
+    profileInfoCard.addView(
+      profileLinksRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    profilePinnedRow.setOnClickListener {
+      onNativeEvent(mapOf("type" to "profileContentSectionPressed", "section" to "pinned", "chatId" to engineChatId))
+    }
+    profileInfoCard.addView(
+      profilePinnedRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    updateProfileHeaderChrome(0)
   }
 
   private fun parseAppearance(raw: Map<String, Any?>) {
@@ -1117,20 +1250,25 @@ class ChatMainView(
     val shouldHighlightStatus = hasGroupTyping || isOnline
     val headerActionColor = resolveHeaderActionColor()
     chatHeader.setBackgroundColor(withAlpha(headerBackgroundColor, 0.95f))
-    profileHeader.background = roundedShape(withAlpha(surfaceColor, 0.84f), dp(20))
+    profileHeader.setBackgroundColor(Color.TRANSPARENT)
+    profileHeaderGlass.setTintColor(withAlpha(surfaceColor, 0.88f))
+    profileHeaderGlass.setBorderEnabled(true)
+    profileHeaderGlass.setShadowEnabled(true)
     profilePage.setBackgroundColor(profileBackgroundColor)
+    val isHeaderDark = contrastForegroundFor(headerBackgroundColor) == Color.WHITE
+    val softRgba = if (isHeaderDark) Color.argb(20, 248, 246, 252) else Color.argb(13, 26, 26, 31)
+
     profileInfoCard.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(24))
-    profileHeroAvatar.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(59))
-    chatAvatarButton.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(19))
+    profileHeroAvatar.background = roundedShape(softRgba, dp(59))
+    chatAvatarButton.background = roundedShape(softRgba, dp(19))
     listOf(profileMuteAction, profileSearchAction, profileAudioAction, profileVideoAction).forEach { action ->
       action.background = roundedShape(withAlpha(surfaceColor, 0.92f), dp(16))
     }
 
-    chatBackButton.setTextColor(headerActionColor)
+    chatBackButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
     chatVideoButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
     chatPhoneButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
     chatSearchButton.setColorFilter(headerActionColor, PorterDuff.Mode.SRC_IN)
-    profileBackButton.setTextColor(headerActionColor)
     chatTitleView.setTextColor(textColor)
     chatSubtitleView.setTextColor(if (shouldHighlightStatus) Color.parseColor("#53E08A") else secondaryTextColor)
     pinnedBannerView.applyTheme(
@@ -1139,8 +1277,10 @@ class ChatMainView(
       isDark = contrastForegroundFor(headerBackgroundColor) == Color.WHITE,
     )
     profileHeaderTitle.setTextColor(textColor)
-    chatAvatarFallback.setTextColor(textColor)
-    profileAvatarFallback.setTextColor(textColor)
+    profileHeaderName.setTextColor(textColor)
+    profileBackButton.setColorFilter(textColor, PorterDuff.Mode.SRC_IN)
+    chatAvatarFallback.setColorFilter(textColor, PorterDuff.Mode.SRC_IN)
+    profileAvatarFallback.setColorFilter(textColor, PorterDuff.Mode.SRC_IN)
     profileNameView.setTextColor(textColor)
     profileHandleView.setTextColor(
       if (hasGroupTyping || (!isGroupOrChannel && isOnline)) Color.parseColor("#53E08A")
@@ -1154,8 +1294,15 @@ class ChatMainView(
         background = withAlpha(surfaceColor, 0.92f),
       )
     }
+    applyProfileRowTheme(profileMembersRow, Color.parseColor("#3B82F6"))
+    applyProfileRowTheme(profileMediaRow, Color.parseColor("#EC4899"))
+    applyProfileRowTheme(profileAudioRow, Color.parseColor("#10B981"))
+    applyProfileRowTheme(profileFilesRow, Color.parseColor("#6366F1"))
+    applyProfileRowTheme(profileLinksRow, Color.parseColor("#F59E0B"))
+    applyProfileRowTheme(profilePinnedRow, Color.parseColor("#F97316"))
     updateChatHeaderControls()
     updateProfileActionState()
+    updateProfileHeaderChrome(profileScroll.scrollY)
   }
 
   private fun updateHeaderTexts() {
@@ -1197,6 +1344,7 @@ class ChatMainView(
   private fun updateProfileTexts() {
     val resolvedTitle = if (profileName.isBlank()) if (headerTitle.isBlank()) "User" else headerTitle else profileName
     profileNameView.text = resolvedTitle
+    profileHeaderName.text = resolvedTitle
     if (isGroupOrChannel) {
       val count = resolvedGroupMemberCount()
       val fallbackHandle = if (count > 0) "$count members" else "group chat"
@@ -1205,33 +1353,174 @@ class ChatMainView(
       val fallbackHandle = resolveEnginePresenceSubtitle() ?: if (isOnline) "online" else "offline"
       profileHandleView.text = if (profileHandle.isBlank()) fallbackHandle else profileHandle
     }
-    profileBioView.text = profileBio
-      .takeIf { it.isNotBlank() }
-      ?: "Shared media, links and pinned messages will appear here."
-    val initial = resolvedTitle.trim().firstOrNull()?.uppercase() ?: "U"
-    chatAvatarFallback.text = initial
-    profileAvatarFallback.text = initial
-    if (isGroupOrChannel) {
-      profileInfoTitle.text = "Members"
-      val members = resolvedGroupMembersSubtitle()
-      val typing = resolvedGroupTypingSubtitle() ?: "No one typing right now"
-      profileInfoSubtitle.text = "$members\n$typing"
-    } else {
-      profileInfoTitle.text = "Shared Content"
-      profileInfoSubtitle.text =
-        if (profileSummaryHistoryLoaded) {
-          val base =
-            "Media $profileSummaryMediaCount • Files $profileSummaryFileCount • Links $profileSummaryLinkCount\n$profileSummaryMessageCount cached messages available natively."
-          if (profileSummaryRecentFiles.isNotEmpty()) {
-            "$base\nRecent files: ${profileSummaryRecentFiles.joinToString(", ")}"
-          } else {
-            base
-          }
-        } else {
-          "Loading shared media and files from native encrypted cache..."
-        }
-    }
+    val resolvedBio = profileBio.takeIf { it.isNotBlank() }.orEmpty()
+    profileBioView.text = resolvedBio
+    profileBioView.visibility = if (resolvedBio.isBlank()) View.GONE else View.VISIBLE
+    profileInfoTitle.text = if (isGroupOrChannel) "Overview" else "Shared Content"
+    profileInfoSubtitle.visibility = View.GONE
+    configureProfileSummaryRows()
     updateProfileActionState()
+    updateProfileHeaderChrome(profileScroll.scrollY)
+  }
+
+  private fun updateProfileHeaderChrome(scrollY: Int) {
+    val progress = (scrollY / dpF(PROFILE_HEADER_COLLAPSE_DISTANCE_DP)).coerceIn(0f, 1f)
+    profileHeaderGlass.alpha = progress
+    profileHeaderGlass.translationY = dpF(6f) * (1f - progress)
+    profileHeaderTitle.alpha = 1f - progress
+    profileHeaderTitle.translationY = -dpF(8f) * progress
+    profileHeaderName.alpha = progress
+    profileHeaderName.translationY = dpF(8f) * (1f - progress)
+    profileHeader.elevation = dpF(6f) * progress
+  }
+
+  private fun rebuildProfileSummaryFromRows(rows: List<Map<String, Any?>>) {
+    var totalMessages = 0
+    var mediaCount = 0
+    var audioCount = 0
+    var fileCount = 0
+    var linkCount = 0
+    var pinnedCount = 0
+    val recentFiles = mutableListOf<String>()
+
+    rows.forEach { row ->
+      if (normalized(row["kind"]) != "message") return@forEach
+      val message = row["message"] as? Map<*, *> ?: return@forEach
+      totalMessages += 1
+
+      val type = normalized(message["type"])?.lowercase(Locale.ROOT).orEmpty()
+      val text = normalized(message["text"]).orEmpty()
+      val mediaUrl = normalized(message["mediaUrl"]).orEmpty()
+      val fileName = normalized(message["fileName"]).orEmpty()
+      val isPinned = (message["isPinned"] as? Boolean) == true
+
+      if (type == "image" || type == "gif" || type == "video" || type == "sticker") {
+        mediaCount += 1
+      }
+      if (type == "music") {
+        audioCount += 1
+      }
+      if (type == "file") {
+        fileCount += 1
+        if (fileName.isNotBlank() && recentFiles.size < 3) {
+          recentFiles.add(fileName)
+        }
+      }
+      if (isPinned) {
+        pinnedCount += 1
+      }
+      if (containsProfileLink(text) || containsProfileLink(mediaUrl)) {
+        linkCount += 1
+      }
+    }
+
+    profileSummaryHistoryLoaded = profileSummaryHistoryLoaded || rows.isNotEmpty()
+    profileSummaryMessageCount = totalMessages
+    profileSummaryMediaCount = mediaCount
+    profileSummaryAudioCount = audioCount
+    profileSummaryFileCount = fileCount
+    profileSummaryLinkCount = linkCount
+    profileSummaryPinnedCount = pinnedCount
+    profileSummaryRecentFiles = recentFiles
+  }
+
+  private fun configureProfileSummaryRows() {
+    profileMembersRow.visibility = if (isGroupOrChannel) View.VISIBLE else View.GONE
+    if (isGroupOrChannel) {
+      profileMembersRow.configure(
+        title = "Members",
+        value = resolvedGroupMemberCount().toString(),
+        iconRes = R.drawable.ic_profile_members,
+        showsSeparator = true,
+      )
+    }
+
+    val visibleRows = mutableListOf<ChatMainProfileListRowNode>()
+    if (profileMembersRow.visibility == View.VISIBLE) visibleRows.add(profileMembersRow)
+    visibleRows.add(profileMediaRow)
+    visibleRows.add(profileAudioRow)
+    visibleRows.add(profileFilesRow)
+    visibleRows.add(profileLinksRow)
+    visibleRows.add(profilePinnedRow)
+
+    profileMediaRow.configure(
+      title = "Media",
+      value = profileSummaryMediaCount.toString(),
+      iconRes = R.drawable.ic_profile_media,
+      showsSeparator = true,
+    )
+    profileAudioRow.configure(
+      title = "Audio",
+      value = profileSummaryAudioCount.toString(),
+      iconRes = R.drawable.ic_profile_audio,
+      showsSeparator = true,
+    )
+    profileFilesRow.configure(
+      title = "Files",
+      value = profileSummaryFileCount.toString(),
+      iconRes = R.drawable.ic_profile_files,
+      showsSeparator = true,
+    )
+    profileLinksRow.configure(
+      title = "Links",
+      value = profileSummaryLinkCount.toString(),
+      iconRes = R.drawable.ic_profile_links,
+      showsSeparator = true,
+    )
+    profilePinnedRow.configure(
+      title = "Pinned",
+      value = profileSummaryPinnedCount.toString(),
+      iconRes = R.drawable.ic_profile_pinned,
+      showsSeparator = false,
+    )
+
+    visibleRows.forEachIndexed { index, row ->
+      val isLast = index == visibleRows.lastIndex
+      row.configure(
+        title = when (row) {
+          profileMembersRow -> "Members"
+          profileMediaRow -> "Media"
+          profileAudioRow -> "Audio"
+          profileFilesRow -> "Files"
+          profileLinksRow -> "Links"
+          else -> "Pinned"
+        },
+        value = when (row) {
+          profileMembersRow -> resolvedGroupMemberCount().toString()
+          profileMediaRow -> profileSummaryMediaCount.toString()
+          profileAudioRow -> profileSummaryAudioCount.toString()
+          profileFilesRow -> profileSummaryFileCount.toString()
+          profileLinksRow -> profileSummaryLinkCount.toString()
+          else -> profileSummaryPinnedCount.toString()
+        },
+        iconRes = when (row) {
+          profileMembersRow -> R.drawable.ic_profile_members
+          profileMediaRow -> R.drawable.ic_profile_media
+          profileAudioRow -> R.drawable.ic_profile_audio
+          profileFilesRow -> R.drawable.ic_profile_files
+          profileLinksRow -> R.drawable.ic_profile_links
+          else -> R.drawable.ic_profile_pinned
+        },
+        showsSeparator = !isLast,
+      )
+    }
+  }
+
+  private fun applyProfileRowTheme(row: ChatMainProfileListRowNode, accentColor: Int) {
+    row.applyTheme(
+      titleColor = textColor,
+      subtitleColor = secondaryTextColor,
+      valueColor = secondaryTextColor,
+      separatorColor = withAlpha(textColor, 0.08f),
+      highlightedColor = withAlpha(textColor, 0.06f),
+      iconTintColor = accentColor,
+      iconBackgroundColor = withAlpha(accentColor, 0.12f),
+    )
+  }
+
+  private fun containsProfileLink(text: String): Boolean {
+    if (text.isBlank()) return false
+    return LINK_REGEX.containsMatchIn(text)
   }
 
   private fun resolvedGroupMemberCount(): Int {
@@ -1321,10 +1610,23 @@ class ChatMainView(
       && ca.get(Calendar.DAY_OF_YEAR) == cb.get(Calendar.DAY_OF_YEAR)
   }
 
+  private fun resolveResolvedAvatarUri(): String {
+    if (headerMode == "saved_messages") return ""
+    return resolveNativeAvatarUri(
+      context = context,
+      rawAvatar = avatarUri,
+      peerUserId = enginePeerUserIdRaw,
+      preferPushAvatar = !isGroupOrChannel,
+    ).orEmpty()
+  }
+
   private fun updateAvatarViews() {
     updateProfileTexts()
-    if (avatarUri.isBlank()) {
+    val resolvedUri = resolveResolvedAvatarUri()
+    if (resolvedUri.isBlank()) {
       Log.d(TAG, "updateAvatarViews avatarUri empty -> fallback")
+      avatarLoadCall?.cancel()
+      avatarLoadCall = null
       chatAvatarImage.setImageDrawable(null)
       profileAvatarImage.setImageDrawable(null)
       chatAvatarImage.visibility = View.GONE
@@ -1334,32 +1636,44 @@ class ChatMainView(
       return
     }
 
-    val parsed = try {
-      Uri.parse(avatarUri)
-    } catch (_: Throwable) {
-      null
-    }
-    if (parsed == null || parsed.toString().isBlank()) {
-      return
-    }
-
     val token = ++avatarLoadToken
-    Thread {
-      try {
-        val bmp = URL(parsed.toString()).openStream().use { BitmapFactory.decodeStream(it) } ?: return@Thread
-        post {
-          if (token != avatarLoadToken) return@post
-          chatAvatarImage.setImageBitmap(bmp)
-          profileAvatarImage.setImageBitmap(bmp)
-          chatAvatarImage.visibility = View.VISIBLE
-          profileAvatarImage.visibility = View.VISIBLE
-          chatAvatarFallback.visibility = View.GONE
-          profileAvatarFallback.visibility = View.GONE
-        }
-      } catch (_: Throwable) {
-        // Fallback already visible.
+    avatarLoadCall?.cancel()
+
+    // Note: Assuming ChatPhoenixClient has buildPinnedHttpClient(), otherwise fall back
+    val request = Request.Builder()
+      .url(resolvedUri)
+      .get()
+      .header("Accept", "image/*,*/*;q=0.8")
+      .header("ngrok-skip-browser-warning", "true")
+      .build()
+
+    val call = avatarHttpClient.newCall(request)
+    avatarLoadCall = call
+    call.enqueue(object : Callback {
+      override fun onFailure(call: Call, e: IOException) {
+        // Fallback already visible
       }
-    }.start()
+      override fun onResponse(call: Call, response: Response) {
+        response.use { res ->
+          if (!res.isSuccessful) return
+          val bytes = try {
+            res.body?.bytes()
+          } catch (_: Throwable) {
+            null
+          } ?: return
+          val bitmap = BitmapFactory.decodeByteArray(bytes, 0, bytes.size) ?: return
+          post {
+            if (token != avatarLoadToken) return@post
+            chatAvatarImage.setImageBitmap(bitmap)
+            profileAvatarImage.setImageBitmap(bitmap)
+            chatAvatarImage.visibility = View.VISIBLE
+            profileAvatarImage.visibility = View.VISIBLE
+            chatAvatarFallback.visibility = View.GONE
+            profileAvatarFallback.visibility = View.GONE
+          }
+        }
+      }
+    })
   }
 
   private fun applyPageState(animated: Boolean, emitEvent: Boolean) {

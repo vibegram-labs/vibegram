@@ -77,31 +77,32 @@ internal class BubbleTailView(context: Context) : View(context) {
   }
 }
 
-internal class BubbleStatusIndicatorView(context: Context) : View(context) {
-  private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.STROKE
-    strokeCap = Paint.Cap.ROUND
-    strokeJoin = Paint.Join.ROUND
-    strokeWidth = dpF(1.35f)
-    color = Color.WHITE
-  }
-  private val textPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-    style = Paint.Style.FILL
-    color = Color.WHITE
-    textAlign = Paint.Align.CENTER
-    textSize = dpF(10f)
-  }
+internal class BubbleStatusIndicatorView(context: Context) : android.widget.ImageView(context) {
   private var status: String? = null
   private var baseColor: Int = Color.WHITE
-  private val tmpPath = Path()
+
+  init {
+    scaleType = ScaleType.FIT_END
+  }
 
   fun bind(rawStatus: String?, color: Int) {
     val normalized = rawStatus?.trim()?.lowercase()
     if (status == normalized && baseColor == color) return
     status = normalized
     baseColor = color
+
+    when (normalized) {
+      "pending" -> setImageResource(R.drawable.ic_bubble_pending)
+      "error" -> setImageResource(R.drawable.ic_bubble_error)
+      "sent" -> setImageResource(R.drawable.ic_bubble_sent)
+      "delivered", "read" -> setImageResource(R.drawable.ic_bubble_read)
+      else -> setImageDrawable(null)
+    }
+
+    val tintColor = if (normalized == "read") Color.argb(255, 0, 163, 255) else if (normalized == "error") Color.argb(255, 255, 122, 122) else baseColor
+    setColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_IN)
+
     requestLayout()
-    invalidate()
   }
 
   override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -116,83 +117,12 @@ internal class BubbleStatusIndicatorView(context: Context) : View(context) {
     setMeasuredDimension(w, h)
   }
 
-  override fun onDraw(canvas: Canvas) {
-    super.onDraw(canvas)
-    val s = status ?: return
-    val w = width.toFloat().coerceAtLeast(1f)
-    val h = height.toFloat().coerceAtLeast(1f)
-    when (s) {
-      "pending" -> {
-        textPaint.color = withAlpha(baseColor, 0.95f)
-        textPaint.textSize = h * 0.90f
-        val y = (h * 0.5f) - ((textPaint.descent() + textPaint.ascent()) * 0.5f)
-        canvas.drawText("\u25F7", w * 0.5f, y, textPaint)
-      }
-      "error" -> {
-        textPaint.color = Color.argb(255, 255, 122, 122)
-        textPaint.textSize = h * 0.92f
-        val y = (h * 0.5f) - ((textPaint.descent() + textPaint.ascent()) * 0.5f)
-        canvas.drawText("!", w * 0.5f, y, textPaint)
-      }
-      "sent" -> drawChecks(canvas, w, h, doubleCheck = false, color = baseColor)
-      "delivered" -> drawChecks(canvas, w, h, doubleCheck = true, color = baseColor)
-      "read" -> drawChecks(canvas, w, h, doubleCheck = true, color = Color.argb(255, 0, 163, 255))
-      else -> Unit
-    }
-  }
-
-  private fun drawChecks(canvas: Canvas, w: Float, h: Float, doubleCheck: Boolean, color: Int) {
-    strokePaint.color = color
-    // Determine a base scale from the height to keep aspect ratio consistent
-    val s = h / 24f
-    
-    // For single check, we center it. For double check, we right-align the entire glyph set.
-    // Native double check typically has bounding box ~22x14, single check ~16x14.
-    // The design paths here are from a 24x24 unit grid.
-    
-    // Calculate right bound of the path (the double check's right-most point is ~20 on the 24 grid)
-    // If not double check, the right-most point is ~15 on the 24 grid.
-    val pathWidthUnits = if (doubleCheck) 20f else 15f
-    val pathWidth = pathWidthUnits * s
-    
-    // Offset x to right-align the icon block, preserving exactly 1x scale logic
-    val offsetX = max(0f, (w - pathWidth) - (2f * s)) // small constant padding
-    
-    fun p(x: Float, y: Float): Pair<Float, Float> = Pair(offsetX + x * s, y * s)
-
-    tmpPath.reset()
-    p(4f, 12.9f).let { (x, y) -> tmpPath.moveTo(x, y) }
-    p(7.14286f, 16.5f).let { (x, y) -> tmpPath.lineTo(x, y) }
-    p(15f, 7.5f).let { (x, y) -> tmpPath.lineTo(x, y) }
-    canvas.drawPath(tmpPath, strokePaint)
-
-    if (doubleCheck) {
-      tmpPath.reset()
-      p(20f, 7.5625f).let { (x, y) -> tmpPath.moveTo(x, y) }
-      p(11.4283f, 16.5625f).let { (x, y) -> tmpPath.lineTo(x, y) }
-      p(11f, 16f).let { (x, y) -> tmpPath.lineTo(x, y) }
-      canvas.drawPath(tmpPath, strokePaint)
-    }
-  }
-
   private fun dp(value: Int): Int =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
+    android.util.TypedValue.applyDimension(
+      android.util.TypedValue.COMPLEX_UNIT_DIP,
       value.toFloat(),
       context.resources.displayMetrics,
     ).toInt()
-
-  private fun dpF(value: Float): Float =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value,
-      context.resources.displayMetrics,
-    )
-
-  private fun withAlpha(color: Int, alpha: Float): Int {
-    val a = (alpha.coerceIn(0f, 1f) * 255f).toInt()
-    return Color.argb(a, Color.red(color), Color.green(color), Color.blue(color))
-  }
 }
 
 internal class VoicePlayProgressView(context: Context) : View(context) {

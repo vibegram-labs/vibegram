@@ -1574,6 +1574,7 @@ class ChatListView(
           val chatId = engineChatId.trim()
           val myUserId = engineMyUserId.trim()
           val peerUserId = enginePeerUserId.trim()
+          val messageId = UUID.randomUUID().toString()
           if (chatId.isEmpty()) {
             Log.w(
               "ChatListView",
@@ -1585,6 +1586,7 @@ class ChatListView(
             val result = ChatEngine.sendMessage(
               mapOf(
                 "chatId" to chatId,
+                "messageId" to messageId,
                 "type" to "voice",
                 "text" to "",
                 "myUserId" to myUserId,
@@ -1599,7 +1601,7 @@ class ChatListView(
             )
             Log.i(
               "ChatListView",
-              "native voice send result chatId=$chatId result=$result uri=$uri duration=$durationSeconds",
+              "native voice send result chatId=$chatId messageId=$messageId result=$result uri=$uri duration=$durationSeconds",
             )
           }
           return

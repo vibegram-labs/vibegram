@@ -57,14 +57,7 @@ defmodule Vibe.RelayRegistry do
 
     case result do
       [relay | _] ->
-        {:ok, %{
-          relay_id: relay.relay_id,
-          name: relay[:name] || "Relay",
-          invite_key: relay[:invite_key],
-          invite_code: relay[:invite_code],
-          is_public: relay[:is_public] || false,
-          region: relay[:region] || "unknown"
-        }}
+        {:ok, relay_to_map(relay)}
       [] ->
         :not_found
     end
@@ -75,17 +68,7 @@ defmodule Vibe.RelayRegistry do
     :ets.foldl(
       fn {_id, relay}, acc ->
         if relay[:is_public] do
-          [%{
-            relay_id: relay.relay_id,
-            name: relay[:name] || "Relay",
-            current_peers: relay[:current_peers] || 0,
-            max_peers: relay[:max_peers] || 5,
-            region: relay[:region] || "unknown",
-            uptime: calculate_uptime(relay[:started_at]),
-            invite_code: relay[:invite_code],
-            invite_key: relay[:invite_key],
-            tags: []
-          } | acc]
+          [relay_to_map(relay) |> Map.put(:uptime, calculate_uptime(relay[:started_at])) | acc]
         else
           acc
         end
@@ -114,5 +97,23 @@ defmodule Vibe.RelayRegistry do
   defp calculate_uptime(started_at) do
     elapsed = System.system_time(:second) - started_at
     min(100, div(elapsed, 36)) # rough percentage based on 1 hour = 100%
+  end
+
+  defp relay_to_map(relay) do
+    %{
+      relay_id: relay.relay_id,
+      name: relay[:name] || "Relay",
+      invite_key: relay[:invite_key],
+      invite_code: relay[:invite_code],
+      is_public: relay[:is_public] || false,
+      region: relay[:region] || "unknown",
+      current_peers: relay[:current_peers] || 0,
+      max_peers: relay[:max_peers] || 5,
+      tags: [],
+      external_ip: relay[:external_ip],
+      bridge_url: relay[:bridge_url],
+      share_link: relay[:share_link],
+      bridge_descriptor: relay[:bridge_descriptor]
+    }
   end
 end

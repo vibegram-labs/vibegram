@@ -31,11 +31,11 @@ const FloatInput = ({ label, value, error, containerStyle, labelColor, ...props 
         return {
             position: 'absolute',
             [isRTL ? 'right' : 'left']: 12,
-            top: interpolate(focusAnim.value, [0, 1], [26, -4]),
+            top: interpolate(focusAnim.value, [0, 1], [23, 2]),
             fontSize: interpolate(focusAnim.value, [0, 1], [15, 12]),
             color: interpolateColor(focusAnim.value, [0, 1], [inactiveLabelColor, activeLabelColor]),
             zIndex: 1,
-            backgroundColor: colors.background,
+            backgroundColor: focusAnim.value > 0.1 ? colors.background : 'transparent',
             paddingHorizontal: 6,
             borderRadius: 8,
         };
@@ -78,9 +78,9 @@ const styles = StyleSheet.create({
         letterSpacing: 0.2,
     },
     input: {
-        height: 52,
+        height: 46,
         borderWidth: 1,
-        borderRadius: 22,
+        borderRadius: 23,
         paddingHorizontal: 16,
         paddingTop: 0,
         paddingBottom: 0,

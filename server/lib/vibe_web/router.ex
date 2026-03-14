@@ -148,6 +148,10 @@ defmodule VibeWeb.Router do
 
     # Media Upload
     post "/media/upload", MediaController, :upload
+
+    # Relay → Bridge registration
+    post "/relay/register-bridge", BridgeController, :register_relay
+    get "/relay/resolve-bridge", BridgeController, :resolve_relay_bridge
   end
 
   # High-cost / abuse-prone endpoints (require auth + strict rate limit)

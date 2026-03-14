@@ -614,16 +614,8 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
   private var theme = NativeSettingsTheme()
   private var sections: [NativeSettingsSection] = []
   private var currentBadgeTier: String?
-  private var avatarCollapsed = false
   private var currentHeroTop: CGFloat = 0
   private var currentCollapsedTop: CGFloat = 0
-
-  private let heroTopAdjust: CGFloat = 12
-  private let heroIslandAnchor: CGFloat = 56
-  private let heroTopOffset: CGFloat = 80
-  private let heroCollapsedTopOffset: CGFloat = 25
-  private let heroExpandedAvatarSize: CGFloat = 100
-  private let heroCollapsedAvatarSize: CGFloat = 32
 
   required init(appContext: AppContext? = nil) {
     avatarView = NativeProfileAvatarView(appContext: appContext)
@@ -872,11 +864,11 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     avatarPenTopConstraint?.isActive = true
 
     avatarActionWidthConstraint = avatarActionHost.widthAnchor.constraint(
-      equalToConstant: heroExpandedAvatarSize)
+      equalToConstant: NativeProfileAvatarHeroMetrics.expandedSize)
     avatarActionWidthConstraint?.isActive = true
 
     avatarActionHeightConstraint = avatarActionHost.heightAnchor.constraint(
-      equalToConstant: heroExpandedAvatarSize)
+      equalToConstant: NativeProfileAvatarHeroMetrics.expandedSize)
     avatarActionHeightConstraint?.isActive = true
 
     heroSpacerHeightConstraint = heroSpacerView.heightAnchor.constraint(equalToConstant: 220)
@@ -999,8 +991,9 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
   private func updateMetrics() {
     let topInset = safeAreaInsets.top
     let headerHeight = topInset + 60
-    let heroTop = max(0, topInset - heroIslandAnchor - heroTopAdjust) + heroTopOffset
-    let collapsedTop = max(0, topInset - 18 - heroCollapsedTopOffset)
+    let heroTop = NativeProfileAvatarHeroMetrics.expandedTop(for: topInset)
+    let collapsedTop = NativeProfileAvatarHeroMetrics.collapsedTop(for: topInset)
+    let hostHeight = NativeProfileAvatarHeroMetrics.hostHeight(for: topInset)
 
     currentHeroTop = heroTop
     currentCollapsedTop = collapsedTop
@@ -1008,12 +1001,12 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
     headerMaskHeightConstraint?.constant = headerHeight
     qrTopConstraint?.constant = topInset
     editTopConstraint?.constant = topInset
-    avatarHeightConstraint?.constant = heroTop + 120
+    avatarHeightConstraint?.constant = hostHeight
     avatarPenTopConstraint?.constant = heroTop
-    heroSpacerHeightConstraint?.constant = heroTop + 120
+    heroSpacerHeightConstraint?.constant = hostHeight
 
-    avatarView.setExpandedSize(heroExpandedAvatarSize)
-    avatarView.setCollapsedSize(heroCollapsedAvatarSize)
+    avatarView.setExpandedSize(NativeProfileAvatarHeroMetrics.expandedSize)
+    avatarView.setCollapsedSize(NativeProfileAvatarHeroMetrics.collapsedSize)
     avatarView.setExpandedTopInset(heroTop)
     avatarView.setCollapsedTopInset(collapsedTop)
 
@@ -1034,7 +1027,9 @@ final class NativeSettingsMainView: ExpoView, UIScrollViewDelegate {
       currentHeroTop - resolvedOffset
     )
     let currentAvatarSize =
-      heroExpandedAvatarSize + ((heroCollapsedAvatarSize - heroExpandedAvatarSize) * progress)
+      NativeProfileAvatarHeroMetrics.expandedSize
+      + ((NativeProfileAvatarHeroMetrics.collapsedSize - NativeProfileAvatarHeroMetrics.expandedSize)
+        * progress)
 
     avatarPenTopConstraint?.constant = currentAvatarTop
     avatarActionWidthConstraint?.constant = currentAvatarSize

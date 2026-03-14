@@ -1,5 +1,5 @@
-import React, { useCallback, useEffect, useMemo } from 'react';
-import { Linking, Platform, Text, View } from 'react-native';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import { InteractionManager, Linking, Platform, Text, View } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import * as Clipboard from 'expo-clipboard';
@@ -82,6 +82,20 @@ export default function ChatScreen() {
   const { user } = useAuthStore();
   const { colors, effectiveTheme } = useThemeStore();
   const activeWallpaperTheme = useWallpaperStore((s) => s.activeTheme);
+
+  const [isTransitioning, setIsTransitioning] = useState(true);
+
+  useEffect(() => {
+    const task = InteractionManager.runAfterInteractions(() => {
+      setIsTransitioning(false);
+    });
+    // Fallback if interactions take too long to settle
+    const timeout = setTimeout(() => setIsTransitioning(false), 350);
+    return () => {
+      task.cancel();
+      clearTimeout(timeout);
+    };
+  }, []);
 
   const nativeMainModule = useMemo(() => getNativeChatMainModule(), []);
   const nativeEngineModule = useMemo(() => getNativeChatEngineModule(), []);
@@ -218,6 +232,8 @@ export default function ChatScreen() {
   }, [activeWallpaperTheme, colors.background, effectiveTheme]);
 
   const nativeRows = useMemo(() => {
+    if (isTransitioning) return [];
+
     const sourceMessages = Array.isArray(activeChat?.messages) ? (activeChat?.messages as any[]) : [];
     const myUserIdUpper = (user?.userId || '').trim().toUpperCase();
 
@@ -261,7 +277,7 @@ export default function ChatScreen() {
 
     runtimeMessages.sort((a, b) => a.timestampMs - b.timestampMs);
     return mapMessagesToNativeRows(runtimeMessages);
-  }, [activeChat?.messages, effectiveChatId, uploadProgress, user?.userId]);
+  }, [activeChat?.messages, effectiveChatId, isTransitioning, uploadProgress, user?.userId]);
 
   const callNativeEngine = useCallback(async (
     methodName:

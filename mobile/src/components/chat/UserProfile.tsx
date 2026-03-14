@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
     View,
     Text,
@@ -70,6 +70,7 @@ interface ProfileProps {
     onClearChat?: () => void;
     onDeleteContact?: () => void;
     isContentLoading?: boolean;
+    initialTab?: ProfileTab;
     mediaItems?: UserProfileMediaItem[];
     videoItems?: UserProfileMediaItem[];
     imageItems?: UserProfileMediaItem[];
@@ -222,6 +223,7 @@ export default function UserProfile({
     onBlock,
     onClearChat,
     onDeleteContact,
+    initialTab,
     mediaItems = [],
     videoItems = [],
     imageItems = [],
@@ -235,8 +237,9 @@ export default function UserProfile({
     const { showToast } = useToastStore();
     const isDark = effectiveTheme === 'dark';
 
-    const [activeTab, setActiveTab] = useState<ProfileTab>('media');
+    const [activeTab, setActiveTab] = useState<ProfileTab>(initialTab || 'media');
     const [menuOpen, setMenuOpen] = useState(false);
+    const appliedInitialTabRef = useRef<ProfileTab | null>(null);
 
     const allMedia = useMemo(
         () => [...imageItems, ...videoItems].sort((a, b) => b.timestamp - a.timestamp),
@@ -271,6 +274,14 @@ export default function UserProfile({
             setActiveTab(tabs[0].key);
         }
     }, [tabs, activeTab]);
+
+    useEffect(() => {
+        if (!initialTab) return;
+        if (appliedInitialTabRef.current === initialTab) return;
+        if (!tabs.some((item) => item.key === initialTab)) return;
+        appliedInitialTabRef.current = initialTab;
+        setActiveTab(initialTab);
+    }, [initialTab, tabs]);
 
     const handleBack = () => {
         if (onClose) onClose();

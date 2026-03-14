@@ -13,6 +13,13 @@ private final class NativeProfileAvatarModel: ObservableObject {
   @Published var collapsedTopInset: CGFloat = 0.0
   @Published var scrollOffset: CGFloat = 0.0
   @Published var islandCoverColor: UIColor = UIColor(red: 0.071, green: 0.071, blue: 0.075, alpha: 1.0)  // #121212
+  @Published var fallbackBackgroundColor: UIColor = UIColor(
+    red: 222 / 255,
+    green: 230 / 255,
+    blue: 243 / 255,
+    alpha: 1.0
+  )
+  @Published var fallbackIconTintColor: UIColor = UIColor.darkText
 
   private var imageUri: String?
   private var imageTask: Task<Void, Never>?
@@ -55,7 +62,7 @@ extension String {
   }
 }
 
-private enum NativeProfileAvatarImageLoader {
+enum NativeProfileAvatarImageLoader {
   static func load(from rawValue: String?) async -> UIImage? {
     guard let rawValue else { return nil }
     let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -100,6 +107,28 @@ private enum NativeProfileAvatarImageLoader {
   }
 }
 
+enum NativeProfileAvatarHeroMetrics {
+  static let topAdjust: CGFloat = 12
+  static let islandAnchor: CGFloat = 56
+  static let topOffset: CGFloat = 80
+  static let collapsedTopOffset: CGFloat = 25
+  static let expandedSize: CGFloat = 100
+  static let collapsedSize: CGFloat = 32
+  static let bottomSpacing: CGFloat = 20
+
+  static func expandedTop(for safeTop: CGFloat) -> CGFloat {
+    max(0, safeTop - islandAnchor - topAdjust) + topOffset
+  }
+
+  static func collapsedTop(for safeTop: CGFloat) -> CGFloat {
+    max(0, safeTop - 18 - collapsedTopOffset)
+  }
+
+  static func hostHeight(for safeTop: CGFloat) -> CGFloat {
+    expandedTop(for: safeTop) + expandedSize + bottomSpacing
+  }
+}
+
 private struct NativeProfileAvatarContentView: View {
   @ObservedObject var model: NativeProfileAvatarModel
 
@@ -114,7 +143,8 @@ private struct NativeProfileAvatarContentView: View {
 
 private struct NativeProfileAvatarInnerContent: View {
   let image: UIImage?
-  let fallbackText: String
+  let fallbackIconTintColor: UIColor
+  let fallbackBackgroundColor: UIColor
   let size: CGFloat
 
   private var inset: CGFloat {
@@ -123,7 +153,8 @@ private struct NativeProfileAvatarInnerContent: View {
 
   var body: some View {
     ZStack {
-      Color.clear
+      Circle()
+        .fill(Color(uiColor: fallbackBackgroundColor))
 
       Group {
         if let image {
@@ -131,12 +162,14 @@ private struct NativeProfileAvatarInnerContent: View {
             .resizable()
             .scaledToFill()
         } else {
-          Circle()
-            .fill(Color.white.opacity(0.16))
-
-          Text(String(fallbackText.prefix(1)).uppercased())
-            .font(.system(size: max(14.0, size * 0.34), weight: .semibold))
-            .foregroundStyle(.white)
+          Image(systemName: "person.fill")
+            .resizable()
+            .scaledToFit()
+            .frame(
+              width: max(14.0, size * 0.34),
+              height: max(14.0, size * 0.34)
+            )
+            .foregroundStyle(Color(uiColor: fallbackIconTintColor))
         }
       }
       .padding(inset)
@@ -210,17 +243,10 @@ private struct NativeProfileAvatarGlassMorphView: View {
       // ── 3. IMAGE CONTENT LAYER ──
       // Rendered outside the glass container to avoid GPU shader collision.
       ZStack {
-        // Solid black base ensures the glass underneath never bleeds through.
         Circle()
-          .fill(Color.black)
+          .fill(Color(uiColor: model.fallbackBackgroundColor))
 
         avatarContent
-          .drawingGroup()                    // rasterize → eliminates blur flicker
-          .blur(radius: progress * 20)
-
-        // Dark overlay – starts early for Telegram-style black glass look
-        Circle()
-          .fill(Color.black.opacity(max(0, min(1.0, (progress - 0.15) * 1.4))))
       }
       .frame(width: currentSize, height: currentSize)
       .clipShape(Circle())
@@ -239,10 +265,15 @@ private struct NativeProfileAvatarGlassMorphView: View {
     } else {
       ZStack {
         Circle()
-          .fill(Color(white: 0.16))
-        Text(String(model.fallbackText.prefix(1)).uppercased())
-          .font(.system(size: max(14.0, currentSize * 0.34), weight: .semibold))
-          .foregroundStyle(.white)
+          .fill(Color(uiColor: model.fallbackBackgroundColor))
+        Image(systemName: "person.fill")
+          .resizable()
+          .scaledToFit()
+          .frame(
+            width: max(14.0, currentSize * 0.34),
+            height: max(14.0, currentSize * 0.34)
+          )
+          .foregroundStyle(Color(uiColor: model.fallbackIconTintColor))
       }
     }
   }
@@ -266,7 +297,8 @@ private struct NativeProfileAvatarLegacyView: View {
   var body: some View {
     NativeProfileAvatarInnerContent(
       image: model.loadedImage,
-      fallbackText: model.fallbackText,
+      fallbackIconTintColor: model.fallbackIconTintColor,
+      fallbackBackgroundColor: model.fallbackBackgroundColor,
       size: currentSize
     )
     .padding(.top, currentTopInset)
@@ -388,6 +420,18 @@ final class NativeProfileAvatarView: ExpoView {
     if let color = UIColor.nativeProfileAvatarColor(from: value) {
       model.islandCoverColor = color
     }
+  }
+
+  func setIslandCoverUIColor(_ value: UIColor) {
+    model.islandCoverColor = value
+  }
+
+  func setFallbackBackgroundUIColor(_ value: UIColor) {
+    model.fallbackBackgroundColor = value
+  }
+
+  func setFallbackIconTintUIColor(_ value: UIColor) {
+    model.fallbackIconTintColor = value
   }
 }
 

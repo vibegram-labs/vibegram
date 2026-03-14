@@ -220,6 +220,8 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
   }
 
   private func applyContentInsets() {
+    let previousTopInset = tableView.contentInset.top
+    let normalizedOffsetY = max(0, tableView.contentOffset.y + previousTopInset)
     tableView.contentInset = UIEdgeInsets(
       top: contentTopInset,
       left: 0,
@@ -232,6 +234,13 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
       bottom: contentBottomInset,
       right: 0
     )
+    let targetOffsetY = normalizedOffsetY - contentTopInset
+    if abs(tableView.contentOffset.y - targetOffsetY) > 0.5 {
+      tableView.setContentOffset(
+        CGPoint(x: tableView.contentOffset.x, y: targetOffsetY),
+        animated: false
+      )
+    }
   }
 
   private func updateUndoBanner(animated: Bool) {

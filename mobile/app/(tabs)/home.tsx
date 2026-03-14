@@ -33,6 +33,7 @@ import { getNativeChatEngineModule } from '../../src/native/chat'
 import { mapMessagesToNativeRows, type RuntimeChatMessage } from '../../src/native/chat/mapper'
 import { theme } from '../../src/lib/theme'
 
+const NATIVE_HOME_LIST_DEV_REMOUNT_KEY = __DEV__ ? `dev-${Date.now()}` : 'stable'
 
 // Helper to add alpha to hex color
 const withAlpha = (color: string, alpha: number): string => {
@@ -1180,7 +1181,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             const chatType = normalizeChatType(item?.type)
             // console.log('[HomeScreen] Navigating to /chat:', item.chatId);
             setActiveChat(item.chatId)
-            router.push({
+            router.navigate({
                 pathname: '/chat',
                 params: {
                     id: item.chatId,
@@ -1731,6 +1732,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         <View style={{ flex: 1 }}>
                             <View style={{ flex: 1 }}>
                                 <NativeHomeListSurface
+                                    key={NATIVE_HOME_LIST_DEV_REMOUNT_KEY}
                                     rows={nativeHomeRows}
                                     refreshing={isPullRefreshing}
                                     isDark={effectiveTheme === 'dark'}

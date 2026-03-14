@@ -1,10 +1,6 @@
 package expo.modules.vibechatnative
 
 import android.content.Context
-import android.net.Uri
-import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
-
-private const val fallbackHomeApiBaseUrl = "https://modest-recreation-production-8329.up.railway.app"
 
 internal data class ChatNativeHomeListRow(
   val chatId: String,
@@ -31,7 +27,7 @@ internal fun parseChatNativeHomeRows(
   rawRows: List<Map<String, Any?>>,
   context: Context,
 ): List<ChatNativeHomeListRow> {
-  val apiBaseUrl = resolveNativeHomeApiBaseUrl(context)
+  val apiBaseUrl = resolveNativeApiBaseUrl(context)
   return rawRows.mapNotNull { raw ->
     val chatId = raw["chatId"]?.toString()?.trim().orEmpty()
     if (chatId.isEmpty()) return@mapNotNull null
@@ -103,68 +99,12 @@ private fun resolveAvatarUri(
   apiBaseUrl: String?,
 ): String? {
   if (chatId == "saved_messages") return null
-  if (!friendId.isNullOrBlank() && !apiBaseUrl.isNullOrBlank()) {
-    return buildPushAvatarUrl(apiBaseUrl, friendId)
-  }
-  if (rawAvatar.isNullOrBlank()) return null
-  val trimmed = rawAvatar.trim()
-  val parsed = trimmed.toHttpUrlOrNull()
-  if (parsed != null && (parsed.scheme == "https" || parsed.scheme == "http")) {
-    return parsed.toString()
-  }
-  if (trimmed.startsWith("/") && !apiBaseUrl.isNullOrBlank()) {
-    return buildRelativeUrl(apiBaseUrl, trimmed)
-  }
-  return null
-}
-
-private fun resolveNativeHomeApiBaseUrl(context: Context): String? {
-  val config = ChatEngineStore.getConfig(context)
-  val explicit =
-    config["apiBaseUrl"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-      ?: config["baseUrl"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-  if (!explicit.isNullOrBlank()) return explicit.trimEnd('/')
-
-  val socketUrl =
-    config["socketUrl"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-      ?: config["url"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-      ?: return fallbackHomeApiBaseUrl
-  val parsed = socketUrl.toHttpUrlOrNull() ?: return fallbackHomeApiBaseUrl
-  val scheme = when (parsed.scheme) {
-    "wss" -> "https"
-    "ws" -> "http"
-    else -> parsed.scheme
-  }
-  val pathSegments = parsed.pathSegments.toMutableList()
-  if (pathSegments.isNotEmpty() && pathSegments.last().equals("socket", ignoreCase = true)) {
-    pathSegments.removeAt(pathSegments.lastIndex)
-  }
-  if (pathSegments.isNotEmpty() && pathSegments.last().equals("websocket", ignoreCase = true)) {
-    pathSegments.removeAt(pathSegments.lastIndex)
-  }
-  return parsed.newBuilder()
-    .scheme(scheme)
-    .encodedPath("/${pathSegments.joinToString("/")}")
-    .build()
-    .toString()
-    .trimEnd('/')
-}
-
-private fun buildPushAvatarUrl(apiBaseUrl: String, userId: String): String {
-  val base = apiBaseUrl.trimEnd('/')
-  val pathBase =
-    if (base.lowercase().endsWith("/api")) {
-      base
-    } else {
-      "$base/api"
-    }
-  return "$pathBase/push/avatar/${Uri.encode(userId)}"
-}
-
-private fun buildRelativeUrl(apiBaseUrl: String, path: String): String {
-  val base = apiBaseUrl.trimEnd('/')
-  val normalizedPath = if (path.startsWith("/")) path else "/$path"
-  return "$base$normalizedPath"
+  return resolveNativeAvatarUri(
+    rawAvatar = rawAvatar,
+    peerUserId = friendId,
+    apiBaseUrl = apiBaseUrl,
+    preferPushAvatar = true,
+  )
 }
 
 private fun parseInt(value: Any?): Int? =

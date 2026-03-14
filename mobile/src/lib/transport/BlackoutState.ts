@@ -3,6 +3,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import ProxyManager from '../ProxyManager';
 import { buildBridgeBaseUrl } from './bridgeBundle';
 import { ensureBootstrapStoreReady, getBootstrapSnapshot } from './BootstrapStore';
+import { isBlackoutEligibleRegion } from './GeoCheck';
 import type { BlackoutCapabilities, BlackoutPhase, BlackoutStateSnapshot, NativeTransportSnapshot, TransportMode } from './types';
 
 const STORAGE_KEY = 'vibe.blackout.state.v1';
@@ -32,6 +33,7 @@ class BlackoutStateController {
   private static instance: BlackoutStateController | null = null;
 
   private ready = false;
+  private blackoutEligible = false; // true only if geo-check says user is in a censored region
   private initPromise: Promise<BlackoutStateSnapshot> | null = null;
   private listeners = new Set<Listener>();
   private reprobeTimer: ReturnType<typeof setInterval> | null = null;
@@ -194,8 +196,81 @@ class BlackoutStateController {
       } catch (error) {
         this.snapshot.lastError = error instanceof Error ? error.message : 'blackout_state_load_failed';
       }
+
+      // ── Geo-IP eligibility check ──
+      // Only allow blackout mode in known censored countries.
+      // For all other regions, force direct mode regardless of persisted state.
+      try {
+        const geoResult = await isBlackoutEligibleRegion();
+        this.blackoutEligible = geoResult.eligible;
+        console.log(`[BlackoutState] geo-check: country=${geoResult.countryCode} eligible=${geoResult.eligible}`);
+      } catch {
+        // Geo-check failed — default to NOT eligible (safe: use direct)
+        this.blackoutEligible = false;
+        console.log('[BlackoutState] geo-check failed — defaulting to not eligible');
+      }
+
+      if (!this.blackoutEligible) {
+        // User is NOT in a censored region → always use direct mode.
+        // Clear any stale blackout state from previous sessions.
+        if (this.snapshot.transportMode !== 'direct') {
+          console.log('[BlackoutState] not in censored region — forcing direct mode (was:', this.snapshot.transportMode, ')');
+        }
+        this.snapshot = {
+          ...this.snapshot,
+          ready: true,
+          phase: 'normal',
+          transportMode: 'direct',
+          directFailureTimestamps: [],
+          directSuccessStreak: 0,
+          bridgeFailureCount: 0,
+          lastError: undefined,
+          updatedAt: nowMs(),
+        };
+      } else if (this.snapshot.transportMode !== 'direct') {
+        // ── Startup recovery probe (censored region only) ──
+        // Even in a censored region, verify the block is real before staying
+        // in blackout mode. A single successful probe resets to direct.
+        try {
+          const proxyManager = ProxyManager.getInstance();
+          const baseUrl = proxyManager.getBestUrl().trim().replace(/\/$/, '');
+          const probeController = new AbortController();
+          const probeTimeout = setTimeout(() => probeController.abort(), REPROBE_TIMEOUT_MS);
+          try {
+            const response = await fetch(`${baseUrl}/api/ping`, {
+              signal: probeController.signal,
+              headers: { Accept: 'application/json' },
+            });
+            clearTimeout(probeTimeout);
+            if (response.ok) {
+              console.log('[BlackoutState] startup probe succeeded in censored region — resetting to direct');
+              this.snapshot = {
+                ...this.snapshot,
+                ready: true,
+                phase: 'normal',
+                transportMode: 'direct',
+                directFailureTimestamps: [],
+                directSuccessStreak: 0,
+                bridgeFailureCount: 0,
+                lastDirectSuccessAt: nowMs(),
+                lastError: undefined,
+                updatedAt: nowMs(),
+              };
+            }
+          } catch (_probeErr) {
+            clearTimeout(probeTimeout);
+            console.log('[BlackoutState] startup probe failed in censored region — keeping blackout mode');
+          }
+        } catch {
+          // ProxyManager or other init issue — keep persisted state.
+        }
+      }
+
       this.ready = true;
-      this.startReprobeLoop();
+      // Only run the reprobe loop in censored regions where blackout can activate
+      if (this.blackoutEligible) {
+        this.startReprobeLoop();
+      }
       this.emit();
       return this.getSnapshot();
     })();
@@ -219,6 +294,15 @@ class BlackoutStateController {
 
   async recordDirectFailure(source: string, error?: string): Promise<BlackoutStateSnapshot> {
     await this.ensureReady();
+
+    // If user is NOT in a censored region, never escalate to blackout.
+    // Just log the failure and stay in direct mode.
+    if (!this.blackoutEligible) {
+      return this.setSnapshot({
+        lastError: error || source,
+      });
+    }
+
     const ts = nowMs();
     const failures = [...this.snapshot.directFailureTimestamps, ts].filter((entry) => ts - entry <= FAILURE_WINDOW_MS);
     const nextState: Partial<BlackoutStateSnapshot> = {

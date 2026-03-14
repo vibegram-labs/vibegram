@@ -543,8 +543,28 @@ const isValidBinaryId = (value?: string | null): boolean => {
     return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 };
 
+const messageRetryStates = new Map<string, { attempts: number, nextRetryAt: number }>();
+
+export const markMessageRetryFailed = (messageId: string) => {
+    const ret = messageRetryStates.get(messageId) || { attempts: 0, nextRetryAt: 0 };
+    ret.attempts += 1;
+    // Exponential backoff: starts at 2s... max 300s (5 mins)
+    const backoffMs = Math.min(300_000, Math.pow(2, ret.attempts) * 1000);
+    ret.nextRetryAt = Date.now() + backoffMs;
+    messageRetryStates.set(messageId, ret);
+};
+
+export const clearMessageRetryState = (messageId: string) => {
+    messageRetryStates.delete(messageId);
+};
+
 const isRetryableMessage = (message: Message, now = Date.now()): boolean => {
     if (message.status === 'error' && hasPermanentLocalMediaError(message)) return false;
+
+    // Apply exponential backoff check
+    const retryData = messageRetryStates.get(message.id);
+    if (retryData && now < retryData.nextRetryAt) return false;
+
     if (message.status === 'pending' || message.status === 'error') return true;
     if (message.status === 'sending') {
         const sentAt = typeof message.timestamp === 'number' ? message.timestamp : now;
@@ -614,6 +634,19 @@ const runChatRetryPump = async (chatId: string, get: any) => {
             if (!latestMessage || !isRetryableMessage(latestMessage)) continue;
 
             await get().retryMessage(chatId, message.id);
+
+            // Check status after retry to update exponential backoff state
+            const postChat = get().chats.find((c: Chat) => c.chatId === chatId);
+            const postMsg = postChat?.messages.find((m: Message) => m.id === message.id);
+            if (postMsg) {
+                if (postMsg.status === 'error' || postMsg.status === 'pending') {
+                    markMessageRetryFailed(message.id);
+                } else {
+                    // Success or cancelled
+                    clearMessageRetryState(message.id);
+                }
+            }
+
             await sleep(RETRY_DISPATCH_GAP_MS);
         }
     } finally {
@@ -1964,6 +1997,15 @@ export const useChatStore = create<ChatState>()(
                     set({ isLoading: true });
                 }
                 set({ lastChatsLoad: Date.now() });
+
+                // If hydrated and not empty, delay the network fetch by a bit
+                // to avoid slamming the DB on developer reload loops.
+                if (!wasEmpty) {
+                     console.log(`[ChatStore] loadChats using offline cached data (${get().chats.length} chats) — deferring background sync`);
+                     // Let the UI finish rendering from local AsyncStorage before background syncing.
+                     // The background sync could happen via Phoenix auto-sync or delayed retry.
+                     return;
+                }
 
                 try {
                     // Fetch chats via native module (pure native, no JS fallback).

@@ -215,84 +215,72 @@ function HeaderLightBeam({
 
 const AnimatedDetailWord = React.memo(({
     word,
-    wordIndex,
-    totalWords,
+    charIndex,
     progress,
     index,
     introProgress,
     isFirst,
     textStyle,
+    hasSpace,
 }: any) => {
     const wordStyle = useAnimatedStyle(() => {
         let diff = progress.value - index;
         if (diff > 1.5) diff -= 3;
         if (diff < -1.5) diff += 3;
 
-        const introStagger = wordIndex * 0.02;
-        const outroStagger = wordIndex * 0.01;
+        const introStagger = charIndex * 0.006;
+        const outroStagger = charIndex * 0.004;
 
         const opacitySlide = interpolate(
             diff,
-            [-0.75 + introStagger, -0.25 + introStagger, 0.2 + outroStagger, 0.6 + outroStagger],
+            [-0.7 + introStagger, -0.3 + introStagger, 0.1 + outroStagger, 0.5 + outroStagger],
             [0, 1, 1, 0],
             Extrapolation.CLAMP
         );
 
-        const translateXSlide = interpolate(
-            diff,
-            [-0.75 + introStagger, -0.25 + introStagger, 0.2 + outroStagger, 0.6 + outroStagger],
-            [-16, 0, 0, 16],
-            Extrapolation.CLAMP
-        );
-
         let introOpacity = 1;
-        let introTx = 0;
         if (isFirst && introProgress) {
-            const introInitStagger = wordIndex * 0.03;
+            const introInitStagger = charIndex * 0.006;
             introOpacity = interpolate(
                 introProgress.value,
                 [0.35 + introInitStagger, 0.55 + introInitStagger],
                 [0, 1],
                 Extrapolation.CLAMP
             );
-            introTx = interpolate(
-                introProgress.value,
-                [0.35 + introInitStagger, 0.55 + introInitStagger],
-                [-16, 0],
-                Extrapolation.CLAMP
-            );
         }
 
         return {
             opacity: isFirst ? (opacitySlide * introOpacity) : opacitySlide,
-            transform: [{ translateX: Platform.OS === 'android' ? 0 : (isFirst ? (translateXSlide + introTx) : translateXSlide) }],
         };
     });
 
     return (
         <Animated.Text style={[textStyle, wordStyle]}>
-            {word}{wordIndex < totalWords - 1 ? ' ' : ''}
+            {word}{hasSpace ? ' ' : ''}
         </Animated.Text>
     );
 });
 
 function AnimatedLetters({ text, progress, index, introProgress, isFirst, textStyle }: any) {
     const words = text.split(' ');
+    let charIndex = 0;
 
     return (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
             {words.map((word: string, wIndex: number) => {
+                const currentIdx = charIndex;
+                charIndex += word.length + 1; // +1 for the space
                 return (
                     <AnimatedDetailWord
                         key={`detail-word-${wIndex}`}
                         word={word}
-                        wordIndex={wIndex}
-                        totalWords={words.length}
+                        charIndex={currentIdx}
                         progress={progress}
                         index={index}
                         introProgress={introProgress}
                         isFirst={isFirst}
                         textStyle={textStyle}
+                        hasSpace={wIndex < words.length - 1}
                     />
                 );
             })}
@@ -302,87 +290,74 @@ function AnimatedLetters({ text, progress, index, introProgress, isFirst, textSt
 
 const AnimatedHeaderWord = React.memo(({
     word,
-    wordIndex,
-    totalWords,
+    charIndex,
     progress,
     index,
     introProgress,
     isFirst,
     textStyle,
+    hasSpace,
 }: any) => {
     const wordStyle = useAnimatedStyle(() => {
         let diff = progress.value - index;
         if (diff > 1.5) diff -= 3;
         if (diff < -1.5) diff += 3;
 
-        const introStagger = wordIndex * 0.05;
-        const outroStagger = wordIndex * 0.03;
+        const introStagger = charIndex * 0.012;
+        const outroStagger = charIndex * 0.012;
 
         const opacitySlide = interpolate(
             diff,
-            [-0.5 + introStagger, -0.15 + introStagger, 0.2 + outroStagger, 0.45 + outroStagger],
+            [-0.7 + introStagger, -0.3 + introStagger, 0.1 + outroStagger, 0.5 + outroStagger],
             [0, 1, 1, 0],
             Extrapolation.CLAMP
         );
 
-        const translateXSlide = interpolate(
-            diff,
-            [-0.5 + introStagger, -0.15 + introStagger, 0.2 + outroStagger, 0.45 + outroStagger],
-            [-24, 0, 0, 24],
-            Extrapolation.CLAMP
-        );
-
         let introOpacity = 1;
-        let introTx = 0;
         if (isFirst && introProgress) {
-            const introInitStagger = wordIndex * 0.05;
+            const introInitStagger = charIndex * 0.012;
             introOpacity = interpolate(
                 introProgress.value,
-                [0.35 + introInitStagger, 0.55 + introInitStagger],
+                [0.2 + introInitStagger, 0.6 + introInitStagger],
                 [0, 1],
-                Extrapolation.CLAMP
-            );
-            introTx = interpolate(
-                introProgress.value,
-                [0.35 + introInitStagger, 0.55 + introInitStagger],
-                [-24, 0],
                 Extrapolation.CLAMP
             );
         }
 
         const mergedOpacity = isFirst ? (opacitySlide * introOpacity) : opacitySlide;
-        const mergedTx = isFirst ? (translateXSlide + introTx) : translateXSlide;
 
         return {
             opacity: mergedOpacity,
-            transform: [{ translateX: Platform.OS === 'android' ? 0 : mergedTx }],
         };
     });
 
     return (
         <Animated.Text style={[textStyle, wordStyle]}>
-            {word}{wordIndex < totalWords - 1 ? ' ' : ''}
+            {word}{hasSpace ? ' ' : ''}
         </Animated.Text>
     );
 });
 
 const AnimatedHeaderLetters = React.memo(({ text, progress, index, introProgress, isFirst, textStyle }: any) => {
     const words = text.split(' ');
+    let charIndex = 0;
 
     return (
         <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
             {words.map((word: string, wIndex: number) => {
+                const currentIdx = charIndex;
+                charIndex += word.length + 1;
                 return (
                     <AnimatedHeaderWord
                         key={`word-${wIndex}`}
                         word={word}
-                        wordIndex={wIndex}
-                        totalWords={words.length}
+                        charIndex={currentIdx}
                         progress={progress}
                         index={index}
                         introProgress={introProgress}
                         isFirst={isFirst}
                         textStyle={textStyle}
+                        hasSpace={wIndex < words.length - 1}
                     />
                 );
             })}
@@ -413,7 +388,7 @@ function FeatureSlide({
         let diff = progress.value - index;
         if (diff > 1.5) diff -= 3;
         if (diff < -1.5) diff += 3;
-        const op = interpolate(diff, [-0.85, -0.2, 0.2, 0.7], [0, 1, 1, 0], Extrapolation.CLAMP)
+        const op = interpolate(diff, [-1.1, -0.9, 0.9, 1.1], [0, 1, 1, 0], Extrapolation.CLAMP)
         return { opacity: op };
     });
 
@@ -534,13 +509,7 @@ export default function WelcomeScreen() {
                 darken={isDark ? 0.14 : 0.03}
             />
 
-            <View pointerEvents="none" style={StyleSheet.absoluteFill}>
-                <LinearGradient
-                    colors={['transparent', backgroundBase]}
-                    locations={[0.4, 1]}
-                    style={StyleSheet.absoluteFill}
-                />
-            </View>
+
 
             <Animated.View style={[styles.mainContent, pageIntroStyle]}>
                 <View style={styles.textContainer}>
@@ -587,37 +556,20 @@ export default function WelcomeScreen() {
             </Animated.View>
 
             <Animated.View style={[styles.bottomArea, bottomIntroStyle]}>
-                <SafeLiquidGlass
-                    style={[
-                        styles.buttonWrapper,
-                        { backgroundColor: buttonGlassColor },
+                <Pressable
+                    onPress={() => router.push('/(auth)/signin')}
+                    style={({ pressed }) => [
+                        styles.mainButton,
+                        { backgroundColor: colors.button },
+                        { opacity: pressed ? 0.78 : 1 }
                     ]}
-                    blurIntensity={20}
-                    tint={isDark ? 'dark' : 'light'}
-                    tintColor={buttonGlassColor}
                 >
-                    <Pressable
-                        onPress={() => router.push('/(auth)/signup')}
-                        style={({ pressed }) => [
-                            styles.mainButton,
-                            { backgroundColor: buttonWashSoft },
-                            { opacity: pressed ? 0.78 : 1 }
-                        ]}
-                    >
-                        <LinearGradient
-                            pointerEvents="none"
-                            colors={[buttonWashStrong, buttonWashSoft]}
-                            start={{ x: 0.08, y: 0 }}
-                            end={{ x: 0.92, y: 1 }}
-                            style={StyleSheet.absoluteFill}
-                        />
-                        <Text style={[styles.mainButtonText, { color: colors.buttonText }]}>Create account</Text>
-                    </Pressable>
-                </SafeLiquidGlass>
+                    <Text style={[styles.mainButtonText, { color: colors.buttonText }]}>Sign In</Text>
+                </Pressable>
 
-                <Pressable onPress={() => router.push('/(auth)/signin')} style={{ paddingVertical: 12 }}>
+                <Pressable onPress={() => router.push('/(auth)/signup')} style={{ paddingVertical: 12 }}>
                     <Text style={[styles.signInTextBase, { color: colors.textSecondary }]}>
-                        Already have an account? <Text style={[styles.signInTextHighlight, { color: colors.primary }]}>Sign in</Text>
+                        <Text style={[styles.signInTextHighlight, { color: colors.text }]}>Create account</Text>
                     </Text>
                 </Pressable>
             </Animated.View>
@@ -686,26 +638,15 @@ const styles = StyleSheet.create({
         paddingHorizontal: 32,
         paddingBottom: Platform.OS === 'ios' ? 50 : 40,
         alignItems: 'center',
-        gap: 20,
-    },
-    buttonWrapper: {
-        borderRadius: 30,
-        overflow: 'hidden',
-        width: '100%',
-        maxWidth: 400,
-        height: 56,
-        position: 'relative',
-        shadowColor: '#111',
-        shadowOffset: { width: 0, height: 6 },
-        shadowOpacity: 0.2,
-        shadowRadius: 15,
+        gap: 16,
     },
     mainButton: {
-        flex: 1,
+        width: '100%',
+        maxWidth: 400,
+        height: 46,
         justifyContent: 'center',
         alignItems: 'center',
-        borderRadius: 30,
-        overflow: 'hidden',
+        borderRadius: 23,
     },
     mainButtonText: {
         fontSize: 16,
@@ -713,7 +654,7 @@ const styles = StyleSheet.create({
         letterSpacing: 0.1,
     },
     signInTextBase: {
-        fontSize: 15,
+        fontSize: 16,
         fontFamily: 'SpaceGrotesk-Regular',
     },
     signInTextHighlight: {

@@ -114,25 +114,107 @@ internal class ChatMainProfileTabNode(
 internal class ChatMainProfileListRowNode(
   context: Context,
 ) : FrameLayout(context) {
+  private val contentRow = LinearLayout(context)
+  private val iconContainer = FrameLayout(context)
+  private val iconView = ImageView(context)
+  private val textStack = LinearLayout(context)
   private val titleLabel = TextView(context)
   private val subtitleLabel = TextView(context)
+  private val trailingRow = LinearLayout(context)
+  private val valueLabel = TextView(context)
+  private val chevronView = ImageView(context)
   private val separatorView = FrameLayout(context)
   private val pressedOverlay = FrameLayout(context)
 
   private var defaultTitleColor: Int = Color.WHITE
   private var subtitleColor: Int = Color.LTGRAY
+  private var valueColor: Int = Color.LTGRAY
   private var separatorColor: Int = Color.argb(26, 255, 255, 255)
   private var highlightedColor: Int = Color.argb(10, 255, 255, 255)
+  private var iconTintColor: Int = Color.WHITE
+  private var iconBackgroundColor: Int = Color.argb(16, 255, 255, 255)
   private var titleColorOverride: Int? = null
 
   init {
+    minimumHeight = dp(62)
+
+    contentRow.orientation = LinearLayout.HORIZONTAL
+    contentRow.gravity = Gravity.CENTER_VERTICAL
+    contentRow.setPadding(dp(18), dp(12), dp(18), dp(12))
+    addView(
+      contentRow,
+      LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT),
+    )
+
+    iconContainer.background = roundedShape(iconBackgroundColor, dp(14))
+    contentRow.addView(
+      iconContainer,
+      LinearLayout.LayoutParams(dp(36), dp(36)),
+    )
+
+    iconView.scaleType = ImageView.ScaleType.CENTER_INSIDE
+    iconContainer.addView(
+      iconView,
+      LayoutParams(dp(18), dp(18), Gravity.CENTER),
+    )
+
+    textStack.orientation = LinearLayout.VERTICAL
+    contentRow.addView(
+      textStack,
+      LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f).apply {
+        marginStart = dp(12)
+      },
+    )
+
     titleLabel.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
     titleLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
     titleLabel.maxLines = 1
-    addView(titleLabel)
+    textStack.addView(
+      titleLabel,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
 
     subtitleLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14f)
-    addView(subtitleLabel)
+    subtitleLabel.setPadding(0, dp(2), 0, 0)
+    textStack.addView(
+      subtitleLabel,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.MATCH_PARENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    trailingRow.orientation = LinearLayout.HORIZONTAL
+    trailingRow.gravity = Gravity.CENTER_VERTICAL
+    contentRow.addView(
+      trailingRow,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    valueLabel.setTypeface(Typeface.DEFAULT, Typeface.NORMAL)
+    valueLabel.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
+    trailingRow.addView(
+      valueLabel,
+      LinearLayout.LayoutParams(
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+        LinearLayout.LayoutParams.WRAP_CONTENT,
+      ),
+    )
+
+    chevronView.scaleType = ImageView.ScaleType.CENTER_INSIDE
+    chevronView.setImageResource(R.drawable.ic_chevron_right_small)
+    trailingRow.addView(
+      chevronView,
+      LinearLayout.LayoutParams(dp(14), dp(14)).apply {
+        marginStart = dp(8)
+      },
+    )
 
     addView(separatorView)
 
@@ -143,36 +225,67 @@ internal class ChatMainProfileListRowNode(
     )
   }
 
-  fun configure(title: String, subtitle: String, titleColor: Int? = null, showsSeparator: Boolean) {
+  fun configure(
+    title: String,
+    subtitle: String = "",
+    value: String = "",
+    iconRes: Int = 0,
+    titleColor: Int? = null,
+    showsSeparator: Boolean,
+    showsChevron: Boolean = true,
+  ) {
     titleLabel.text = title
-    subtitleLabel.text = subtitle
+    val resolvedSubtitle = subtitle.trim()
+    subtitleLabel.text = resolvedSubtitle
+    subtitleLabel.visibility = if (resolvedSubtitle.isEmpty()) GONE else VISIBLE
+    valueLabel.text = value
+    valueLabel.visibility = if (value.isBlank()) GONE else VISIBLE
+    if (iconRes != 0) {
+      iconView.setImageResource(iconRes)
+      iconContainer.visibility = VISIBLE
+    } else {
+      iconContainer.visibility = GONE
+    }
+    chevronView.visibility = if (showsChevron) VISIBLE else GONE
     titleColorOverride = titleColor
     separatorView.visibility = if (showsSeparator) VISIBLE else GONE
     titleLabel.setTextColor(titleColor ?: defaultTitleColor)
     subtitleLabel.setTextColor(subtitleColor)
+    valueLabel.setTextColor(valueColor)
   }
 
-  fun applyTheme(titleColor: Int, subtitleColor: Int, separatorColor: Int, highlightedColor: Int) {
+  fun applyTheme(
+    titleColor: Int,
+    subtitleColor: Int,
+    valueColor: Int,
+    separatorColor: Int,
+    highlightedColor: Int,
+    iconTintColor: Int,
+    iconBackgroundColor: Int,
+  ) {
     defaultTitleColor = titleColor
     this.subtitleColor = subtitleColor
+    this.valueColor = valueColor
     this.separatorColor = separatorColor
     this.highlightedColor = highlightedColor
+    this.iconTintColor = iconTintColor
+    this.iconBackgroundColor = iconBackgroundColor
     titleLabel.setTextColor(titleColorOverride ?: titleColor)
     subtitleLabel.setTextColor(subtitleColor)
+    valueLabel.setTextColor(valueColor)
+    iconView.setColorFilter(iconTintColor, PorterDuff.Mode.SRC_IN)
+    chevronView.setColorFilter(valueColor, PorterDuff.Mode.SRC_IN)
+    iconContainer.background = roundedShape(iconBackgroundColor, dp(14))
     separatorView.setBackgroundColor(separatorColor)
     pressedOverlay.setBackgroundColor(highlightedColor)
   }
 
   override fun onLayout(changed: Boolean, left: Int, top: Int, right: Int, bottom: Int) {
     super.onLayout(changed, left, top, right, bottom)
-    val width = right - left
     val height = bottom - top
-    val insetX = dp(18)
-    titleLabel.layout(insetX, dp(11), width - insetX, dp(33))
-    subtitleLabel.layout(insetX, dp(34), width - insetX, height - dp(11))
     val lineHeight = 1
-    separatorView.layout(insetX, height - lineHeight, width - insetX, height)
-    pressedOverlay.layout(0, 0, width, height)
+    separatorView.layout(dp(18), height - lineHeight, right - left - dp(18), height)
+    pressedOverlay.layout(0, 0, right - left, height)
   }
 
   override fun onTouchEvent(event: MotionEvent): Boolean {
@@ -186,6 +299,12 @@ internal class ChatMainProfileListRowNode(
   private fun dp(value: Int): Int {
     val density = resources.displayMetrics.density
     return (value * density).toInt()
+  }
+
+  private fun roundedShape(color: Int, radiusPx: Int) = GradientDrawable().apply {
+    shape = GradientDrawable.RECTANGLE
+    cornerRadius = radiusPx.toFloat()
+    setColor(color)
   }
 }
 

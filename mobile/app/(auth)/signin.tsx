@@ -1,6 +1,6 @@
 
 import React, { useState } from 'react'
-import { View, Text, StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, I18nManager } from 'react-native'
+import { View, Text, StyleSheet, ActivityIndicator, Alert, KeyboardAvoidingView, Platform, ScrollView, I18nManager, Pressable } from 'react-native'
 import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
 
@@ -29,9 +29,7 @@ export default function SignInScreen() {
     const insets = useSafeAreaInsets()
     const isDark = effectiveTheme === 'dark'
     const isFormValid = secretKey.length > 5;
-    const buttonBackgroundColor = isFormValid
-        ? colors.button
-        : (Platform.OS === 'android' ? (isDark ? '#222222' : '#E0DED7') : colors.input);
+    const buttonBackgroundColor = colors.button;
 
     const handleLogin = async () => {
         if (!secretKey.trim()) {
@@ -189,45 +187,27 @@ export default function SignInScreen() {
                         />
 
                         <View style={[styles.buttonWrapper, { marginTop: 8 }]}>
-                            {Platform.OS === 'android' ? (
-                                <View style={[styles.nativeButtonGlass, { backgroundColor: buttonBackgroundColor }]}>
-                                    {loading ? (
-                                        <ModernLoader size={48} color="#fff" type="dots" />
-                                    ) : (
-                                        <Text
-                                            onPress={() => {
-                                                if (!loading && isFormValid) {
-                                                    handleLogin()
-                                                }
-                                            }}
-                                            style={[styles.buttonLabel, { color: isFormValid ? colors.buttonText : colors.textSecondary }]}
-                                        >
-                                            {t('auth.signIn')}
-                                        </Text>
-                                    )}
-                                </View>
-                            ) : (
-                                <SafeLiquidGlass
-                                    style={[styles.nativeButtonGlass, { backgroundColor: buttonBackgroundColor }]}
-                                    blurIntensity={18}
-                                    tintColor={Platform.OS === 'ios' ? buttonBackgroundColor : undefined}
-                                    tint={isDark ? 'dark' : 'light'}
-                                    onStartShouldSetResponder={() => !loading && isFormValid}
-                                    onResponderRelease={() => {
-                                        if (!loading && isFormValid) {
-                                            handleLogin()
-                                        }
-                                    }}
-                                >
-                                    {loading ? (
-                                        <ModernLoader size={48} color="#fff" type="dots" />
-                                    ) : (
-                                        <Text style={[styles.buttonLabel, { color: isFormValid ? colors.buttonText : colors.textSecondary }]}>
-                                            {t('auth.signIn')}
-                                        </Text>
-                                    )}
-                                </SafeLiquidGlass>
-                            )}
+                            <Pressable
+                                onPress={() => {
+                                    if (!loading && isFormValid) {
+                                        handleLogin()
+                                    }
+                                }}
+                                style={({ pressed }) => [
+                                    styles.nativeButtonGlass,
+                                    { backgroundColor: buttonBackgroundColor, opacity: isFormValid ? (pressed ? 0.78 : 1) : 0.4 }
+                                ]}
+                            >
+                                {loading ? (
+                                    <View style={styles.loadingWrapper}>
+                                        <ModernLoader size={48} color={colors.buttonText} type="dots" />
+                                    </View>
+                                ) : (
+                                    <Text style={[styles.buttonLabel, { color: colors.buttonText }]}>
+                                        {t('auth.signIn')}
+                                    </Text>
+                                )}
+                            </Pressable>
                         </View>
 
                         <View style={styles.switchLink}>
@@ -305,15 +285,24 @@ const styles = StyleSheet.create({
         height: 54,
     },
     nativeButtonGlass: {
-        height: 54,
-        borderRadius: 22,
+        height: 46,
+        borderRadius: 23, // Match welcome screen
         overflow: 'hidden',
         justifyContent: 'center',
         alignItems: 'center',
+        width: '100%',
+        textAlign: 'center',
     },
     buttonLabel: {
         fontSize: 16,
         fontWeight: '700',
+        textAlign: 'center',
+        lineHeight: 46,
+    },
+    loadingWrapper: {
+        height: 46,
+        justifyContent: 'center',
+        alignItems: 'center',
     },
     loadingRow: {
         flexDirection: 'row',

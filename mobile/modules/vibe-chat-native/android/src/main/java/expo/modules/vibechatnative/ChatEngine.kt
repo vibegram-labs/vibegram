@@ -24,6 +24,8 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
 import java.io.IOException
+import java.io.InterruptedIOException
+import java.net.SocketTimeoutException
 import java.nio.charset.StandardCharsets
 import java.security.KeyFactory
 import java.security.PrivateKey
@@ -36,6 +38,7 @@ import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.spec.GCMParameterSpec
 import javax.crypto.spec.OAEPParameterSpec
@@ -217,6 +220,8 @@ private fun chatEngineEncryptHybridMessage(
 }
 
 internal object ChatEngine {
+  private const val NATIVE_CONNECT_STALE_TIMEOUT_MS = 5_000L
+
   private data class SurfaceBinding(
     val surfaceId: String,
     val chatId: String?,
@@ -274,6 +279,15 @@ internal object ChatEngine {
   // Use the same pinned OkHttpClient with cert pinning + TLS enforcement
   // for history HTTP requests as the WebSocket connection uses.
   private val historyHttpClient by lazy { ChatPhoenixClient.buildPinnedHttpClient() }
+  private val mediaUploadHttpClient by lazy {
+    ChatPhoenixClient.buildPinnedHttpClient()
+      .newBuilder()
+      .connectTimeout(20L, TimeUnit.SECONDS)
+      .writeTimeout(40L, TimeUnit.SECONDS)
+      .readTimeout(40L, TimeUnit.SECONDS)
+      .callTimeout(45L, TimeUnit.SECONDS)
+      .build()
+  }
   private const val fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
   private const val AGENT_USER_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -451,9 +465,46 @@ internal object ChatEngine {
   }
 
   private fun ensureNativeTransport(trigger: String) {
+    var clientToDisconnect: ChatRealtimeTransport? = null
+    var shouldEmitStateChange = false
     val shouldConnect = synchronized(lock) {
       val connected = state["connected"] == true
-      val currentState = normalized(state["state"])?.lowercase().orEmpty()
+      var currentState = normalized(state["state"])?.lowercase().orEmpty()
+      val nowMs = System.currentTimeMillis()
+      val updatedAtMs = (state["updatedAt"] as? Number)?.toLong() ?: 0L
+      val stateAgeMs = if (updatedAtMs > 0L) nowMs - updatedAtMs else -1L
+      if (currentState == "connecting-native-presence" && stateAgeMs >= NATIVE_CONNECT_STALE_TIMEOUT_MS) {
+        Log.w(
+          "ChatEngine",
+          "ensureNativeTransport resetting stale connect trigger=$trigger stateAgeMs=$stateAgeMs hasClient=${phoenixClient != null}",
+        )
+        appendJournalLocked(
+          "native-connect-stale",
+          mapOf("trigger" to trigger, "stateAgeMs" to stateAgeMs, "hasClient" to (phoenixClient != null)),
+        )
+        clientToDisconnect = phoenixClient
+        phoenixClient = null
+        nativeSocketSignature = null
+        nativePresenceActive = false
+        nativeUserJoinRef = null
+        nativeUserTopic = null
+        nativeChatJoinRefsByRef.clear()
+        nativeJoinedChatIds.clear()
+        nativePendingMessagePushRefs.clear()
+        nativePendingEditPushRefs.clear()
+        nativePendingDeletePushRefs.clear()
+        nativeTypingStateByChatId.clear()
+        peerTypingUserIdsByChatId.clear()
+        nativeRecordingStateByChatId.clear()
+        pinnedFetchInFlightChatIds.clear()
+        historyLoadingChats.clear()
+        state["connected"] = false
+        state["state"] = "native-connect-stale"
+        state["updatedAt"] = nowMs
+        state["presenceSource"] = "shadow"
+        currentState = "native-connect-stale"
+        shouldEmitStateChange = true
+      }
       if (connected || currentState == "connecting-native-presence" || currentState == "native-socket-open") {
         false
       } else if (transportModeLocked() == "offline") {
@@ -461,6 +512,10 @@ internal object ChatEngine {
       } else {
         bootstrapConfigFromNativeSessionIfNeededLocked(trigger)
       }
+    }
+    clientToDisconnect?.disconnect()
+    if (shouldEmitStateChange) {
+      emitChangeLocked("connectionStateChanged", null, null)
     }
     if (shouldConnect) {
       connect()
@@ -471,7 +526,8 @@ internal object ChatEngine {
     Thread {
       try {
         ensureNativeTransport(trigger)
-      } catch (_: Throwable) {
+      } catch (t: Throwable) {
+        Log.e("ChatEngine", "ensureNativeTransportAsync failed trigger=$trigger", t)
       }
     }.apply { isDaemon = true }.start()
   }
@@ -509,6 +565,22 @@ internal object ChatEngine {
 
   fun getTransportStatus(): Map<String, Any?> =
     synchronized(lock) { statusSnapshotLocked() }
+
+  private fun transportDebugStateLocked(chatId: String? = null): String {
+    val connected = (state["connected"] as? Boolean) == true
+    val socketState = normalized(state["state"]) ?: "-"
+    val hasClient = phoenixClient != null
+    val openChatCount = if (chatId != null) (openChatChannels[chatId] ?: 0) else openChatChannels.size
+    val joined = if (chatId != null) nativeJoinedChatIds.contains(chatId) else nativeJoinedChatIds.isNotEmpty()
+    val joining = if (chatId != null) nativeChatJoinRefsByRef.values.contains(chatId) else nativeChatJoinRefsByRef.isNotEmpty()
+    val queued = if (chatId != null) (pendingOutboundQueueByChat[chatId]?.size ?: 0) else pendingOutboundQueueByChat.values.sumOf { it.size }
+    val inFlight = if (chatId != null) {
+      nativePendingMessagePushRefs.values.count { it.first == chatId }
+    } else {
+      nativePendingMessagePushRefs.size
+    }
+    return "connected=$connected socketState=$socketState hasClient=$hasClient openChats=$openChatCount joined=$joined joining=$joining queued=$queued inFlight=$inFlight"
+  }
 
   private fun transportModeLocked(config: Map<String, Any?>? = null): String {
     val resolved = config ?: appContextRef?.let(ChatEngineStore::getConfig).orEmpty()
@@ -654,7 +726,14 @@ internal object ChatEngine {
     val signature = "$transportMode|$resolvedTarget|${authToken ?: ""}|$userTopic"
     var clientToDisconnect: ChatRealtimeTransport? = null
     var clientToConnect: ChatRealtimeTransport? = null
+    var openChatIdsSnapshot: List<String> = emptyList()
+    var connectJournalPayload: Map<String, Any?> = emptyMap()
+    Log.i(
+      "ChatEngine",
+      "connect start transportMode=$transportMode target=${resolvedTarget.take(200)} userTopic=$userTopic hasAuthToken=${!authToken.isNullOrBlank()} hasExistingClient=${phoenixClient != null}",
+    )
     synchronized(lock) {
+      Log.d("ChatEngine", "connect stage=entered_lock userTopic=$userTopic signatureHash=${signature.hashCode()}")
       if (phoenixClient != null && nativeSocketSignature != signature) {
         clientToDisconnect = phoenixClient
         phoenixClient = null
@@ -704,13 +783,14 @@ internal object ChatEngine {
           }
         nativeSocketSignature = signature
       }
+      Log.d("ChatEngine", "connect stage=client_ready userTopic=$userTopic hasClient=${phoenixClient != null}")
       nativeUserTopic = userTopic
       state["connected"] = false
       state["state"] = "connecting-native-presence"
       state["updatedAt"] = System.currentTimeMillis()
       state["transportMode"] = transportMode
-      state["activeBridgeId"] = normalized(config["activeBridgeId"])
-      state["bridgeBaseUrl"] = bridgeBaseUrl
+      putNullableStateLocked("activeBridgeId", normalized(config["activeBridgeId"]))
+      putNullableStateLocked("bridgeBaseUrl", bridgeBaseUrl)
       state["note"] =
         if (transportMode == "bridge_text") {
           "ChatEngine blackout bridge connecting"
@@ -718,17 +798,25 @@ internal object ChatEngine {
           "ChatEngine native Phoenix presence connecting"
         }
       state["presenceSource"] = if (nativePresenceActive) "native" else "shadow"
-      appendJournalLocked(
-        "connect-native",
-        mapOf("topic" to userTopic, "transportMode" to transportMode, "bridgeBaseUrl" to bridgeBaseUrl),
-      )
-      val result = statusSnapshotLocked()
-      emitChangeLocked("connectionStateChanged", null, null)
+      connectJournalPayload =
+        mapOf("topic" to userTopic, "transportMode" to transportMode, "bridgeBaseUrl" to bridgeBaseUrl)
       clientToConnect = phoenixClient
-      clientToDisconnect?.disconnect()
-      clientToConnect?.connect()
-      return result
+      openChatIdsSnapshot = openChatChannels.keys.toList()
+      Log.d(
+        "ChatEngine",
+        "connect stage=lock_exit_ready userTopic=$userTopic hasClient=${clientToConnect != null} openChatIds=$openChatIdsSnapshot",
+      )
     }
+
+    appendJournalLocked("connect-native", connectJournalPayload)
+    emitChangeLocked("connectionStateChanged", null, null)
+    Log.i(
+      "ChatEngine",
+      "connect dispatch transportMode=$transportMode userTopic=$userTopic openChatIds=$openChatIdsSnapshot hasClient=${clientToConnect != null}",
+    )
+    clientToDisconnect?.disconnect()
+    clientToConnect?.connect()
+    return getStatus()
   }
 
   fun disconnect(): Map<String, Any?> {
@@ -808,6 +896,10 @@ internal object ChatEngine {
       val resolvedChatId = normalized(payload["chatId"] ?: payload["chat_id"])
       resolvedChatId?.let { chatId ->
         openChatChannels[chatId] = (openChatChannels[chatId] ?: 0) + 1
+        Log.i(
+          "ChatEngine",
+          "openChatChannel chatId=$chatId count=${openChatChannels[chatId] ?: 0} ${transportDebugStateLocked(chatId)}",
+        )
         joinNativeChatTopicIfNeededLocked(chatId)
       }
       appendJournalLocked("open-chat-channel", payload)
@@ -857,18 +949,34 @@ internal object ChatEngine {
       else -> false
     }
     return synchronized(lock) {
+      Log.d(
+        "ChatEngine",
+        "sendTypingState start chatId=$chatId typing=$typing ${transportDebugStateLocked(chatId)}",
+      )
       if (isBridgeTextModeLocked()) {
         return@synchronized mapOf("accepted" to false, "reason" to "typing_disabled_in_blackout", "typing" to typing)
       }
       if (nativeTypingStateByChatId[chatId] == typing) {
+        Log.d(
+          "ChatEngine",
+          "sendTypingState deduped chatId=$chatId typing=$typing ${transportDebugStateLocked(chatId)}",
+        )
         return@synchronized mapOf("accepted" to true, "transport" to "native", "deduped" to true, "typing" to typing)
       }
       nativeTypingStateByChatId[chatId] = typing
       val client = phoenixClient ?: run {
+        Log.w(
+          "ChatEngine",
+          "sendTypingState blocked reason=no_native_socket chatId=$chatId typing=$typing ${transportDebugStateLocked(chatId)}",
+        )
         ensureNativeTransportAsync("typing_no_socket")
         return@synchronized mapOf("accepted" to false, "reason" to "no_native_socket", "typing" to typing)
       }
       if (!nativeJoinedChatIds.contains(chatId) || state["connected"] != true) {
+        Log.w(
+          "ChatEngine",
+          "sendTypingState blocked reason=chat_not_joined chatId=$chatId typing=$typing ${transportDebugStateLocked(chatId)}",
+        )
         joinNativeChatTopicIfNeededLocked(chatId)
         ensureNativeTransportAsync("typing_chat_not_joined")
         return@synchronized mapOf("accepted" to false, "reason" to "chat_not_joined", "typing" to typing)
@@ -876,6 +984,10 @@ internal object ChatEngine {
       val userId = normalized(getConfigValueLocked("userId")) ?: "me"
       val event = if (typing) "typing" else "stop-typing"
       val ref = client.push(chatTopic(chatId), event, mapOf("userId" to userId))
+      Log.i(
+        "ChatEngine",
+        "sendTypingState pushed chatId=$chatId typing=$typing ref=$ref event=$event userId=$userId ${transportDebugStateLocked(chatId)}",
+      )
       appendJournalLocked("native-$event", mapOf("chatId" to chatId, "ref" to ref, "typing" to typing))
       state["updatedAt"] = System.currentTimeMillis()
       emitChangeLocked("typingStateSent", chatId, null)
@@ -1117,7 +1229,7 @@ internal object ChatEngine {
       val userId = normalized(getConfigValueLocked("userId"))
       val myPublicKeyPem = normalized(getConfigValueLocked("publicKeyPem") ?: getConfigValueLocked("publicKey"))
 
-      Thread {
+      Thread { try {
         // ── Now resolve friend public key (may do synchronous HTTP — no longer blocks UI) ──
         val keyResolveStartMs = System.currentTimeMillis()
         val friendPublicKey = if (isGroup) null else {
@@ -1162,6 +1274,10 @@ internal object ChatEngine {
             }
             return@Thread
           }
+          Log.i(
+            "ChatEngine",
+            "sendMessage uploadStart chatId=$chatId messageId=$messageId type=$type localUri=${mediaUrl?.take(160)} fileName=${fileName ?: "-"}",
+          )
           synchronized(lock) {
             appendJournalLocked(
               "native-media-upload-start",
@@ -1215,6 +1331,10 @@ internal object ChatEngine {
               is LocalMediaUploadOutcome.Failure -> {
                 val reason = uploadResult.reason
                 val shouldQueue = setOf("upload_failed", "upload_timeout", "missing_upload_config").contains(reason)
+                Log.w(
+                  "ChatEngine",
+                  "sendMessage uploadFailed chatId=$chatId messageId=$messageId type=$type reason=$reason retryable=$shouldQueue localUri=${mediaUrl?.take(160)}",
+                )
                 upsertLocalStatusLocked(chatId, messageId, if (shouldQueue) "pending" else "error")
                 appendJournalLocked(
                   "native-media-upload-error",
@@ -1328,9 +1448,17 @@ internal object ChatEngine {
           optimisticRow["message"] = optimisticMessage
           upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
           pendingOutboundDraftsByMessageId[messageId] = LinkedHashMap(effectivePayload)
+          Log.i(
+            "ChatEngine",
+            "sendMessage prePush chatId=$chatId messageId=$messageId type=$type ${transportDebugStateLocked(chatId)}",
+          )
 
           val client = phoenixClient
           if (client == null) {
+            Log.w(
+              "ChatEngine",
+              "sendMessage queued reason=no_native_socket chatId=$chatId messageId=$messageId ${transportDebugStateLocked(chatId)}",
+            )
             upsertLocalStatusLocked(chatId, messageId, "pending")
             queueOutboundDraftLocked(chatId, messageId, effectivePayload, "no_native_socket")
             emitChangeLocked("messageStatusChanged", chatId, messageId)
@@ -1338,6 +1466,10 @@ internal object ChatEngine {
             return@Thread
           }
           if (!nativeJoinedChatIds.contains(chatId)) {
+            Log.w(
+              "ChatEngine",
+              "sendMessage queued reason=chat_not_joined chatId=$chatId messageId=$messageId ${transportDebugStateLocked(chatId)}",
+            )
             joinNativeChatTopicIfNeededLocked(chatId)
             upsertLocalStatusLocked(chatId, messageId, "pending")
             queueOutboundDraftLocked(chatId, messageId, effectivePayload, "chat_not_joined")
@@ -1365,6 +1497,7 @@ internal object ChatEngine {
           Log.i("ChatEngine", "sendMessage pushed chatId=$chatId messageId=$messageId ref=$ref encryptMs=${System.currentTimeMillis() - encryptStartMs} totalMs=$totalSendMs")
           emitChangeLocked("messageStatusChanged", chatId, messageId)
         }
+      } catch (e: Throwable) { android.util.Log.e("ChatEngine", "CRASH in sendMessage thread:\n" + android.util.Log.getStackTraceString(e)) }
       }.start()
 
       mapOf(
@@ -3307,17 +3440,35 @@ internal object ChatEngine {
     if (chatId.isBlank()) return
     loadChatHistoryIfNeededLocked(chatId)
     val client = phoenixClient ?: run {
+      Log.w(
+        "ChatEngine",
+        "joinChat skipped reason=no_native_socket chatId=$chatId ${transportDebugStateLocked(chatId)}",
+      )
       ensureNativeTransportAsync("join_chat_no_socket")
       return
     }
     if ((state["connected"] as? Boolean) != true) {
+      Log.w(
+        "ChatEngine",
+        "joinChat skipped reason=not_connected chatId=$chatId ${transportDebugStateLocked(chatId)}",
+      )
       ensureNativeTransportAsync("join_chat_not_connected")
       return
     }
-    if (nativeJoinedChatIds.contains(chatId)) return
-    if (nativeChatJoinRefsByRef.values.contains(chatId)) return
+    if (nativeJoinedChatIds.contains(chatId)) {
+      Log.d("ChatEngine", "joinChat skipped reason=already_joined chatId=$chatId ${transportDebugStateLocked(chatId)}")
+      return
+    }
+    if (nativeChatJoinRefsByRef.values.contains(chatId)) {
+      Log.d("ChatEngine", "joinChat skipped reason=join_in_flight chatId=$chatId ${transportDebugStateLocked(chatId)}")
+      return
+    }
     val ref = client.join(chatTopic(chatId), emptyMap())
     nativeChatJoinRefsByRef[ref] = chatId
+    Log.i(
+      "ChatEngine",
+      "joinChat start chatId=$chatId ref=$ref ${transportDebugStateLocked(chatId)}",
+    )
     appendJournalLocked("native-chat-join-start", mapOf("chatId" to chatId, "ref" to ref))
   }
 
@@ -3552,6 +3703,10 @@ internal object ChatEngine {
     val uploadUrl = resolveUploadUrl(apiBaseUrl) ?: return LocalMediaUploadOutcome.Failure("invalid_upload_url")
     val source = resolveLocalMediaSource(localUri, fileNameHint, messageType)
       ?: return LocalMediaUploadOutcome.Failure("media_file_missing")
+    Log.d(
+      "ChatEngine",
+      "uploadLocalMedia start type=$messageType fileName=${source.fileName} fileSize=${source.fileSize ?: -1} localUri=${localUri.take(160)} url=${uploadUrl.take(160)}",
+    )
     val multipart = MultipartBody.Builder()
       .setType(MultipartBody.FORM)
       .addFormDataPart("file", source.fileName, source.body)
@@ -3590,12 +3745,29 @@ internal object ChatEngine {
       .header("Authorization", "Bearer $token")
       .build()
     val response = try {
-      historyHttpClient.newCall(request).execute()
-    } catch (_: Throwable) {
-      return LocalMediaUploadOutcome.Failure("upload_failed")
+      mediaUploadHttpClient.newCall(request).execute()
+    } catch (t: Throwable) {
+      val reason =
+        if (t is SocketTimeoutException || t is InterruptedIOException) {
+          "upload_timeout"
+        } else {
+          "upload_failed"
+        }
+      Log.w(
+        "ChatEngine",
+        "uploadLocalMedia exception type=$messageType fileName=${source.fileName} reason=$reason error=${t.message ?: t.javaClass.simpleName}",
+        t,
+      )
+      return LocalMediaUploadOutcome.Failure(reason)
     }
     response.use { res ->
-      if (!res.isSuccessful) return LocalMediaUploadOutcome.Failure("upload_failed")
+      if (!res.isSuccessful) {
+        Log.w(
+          "ChatEngine",
+          "uploadLocalMedia httpFailure type=$messageType fileName=${source.fileName} code=${res.code}",
+        )
+        return LocalMediaUploadOutcome.Failure("upload_failed")
+      }
       val body = try { res.body?.string() } catch (_: Throwable) { null } ?: return LocalMediaUploadOutcome.Failure("upload_failed")
       val remoteUrl = try {
         val json = JSONObject(body)
@@ -3603,6 +3775,10 @@ internal object ChatEngine {
       } catch (_: Throwable) {
         null
       } ?: return LocalMediaUploadOutcome.Failure("invalid_upload_response")
+      Log.i(
+        "ChatEngine",
+        "uploadLocalMedia success type=$messageType fileName=${source.fileName} remoteUrl=${remoteUrl.take(160)}",
+      )
       return LocalMediaUploadOutcome.Success(
         LocalMediaUploadResult(
           remoteUrl = remoteUrl,
@@ -3840,6 +4016,10 @@ internal object ChatEngine {
       appendJournalLocked("native-socket-open", emptyMap())
       nativeUserTopic = userTopic
       nativeUserJoinRef = client.join(userTopic, emptyMap())
+      Log.i(
+        "ChatEngine",
+        "nativeSocket open userTopic=$userTopic userJoinRef=$nativeUserJoinRef openChatIds=${openChatChannels.keys} ${transportDebugStateLocked()}",
+      )
       nativeChatJoinRefsByRef.clear()
       nativeJoinedChatIds.clear()
       nativePendingMessagePushRefs.clear()
@@ -3860,6 +4040,10 @@ internal object ChatEngine {
 
   private fun onNativeSocketClosed(code: Int, reason: String?) {
     synchronized(lock) {
+      Log.w(
+        "ChatEngine",
+        "nativeSocket closed code=$code reason=${reason ?: "-"} ${transportDebugStateLocked()}",
+      )
       val inFlightMessages = nativePendingMessagePushRefs.values.toList()
       inFlightMessages.forEach { (chatId, messageId) ->
         upsertLocalStatusLocked(chatId, messageId, "pending")
@@ -3896,6 +4080,10 @@ internal object ChatEngine {
 
   private fun onNativeSocketError(error: String) {
     synchronized(lock) {
+      Log.e(
+        "ChatEngine",
+        "nativeSocket error error=$error ${transportDebugStateLocked()}",
+      )
       state["updatedAt"] = System.currentTimeMillis()
       state["lastNativeSocketError"] = error
       appendJournalLocked("native-socket-error", mapOf("error" to error))
@@ -3910,6 +4098,19 @@ internal object ChatEngine {
     val ref = frame.ref
     val joinRef = frame.joinRef
     synchronized(lock) {
+      if (
+        event == "phx_reply" ||
+          event == "message" ||
+          event == "typing" ||
+          event == "stop-typing" ||
+          event == "delivery-receipt" ||
+          event == "read-receipt"
+      ) {
+        Log.d(
+          "ChatEngine",
+          "socketEvent topic=$topic event=$event ref=${ref ?: "-"} joinRef=${joinRef ?: "-"} payloadKeys=${payload.keys.sorted()}",
+        )
+      }
       if (
         event == "phx_reply" &&
           topic == nativeUserTopic &&
@@ -3929,6 +4130,10 @@ internal object ChatEngine {
         val joinedChatId = nativeChatJoinRefsByRef.remove(ref)
         if (!joinedChatId.isNullOrBlank()) {
           val status = normalized(payload["status"])?.lowercase().orEmpty()
+          Log.i(
+            "ChatEngine",
+            "joinChat reply chatId=$joinedChatId ref=$ref status=$status payload=$payload ${transportDebugStateLocked(joinedChatId)}",
+          )
           if (status == "ok") {
             nativeJoinedChatIds.add(joinedChatId)
             appendJournalLocked("native-chat-joined", mapOf("chatId" to joinedChatId))
@@ -3946,6 +4151,10 @@ internal object ChatEngine {
           val (chatId, messageId) = pending
           val status = normalized(payload["status"])?.lowercase().orEmpty()
           val nextStatus = if (status == "ok") "sent" else "error"
+          Log.i(
+            "ChatEngine",
+            "sendMessage reply chatId=$chatId messageId=$messageId ref=$ref status=$status nextStatus=$nextStatus payload=$payload ${transportDebugStateLocked(chatId)}",
+          )
           if (status == "ok") {
             removeQueuedOutboundDraftLocked(chatId, messageId, dropDraft = true)
           }
@@ -3962,6 +4171,10 @@ internal object ChatEngine {
         if (pendingEdit != null) {
           val (chatId, messageId) = pendingEdit
           val status = normalized(payload["status"])?.lowercase().orEmpty()
+          Log.i(
+            "ChatEngine",
+            "editMessage reply chatId=$chatId messageId=$messageId ref=$ref status=$status payload=$payload",
+          )
           appendJournalLocked(
             "native-edit-message-push-reply",
             mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref, "status" to status),
@@ -3974,6 +4187,10 @@ internal object ChatEngine {
         if (pendingDelete != null) {
           val (chatId, messageId) = pendingDelete
           val status = normalized(payload["status"])?.lowercase().orEmpty()
+          Log.i(
+            "ChatEngine",
+            "deleteMessage reply chatId=$chatId messageId=$messageId ref=$ref status=$status payload=$payload",
+          )
           if (status == "ok") {
             removeMessageIndicesLocked(chatId, messageId)
           }
@@ -3984,6 +4201,10 @@ internal object ChatEngine {
           emitChangeLocked("chatMessageDeleted", chatId, messageId)
           return
         }
+        Log.w(
+          "ChatEngine",
+          "socketEvent unmatched phx_reply topic=$topic ref=$ref payload=$payload ${transportDebugStateLocked()}",
+        )
       }
       if (topic.startsWith("chat:")) {
         val chatId = topic.removePrefix("chat:")
@@ -4493,6 +4714,14 @@ internal object ChatEngine {
         callback(reason, chatId, messageId)
       } catch (_: Throwable) {
       }
+    }
+  }
+
+  private fun putNullableStateLocked(key: String, value: Any?) {
+    if (value == null) {
+      state.remove(key)
+    } else {
+      state[key] = value
     }
   }
 

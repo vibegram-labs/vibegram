@@ -94,7 +94,7 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
     avatarContainer.addView(onlineDot)
 
     textColumn.orientation = LinearLayout.VERTICAL
-    textColumn.layoutParams = LayoutParams(LayoutParams.WRAP_CONTENT, LayoutParams.WRAP_CONTENT).apply {
+    textColumn.layoutParams = LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
       gravity = Gravity.START or Gravity.CENTER_VERTICAL
       marginStart = dp(74f)
       marginEnd = dp(88f)
@@ -105,10 +105,12 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
     titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 17f)
     titleView.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
     titleView.maxLines = 1
+    titleView.ellipsize = android.text.TextUtils.TruncateAt.END
     textColumn.addView(titleView)
 
     previewView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15f)
     previewView.maxLines = 1
+    previewView.ellipsize = android.text.TextUtils.TruncateAt.END
     previewView.layoutParams = LinearLayout.LayoutParams(
       LinearLayout.LayoutParams.WRAP_CONTENT,
       LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -182,7 +184,7 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
     )
     avatarFallbackIcon.setColorFilter(if (isDark) Color.WHITE else Color.DKGRAY)
     avatarContainer.background = circleDrawable(
-      avatarBackgroundColor ?: if (isDark) Color.argb(255, 63, 70, 85) else Color.argb(255, 222, 230, 243),
+      avatarBackgroundColor ?: if (isDark) Color.argb(20, 248, 246, 252) else Color.argb(13, 26, 26, 31),
     )
     loadAvatar(row.avatarUri)
 

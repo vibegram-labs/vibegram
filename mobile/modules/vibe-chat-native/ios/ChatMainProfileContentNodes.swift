@@ -81,12 +81,14 @@ final class ChatMainProfileListRowNode: UIControl {
   private let iconImageView = UIImageView()
   private let titleLabel = UILabel()
   private let subtitleLabel = UILabel()
+  private let valueLabel = UILabel()
   private let chevronImageView = UIImageView()
   private let separatorView = UIView()
   private let pressedOverlay = UIView()
 
   private var defaultTitleColor: UIColor = .label
   private var subtitleColor: UIColor = .secondaryLabel
+  private var valueColor: UIColor = .secondaryLabel
   private var separatorColor: UIColor = UIColor(white: 1.0, alpha: 0.08)
   private var highlightedColor: UIColor = UIColor(white: 1.0, alpha: 0.04)
   private var titleColorOverride: UIColor?
@@ -122,6 +124,11 @@ final class ChatMainProfileListRowNode: UIControl {
     subtitleLabel.numberOfLines = 2
     addSubview(subtitleLabel)
 
+    valueLabel.font = UIFont.systemFont(ofSize: 15, weight: .regular)
+    valueLabel.textAlignment = .right
+    valueLabel.numberOfLines = 1
+    addSubview(valueLabel)
+
     let chevronConfig = UIImage.SymbolConfiguration(pointSize: 14, weight: .semibold)
     chevronImageView.image = UIImage(systemName: "chevron.right", withConfiguration: chevronConfig)
     chevronImageView.tintColor = UIColor(white: 1.0, alpha: 0.2)
@@ -149,24 +156,47 @@ final class ChatMainProfileListRowNode: UIControl {
     }
 
     let chevronWidth: CGFloat = 20.0
+    let hasChevron = !chevronImageView.isHidden
+    let valueWidth: CGFloat = valueLabel.isHidden ? 0.0 : 56.0
     chevronImageView.frame = CGRect(
       x: bounds.width - 16.0 - chevronWidth,
       y: (bounds.height - chevronWidth) / 2.0,
       width: chevronWidth,
       height: chevronWidth
     )
-
-    let textWidth = bounds.width - insetX - chevronWidth - 12.0
-
-    titleLabel.frame = CGRect(
-      x: insetX, y: 12.0, width: textWidth, height: 22.0)
-    let subtitleHeight = max(0.0, bounds.height - titleLabel.frame.maxY - 12.0)
-    subtitleLabel.frame = CGRect(
-      x: insetX,
-      y: titleLabel.frame.maxY,
-      width: textWidth,
-      height: subtitleHeight
+    valueLabel.frame = CGRect(
+      x: bounds.width - 16.0 - (hasChevron ? chevronWidth + 8.0 : 0.0) - valueWidth,
+      y: 0.0,
+      width: valueWidth,
+      height: bounds.height
     )
+
+    let textWidth =
+      bounds.width
+      - insetX
+      - (hasChevron ? chevronWidth + 12.0 : 0.0)
+      - (valueLabel.isHidden ? 0.0 : valueWidth + 10.0)
+    let hasSubtitle = !(subtitleLabel.text?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+
+    if hasSubtitle {
+      titleLabel.frame = CGRect(
+        x: insetX, y: 12.0, width: textWidth, height: 22.0)
+      let subtitleHeight = max(0.0, bounds.height - titleLabel.frame.maxY - 12.0)
+      subtitleLabel.frame = CGRect(
+        x: insetX,
+        y: titleLabel.frame.maxY,
+        width: textWidth,
+        height: subtitleHeight
+      )
+    } else {
+      titleLabel.frame = CGRect(
+        x: insetX,
+        y: (bounds.height - 22.0) * 0.5,
+        width: textWidth,
+        height: 22.0
+      )
+      subtitleLabel.frame = .zero
+    }
     separatorView.frame = CGRect(
       x: insetX,
       y: bounds.height - (1.0 / UIScreen.main.scale),
@@ -191,18 +221,25 @@ final class ChatMainProfileListRowNode: UIControl {
   func configure(
     title: String,
     subtitle: String,
+    value: String = "",
     titleColor: UIColor? = nil,
     showsSeparator: Bool,
     iconName: String? = nil,
     iconTintColor: UIColor? = nil,
-    iconBackgroundColor: UIColor? = nil
+    iconBackgroundColor: UIColor? = nil,
+    showsChevron: Bool = true
   ) {
     titleLabel.text = title
     subtitleLabel.text = subtitle
+    subtitleLabel.isHidden = subtitle.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    valueLabel.text = value
+    valueLabel.isHidden = value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    chevronImageView.isHidden = !showsChevron
     titleColorOverride = titleColor
     separatorView.isHidden = !showsSeparator
     titleLabel.textColor = titleColor ?? defaultTitleColor
     subtitleLabel.textColor = subtitleColor
+    valueLabel.textColor = valueColor
 
     if let iconName {
       iconContainer.isHidden = false
@@ -222,14 +259,17 @@ final class ChatMainProfileListRowNode: UIControl {
     titleColor: UIColor,
     subtitleColor: UIColor,
     separatorColor: UIColor,
-    highlightedColor: UIColor
+    highlightedColor: UIColor,
+    valueColor: UIColor? = nil
   ) {
     defaultTitleColor = titleColor
     self.subtitleColor = subtitleColor
+    self.valueColor = valueColor ?? subtitleColor
     self.separatorColor = separatorColor
     self.highlightedColor = highlightedColor
     titleLabel.textColor = titleColorOverride ?? titleColor
     subtitleLabel.textColor = subtitleColor
+    valueLabel.textColor = self.valueColor
     separatorView.backgroundColor = separatorColor
     pressedOverlay.backgroundColor = highlightedColor
   }

@@ -66,9 +66,7 @@ half4 main(float2 fragCoord) {
 
     float dist = length(d);
     
-    // Constant radiating star/liquid shape
-    float angle = atan(d.y, d.x);
-    dist -= sin(angle * 5.0 + t * 2.0) * 0.15;
+    // Pure abstract smooth gradient (removed star shape math)
 
     // We drive a seamless gentle breathing using iTime
     float currentSize = 0.55 + sin(t * 1.5) * 0.05;
@@ -102,9 +100,9 @@ half4 main(float2 fragCoord) {
         col += (grain - 0.5) * 0.06 * blob * grainAmount;
     }
 
-    // Rich dark vignette
+    // Subtle vignette
     float vignette = 1.0 - smoothstep(0.3, 1.5, length(uv - 0.5));
-    col *= (0.8 + 0.2 * vignette);
+    col *= (0.95 + 0.05 * vignette);
     col = mix(col, baseColor, darken);
 
     return half4(col, 1.0);

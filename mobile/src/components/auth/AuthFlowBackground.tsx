@@ -51,9 +51,8 @@ half4 main(float2 fragCoord) {
     d.x *= blobScale.x;
     d.y *= blobScale.y;
 
-    float angle = atan(d.y, d.x);
     float dist = length(d);
-    dist -= sin(angle * 3.0 + 0.92) * 0.06;
+    // Smooth gradient (removed wavy edges)
 
     float blob = smoothstep(0.9, 0.0, dist);
     blob = pow(blob, 1.8);
@@ -80,7 +79,7 @@ half4 main(float2 fragCoord) {
     }
 
     float vignette = 1.0 - smoothstep(0.3, 1.5, length(uv - 0.5));
-    col *= (0.8 + 0.2 * vignette);
+    col *= (0.95 + 0.05 * vignette);
     col = mix(col, baseColor, darken);
 
     return half4(col, 1.0);

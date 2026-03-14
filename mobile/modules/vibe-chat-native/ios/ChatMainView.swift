@@ -221,6 +221,7 @@ public final class ChatMainView: ExpoView,
   private var avatarUri: String = ""
   private var isChatMuted = false
   private var engineChatId: String = ""
+  private var enginePeerUserIdRaw: String = ""
   private var enginePeerUserId: String = ""
   private var engineLastSeenTimestampMs: Int64?
   private var profileSummaryMessageCount = 0
@@ -289,7 +290,6 @@ public final class ChatMainView: ExpoView,
   private static let themeDarkCard = UIColor(
     red: 36.0 / 255.0, green: 36.0 / 255.0, blue: 36.0 / 255.0, alpha: 1.0)
   private static let themeLightCard = UIColor.white
-
   required init(appContext: AppContext? = nil) {
     chatListView = ChatListView(appContext: appContext)
     super.init(appContext: appContext)
@@ -351,17 +351,20 @@ public final class ChatMainView: ExpoView,
   }
 
   func setEnginePeerUserId(_ value: String) {
-    enginePeerUserId = value.trimmingCharacters(in: .whitespacesAndNewlines).uppercased()
+    enginePeerUserIdRaw = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    enginePeerUserId = enginePeerUserIdRaw.uppercased()
     surfacePresenceOnline = nil
     chatListView.setEnginePeerUserId(value)
     if enginePeerUserId.isEmpty {
       engineLastSeenTimestampMs = nil
       updateHeaderTexts()
       updateProfileTexts()
+      updateAvatarViews()
       return
     }
     refreshPresenceStateFromEngine(force: true)
     refreshTypingStateFromEngine(force: true)
+    updateAvatarViews()
   }
 
   func setStatusAuthorityEnabled(_ enabled: Bool) {
@@ -434,6 +437,7 @@ public final class ChatMainView: ExpoView,
     headerMode = nextMode
     updateChatModeHeaderControls()
     updateHeaderTexts()
+    updateAvatarViews()
     setNeedsLayout()
     applyPageState(animated: false, emitEvent: false)
   }
@@ -2942,10 +2946,10 @@ public final class ChatMainView: ExpoView,
       
       avatarFallbackIconView.image = UIImage(systemName: "bookmark.fill")
       avatarFallbackIconView.tintColor = .white
-      
+
       profileAvatarFallbackIconView.image = UIImage(systemName: "bookmark.fill")
       profileAvatarFallbackIconView.tintColor = .white
-      
+
       let gradientStart =
         appearance.isDark
         ? UIColor(red: 77 / 255, green: 217 / 255, blue: 229 / 255, alpha: 1)
@@ -2978,7 +2982,6 @@ public final class ChatMainView: ExpoView,
       pGradient?.startPoint = CGPoint(x: 0.5, y: 0)
       pGradient?.endPoint = CGPoint(x: 0.5, y: 1)
       profileAvatarView.backgroundColor = .clear
-      
       return
     }
 
@@ -2989,12 +2992,13 @@ public final class ChatMainView: ExpoView,
     avatarFallbackIconView.image = UIImage(systemName: "person.fill")
     avatarFallbackIconView.tintColor = appearance.isDark ? .white : .darkText
     avatarGlassView.contentView.backgroundColor = .clear
-    
+
     profileAvatarFallbackIconView.image = UIImage(systemName: "person.fill")
     profileAvatarFallbackIconView.tintColor = appearance.isDark ? .white : .darkText
     profileAvatarView.backgroundColor = .clear
 
-    guard let url = URL(string: avatarUri), !avatarUri.isEmpty else {
+    let resolvedUri = resolveFullAvatarUri(avatarUri)
+    guard let url = URL(string: resolvedUri), !resolvedUri.isEmpty else {
       avatarImageView.isHidden = true
       profileAvatarImageView.isHidden = true
       avatarFallbackIconView.isHidden = false
@@ -3009,7 +3013,9 @@ public final class ChatMainView: ExpoView,
     avatarFallbackIconView.isHidden = false
     profileAvatarFallbackIconView.isHidden = false
 
-    let task = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
+    var request = URLRequest(url: url)
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+    let task = URLSession.shared.dataTask(with: request) { [weak self] data, _, _ in
       guard let self, let data, let image = UIImage(data: data) else { return }
       DispatchQueue.main.async {
         self.avatarImageView.image = image
@@ -3022,6 +3028,15 @@ public final class ChatMainView: ExpoView,
     }
     avatarLoadTask = task
     task.resume()
+  }
+
+  private func resolveFullAvatarUri(_ uri: String) -> String {
+    return ChatNativeAvatarURLResolver.resolve(
+      rawAvatar: uri,
+      peerUserId: enginePeerUserIdRaw,
+      chatId: engineChatId,
+      preferPushAvatar: !isGroupOrChannel
+    ) ?? ""
   }
 
   private func applyPageState(animated: Bool, emitEvent: Bool) {
@@ -3415,6 +3430,7 @@ public final class ChatMainView: ExpoView,
     refreshTypingStateFromEngine(force: true)
     updateHeaderTexts()
     updateProfileTexts()
+    updateAvatarViews()
   }
 
   private func getAgentDocuments() -> [(id: String, name: String, url: String)] {

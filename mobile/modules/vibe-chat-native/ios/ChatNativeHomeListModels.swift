@@ -1,8 +1,92 @@
 import Foundation
 import UIKit
 
+enum ChatNativeAvatarURLResolver {
+  private static let fallbackAPIBaseURL =
+    "https://modest-recreation-production-8329.up.railway.app"
+
+  static func resolve(
+    rawAvatar: String?,
+    peerUserId: String? = nil,
+    chatId: String? = nil,
+    preferPushAvatar: Bool = false
+  ) -> String? {
+    if chatId == "saved_messages" {
+      return nil
+    }
+
+    let apiBaseURL = resolvedAPIBaseURL()
+    if preferPushAvatar,
+      let normalizedPeerUserId = normalizedString(peerUserId),
+      let apiBaseURL
+    {
+      return pushAvatarURL(baseURL: apiBaseURL, userId: normalizedPeerUserId)
+    }
+
+    guard let trimmed = normalizedString(rawAvatar) else { return nil }
+    if isHTTPURL(trimmed) {
+      return trimmed
+    }
+    if trimmed.hasPrefix("/"), let apiBaseURL {
+      return URL(string: trimmed, relativeTo: apiBaseURL)?.absoluteURL.absoluteString
+    }
+    return nil
+  }
+
+  static func resolvedAPIBaseURL() -> URL? {
+    let config = ChatEngineStore.shared.getConfig()
+    if let explicit = normalizedString(config["apiBaseUrl"] ?? config["baseUrl"]),
+      let url = URL(string: explicit)
+    {
+      return url
+    }
+    guard let socketURLString = normalizedString(config["socketUrl"] ?? config["url"]),
+      var components = URLComponents(string: socketURLString)
+    else {
+      return URL(string: fallbackAPIBaseURL)
+    }
+    if components.scheme == "wss" { components.scheme = "https" }
+    if components.scheme == "ws" { components.scheme = "http" }
+    if components.path.hasSuffix("/socket") {
+      components.path = String(components.path.dropLast("/socket".count))
+    }
+    if components.path.hasSuffix("/websocket") {
+      components.path = String(components.path.dropLast("/websocket".count))
+    }
+    return components.url ?? URL(string: fallbackAPIBaseURL)
+  }
+
+  private static func pushAvatarURL(baseURL: URL, userId: String) -> String? {
+    guard !userId.isEmpty else { return nil }
+    let hasApiSuffix = baseURL.path.lowercased().hasSuffix("/api")
+    var url = baseURL
+    if !hasApiSuffix {
+      url = url.appendingPathComponent("api")
+    }
+    return url.appendingPathComponent("push")
+      .appendingPathComponent("avatar")
+      .appendingPathComponent(userId)
+      .absoluteString
+  }
+
+  private static func isHTTPURL(_ value: String) -> Bool {
+    guard let url = URL(string: value), let scheme = url.scheme?.lowercased() else { return false }
+    return scheme == "https" || scheme == "http"
+  }
+
+  private static func normalizedString(_ value: Any?) -> String? {
+    if let value = value as? String {
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    if let value = value as? NSNumber {
+      return value.stringValue
+    }
+    return nil
+  }
+}
+
 struct ChatNativeHomeListRow {
-  private static let fallbackAPIBaseURL = "https://modest-recreation-production-8329.up.railway.app"
   let chatId: String
   let title: String
   let preview: String
@@ -105,64 +189,12 @@ struct ChatNativeHomeListRow {
   private static func resolveAvatarURI(rawAvatar: String?, friendId: String?, chatId: String)
     -> String?
   {
-    if chatId == "saved_messages" {
-      return nil
-    }
-    let apiBaseURL = resolvedAPIBaseURL()
-    if let friendId, let apiBaseURL {
-      return pushAvatarURL(baseURL: apiBaseURL, userId: friendId)
-    }
-    guard let rawAvatar else { return nil }
-    let trimmed = rawAvatar.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard !trimmed.isEmpty else { return nil }
-    if isHTTPURL(trimmed) {
-      return trimmed
-    }
-    if trimmed.hasPrefix("/"), let apiBaseURL {
-      return URL(string: trimmed, relativeTo: apiBaseURL)?.absoluteURL.absoluteString
-    }
-    return nil
-  }
-
-  private static func resolvedAPIBaseURL() -> URL? {
-    let config = ChatEngineStore.shared.getConfig()
-    if let explicit = normalizedString(config["apiBaseUrl"] ?? config["baseUrl"]),
-      let url = URL(string: explicit)
-    {
-      return url
-    }
-    guard let socketURLString = normalizedString(config["socketUrl"] ?? config["url"]),
-      var components = URLComponents(string: socketURLString)
-    else {
-      return URL(string: fallbackAPIBaseURL)
-    }
-    if components.scheme == "wss" { components.scheme = "https" }
-    if components.scheme == "ws" { components.scheme = "http" }
-    if components.path.hasSuffix("/socket") {
-      components.path = String(components.path.dropLast("/socket".count))
-    }
-    if components.path.hasSuffix("/websocket") {
-      components.path = String(components.path.dropLast("/websocket".count))
-    }
-    return components.url ?? URL(string: fallbackAPIBaseURL)
-  }
-
-  private static func pushAvatarURL(baseURL: URL, userId: String) -> String? {
-    guard !userId.isEmpty else { return nil }
-    let hasApiSuffix = baseURL.path.lowercased().hasSuffix("/api")
-    var url = baseURL
-    if !hasApiSuffix {
-      url = url.appendingPathComponent("api")
-    }
-    return url.appendingPathComponent("push").appendingPathComponent("avatar")
-      .appendingPathComponent(
-        userId
-      ).absoluteString
-  }
-
-  private static func isHTTPURL(_ value: String) -> Bool {
-    guard let url = URL(string: value), let scheme = url.scheme?.lowercased() else { return false }
-    return scheme == "https" || scheme == "http"
+    return ChatNativeAvatarURLResolver.resolve(
+      rawAvatar: rawAvatar,
+      peerUserId: friendId,
+      chatId: chatId,
+      preferPushAvatar: true
+    )
   }
 
   private static func normalizedString(_ value: Any?) -> String? {

@@ -15,90 +15,94 @@ class ChatNativeProfileModule : Module() {
       true
     }
 
-    View(ChatMainView::class) {
+    View(ChatProfileMainView::class) {
       Events("onViewportChanged", "onNativeEvent")
 
-      Prop("profileOnly") { view: ChatMainView, value: Boolean? ->
-        view.setStandaloneProfileMode(value ?: true)
+      Prop("profileOnly") { view: ChatProfileMainView, value: Boolean? ->
+        view.setProfileOnly(value ?: true)
       }
 
-      Prop("surfaceId") { view: ChatMainView, value: String ->
+      Prop("surfaceId") { view: ChatProfileMainView, value: String ->
         view.setSurfaceId(value)
       }
 
-      Prop("rows") { view: ChatMainView, rows: List<Map<String, Any?>> ->
+      Prop("rows") { view: ChatProfileMainView, rows: List<Map<String, Any?>> ->
         view.setRows(rows)
       }
 
-      Prop("engineSurfaceId") { view: ChatMainView, value: String? ->
+      Prop("engineSurfaceId") { view: ChatProfileMainView, value: String? ->
         view.setEngineSurfaceId(value ?: "")
       }
 
-      Prop("chatId") { view: ChatMainView, value: String? ->
+      Prop("chatId") { view: ChatProfileMainView, value: String? ->
         view.setEngineChatId(value ?: "")
       }
 
-      Prop("myUserId") { view: ChatMainView, value: String? ->
+      Prop("myUserId") { view: ChatProfileMainView, value: String? ->
         view.setEngineMyUserId(value ?: "")
       }
 
-      Prop("peerUserId") { view: ChatMainView, value: String? ->
+      Prop("peerUserId") { view: ChatProfileMainView, value: String? ->
         view.setEnginePeerUserId(value ?: "")
       }
 
-      Prop("statusAuthorityEnabled") { view: ChatMainView, enabled: Boolean ->
+      Prop("statusAuthorityEnabled") { view: ChatProfileMainView, enabled: Boolean ->
         view.setStatusAuthorityEnabled(enabled)
       }
 
-      Prop("appearance") { view: ChatMainView, appearance: Map<String, Any?> ->
+      Prop("appearance") { view: ChatProfileMainView, appearance: Map<String, Any?> ->
         view.setAppearance(appearance)
       }
 
-      Prop("headerTitle") { view: ChatMainView, value: String? ->
+      Prop("headerTitle") { view: ChatProfileMainView, value: String? ->
         view.setHeaderTitle(value ?: "")
       }
 
-      Prop("headerSubtitle") { view: ChatMainView, value: String? ->
+      Prop("headerSubtitle") { view: ChatProfileMainView, value: String? ->
         view.setHeaderSubtitle(value ?: "")
       }
 
-      Prop("profileName") { view: ChatMainView, value: String? ->
+      Prop("profileName") { view: ChatProfileMainView, value: String? ->
         view.setProfileName(value ?: "")
       }
 
-      Prop("profileHandle") { view: ChatMainView, value: String? ->
+      Prop("profileHandle") { view: ChatProfileMainView, value: String? ->
         view.setProfileHandle(value ?: "")
       }
 
-      Prop("profileBio") { view: ChatMainView, value: String? ->
+      Prop("profileBio") { view: ChatProfileMainView, value: String? ->
         view.setProfileBio(value ?: "")
       }
 
-      Prop("avatarUri") { view: ChatMainView, value: String? ->
+      Prop("avatarUri") { view: ChatProfileMainView, value: String? ->
         view.setAvatarUri(value)
       }
 
-      Prop("isOnline") { view: ChatMainView, value: Boolean? ->
+      Prop("isOnline") { view: ChatProfileMainView, value: Boolean? ->
         view.setIsOnline(value ?: false)
       }
 
-      Prop("isChatMuted") { view: ChatMainView, value: Boolean? ->
+      Prop("isChatMuted") { view: ChatProfileMainView, value: Boolean? ->
         view.setIsChatMuted(value ?: false)
       }
 
-      Prop("isGroupOrChannel") { view: ChatMainView, value: Boolean? ->
+      Prop("isGroupOrChannel") { view: ChatProfileMainView, value: Boolean? ->
         view.setIsGroupOrChannel(value ?: false)
       }
 
-      Prop("groupMembers") { view: ChatMainView, value: List<Map<String, Any?>>? ->
+      Prop("groupMembers") { view: ChatProfileMainView, value: List<Map<String, Any?>>? ->
         view.setGroupMembers(value ?: emptyList())
       }
 
-      Prop("groupMemberCount") { view: ChatMainView, value: Int? ->
+      Prop("groupMemberCount") { view: ChatProfileMainView, value: Int? ->
         view.setGroupMemberCount(value)
       }
 
-      Prop("page") { view: ChatMainView, value: String? ->
+      Prop("agentConfig") { view: ChatProfileMainView, value: Map<String, Any?>? ->
+        view.setAgentConfig(value)
+      }
+
+      Prop("page") { view: ChatProfileMainView, value: String? ->
         value?.let { view.setPage(it, true) }
       }
     }

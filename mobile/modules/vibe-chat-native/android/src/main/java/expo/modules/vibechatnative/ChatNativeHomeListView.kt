@@ -270,12 +270,12 @@ class ChatNativeHomeListView(
   }
 
   fun setContentTopInset(value: Double) {
-    contentTopInsetPx = value.coerceAtLeast(0.0).toInt()
+    contentTopInsetPx = dp(value.coerceAtLeast(0.0).toFloat())
     applyContentInsets()
   }
 
   fun setContentBottomInset(value: Double) {
-    contentBottomInsetPx = value.coerceAtLeast(0.0).toInt()
+    contentBottomInsetPx = dp(value.coerceAtLeast(0.0).toFloat())
     applyContentInsets()
     updateUndoBannerLayout()
   }
@@ -286,14 +286,39 @@ class ChatNativeHomeListView(
   }
 
   private fun applyContentInsets() {
-    val topInset = contentTopInsetPx + baseTopInsetPx
+    val layoutManager = recyclerView.layoutManager as? LinearLayoutManager
+    val previousTopInset = recyclerView.paddingTop
+    val targetTopInset = contentTopInsetPx + baseTopInsetPx
+    val previousBottomInset = recyclerView.paddingBottom
+    val targetBottomInset = contentBottomInsetPx
+    val firstVisiblePosition = layoutManager?.findFirstVisibleItemPosition() ?: RecyclerView.NO_POSITION
+    val firstVisibleTop = if (firstVisiblePosition != RecyclerView.NO_POSITION) {
+      layoutManager?.findViewByPosition(firstVisiblePosition)?.top ?: previousTopInset
+    } else {
+      previousTopInset
+    }
+
+    if (previousTopInset == targetTopInset && previousBottomInset == targetBottomInset) {
+      recyclerView.clipToPadding = false
+      swipeRefreshLayout.setProgressViewOffset(false, targetTopInset, targetTopInset + dp(40f))
+      return
+    }
+
     recyclerView.setPadding(
       recyclerView.paddingLeft,
-      topInset,
+      targetTopInset,
       recyclerView.paddingRight,
-      contentBottomInsetPx,
+      targetBottomInset,
     )
     recyclerView.clipToPadding = false
+    swipeRefreshLayout.setProgressViewOffset(false, targetTopInset, targetTopInset + dp(40f))
+
+    if (firstVisiblePosition != RecyclerView.NO_POSITION && layoutManager != null) {
+      val topDelta = targetTopInset - previousTopInset
+      recyclerView.post {
+        layoutManager.scrollToPositionWithOffset(firstVisiblePosition, firstVisibleTop + topDelta)
+      }
+    }
   }
 
   private fun updateUndoBannerLayout() {

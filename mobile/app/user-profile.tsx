@@ -61,6 +61,14 @@ const toTimestamp = (value: unknown): number => {
     return Date.now();
 };
 
+const URL_REGEX = /https?:\/\/[^\s]+|www\.[^\s]+/gi;
+
+const extractUrls = (value: unknown): string[] => {
+    if (typeof value !== 'string' || value.trim().length === 0) return [];
+    const matches = value.match(URL_REGEX) || [];
+    return matches.map((entry) => entry.trim()).filter(Boolean);
+};
+
 const toText = (m: Message): string => {
     return (m.plaintext || m.caption || '').toString();
 };
@@ -102,6 +110,8 @@ const deriveProfileContentFromMessages = (messages: Message[]): DerivedProfileCo
     const videoItems: UserProfileMediaItem[] = [];
     const imageItems: UserProfileMediaItem[] = [];
     const fileItems: UserProfileFileItem[] = [];
+    const linkItems: UserProfileLinkItem[] = [];
+    const seenLinks = new Set<string>();
 
     // Messages in store are already timestamp-sorted in practice; iterate newest -> oldest
     // to avoid cloning/sorting full history on profile open.
@@ -137,6 +147,22 @@ const deriveProfileContentFromMessages = (messages: Message[]): DerivedProfileCo
                 timestamp,
             });
         }
+
+        const linkCandidates = [
+            ...extractUrls(toText(m)),
+            ...extractUrls(mediaUrl),
+        ];
+        linkCandidates.forEach((url, index) => {
+            const linkId = `${m.id}:${url}`;
+            if (seenLinks.has(linkId)) return;
+            seenLinks.add(linkId);
+            linkItems.push({
+                id: `${m.id}:link:${index}`,
+                url,
+                previewText: toText(m),
+                timestamp,
+            });
+        });
     }
 
     return {
@@ -144,7 +170,7 @@ const deriveProfileContentFromMessages = (messages: Message[]): DerivedProfileCo
         videoItems,
         imageItems,
         fileItems,
-        linkItems: [],  // intentionally disabled: use direct media/file tabs only
+        linkItems,
     };
 };
 
@@ -166,6 +192,7 @@ export default function UserProfileRoute() {
     const chatIdParam = typeof params.chatId === 'string' ? params.chatId : '';
     const usernameParam = typeof params.username === 'string' ? params.username : '';
     const profileImageParam = typeof params.profileImage === 'string' ? params.profileImage : '';
+    const initialTabParam = typeof params.initialTab === 'string' ? params.initialTab : '';
     const isOnlineParam = toBool(params.isOnline);
 
     // Stabilize the store selector: resolve chatId once and subscribe by ID
@@ -470,6 +497,15 @@ export default function UserProfileRoute() {
             onDeleteContact={resolvedChatId ? handleClearChat : undefined}
             onBlock={handleBlock}
             isContentLoading={contentLoading}
+            initialTab={
+                initialTabParam === 'media' ||
+                initialTabParam === 'music' ||
+                initialTabParam === 'files' ||
+                initialTabParam === 'links' ||
+                initialTabParam === 'pinned'
+                    ? initialTabParam
+                    : undefined
+            }
             mediaItems={contentData.mediaItems}
             videoItems={contentData.videoItems}
             imageItems={contentData.imageItems}
