@@ -112,6 +112,15 @@ defmodule Vibe.Subscriptions do
     end
   end
 
+  def agent_limit_for_user(user_id) do
+    case Accounts.get_user(user_id) do
+      %{tier: "gold"} -> 10
+      %{tier: "silver"} -> 3
+      %{tier: "bronze"} -> 1
+      _ -> 1
+    end
+  end
+
   # ============================================
   # Subscription Lifecycle
   # ============================================

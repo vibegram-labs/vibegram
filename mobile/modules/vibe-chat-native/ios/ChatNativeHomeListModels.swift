@@ -100,16 +100,20 @@ struct ChatNativeHomeListRow {
   let peerUserId: String?
   let avatarUri: String?
   let avatarFallback: String
+  let avatarGradientStartLight: String?
+  let avatarGradientEndLight: String?
+  let avatarGradientStartDark: String?
+  let avatarGradientEndDark: String?
   let isSavedMessages: Bool
   let type: String?
   let isGroup: Bool
   let previewRows: [[String: Any]]
 
-  func withPresence(isTyping: Bool, isOnline: Bool) -> ChatNativeHomeListRow {
+  func withPresence(isTyping: Bool, isOnline: Bool, preview: String? = nil) -> ChatNativeHomeListRow {
     ChatNativeHomeListRow(
       chatId: chatId,
       title: title,
-      preview: preview,
+      preview: preview ?? self.preview,
       timeLabel: timeLabel,
       unreadCount: unreadCount,
       markedUnread: markedUnread,
@@ -120,6 +124,10 @@ struct ChatNativeHomeListRow {
       peerUserId: peerUserId,
       avatarUri: avatarUri,
       avatarFallback: avatarFallback,
+      avatarGradientStartLight: avatarGradientStartLight,
+      avatarGradientEndLight: avatarGradientEndLight,
+      avatarGradientStartDark: avatarGradientStartDark,
+      avatarGradientEndDark: avatarGradientEndDark,
       isSavedMessages: isSavedMessages,
       type: type,
       isGroup: isGroup,
@@ -153,6 +161,14 @@ struct ChatNativeHomeListRow {
     let avatarFallback =
       normalizedString(raw["avatarFallback"] ?? raw["avatar_fallback"])
       ?? String(title.prefix(1)).uppercased()
+    let avatarGradientStartLight =
+      normalizedString(raw["avatarGradientStartLight"] ?? raw["avatar_gradient_start_light"])
+    let avatarGradientEndLight =
+      normalizedString(raw["avatarGradientEndLight"] ?? raw["avatar_gradient_end_light"])
+    let avatarGradientStartDark =
+      normalizedString(raw["avatarGradientStartDark"] ?? raw["avatar_gradient_start_dark"])
+    let avatarGradientEndDark =
+      normalizedString(raw["avatarGradientEndDark"] ?? raw["avatar_gradient_end_dark"])
     let type = normalizedString(raw["type"] ?? raw["chatType"] ?? raw["chat_type"])
     let isGroup =
       parseBool(raw["isGroup"] ?? raw["is_group"]) ?? (type == "group" || type == "channel")
@@ -172,6 +188,10 @@ struct ChatNativeHomeListRow {
       peerUserId: peerUserId,
       avatarUri: avatarUri,
       avatarFallback: avatarFallback,
+      avatarGradientStartLight: avatarGradientStartLight,
+      avatarGradientEndLight: avatarGradientEndLight,
+      avatarGradientStartDark: avatarGradientStartDark,
+      avatarGradientEndDark: avatarGradientEndDark,
       isSavedMessages: isSavedMessages,
       type: type,
       isGroup: isGroup,

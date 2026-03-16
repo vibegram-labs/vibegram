@@ -29,6 +29,8 @@ export interface RuntimeChatMessage {
   encryptedContent?: string;
   plainContent?: string;
   agentName?: string;
+  agentId?: string;
+  isAgentMessage?: boolean;
   metadata?: Record<string, unknown>;
 }
 
@@ -111,7 +113,13 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
     const isSequenceStart = !previous || previous.isMe !== current.isMe;
     const isSequenceEnd = !next || next.isMe !== current.isMe;
 
-    const isAgentMessage = current.fromId === AGENT_USER_ID;
+    const isAgentMessage =
+      current.isAgentMessage === true
+      || current.fromId === AGENT_USER_ID
+      || !!current.agentId
+      || !!current.agentName
+      || current.metadata?.isAgentMessage === true
+      || current.metadata?.is_agent_message === true;
 
     const metadata: Record<string, unknown> = current.metadata && typeof current.metadata === 'object'
       ? { ...current.metadata }
@@ -144,7 +152,12 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
       metadata: Object.keys(metadata).length > 0 ? metadata : undefined,
       bubbleShape: resolveBubbleShape(current.isMe, isSequenceStart, isSequenceEnd, current.type),
       isAgentMessage,
-      agentName: isAgentMessage ? (current.agentName || 'Vibe AI') : undefined,
+      agentName: isAgentMessage
+        ? (
+          current.agentName
+          || String(current.metadata?.agentName || current.metadata?.agent_name || 'Vibe AI')
+        )
+        : undefined,
       plainContent: isAgentMessage ? (current.plainContent || current.text) : undefined,
     };
 

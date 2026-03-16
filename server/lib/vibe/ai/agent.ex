@@ -6,6 +6,8 @@ defmodule Vibe.AI.Agent do
 
   require Logger
 
+  alias Vibe.AI.GroupAgent
+
   @claude_api "https://api.anthropic.com/v1/messages"
   @claude_model "claude-haiku-4-5-20251001"
 
@@ -165,14 +167,25 @@ defmodule Vibe.AI.Agent do
     conversation_history = Keyword.get(opts, :history, [])
     image_urls = Keyword.get(opts, :images, [])
     user_id = Keyword.get(opts, :user_id, nil)
+    chat_id = Keyword.get(opts, :chat_id, nil)
+    system_prompt = Keyword.get(opts, :system_prompt, @system_prompt)
+    enabled_tools = Keyword.get(opts, :enabled_tools, available_tool_names())
+    tools = filter_tools(enabled_tools)
 
     messages = build_messages(conversation_history, user_message, image_urls)
 
-    case call_claude_with_tools(messages, callback, 0, "", user_id) do
+    case call_claude_with_tools(messages, callback, 0, "", user_id, system_prompt, tools, chat_id) do
       {:ok, final_response} -> {:ok, final_response}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  def available_tools do
+    (@tools ++ GroupAgent.standalone_available_tools())
+    |> Enum.uniq_by(& &1.name)
+  end
+
+  def available_tool_names, do: Enum.map(available_tools(), & &1.name)
 
   @doc """
   Quick non-streaming completion for simple tasks like title generation.
@@ -246,7 +259,18 @@ defmodule Vibe.AI.Agent do
     history_messages ++ [%{role: "user", content: current_content}]
   end
 
-  defp call_claude_with_tools(messages, callback, depth \\ 0, _buffered_text \\ "", user_id \\ nil) do
+  defp call_claude_with_tools(
+         messages,
+         callback,
+         depth \\ 0,
+         _buffered_text \\ "",
+         user_id \\ nil,
+         system_prompt \\ @system_prompt,
+         tools \\ nil,
+         chat_id \\ nil
+       ) do
+    tools = tools || available_tools()
+
     if depth > 3 do
       # Reduced max depth - no retries, just fail fast
       {:error, "Max tool depth reached"}
@@ -259,8 +283,8 @@ defmodule Vibe.AI.Agent do
         body = Jason.encode!(%{
           model: @claude_model,
           max_tokens: 4096,
-          system: @system_prompt,
-          tools: @tools,
+          system: system_prompt,
+          tools: tools,
           messages: messages,
           stream: true
         })
@@ -278,7 +302,7 @@ defmodule Vibe.AI.Agent do
         case stream_claude_response(body, headers, callback, stream_text: stream_text) do
           {:tool_use, tool_calls, partial_response} ->
             # Execute tools first (this emits progress + tool_result events)
-            tool_results = execute_tools(tool_calls, callback, user_id)
+            tool_results = execute_tools(tool_calls, callback, user_id, chat_id)
 
             # Add assistant response and tool results to messages
             new_messages = messages ++ [
@@ -287,7 +311,7 @@ defmodule Vibe.AI.Agent do
             ]
 
             # Recurse to get final response - don't pass any buffered intro text
-            call_claude_with_tools(new_messages, callback, depth + 1, "", user_id)
+            call_claude_with_tools(new_messages, callback, depth + 1, "", user_id, system_prompt, tools, chat_id)
 
           {:ok, response} ->
             # Final turn - stream the complete response now
@@ -430,7 +454,7 @@ defmodule Vibe.AI.Agent do
     Enum.reverse(blocks)
   end
 
-  defp execute_tools(tool_calls, callback, user_id \\ nil) do
+  defp execute_tools(tool_calls, callback, user_id \\ nil, chat_id \\ nil) do
     Enum.map(tool_calls, fn tool ->
       tool_name = tool["name"]
       tool_input = tool["input"] || %{}
@@ -443,6 +467,12 @@ defmodule Vibe.AI.Agent do
         "search_google" -> "Searching the web..."
         "analyze_image" -> "Analyzing image..."
         "analyze_document" -> "Reading document..."
+        "create_document" -> "Preparing document..."
+        "find_rows" -> "Inspecting rows..."
+        "edit_rows" -> "Updating rows..."
+        "delete_rows" -> "Deleting rows..."
+        "export_rows" -> "Exporting file..."
+        "delete_document" -> "Removing document..."
         "post_to_channel" -> "Posting to channel..."
         "get_channel_analytics" -> "Fetching channel analytics..."
         "schedule_channel_post" -> "Scheduling post..."
@@ -458,6 +488,7 @@ defmodule Vibe.AI.Agent do
         "search_google" -> Vibe.AI.Tools.Search.google(tool["input"])
         "analyze_image" -> Vibe.AI.Tools.Vision.analyze(tool["input"])
         "analyze_document" -> Vibe.AI.Tools.Document.analyze(tool["input"])
+        name when name in GroupAgent.standalone_tool_names() -> GroupAgent.execute_standalone_tool(name, tool["input"], user_id, chat_id)
         "post_to_channel" -> Vibe.AI.Tools.Channel.post_to_channel(tool["input"], user_id)
         "get_channel_analytics" -> Vibe.AI.Tools.Channel.get_analytics(tool["input"], user_id)
         "schedule_channel_post" -> Vibe.AI.Tools.Channel.schedule_post(tool["input"], user_id)
@@ -482,5 +513,10 @@ defmodule Vibe.AI.Agent do
         content: Jason.encode!(result)
       }
     end)
+  end
+
+  defp filter_tools(enabled_tools) do
+    allowed = MapSet.new(List.wrap(enabled_tools) |> Enum.map(&to_string/1))
+    Enum.filter(available_tools(), fn tool -> MapSet.member?(allowed, tool.name) end)
   end
 end

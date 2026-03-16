@@ -1046,19 +1046,22 @@ defmodule Vibe.Chat do
   defp to_client_message(nil), do: nil
 
   defp to_client_message(%Message{} = message) do
-    if is_agent_message?(message) do
-      plain_text = AgentMessageCrypto.decrypt_from_storage(message.encrypted_content || "")
-      base = base_message_map(message)
+    case agent_message_meta(message) do
+      nil ->
+        base_message_map(message)
 
-      Map.merge(base, %{
-        encrypted_content: "",
-        plaintext: plain_text,
-        plain_content: plain_text,
-        is_agent_message: true,
-        agent_name: "Vibe AI"
-      })
-    else
-      base_message_map(message)
+      meta ->
+        plain_text = AgentMessageCrypto.decrypt_from_storage(message.encrypted_content || "")
+        base = base_message_map(message)
+
+        Map.merge(base, %{
+          encrypted_content: "",
+          plaintext: plain_text,
+          plain_content: plain_text,
+          is_agent_message: true,
+          agent_name: meta.agent_name,
+          agent_id: meta.agent_id
+        })
     end
   end
 
@@ -1081,7 +1084,25 @@ defmodule Vibe.Chat do
     }
   end
 
-  defp is_agent_message?(%Message{from_id: from_id}) do
+  defp agent_message_meta(%Message{} = message) do
+    metadata = message.metadata || %{}
+
+    cond do
+      legacy_group_agent_id?(message.from_id) ->
+        %{agent_name: "Vibe AI", agent_id: nil}
+
+      metadata["isAgentMessage"] == true or metadata["is_agent_message"] == true ->
+        %{
+          agent_name: metadata["agentName"] || metadata["agent_name"] || "Vibe Agent",
+          agent_id: metadata["agentId"] || metadata["agent_id"]
+        }
+
+      true ->
+        nil
+    end
+  end
+
+  defp legacy_group_agent_id?(from_id) do
     case {Ecto.UUID.cast(from_id), Ecto.UUID.cast(@agent_user_id)} do
       {{:ok, a}, {:ok, b}} -> a == b
       _ -> false
@@ -1098,6 +1119,7 @@ defmodule Vibe.Chat do
       encrypted_content: message.encrypted_content,
       status: message.status,
       media_url: rewrite_media_url(message.media_url),
+      metadata: message.metadata || %{},
       reply_to_id: message.reply_to_id
     }
   end

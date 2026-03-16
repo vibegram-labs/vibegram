@@ -16,12 +16,15 @@ defmodule Vibe.Accounts do
   @legacy_pbkdf2_iterations 1_000
   @phone_min_digits 7
   @phone_max_digits 15
+  @reserved_usernames ["vibeagent"]
 
   def get_user(id), do: Repo.get(User, id)
 
   def get_user_by_token(token) do
     case Repo.get_by(User, login_token: token) do
       nil ->
+        {:error, :not_found}
+      %User{is_agent: true} ->
         {:error, :not_found}
       user ->
         # SECURITY: Check token expiration
@@ -76,7 +79,7 @@ defmodule Vibe.Accounts do
 
       query =
         from u in User,
-          where: normalized_phone_expr(u.phone_number) in ^normalized_phones,
+          where: normalized_phone_expr(u.phone_number) in ^normalized_phones and u.is_agent == false,
           limit: ^limit
 
       query =
@@ -109,6 +112,12 @@ defmodule Vibe.Accounts do
   def username_exists?(username) do
     Repo.exists?(from u in User, where: fragment("LOWER(?)", u.username) == ^String.downcase(username))
   end
+
+  def reserved_username?(username) when is_binary(username) do
+    String.downcase(String.trim(username)) in @reserved_usernames
+  end
+
+  def reserved_username?(_), do: false
 
   def create_user(attrs) do
     %User{}

@@ -22,7 +22,7 @@ const SectionLabel = ({ children }: { children: string }) => (
 const Hero = () => {
     const navigate = useNavigate();
     return (
-        <section className="hero">
+        <section className="hero" id="features">
             <div className="hero-content">
                 <FadeIn>
                     <SectionLabel>PROTOCOL_V2.5</SectionLabel>
@@ -35,8 +35,8 @@ const Hero = () => {
                         <button className="luxe-button-primary" onClick={() => navigate('/app')}>
                             Launch Node
                         </button>
-                        <button className="luxe-button-secondary">
-                            View Whitepaper
+                        <button className="luxe-button-secondary" onClick={() => navigate('/docs/agents')}>
+                            Agent Docs
                         </button>
                     </div>
                 </FadeIn>
@@ -172,12 +172,13 @@ const Home = () => {
                 <div className="footer-inner">
                     <div className="footer-top">
                         <span className="logo-small">vibe</span>
-                        <div className="footer-nav">
-                            <a href="#network">Network</a>
-                            <a href="#security">Security</a>
-                            <a href="#github">Source</a>
-                        </div>
+                    <div className="footer-nav">
+                        <a href="#network">Network</a>
+                        <a href="#security">Security</a>
+                        <a href="/docs/agents">Docs</a>
+                        <a href="#github">Source</a>
                     </div>
+                </div>
                     <div className="footer-bottom">
                         <span>© 2026 Vibe. Built for the sovereign edge.</span>
                         <span>0.1.0-ALPHA</span>

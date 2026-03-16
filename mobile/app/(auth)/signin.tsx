@@ -86,6 +86,13 @@ export default function SignInScreen() {
                 loginToken
             }));
 
+            try {
+                const { clearSessionScopedClientCaches } = require('../../src/lib/session-cache');
+                await clearSessionScopedClientCaches(response.userId);
+            } catch (cacheError) {
+                console.warn('Failed to clear session caches before signin handoff', cacheError);
+            }
+
             AuthManager.getInstance().setSession({
                 userId: response.userId,
                 secureId: response.secureId,

@@ -9,6 +9,12 @@ import UniformTypeIdentifiers
 protocol ChatInputBarDelegate: AnyObject {
   func inputBarDidSend(text: String)
   func inputBarDidSendWithAgentMention(text: String, agentText: String)
+  func inputBarDidSendWithStandaloneAgentMention(
+    text: String,
+    agentText: String,
+    agentUsername: String
+  )
+  func inputBarDidRequestVibeAgentBuilder()
   func inputBarDidTapAttachment()
   func inputBarDidTapAction()
   func inputBarTextDidChange(text: String)
@@ -2063,23 +2069,33 @@ final class ChatInputBar: UIView {
     let t = currentText
     guard !t.isEmpty else { return }
 
-    // Detect @vibe mention for group agent
-    let lowered = t.lowercased()
-    if lowered.contains("@vibe") {
-      // Strip the @vibe prefix from the agent text to get the actual query
-      let agentText =
-        t
-        .replacingOccurrences(of: "@vibe", with: "", options: .caseInsensitive)
-        .trimmingCharacters(in: .whitespacesAndNewlines)
-      // Don't auto-send if only @vibe is typed with no actual message
+    switch resolveMentionIntent(in: t) {
+    case .builder:
+      setMentionBannerVisible(false, animated: false)
+      clearText()
+      delegate?.inputBarDidRequestVibeAgentBuilder()
+
+    case .group(let agentText):
       guard !agentText.isEmpty else {
-        // Keep focus in the text view so user can type their message
         textView.becomeFirstResponder()
         return
       }
       setMentionBannerVisible(false, animated: false)
       delegate?.inputBarDidSendWithAgentMention(text: t, agentText: agentText)
-    } else {
+
+    case .standalone(let username, let agentText):
+      guard !agentText.isEmpty else {
+        textView.becomeFirstResponder()
+        return
+      }
+      setMentionBannerVisible(false, animated: false)
+      delegate?.inputBarDidSendWithStandaloneAgentMention(
+        text: t,
+        agentText: agentText,
+        agentUsername: username
+      )
+
+    case .none:
       setMentionBannerVisible(false, animated: false)
       delegate?.inputBarDidSend(text: t)
     }
@@ -2183,10 +2199,60 @@ final class ChatInputBar: UIView {
 
   private func updateMentionBorderGlow(pillFrame: CGRect) {
     let textString = (textView.text ?? "").lowercased()
-    let hasVibeMention = textString.contains("@vibe")
-    if hasVibeMention != mentionActive {
-      setMentionActive(hasVibeMention)
+    let hasMention = textString.contains("@vibe") || textString.contains("@vibeagent")
+    if hasMention != mentionActive {
+      setMentionActive(hasMention)
     }
+  }
+
+  private enum MentionIntent {
+    case none
+    case group(String)
+    case builder
+    case standalone(username: String, agentText: String)
+  }
+
+  private func resolveMentionIntent(in text: String) -> MentionIntent {
+    guard let regex = try? NSRegularExpression(
+      pattern: "(?:^|\\s)@([A-Za-z0-9_]{3,30})\\b",
+      options: [.caseInsensitive]
+    ) else {
+      return .none
+    }
+
+    let nsText = text as NSString
+    let range = NSRange(location: 0, length: nsText.length)
+    let matches = regex.matches(in: text, options: [], range: range)
+    let usernames = matches.compactMap { match -> String? in
+      guard match.numberOfRanges > 1 else { return nil }
+      let raw = nsText.substring(with: match.range(at: 1))
+      let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+      return trimmed.isEmpty ? nil : trimmed
+    }
+
+    let unique = Array(NSOrderedSet(array: usernames)) as? [String] ?? []
+    if unique.contains("vibeagent") {
+      return .builder
+    }
+
+    guard unique.count == 1, let username = unique.first else {
+      return .none
+    }
+
+    let stripped =
+      text
+      .replacingOccurrences(
+        of: "@\(username)",
+        with: "",
+        options: [.caseInsensitive]
+      )
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+
+    if username == "vibe" {
+      return stripped.isEmpty ? .none : .group(stripped)
+    }
+
+    return stripped.isEmpty ? .none : .standalone(username: username, agentText: stripped)
   }
 
   @objc private func cancelOverlayTapped() {
@@ -2758,7 +2824,7 @@ final class ChatInputBar: UIView {
       let dur = Date().timeIntervalSince(recordingStartTime ?? Date())
       if let recorder = audioRecorder {
         recorder.stop()
-        let waveform = downsampleWaveform(recordingWaveformSamples, targetCount: 28)
+        let waveform = downsampleWaveform(recordingWaveformSamples, targetCount: 100)
         let outputURI = recordingFileURL?.absoluteString ?? ""
         if !outputURI.isEmpty {
           delegate?.inputBarDidRecordVoice(uri: outputURI, duration: dur, waveform: waveform)
@@ -2846,24 +2912,29 @@ final class ChatInputBar: UIView {
     guard !sanitized.isEmpty else {
       return Array(repeating: 0.18, count: targetCount)
     }
-    if sanitized.count == targetCount {
-      return sanitized.map(Double.init)
+
+    var peakSamples = Array(repeating: CGFloat.zero, count: targetCount)
+    let sourceCount = sanitized.count
+
+    for index in 0..<sourceCount {
+      let bucketIndex = min(targetCount - 1, (index * targetCount) / max(1, sourceCount))
+      peakSamples[bucketIndex] = max(peakSamples[bucketIndex], sanitized[index])
     }
-    let bucketSize = Double(sanitized.count) / Double(targetCount)
+
+    let averagePeak = peakSamples.reduce(0.0, +) / CGFloat(targetCount)
+    let normalizationPeak = max(0.12, averagePeak * 1.8)
+
     var result: [Double] = []
     result.reserveCapacity(targetCount)
-    for index in 0..<targetCount {
-      let start = Int(floor(Double(index) * bucketSize))
-      let end = min(sanitized.count, Int(floor(Double(index + 1) * bucketSize)))
-      if start < end {
-        let slice = sanitized[start..<end]
-        let avg = slice.reduce(0.0, +) / CGFloat(slice.count)
-        result.append(Double(max(0.12, avg)))
-      } else {
-        let clampedIndex = min(max(0, start), sanitized.count - 1)
-        result.append(Double(max(0.12, sanitized[clampedIndex])))
-      }
+    for sample in peakSamples {
+      let normalized = min(sample, normalizationPeak) / normalizationPeak
+      result.append(Double(max(0.0, min(1.0, normalized))))
     }
+
+    if result.allSatisfy({ $0 <= 0.001 }) {
+      return Array(repeating: 0.18, count: targetCount)
+    }
+
     return result
   }
 

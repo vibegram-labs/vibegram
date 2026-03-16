@@ -30,6 +30,9 @@ defmodule VibeWeb.AuthController do
       not Regex.match?(~r/^[a-zA-Z0-9_]+$/, username) ->
         conn |> put_status(400) |> json(%{error: "Username can only contain letters, numbers, and underscores"})
 
+      Accounts.reserved_username?(username) ->
+        conn |> put_status(409) |> json(%{error: "Username taken"})
+
       String.length(password) < 8 ->
         conn |> put_status(400) |> json(%{error: "Password must be at least 8 characters"})
 
@@ -136,6 +139,9 @@ defmodule VibeWeb.AuthController do
     case user do
       nil ->
         # SECURITY: Use consistent error message to prevent user enumeration
+        conn |> put_status(401) |> json(%{error: "Invalid credentials"})
+
+      %User{is_agent: true} ->
         conn |> put_status(401) |> json(%{error: "Invalid credentials"})
 
       %User{} = u ->

@@ -340,6 +340,8 @@ final class ChatEngine {
   private var nativePendingDeletePushRefs: [String: (chatId: String, messageId: String)] = [:]
   private var pendingOutboundDraftsByMessageId: [String: [String: Any]] = [:]
   private var pendingOutboundQueueByChat: [String: [String]] = [:]
+  private var activeMediaUploadTasksByMessageId: [String: URLSessionTask] = [:]
+  private var canceledOutboundMessageIds = Set<String>()
   private var nativeTypingStateByChatId: [String: Bool] = [:]
   private var peerTypingUserIdsByChatId: [String: Set<String>] = [:]
   private var agentProgressByChatId: [String: AgentProgressState] = [:]
@@ -804,6 +806,12 @@ final class ChatEngine {
       nativePendingDeletePushRefs.removeAll()
       pendingOutboundDraftsByMessageId.removeAll()
       pendingOutboundQueueByChat.removeAll()
+      onlineUsers.removeAll()
+      lastSeenByUserId.removeAll()
+      surfaceBindings.removeAll()
+      openChatChannels.removeAll()
+      receiptIndex.removeAll()
+      localStatusIndex.removeAll()
       nativeTypingStateByChatId.removeAll()
       peerTypingUserIdsByChatId.removeAll()
       agentProgressByChatId.removeAll()
@@ -813,13 +821,18 @@ final class ChatEngine {
       liveMessageRowsByChat.removeAll()
       deletedMessageIdsByChat.removeAll()
       historyRowsByChat.removeAll()
+      historyFullyLoadedChats.removeAll()
       historyLoadingChats.removeAll()
-      friendKeyFetchInFlightUserIds.removeAll()
+      cachedSavedMessagesResponse = nil
+      chatPeerUserIdsByChatId.removeAll()
+      friendPublicKeysByUserId.removeAll()
       pendingFriendKeyChatIdsByUserId.removeAll()
+      friendKeyFetchInFlightUserIds.removeAll()
       for (_, item) in friendKeyRetryWorkItemsByUserId {
         item.cancel()
       }
       friendKeyRetryWorkItemsByUserId.removeAll()
+      configuredUserId = nil
       // Clear cached private key on disconnect to reduce memory exposure.
       cachedDecryptPrivateKey = nil
       cachedDecryptPrivateKeyPem = nil
@@ -1146,6 +1159,7 @@ final class ChatEngine {
       guard let messageId else {
         return ["accepted": false, "reason": "invalid_message"]
       }
+      canceledOutboundMessageIds.remove(messageId)
       guard let draft = pendingOutboundDraftsByMessageId[messageId] else {
         return ["accepted": false, "reason": "missing_draft", "messageId": messageId]
       }
@@ -1176,13 +1190,19 @@ final class ChatEngine {
       guard !resolvedChatId.isEmpty else {
         return ["accepted": false, "reason": "invalid_chat", "messageId": messageId]
       }
+      let activeUploadTask = activeMediaUploadTasksByMessageId.removeValue(forKey: messageId)
+      let hadActiveUpload = activeUploadTask != nil
+      activeUploadTask?.cancel()
+      canceledOutboundMessageIds.insert(messageId)
       removeQueuedOutboundDraftLocked(chatId: resolvedChatId, messageId: messageId, dropDraft: true)
+      setLiveMessageUploadProgressLocked(chatId: resolvedChatId, messageId: messageId, progress: nil)
       upsertLocalStatusLocked(chatId: resolvedChatId, messageId: messageId, status: "error")
       appendJournalLocked(
         event: "native-outgoing-cancel",
         payload: [
           "chatId": resolvedChatId,
           "messageId": messageId,
+          "hadActiveUpload": hadActiveUpload,
         ])
       let snapshot = statusSnapshotLocked()
       postChangeLocked(
@@ -1190,6 +1210,14 @@ final class ChatEngine {
         userInfo: [
           "chatId": resolvedChatId,
           "messageId": messageId,
+          "state": snapshot,
+        ])
+      postChangeLocked(
+        reason: "chatMessageChanged",
+        userInfo: [
+          "chatId": resolvedChatId,
+          "messageId": messageId,
+          "action": "updated",
           "state": snapshot,
         ])
       postChangeLocked(
@@ -1285,6 +1313,7 @@ final class ChatEngine {
     let peerUserIdHint = normalizedUpper(payload["peerUserId"] ?? payload["peer_user_id"])
 
     return queue.sync {
+      canceledOutboundMessageIds.remove(messageId)
       let effectivePayload = payload
       let isGroup =
         (payload["isGroup"] as? Bool) == true || (payload["isGroupOrChannel"] as? Bool) == true
@@ -1478,11 +1507,13 @@ final class ChatEngine {
             fileNameHint: fileName,
             userId: userId,
             token: token,
-            apiBase: apiBase
+            apiBase: apiBase,
+            messageId: messageId
           ) { progress in
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
               guard let self else { return }
               self.queue.sync {
+                if self.canceledOutboundMessageIds.contains(messageId) { return }
                 self.setLiveMessageUploadProgressLocked(
                   chatId: chatId,
                   messageId: messageId,
@@ -1579,9 +1610,27 @@ final class ChatEngine {
                   chatId: chatId, messageId: messageId, payload: localEffectivePayload,
                   reason: reason)
               }
+              self.canceledOutboundMessageIds.remove(messageId)
             }
             return
           }
+        }
+
+        if self.syncOnQueue({ self.canceledOutboundMessageIds.contains(messageId) }) {
+          self.queue.async {
+            self.setLiveMessageUploadProgressLocked(
+              chatId: chatId, messageId: messageId, progress: nil)
+            self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
+            self.postChangeLocked(
+              reason: "chatMessageChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
+            )
+            self.postChangeLocked(
+              reason: "messageStatusChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "status": "error"])
+            self.canceledOutboundMessageIds.remove(messageId)
+          }
+          return
         }
 
         var fullPayloadBase: [String: Any] = ["text": text]
@@ -1691,6 +1740,14 @@ final class ChatEngine {
             wirePayload["agentText"] = agentText
           }
         }
+        if let mentionedAgentUsername = payload["mentionedAgentUsername"] as? String,
+          !mentionedAgentUsername.isEmpty
+        {
+          wirePayload["mentionedAgentUsername"] = mentionedAgentUsername
+          if let agentText = payload["agentText"] as? String {
+            wirePayload["agentText"] = agentText
+          }
+        }
 
         if var message = localOptimisticRow["message"] as? [String: Any] {
           message["encryptedContent"] = encryptedContent
@@ -1701,6 +1758,20 @@ final class ChatEngine {
         let threadWirePayload = wirePayload
 
         self.queue.async {
+          if self.canceledOutboundMessageIds.contains(messageId) {
+            self.setLiveMessageUploadProgressLocked(
+              chatId: chatId, messageId: messageId, progress: nil)
+            self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
+            self.postChangeLocked(
+              reason: "chatMessageChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "action": "updated"]
+            )
+            self.postChangeLocked(
+              reason: "messageStatusChanged",
+              userInfo: ["chatId": chatId, "messageId": messageId, "status": "error"])
+            self.canceledOutboundMessageIds.remove(messageId)
+            return
+          }
           self.upsertLiveMessageRowLocked(
             chatId: chatId, messageId: messageId, row: threadOptimisticRow)
           self.pendingOutboundDraftsByMessageId[messageId] = threadEffectivePayload
@@ -2601,6 +2672,14 @@ final class ChatEngine {
     guard let chatId, let messageId else { return nil }
     return syncOnQueue {
       liveMessageRowsByChat[chatId]?[messageId]
+    }
+  }
+
+  func getLiveMessageRows(_ payload: [String: Any]) -> [String: [String: Any]] {
+    let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
+    guard let chatId else { return [:] }
+    return syncOnQueue {
+      liveMessageRowsByChat[chatId] ?? [:]
     }
   }
 
@@ -5027,6 +5106,7 @@ final class ChatEngine {
     userId: String,
     token: String,
     apiBase: URL,
+    messageId: String? = nil,
     onProgress: ((Float) -> Void)? = nil
   ) -> LocalMediaUploadOutcome {
     guard let fileURL = localFileURL(from: localUri) else {
@@ -5075,11 +5155,11 @@ final class ChatEngine {
     let semaphore = DispatchSemaphore(value: 0)
     var responseData: Data?
     var responseCode: Int?
-    var responseError: String?
+    var responseError: Error?
 
     delegate.onCompletion = { data, res, error in
       if let error {
-        responseError = error.localizedDescription
+        responseError = error
       }
       responseCode = res?.statusCode
       responseData = data
@@ -5088,10 +5168,37 @@ final class ChatEngine {
 
     let session = ChatPhoenixClient.makePinnedURLSession(delegate: delegate)
     let task = session.uploadTask(with: request, from: body)
+    if let messageId, !messageId.isEmpty {
+      syncOnQueue {
+        activeMediaUploadTasksByMessageId[messageId] = task
+      }
+    }
     task.resume()
     let waitResult = semaphore.wait(timeout: .now() + 40.0)
     if waitResult == .timedOut {
+      task.cancel()
+      if let messageId, !messageId.isEmpty {
+        syncOnQueue {
+          if activeMediaUploadTasksByMessageId[messageId] === task {
+            activeMediaUploadTasksByMessageId.removeValue(forKey: messageId)
+          }
+        }
+      }
       return LocalMediaUploadOutcome(result: nil, reason: "upload_timeout")
+    }
+    if let messageId, !messageId.isEmpty {
+      syncOnQueue {
+        if activeMediaUploadTasksByMessageId[messageId] === task {
+          activeMediaUploadTasksByMessageId.removeValue(forKey: messageId)
+        }
+      }
+    }
+    if
+      let nsError = responseError as NSError?,
+      nsError.domain == NSURLErrorDomain,
+      nsError.code == NSURLErrorCancelled
+    {
+      return LocalMediaUploadOutcome(result: nil, reason: "upload_canceled")
     }
     if responseError != nil {
       return LocalMediaUploadOutcome(result: nil, reason: "upload_failed")

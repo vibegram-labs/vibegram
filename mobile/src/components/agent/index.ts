@@ -4,4 +4,4 @@
 
 export { default as AgentMessage } from './AgentMessage';
 export { default as AgentChatScreen } from './AgentChatScreen';
-export { default as AgentSettingsScreen } from './AgentSettingsScreen';
+export { default as VibeChatMainScreen } from './VibeChatMainScreen';

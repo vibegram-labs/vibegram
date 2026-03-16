@@ -109,6 +109,20 @@ defmodule VibeWeb.Router do
     get "/business/settings/:user_id", BusinessController, :show
     post "/business/settings", BusinessController, :update_settings
 
+    # Standalone Agents
+    get "/agents", AgentsController, :index
+    post "/agents", AgentsController, :create
+    get "/agents/:id", AgentsController, :show
+    put "/agents/:id", AgentsController, :update
+    post "/agents/:id/publish", AgentsController, :publish
+    post "/agents/:id/secret/rotate", AgentsController, :rotate_secret
+    get "/agents/:id/deliveries", AgentsController, :deliveries
+    delete "/agents/:id", AgentsController, :delete
+
+    # Builder
+    get "/vibeagent/session", VibeagentController, :session
+    post "/vibeagent/chat", VibeagentController, :chat
+
     # Stories
     post "/stories", StoryController, :create
     get "/stories/feed/:user_id", StoryController, :feed
@@ -165,6 +179,12 @@ defmodule VibeWeb.Router do
 
     # AI
     post "/ai/edit_image", AIController, :edit_image
+  end
+
+  scope "/api", VibeWeb do
+    pipe_through [:strict_rate_limited, :api]
+
+    post "/agents/:identifier/invoke", AgentsController, :invoke
   end
 
   scope "/bridge/v1", VibeWeb do

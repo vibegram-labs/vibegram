@@ -339,7 +339,9 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     let reason =
       ((notification.userInfo?["reason"] as? String) ?? "")
       .trimmingCharacters(in: .whitespacesAndNewlines)
-    if reason == "peerTyping" {
+      
+    let isTypingOrMessage = ["peerTyping", "chatMessageInserted", "chatMessageChanged", "chatRowsReloaded"].contains(reason)
+    if isTypingOrMessage {
       let changedChatId =
         (notification.userInfo?["chatId"] as? String)?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -365,13 +367,74 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     if row.isSavedMessages {
       return row.withPresence(isTyping: false, isOnline: false)
     }
+    let isTyping = ChatEngine.shared.isTyping(["chatId": row.chatId])
     guard let peerUserId = row.peerUserId, !peerUserId.isEmpty else {
       // Group/channel rows do not show single-peer typing/online state.
-      return row.withPresence(isTyping: false, isOnline: false)
+      let resolvedPreview = resolvePreviewFromEngine(for: row)
+      return row.withPresence(isTyping: isTyping, isOnline: false, preview: resolvedPreview)
     }
-    let isTyping = ChatEngine.shared.isTyping(["chatId": row.chatId])
     let isOnline = ChatEngine.shared.isUserOnline(userId: peerUserId)
-    return row.withPresence(isTyping: isTyping, isOnline: isOnline)
+    let resolvedPreview = resolvePreviewFromEngine(for: row)
+    return row.withPresence(isTyping: isTyping, isOnline: isOnline, preview: resolvedPreview)
+  }
+
+  private func resolvePreviewFromEngine(for row: ChatNativeHomeListRow) -> String? {
+    let jsPreview = row.preview.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !jsPreview.isEmpty, jsPreview != "Start a conversation", jsPreview != "Message" {
+      return nil
+    }
+    
+    let liveRows = ChatEngine.shared.getLiveMessageRows(["chatId": row.chatId])
+    if !liveRows.isEmpty {
+      let sortedValues = liveRows.values.sorted { valA, valB -> Bool in
+        let msgA = valA["message"] as? [String: Any]
+        let msgB = valB["message"] as? [String: Any]
+        let timeA = (msgA?["timestampMs"] as? NSNumber)?.int64Value ?? 0
+        let timeB = (msgB?["timestampMs"] as? NSNumber)?.int64Value ?? 0
+        return timeA < timeB
+      }
+      if let lastEntry = sortedValues.last,
+         let msg = lastEntry["message"] as? [String: Any] {
+        if let text = msg["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let type = (msg["type"] as? String)?.lowercased()
+        switch type {
+        case "image": return "Photo"
+        case "voice": return "Voice message"
+        case "gif": return "GIF"
+        case "sticker": return "Sticker"
+        case "video": return "Video"
+        case "file":
+           if let fn = msg["fileName"] as? String, !fn.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return fn.trimmingCharacters(in: .whitespacesAndNewlines) }
+           return "Document"
+        default: break
+        }
+      }
+    }
+    
+    let historyRows = ChatEngine.shared.getChatRows(["chatId": row.chatId])
+    if !historyRows.isEmpty {
+       if let lastRow = historyRows.last(where: { ($0["kind"] as? String) == "message" }),
+          let msg = lastRow["message"] as? [String: Any] {
+          if let text = msg["text"] as? String, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+              return text.trimmingCharacters(in: .whitespacesAndNewlines)
+          }
+          let type = (msg["type"] as? String)?.lowercased()
+          switch type {
+          case "image": return "Photo"
+          case "voice": return "Voice message"
+          case "gif": return "GIF"
+          case "sticker": return "Sticker"
+          case "video": return "Video"
+          case "file":
+             if let fn = msg["fileName"] as? String, !fn.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return fn.trimmingCharacters(in: .whitespacesAndNewlines) }
+             return "Document"
+          default: break
+          }
+       }
+    }
+    return nil
   }
 
   @objc private func handleRefresh() {
@@ -549,10 +612,12 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     }
     let displayRow = resolvedPresenceRow(for: rows[indexPath.row])
     cell.swipeDelegate = self
+    let avatarGradientColors = resolvedAvatarGradientColors(for: displayRow)
     cell.configure(
       row: displayRow,
       isDark: isDark,
       avatarBackgroundColor: resolvedAvatarBackgroundColor(),
+      avatarGradientColors: avatarGradientColors,
       isEditing: isEditingMode,
       isEditSelected: selectedChatIds.contains(displayRow.chatId)
     )
@@ -629,6 +694,15 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     let key = isDark ? "avatarBackgroundColorDark" : "avatarBackgroundColorLight"
     guard let raw = appearance[key] as? String else { return nil }
     return Self.parseHexColor(raw)
+  }
+
+  private func resolvedAvatarGradientColors(for row: ChatNativeHomeListRow) -> (UIColor, UIColor)? {
+    let startRaw = isDark ? row.avatarGradientStartDark : row.avatarGradientStartLight
+    let endRaw = isDark ? row.avatarGradientEndDark : row.avatarGradientEndLight
+    guard let startRaw, let endRaw else { return nil }
+    guard let startColor = Self.parseHexColor(startRaw), let endColor = Self.parseHexColor(endRaw)
+    else { return nil }
+    return (startColor, endColor)
   }
 
   private static func parseHexColor(_ raw: String) -> UIColor? {

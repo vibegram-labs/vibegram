@@ -3,6 +3,7 @@ package expo.modules.vibechatnative
 import android.graphics.Color
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 
 data class ChatListAppearance(
   val backgroundMode: String = "transparent",
@@ -59,7 +60,15 @@ data class ChatListAppearance(
       val wallpaperGradient = parseGradient(raw["wallpaperGradient"] as? List<*>, fallback.wallpaperGradient)
       val wallpaperPatternGradient =
         parseGradient(raw["wallpaperPatternGradient"] as? List<*>, fallback.wallpaperPatternGradient)
-      val bubbleMeGradient = parseGradient(raw["bubbleMeGradient"] as? List<*>, fallback.bubbleMeGradient)
+      val bubbleMeGradientRaw = parseGradient(raw["bubbleMeGradient"] as? List<*>, fallback.bubbleMeGradient)
+
+      val isDarkApprox = isDarkColor(wallpaperGradient.firstOrNull() ?: fallback.wallpaperGradient.firstOrNull() ?: Color.BLACK)
+      val softenedPalette = softenedBubblePalette(
+        bubbleMeGradient = bubbleMeGradientRaw,
+        bubbleThemColor = parseColor(raw["bubbleThemColor"] as? String) ?: fallback.bubbleThemColor,
+        wallpaperGradient = wallpaperGradient,
+        isDark = isDarkApprox
+      )
 
       return ChatListAppearance(
         backgroundMode = backgroundMode,
@@ -69,8 +78,8 @@ data class ChatListAppearance(
         wallpaperPatternLocations = parseFloatList(raw["wallpaperPatternLocations"]),
         wallpaperPatternOpacity = ((raw["wallpaperPatternOpacity"] as? Number)?.toFloat() ?: 0f).coerceIn(0f, 1f),
         wallpaperMaskKey = normalizedString(raw["wallpaperMaskKey"]),
-        bubbleMeGradient = bubbleMeGradient,
-        bubbleThemColor = parseColor(raw["bubbleThemColor"] as? String) ?: fallback.bubbleThemColor,
+        bubbleMeGradient = softenedPalette.first,
+        bubbleThemColor = softenedPalette.second,
         textColorMe = parseColor(raw["textColorMe"] as? String) ?: fallback.textColorMe,
         textColorThem = parseColor(raw["textColorThem"] as? String) ?: fallback.textColorThem,
         timeColorMe = parseColor(raw["timeColorMe"] as? String) ?: fallback.timeColorMe,
@@ -129,12 +138,19 @@ private fun nativePresetAppearance(
 
   val wallpaperGradient = parseGradientStrings(resolvedBackgroundGradient, fallback.wallpaperGradient)
   val patternGradient = parseGradientStrings(resolvedPatternGradientColors, intArrayOf())
-  val bubbleMeGradient = parseGradientStrings(variant.bubbleMeGradient, fallback.bubbleMeGradient)
-  val bubbleThemColor =
+  val bubbleMeGradientUnsoftened = parseGradientStrings(variant.bubbleMeGradient, fallback.bubbleMeGradient)
+  val rawBubbleThemColor =
     parseColor(variant.bubbleThemGradient.firstOrNull()) ?: parseColor(variant.bubbleThem) ?: fallback.bubbleThemColor
   val textColorMe = parseColor(variant.textColorMe) ?: fallback.textColorMe
   val textColorThem = parseColor(variant.textColorThem) ?: fallback.textColorThem
   val dayBackgroundBase = wallpaperGradient.firstOrNull() ?: fallback.wallpaperGradient.firstOrNull() ?: Color.BLACK
+
+  val softenedPalette = softenedBubblePalette(
+    bubbleMeGradient = bubbleMeGradientUnsoftened,
+    bubbleThemColor = rawBubbleThemColor,
+    wallpaperGradient = wallpaperGradient,
+    isDark = isDark
+  )
 
   return ChatListAppearance(
     backgroundMode = (raw["backgroundMode"] as? String) ?: fallback.backgroundMode,
@@ -144,8 +160,8 @@ private fun nativePresetAppearance(
     wallpaperPatternLocations = variant.patternGradientLocations.toFloatArray(),
     wallpaperPatternOpacity = resolvedPatternOpacity.coerceIn(0f, 1f),
     wallpaperMaskKey = preset.maskedImage,
-    bubbleMeGradient = bubbleMeGradient,
-    bubbleThemColor = bubbleThemColor,
+    bubbleMeGradient = softenedPalette.first,
+    bubbleThemColor = softenedPalette.second,
     textColorMe = textColorMe,
     textColorThem = textColorThem,
     timeColorMe = withAlpha(textColorMe, 0.72f),
@@ -480,4 +496,74 @@ private fun parseRgba(value: String): Int? {
     min(255f, max(0f, g)).toInt(),
     min(255f, max(0f, b)).toInt(),
   )
+}
+
+private fun softenedBubblePalette(
+  bubbleMeGradient: IntArray,
+  bubbleThemColor: Int,
+  wallpaperGradient: IntArray,
+  isDark: Boolean
+): Pair<IntArray, Int> {
+  val wallFirst = wallpaperGradient.firstOrNull() ?: if (isDark) Color.BLACK else Color.WHITE
+  val wallLast = wallpaperGradient.lastOrNull() ?: wallFirst
+  val wallpaperAnchor = blendColor(wallFirst, wallLast, 0.36f)
+
+  val softenedMe = bubbleMeGradient.map { color ->
+    val contrast = contrastRatio(color, wallpaperAnchor)
+    val extra = max(0.0, min(0.12, (contrast - (if (isDark) 4.2 else 3.8)) * 0.05))
+    val mix = (if (isDark) 0.12 else 0.10) + extra
+    val base = blendColor(color, wallpaperAnchor, mix.toFloat())
+    withAlpha(base, 0.96f)
+  }.toIntArray()
+
+  val themContrast = contrastRatio(bubbleThemColor, wallpaperAnchor)
+  val themExtra = max(0.0, min(0.14, (themContrast - (if (isDark) 2.6 else 2.2)) * 0.07))
+  val themMix = (if (isDark) 0.12 else 0.09) + themExtra
+  var softenedThem = blendColor(bubbleThemColor, wallpaperAnchor, themMix.toFloat())
+  softenedThem = withAlpha(softenedThem, if (isDark) 0.94f else 0.96f)
+
+  // Force white bubble for incoming messages in light theme
+  if (!isDark) {
+    softenedThem = Color.WHITE
+  }
+
+  return Pair(softenedMe, softenedThem)
+}
+
+private fun blendColor(from: Int, to: Int, amount: Float): Int {
+  val t = amount.coerceIn(0f, 1f)
+  val inv = 1f - t
+  val r = (Color.red(from) * inv + Color.red(to) * t).toInt()
+  val g = (Color.green(from) * inv + Color.green(to) * t).toInt()
+  val b = (Color.blue(from) * inv + Color.blue(to) * t).toInt()
+  val a = (Color.alpha(from) * inv + Color.alpha(to) * t).toInt()
+  return Color.argb(a, r, g, b)
+}
+
+private fun isDarkColor(color: Int): Boolean {
+  val r = Color.red(color) / 255f
+  val g = Color.green(color) / 255f
+  val b = Color.blue(color) / 255f
+  val luminance = 0.299 * r + 0.587 * g + 0.114 * b
+  return luminance < 0.5
+}
+
+private fun contrastRatio(c1: Int, c2: Int): Double {
+  val l1 = relativeLuminance(c1)
+  val l2 = relativeLuminance(c2)
+  val hi = max(l1, l2)
+  val lo = min(l1, l2)
+  return (hi + 0.05) / (lo + 0.05)
+}
+
+private fun relativeLuminance(color: Int): Double {
+  val r = Color.red(color) / 255.0
+  val g = Color.green(color) / 255.0
+  val b = Color.blue(color) / 255.0
+
+  fun linear(value: Double): Double {
+    return if (value <= 0.03928) value / 12.92 else ((value + 0.055) / 1.055).pow(2.4)
+  }
+
+  return (0.2126 * linear(r)) + (0.7152 * linear(g)) + (0.0722 * linear(b))
 }

@@ -53,6 +53,12 @@ const STALE_SENDING_RETRY_MS = 14_000;
 const CHAT_STORE_STORAGE_KEY = 'vibe-chat-store';
 const PERSISTED_TEXT_LIMIT = 420;
 
+const normalizeSessionUserId = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim().toUpperCase();
+    return trimmed.length > 0 ? trimmed : null;
+};
+
 const trimPersistedText = (value: unknown): string | undefined => {
     if (typeof value !== 'string') return undefined;
     const trimmed = value.trim();
@@ -304,6 +310,14 @@ const parseDecryptedContent = (decrypted: string): Partial<Message> => {
 const normalizeMessage = (m: any): Message => {
     let content = m.plaintext || m.plainContent || m.plain_content || m._senderPlaintext || m.sender_plaintext;
     let extra: Partial<Message> = {};
+    const metadata =
+        m?.metadata && typeof m.metadata === 'object'
+            ? m.metadata
+            : {};
+    const rootExtra =
+        m?.extra && typeof m.extra === 'object'
+            ? m.extra
+            : {};
 
     // Detect if content is a JSON string (e.g. {"text":"..."})
     if (typeof content === 'string' && content.trim().startsWith('{')) {
@@ -313,6 +327,11 @@ const normalizeMessage = (m: any): Message => {
             extra = parsed;
         }
     }
+
+    const parsedExtra =
+        extra?.extra && typeof extra.extra === 'object'
+            ? extra.extra
+            : {};
 
     return {
         id: m.id || m.message_id,
@@ -326,20 +345,31 @@ const normalizeMessage = (m: any): Message => {
         readBy: m.readBy || m.read_by || [],
         mediaUrl: extra.mediaUrl || m.mediaUrl || m.media_url,
         mediaKey: extra.mediaKey, // Pass through key
-        fileName: extra.fileName || m.fileName || m.file_name,
+        fileName: extra.fileName || m.fileName || m.file_name || metadata.fileName || metadata.file_name,
         fileSize: extra.fileSize || m.fileSize || m.file_size,
         latitude: extra.latitude || m.latitude,
         longitude: extra.longitude || m.longitude,
-        duration: extra.duration || m.duration,
-        replyToId: extra.replyToId || m.replyToId || m.reply_to_id,
+        duration: extra.duration || m.duration || metadata.duration,
+        replyToId: extra.replyToId || m.replyToId || m.reply_to_id || metadata.replyToId || metadata.reply_to_id,
         contact: extra.contact || m.contact,
         caption: extra.caption || m.caption,
         viewOnce: extra.viewOnce || m.viewOnce,
         viewedBy: m.viewedBy || [],
-        isVideoNote: extra.isVideoNote || m.isVideoNote,
+        isVideoNote: extra.isVideoNote || m.isVideoNote || metadata.isVideoNote,
         isEdited: extra.isEdited || m.isEdited || m.edited === true,
         editedAt: extra.editedAt || m.editedAt || m.edited_at,
-        extra: extra.extra || m.extra,
+        isAgentMessage:
+            m.isAgentMessage === true
+            || m.is_agent_message === true
+            || metadata.isAgentMessage === true
+            || metadata.is_agent_message === true,
+        agentName: m.agentName || m.agent_name || metadata.agentName || metadata.agent_name,
+        agentId: m.agentId || m.agent_id || metadata.agentId || metadata.agent_id,
+        extra: {
+            ...metadata,
+            ...parsedExtra,
+            ...rootExtra,
+        },
     };
 };
 
@@ -372,6 +402,7 @@ interface ChatState {
     isConnected: boolean;
     isLoading: boolean;
     activeChatId: string | null;
+    persistedUserId: string | null;
     typingUsers: Set<string>;
     recordingUsers: Set<string>;
     onlineUsers: Set<string>;
@@ -382,6 +413,7 @@ interface ChatState {
 
     // Actions
     disconnect: () => void;
+    resetSessionCache: (nextUserId?: string | null) => Promise<void>;
     initSocket: () => void;
     loadChats: () => Promise<void>;
     startChat: (friendId: string, friendInfo?: { username?: string, profileImage?: string, publicKey?: string }) => Promise<string>; // Returns chatId
@@ -1475,6 +1507,7 @@ export const useChatStore = create<ChatState>()(
             isConnected: false,
             isLoading: false,
             activeChatId: null,
+            persistedUserId: null,
             typingUsers: new Set(),
             recordingUsers: new Set(),
             onlineUsers: new Set(),
@@ -1486,6 +1519,39 @@ export const useChatStore = create<ChatState>()(
             disconnect: () => {
                 resetSocketConnection();
                 set({ isConnected: false, socket: null });
+            },
+
+            resetSessionCache: async (nextUserId = null) => {
+                const normalizedNextUserId = normalizeSessionUserId(nextUserId);
+
+                resetSocketConnection();
+                uploadAbortControllers.forEach((controller) => controller.abort());
+                uploadAbortControllers.clear();
+                historyLoadInFlight.clear();
+                startChatInFlight.clear();
+                friendKeyFetchInFlight.clear();
+                recentlyProcessedMsgIds.clear();
+
+                try {
+                    await AsyncStorage.removeItem(CHAT_STORE_STORAGE_KEY);
+                } catch (error) {
+                    console.warn('[ChatStore] Failed to clear persisted chat store:', error);
+                }
+
+                set({
+                    chats: [],
+                    isConnected: false,
+                    isLoading: false,
+                    activeChatId: null,
+                    persistedUserId: normalizedNextUserId,
+                    typingUsers: new Set(),
+                    recordingUsers: new Set(),
+                    onlineUsers: new Set(),
+                    offlineQueue: [],
+                    socket: null,
+                    uploadProgress: {},
+                    lastChatsLoad: 0,
+                });
             },
 
             initSocket: () => {
@@ -1992,6 +2058,26 @@ export const useChatStore = create<ChatState>()(
                     }
                 }
 
+                const currentUserId = normalizeSessionUserId(auth.userId);
+                const persistedUserId = normalizeSessionUserId(get().persistedUserId);
+                const hasHydratedChatState =
+                    get().chats.length > 0 ||
+                    !!get().activeChatId ||
+                    Object.keys(get().uploadProgress).length > 0;
+
+                if (
+                    currentUserId &&
+                    (
+                        persistedUserId !== currentUserId ||
+                        (!persistedUserId && hasHydratedChatState)
+                    )
+                ) {
+                    console.log(
+                        `[ChatStore] Detected stale chat cache for user ${persistedUserId ?? 'legacy'} -> ${currentUserId}, clearing local chat state`,
+                    );
+                    await get().resetSessionCache(currentUserId);
+                }
+
                 const wasEmpty = get().chats.length === 0;
                 if (wasEmpty && emptyChatsRetryCount === 0) {
                     set({ isLoading: true });
@@ -2479,10 +2565,10 @@ export const useChatStore = create<ChatState>()(
                         });
 
                     if (chatsUnchanged) {
-                        set({ isLoading: false });
+                        set({ isLoading: false, persistedUserId: currentUserId });
                         chatStoreLog('[ChatStore] Chats unchanged, skipped chats state update');
                     } else {
-                        set({ chats: processedChats, isLoading: false });
+                        set({ chats: processedChats, isLoading: false, persistedUserId: currentUserId });
                         chatStoreLog('[ChatStore] State updated with chats:', processedChats.length);
                     }
 
@@ -4585,11 +4671,13 @@ export const useChatStore = create<ChatState>()(
             partialize: (state) => ({
                 chats: state.chats.map(sanitizeChatForPersist),
                 activeChatId: state.activeChatId,
+                persistedUserId: normalizeSessionUserId(state.persistedUserId),
             }),
             // Merge persisted state with initial state
             merge: (persistedState, currentState) => {
                 const persisted = (persistedState as Partial<ChatState>) || {};
                 const chats = normalizeHydratedChats(persisted.chats);
+                const persistedUserId = normalizeSessionUserId(persisted.persistedUserId);
                 const persistedActiveChatId =
                     typeof persisted.activeChatId === 'string' ? persisted.activeChatId : null;
                 const activeChatId =
@@ -4600,6 +4688,7 @@ export const useChatStore = create<ChatState>()(
                     ...currentState,
                     chats,
                     activeChatId,
+                    persistedUserId,
                 };
             },
             // Called when store is rehydrated from storage

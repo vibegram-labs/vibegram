@@ -94,6 +94,13 @@ export default function SignUpScreen() {
                 loginToken
             }));
 
+            try {
+                const { clearSessionScopedClientCaches } = require('../../src/lib/session-cache');
+                await clearSessionScopedClientCaches(response.userId);
+            } catch (cacheError) {
+                console.warn('Failed to clear session caches before signup handoff', cacheError);
+            }
+
             login({ ...response, loginToken });
 
             // Success! Direct navigation

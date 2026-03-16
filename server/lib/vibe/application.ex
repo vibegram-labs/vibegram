@@ -41,6 +41,7 @@ defmodule Vibe.Application do
       # Start the scheduled post scheduler
       # Start the scheduled post scheduler
       Vibe.Scheduler,
+      Vibe.AgentDeliveryScheduler,
       # Start the Story Cleaner
       Vibe.StoryCleaner
     ]

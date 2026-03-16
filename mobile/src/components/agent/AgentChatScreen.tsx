@@ -32,6 +32,7 @@ import { BlurView } from 'expo-blur'
 import { useThemeStore } from '../../lib/stores/theme-store'
 import { useWallpaperStore, resolveThemeVariant } from '../../lib/stores/wallpaper-store'
 import { useAgentStore } from '../../lib/agent/AgentStore'
+import { useVibeAgentBuilderStore } from '../../lib/agent/VibeAgentBuilderStore'
 import ChatInput from '../../components/shared/ChatInput'
 import { isNativeTabBarAvailable } from '../native/NativeTabBar'
 import StreamingText from '../../components/shared/StreamingText'
@@ -43,7 +44,7 @@ import AnimatedGlassButton from '../native/AnimatedGlassButton'
 import { DocumentIcon, RefreshIcon, ThumbUpIcon, ThumbDownIcon, HistoryIcon, PlusIcon, CloseIcon } from '../../components/Icons'
 import * as Clipboard from 'expo-clipboard'
 import { MessageContextMenu, GlassToast } from '../../components/chat/ChatOverlays'
-import { ArrowLeft, Settings, Plus, Trash2, MessageSquare, Clock } from 'lucide-react-native'
+import { ArrowLeft, MessageSquare } from 'lucide-react-native'
 
 import { MusicBubble } from './MusicBubble'
 import { MessageBubbleBody } from '../../components/chat/bubbles'
@@ -271,18 +272,23 @@ export default function ChatScreen({
     keyboardProgress,
     keyboardHeight,
     onSettings,
-    onBack
+    onBack,
+    mode = 'default',
+    embeddedInTabs = false,
 }: {
     keyboardProgress?: any,
     keyboardHeight?: any,
     onSettings?: () => void,
-    onBack?: () => void
+    onBack?: () => void,
+    mode?: 'default' | 'builder',
+    embeddedInTabs?: boolean,
 }) {
     const insets = useSafeAreaInsets()
     const { colors, effectiveTheme } = useThemeStore()
     const { activeTheme } = useWallpaperStore()
     const isLight = effectiveTheme === 'light'
     const haptic = useHaptics()
+    const isBuilderMode = mode === 'builder'
 
     const resolvedTheme = useMemo(() => {
         return resolveThemeVariant(activeTheme, effectiveTheme === 'dark');
@@ -302,11 +308,19 @@ export default function ChatScreen({
     const storeMessages = useAgentStore((state) => (state.conversations || []).find(c => c.id === state.activeConversationId)?.messages || EMPTY_MESSAGES)
     const currentConversationId = useAgentStore((state) => state.activeConversationId)
     const storeIsStreaming = useAgentStore((state) => state.isStreaming)
-    const storeIsLoading = useAgentStore((state) => state.isLoading)
     const currentTool = useAgentStore((state) => state.currentTool)
     const storeError = useAgentStore((state) => state.error)
     const isConnected = useAgentStore((state) => state.isConnected)
     const hasHydrated = useAgentStore((state) => state._hasHydrated)
+
+    const builderConversationId = useVibeAgentBuilderStore((state) => state.conversationId)
+    const builderMessages = useVibeAgentBuilderStore((state) => state.messages)
+    const builderSuggestions = useVibeAgentBuilderStore((state) => state.suggestions)
+    const builderAgent = useVibeAgentBuilderStore((state) => state.agent)
+    const builderIsSending = useVibeAgentBuilderStore((state) => state.isSending)
+    const builderError = useVibeAgentBuilderStore((state) => state.error)
+    const builderLoad = useVibeAgentBuilderStore((state) => state.load)
+    const builderSendMessage = useVibeAgentBuilderStore((state) => state.sendMessage)
 
     // Store actions
     const connect = useAgentStore((state) => state.connect)
@@ -318,6 +332,12 @@ export default function ChatScreen({
     const stopStreaming = useAgentStore((state) => state.stopStreaming)
     const syncFromServer = useAgentStore((state) => state.syncFromServer)
     const loadConversation = useAgentStore((state) => state.loadConversation)
+
+    const effectiveConversationId = isBuilderMode ? builderConversationId : currentConversationId
+    const effectiveMessages = isBuilderMode ? builderMessages : storeMessages
+    const effectiveIsStreaming = isBuilderMode ? builderIsSending : storeIsStreaming
+    const effectiveError = isBuilderMode ? builderError : storeError
+    const shouldUseTabComposer = embeddedInTabs && isNativeTabBarAvailable()
 
     // Local state for UI
     const [localMessages, setLocalMessages] = useState<Message[]>([])
@@ -342,6 +362,7 @@ export default function ChatScreen({
     const isGesturing = useSharedValue(false)
 
     const navigateToHistory = () => {
+        if (isBuilderMode) return
         Keyboard.dismiss()
         pageIndex.value = 1
         translateX.value = withSpring(-SCREEN_WIDTH, { damping: 24, stiffness: 220, mass: 0.8 })
@@ -354,6 +375,7 @@ export default function ChatScreen({
     }
 
     const gesture = Gesture.Pan()
+        .enabled(!isBuilderMode)
         .activeOffsetX([-20, 20])
         .failOffsetY([-20, 20])
         .onStart(() => {
@@ -412,6 +434,11 @@ export default function ChatScreen({
 
     // Connect to Phoenix Channel on mount and refresh data
     useEffect(() => {
+        if (isBuilderMode) {
+            void builderLoad()
+            return
+        }
+
         loadFromStorage()
         connect()
 
@@ -423,10 +450,13 @@ export default function ChatScreen({
         }, 1000)
 
         return () => clearTimeout(syncTimer)
-    }, [])
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [isBuilderMode])
 
     // Load active conversation messages when switching or on reconnect
     useEffect(() => {
+        if (isBuilderMode) return
+
         if (hasHydrated && isConnected && currentConversationId) {
             // Check if we have recent local messages (optimistic state) to avoid overwriting with empty server state
             // This happens when 'createConversation' updates the ID and we have a pending user message
@@ -445,7 +475,7 @@ export default function ChatScreen({
             // Always reload conversation from server to get fresh messages
             loadConversation(currentConversationId)
         }
-    }, [hasHydrated, isConnected, currentConversationId])
+    }, [currentConversationId, hasHydrated, isBuilderMode, isConnected, loadConversation])
 
     // Sync progress from tool events
     useEffect(() => {
@@ -463,18 +493,18 @@ export default function ChatScreen({
 
     // Effects - sync from store
     useEffect(() => {
-        if (storeMessages && storeMessages.length > 0) {
-            setLocalMessages(storeMessages as Message[])
-            userMessageCountRef.current = storeMessages.filter(m => m.role === 'user').length
+        if (effectiveMessages && effectiveMessages.length > 0) {
+            setLocalMessages(effectiveMessages as Message[])
+            userMessageCountRef.current = effectiveMessages.filter(m => m.role === 'user').length
         } else {
             setLocalMessages([])
             userMessageCountRef.current = 0
         }
-    }, [storeMessages])
+    }, [effectiveMessages])
 
     useEffect(() => {
         setSpacerHeight(0)
-    }, [currentConversationId])
+    }, [effectiveConversationId])
 
     const { flatListMessages, footerMessages } = useMemo(() => {
         if (!localMessages.length) return { flatListMessages: [], footerMessages: [] }
@@ -501,6 +531,7 @@ export default function ChatScreen({
     }
 
     const handleStopStreaming = () => {
+        if (isBuilderMode) return
         stopStreaming()
     }
 
@@ -534,6 +565,14 @@ export default function ChatScreen({
         setProgressHistory([])
 
         try {
+            if (isBuilderMode) {
+                userMessageCountRef.current += 1
+                setSpacerHeight(userMessageCountRef.current === 1 ? SCREEN_HEIGHT * 0.2 : SCREEN_HEIGHT * 0.65)
+                await builderSendMessage(finalText)
+                setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 100)
+                return
+            }
+
             let convId = currentConversationId
             if (!convId) {
                 convId = createNewConversation(finalText.substring(0, 20))
@@ -558,7 +597,7 @@ export default function ChatScreen({
 
         } catch (e) {
             console.error(e)
-            Alert.alert('Error', 'Failed to send message')
+            Alert.alert('Error', isBuilderMode ? 'Failed to send setup message' : 'Failed to send message')
         }
     }
 
@@ -582,17 +621,20 @@ export default function ChatScreen({
     }, [])
 
     const handleSelectConversation = (id: string) => {
+        if (isBuilderMode) return
         setActiveConversation(id)
         navigateToChat()
     }
 
     const handleNewConversation = () => {
+        if (isBuilderMode) return
         const id = createNewConversation('New Chat')
         setActiveConversation(id)
         navigateToChat()
     }
 
     const handleDeleteConversation = (id: string) => {
+        if (isBuilderMode) return
         deleteConversation(id)
         haptic.medium()
     }
@@ -634,8 +676,8 @@ export default function ChatScreen({
                 {footerMessages.map((msg, idx) => {
                     if (msg.role === 'user') return null
                     const messageText = msg.content || msg.message || ''
-                    const isStreamingMsg = storeIsStreaming && idx === footerMessages.length - 1
-                    const showActions = !isStreamingMsg && messageText && (animationComplete || !storeIsStreaming)
+                    const isStreamingMsg = effectiveIsStreaming && idx === footerMessages.length - 1
+                    const showActions = !isStreamingMsg && messageText && (animationComplete || !effectiveIsStreaming) && !isBuilderMode
                     const isRtlText = isRTL(messageText)
 
                     return (
@@ -667,8 +709,139 @@ export default function ChatScreen({
 
     // Sort conversations by most recent
     const sortedConversations = useMemo(() => {
+        if (isBuilderMode) return []
         return [...conversations].sort((a, b) => b.createdAt - a.createdAt)
-    }, [conversations])
+    }, [conversations, isBuilderMode])
+
+    const builderIntro = useMemo(() => {
+        if (!isBuilderMode) return []
+        if (localMessages.length > 0) return []
+        return (builderSuggestions || []).slice(0, 4)
+    }, [builderSuggestions, isBuilderMode, localMessages.length])
+
+    const chatTitle = isBuilderMode ? '@vibeagent' : 'Vibe AI'
+    const chatSubtitle = isBuilderMode
+        ? (builderAgent?.username ? `Editing @${builderAgent.username}` : 'Create and configure agents in chat')
+        : null
+
+    const renderChatPage = () => (
+        <View style={{ width: SCREEN_WIDTH, height: '100%' }}>
+            <View style={{ flex: 1, flexDirection: 'column' }}>
+                <ScrollView ref={scrollViewRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: insets.top + 80, paddingHorizontal: 5, paddingBottom: 140, flexGrow: 1 }} showsVerticalScrollIndicator={false} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
+                    <View style={{ flexGrow: 1, minHeight: '100%' }}>
+                        <Pressable style={{ flexGrow: 1 }} onPress={() => Keyboard.dismiss()}>
+                            <AnimatedView style={[{ height: spacerHeight }]} />
+                        </Pressable>
+                        {isBuilderMode && builderIntro.length > 0 && (
+                            <View style={{ paddingHorizontal: 16, paddingBottom: 18 }}>
+                                <Text style={{ color: colors.text, fontSize: 22, fontWeight: '700', marginBottom: 6 }}>
+                                    Build with chat
+                                </Text>
+                                <Text style={{ color: withAlpha(colors.text, 0.68), fontSize: 15, lineHeight: 22, marginBottom: 14 }}>
+                                    Message @vibeagent like BotFather. Use plain language or slash commands to create and configure your agent.
+                                </Text>
+                                <View style={{ gap: 10 }}>
+                                    {builderIntro.map((suggestion) => (
+                                        <TouchableOpacity
+                                            key={suggestion}
+                                            activeOpacity={0.82}
+                                            onPress={() => {
+                                                setInputText(suggestion)
+                                                setTimeout(() => scrollViewRef.current?.scrollToEnd({ animated: true }), 60)
+                                            }}
+                                            style={{
+                                                paddingHorizontal: 14,
+                                                paddingVertical: 12,
+                                                borderRadius: 16,
+                                                backgroundColor: withAlpha(colors.card, 0.9),
+                                                borderWidth: 1,
+                                                borderColor: withAlpha(colors.text, 0.08),
+                                            }}
+                                        >
+                                            <Text style={{ color: colors.text, fontSize: 15, fontWeight: '600' }}>
+                                                {suggestion}
+                                            </Text>
+                                        </TouchableOpacity>
+                                    ))}
+                                </View>
+                            </View>
+                        )}
+                        {flatListMessages.map((msg, index) => (
+                            <MessageItem
+                                key={msg.id || index}
+                                item={{
+                                    ...msg,
+                                    bubbleTheme
+                                }}
+                                index={index}
+                                prevItem={index > 0 ? flatListMessages[index - 1] : null}
+                                nextItem={index < flatListMessages.length - 1 ? flatListMessages[index + 1] : null}
+                                isActive={contextMenu?.messageId === msg.id}
+                                onLongPress={(e: any, msgItem: any, text: string) => {
+                                    setContextMenu({
+                                        visible: true,
+                                        messageId: msgItem.id,
+                                        isUser: msgItem.role === 'user',
+                                        content: text,
+                                        y: e.nativeEvent.pageY
+                                    })
+                                }}
+                                renderActionButtons={isBuilderMode ? undefined : renderActionButtons}
+                            />
+                        ))}
+                        {renderFooterMessages()}
+                        {!!effectiveError && localMessages.length === 0 && (
+                            <View style={{ paddingHorizontal: 16, paddingTop: 12 }}>
+                                <Text style={{ color: '#ff6b6b', fontSize: 14 }}>{effectiveError}</Text>
+                            </View>
+                        )}
+                    </View>
+                </ScrollView>
+
+                <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: insets.bottom + 82, pointerEvents: 'none' }}>
+                    <LinearGradient
+                        colors={['rgba(0,0,0,0)', isLight ? 'rgba(255,255,255,1)' : 'rgba(0,0,0,1)']}
+                        locations={[0, 0.6]}
+                        style={StyleSheet.absoluteFill}
+                    />
+                </View>
+
+                {!shouldUseTabComposer && (
+                    <KeyboardStickyView offset={{ closed: -20, opened: -10 }} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20 }}>
+                        <ChatInput
+                            value={inputText}
+                            onChangeText={setInputText}
+                            onSend={() => { if (inputText.trim()) void handleSend(inputText.trim()) }}
+                            isStreaming={effectiveIsStreaming}
+                            onStopStreaming={handleStopStreaming}
+                            placeholder={
+                                isBuilderMode
+                                    ? 'Message @vibeagent...'
+                                    : (editingMessageId ? "Update message..." : "Message Vibe...")
+                            }
+                            keyboardProgress={keyboardProgress}
+                            isEditing={!isBuilderMode && !!editingMessageId}
+                            onCancelEdit={() => { setEditingMessageId(null); setInputText('') }}
+                            onVoicePress={() => {
+                                console.log('[Chat] Voice button pressed - opening voice panel')
+                                haptic.medium()
+                            }}
+                        />
+                    </KeyboardStickyView>
+                )}
+            </View>
+
+            <GlassToast visible={toastVisible} onClose={() => setToastVisible(false)} topInset={insets.top} />
+            <MessageContextMenu
+                visible={!isBuilderMode && !!contextMenu?.visible}
+                onClose={() => setContextMenu(null)}
+                onEdit={contextMenu?.isUser ? () => handleEditInit(contextMenu!.messageId!, contextMenu!.content!) : undefined}
+                onCopy={() => handleCopy(contextMenu?.content || '')}
+                isUser={contextMenu?.isUser}
+                targetY={contextMenu?.y}
+            />
+        </View>
+    )
 
     return (
         <View style={{ flex: 1, backgroundColor: colors.background }}>
@@ -713,129 +886,67 @@ export default function ChatScreen({
                         <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', height: 44 }}>
                             {/* Chat Title */}
                             <Animated.View style={[chatTitleStyle, { position: 'absolute', alignItems: 'center' }]}>
-                                <Text style={{ fontSize: 17, fontWeight: '700', color: colors.text }}>Vibe AI</Text>
+                                <Text style={{ fontSize: 17, fontWeight: '700', color: colors.text }}>{chatTitle}</Text>
+                                {chatSubtitle ? (
+                                    <Text style={{ fontSize: 11, fontWeight: '500', color: withAlpha(colors.text, 0.62), marginTop: 2 }}>
+                                        {chatSubtitle}
+                                    </Text>
+                                ) : null}
                             </Animated.View>
 
                             {/* History Title */}
-                            <Animated.View style={[historyTitleStyle, { position: 'absolute', alignItems: 'center' }]}>
-                                <Text style={{ fontSize: 17, fontWeight: '700', color: colors.text }}>History</Text>
-                            </Animated.View>
+                            {!isBuilderMode && (
+                                <Animated.View style={[historyTitleStyle, { position: 'absolute', alignItems: 'center' }]}>
+                                    <Text style={{ fontSize: 17, fontWeight: '700', color: colors.text }}>History</Text>
+                                </Animated.View>
+                            )}
                         </View>
 
                         {/* Right: Toggle / New Chat */}
                         <View style={styles.headerBtnWrapper}>
-                            <AnimatedGlassButton
-                                progress={headerButtonProgress}
-                                homeIcon={<HistoryIcon color={colors.text} size={22} />}
-                                panelIcon={<PlusIcon color={colors.text} size={22} />}
-                                showPanelIcon={false}
-                                onPress={() => {
-                                    if (headerButtonProgress.value > 0.5) {
-                                        handleNewConversation()
-                                    } else {
-                                        navigateToHistory()
-                                    }
-                                }}
-                                size={44}
-                                effectiveTheme={effectiveTheme === 'dark' ? 'dark' : 'light'}
-                                homeBackgroundColor="transparent"
-                                panelBackgroundColor="transparent"
-                            />
+                            {!isBuilderMode ? (
+                                <AnimatedGlassButton
+                                    progress={headerButtonProgress}
+                                    homeIcon={<HistoryIcon color={colors.text} size={22} />}
+                                    panelIcon={<PlusIcon color={colors.text} size={22} />}
+                                    showPanelIcon={false}
+                                    onPress={() => {
+                                        if (headerButtonProgress.value > 0.5) {
+                                            handleNewConversation()
+                                        } else {
+                                            navigateToHistory()
+                                        }
+                                    }}
+                                    size={44}
+                                    effectiveTheme={effectiveTheme === 'dark' ? 'dark' : 'light'}
+                                    homeBackgroundColor="transparent"
+                                    panelBackgroundColor="transparent"
+                                />
+                            ) : (
+                                <View style={{ width: 44, height: 44 }} />
+                            )}
                         </View>
                     </View>
                 </View>
 
-                <GestureDetector gesture={gesture}>
-                    <Animated.View style={[{ flex: 1, flexDirection: 'row', width: SCREEN_WIDTH * 2 }, swipeStyle]}>
-
-                        {/* --- PAGE 0: CHAT SCREEN --- */}
-                        <View style={{ width: SCREEN_WIDTH, height: '100%' }}>
-                            <View style={{ flex: 1, flexDirection: 'column' }}>
-                                <ScrollView ref={scrollViewRef} style={{ flex: 1 }} contentContainerStyle={{ paddingTop: insets.top + 80, paddingHorizontal: 5, paddingBottom: 140, flexGrow: 1 }} showsVerticalScrollIndicator={false} keyboardDismissMode="interactive" keyboardShouldPersistTaps="handled">
-                                    <View style={{ flexGrow: 1, minHeight: '100%' }}>
-                                        <Pressable style={{ flexGrow: 1 }} onPress={() => Keyboard.dismiss()}>
-                                            <AnimatedView style={[{ height: spacerHeight }]} />
-                                        </Pressable>
-                                        {flatListMessages.map((msg, index) => (
-                                            <MessageItem
-                                                key={msg.id || index}
-                                                item={{
-                                                    ...msg,
-                                                    bubbleTheme
-                                                }}
-                                                index={index}
-                                                prevItem={index > 0 ? flatListMessages[index - 1] : null}
-                                                nextItem={index < flatListMessages.length - 1 ? flatListMessages[index + 1] : null}
-                                                isActive={contextMenu?.messageId === msg.id}
-                                                onLongPress={(e: any, msgItem: any, text: string) => {
-                                                    setContextMenu({
-                                                        visible: true,
-                                                        messageId: msgItem.id,
-                                                        isUser: msgItem.role === 'user',
-                                                        content: text,
-                                                        y: e.nativeEvent.pageY
-                                                    })
-                                                }}
-                                                renderActionButtons={renderActionButtons}
-                                            />
-                                        ))}
-                                        {renderFooterMessages()}
-                                    </View>
-                                </ScrollView>
-
-                                <View style={{ position: 'absolute', bottom: 0, left: 0, right: 0, height: insets.bottom + 82, pointerEvents: 'none' }}>
-                                    <LinearGradient
-                                        colors={['rgba(0,0,0,0)', isLight ? 'rgba(255,255,255,1)' : 'rgba(0,0,0,1)']}
-                                        locations={[0, 0.6]}
-                                        style={StyleSheet.absoluteFill}
-                                    />
-                                </View>
-
-                                {!isNativeTabBarAvailable() && (
-                                    <KeyboardStickyView offset={{ closed: -20, opened: -10 }} style={{ position: 'absolute', bottom: 0, left: 0, right: 0, zIndex: 20 }}>
-                                        <ChatInput
-                                            value={inputText}
-                                            onChangeText={setInputText}
-                                            onSend={() => { if (inputText.trim()) void handleSend(inputText.trim()) }}
-                                            isStreaming={storeIsStreaming}
-                                            onStopStreaming={handleStopStreaming}
-                                            placeholder={editingMessageId ? "Update message..." : "Message Vibe..."}
-                                            keyboardProgress={keyboardProgress}
-                                            isEditing={!!editingMessageId}
-                                            onCancelEdit={() => { setEditingMessageId(null); setInputText('') }}
-                                            onVoicePress={() => {
-                                                console.log('[Chat] Voice button pressed - opening voice panel')
-                                                haptic.medium()
-                                            }}
-                                        />
-                                    </KeyboardStickyView>
-                                )}
+                {isBuilderMode ? (
+                    renderChatPage()
+                ) : (
+                    <GestureDetector gesture={gesture}>
+                        <Animated.View style={[{ flex: 1, flexDirection: 'row', width: SCREEN_WIDTH * 2 }, swipeStyle]}>
+                            {renderChatPage()}
+                            <View style={{ width: SCREEN_WIDTH, height: '100%' }}>
+                                <HistoryPanel
+                                    conversations={sortedConversations}
+                                    activeConversationId={effectiveConversationId}
+                                    onSelectConversation={handleSelectConversation}
+                                    onNewConversation={handleNewConversation}
+                                    onDeleteConversation={handleDeleteConversation}
+                                />
                             </View>
-
-                            <GlassToast visible={toastVisible} onClose={() => setToastVisible(false)} topInset={insets.top} />
-                            <MessageContextMenu
-                                visible={!!contextMenu?.visible}
-                                onClose={() => setContextMenu(null)}
-                                onEdit={contextMenu?.isUser ? () => handleEditInit(contextMenu!.messageId!, contextMenu!.content!) : undefined}
-                                onCopy={() => handleCopy(contextMenu?.content || '')}
-                                isUser={contextMenu?.isUser}
-                                targetY={contextMenu?.y}
-                            />
-                        </View>
-
-                        {/* --- PAGE 1: HISTORY PANEL --- */}
-                        <View style={{ width: SCREEN_WIDTH, height: '100%' }}>
-                            <HistoryPanel
-                                conversations={sortedConversations}
-                                activeConversationId={currentConversationId}
-                                onSelectConversation={handleSelectConversation}
-                                onNewConversation={handleNewConversation}
-                                onDeleteConversation={handleDeleteConversation}
-                            />
-                        </View>
-
-                    </Animated.View>
-                </GestureDetector>
+                        </Animated.View>
+                    </GestureDetector>
+                )}
             </GestureHandlerRootView>
         </View>
     )

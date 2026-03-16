@@ -29,6 +29,10 @@ export interface NativeHomeListRow {
   isTyping?: boolean;
   isOnline?: boolean;
   avatarFallback?: string;
+  avatarGradientStartLight?: string;
+  avatarGradientEndLight?: string;
+  avatarGradientStartDark?: string;
+  avatarGradientEndDark?: string;
   previewRows?: NativeChatRow[];
 }
 

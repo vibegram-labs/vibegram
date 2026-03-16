@@ -1,6 +1,6 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { View, Text, TouchableOpacity, StyleSheet, Platform, Dimensions, Keyboard, BackHandler, ActivityIndicator, DeviceEventEmitter } from 'react-native'
+import { View, Text, TouchableOpacity, StyleSheet, Platform, Dimensions, Keyboard, BackHandler, ActivityIndicator } from 'react-native'
 import Animated, {
     useSharedValue,
     useAnimatedStyle,
@@ -12,8 +12,8 @@ import Animated, {
 } from 'react-native-reanimated'
 import { GestureHandlerRootView } from 'react-native-gesture-handler'
 import { useSafeAreaInsets } from 'react-native-safe-area-context'
-import { useRouter } from 'expo-router'
 import { useTranslation } from 'react-i18next'
+import { useRouter } from 'expo-router'
 import { useThemeStore } from '../../src/lib/stores/theme-store'
 import { useUIStore } from '../../src/lib/stores/ui-store'
 import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wallpaper-store'
@@ -28,9 +28,7 @@ import SettingsScreen from './settings'
 import ContactsScreen from './contacts'
 import CallsScreen from './calls'
 import { StoryCamera } from '../story-camera'
-import { AgentChatScreen } from '../../src/components/agent'
-import { useAgentStore } from '../../src/lib/agent/AgentStore'
-import { NativeAgentChatSurface, type NativeAgentChatSurfaceRef, getNativeChatAgentModule } from '../../src/native/chat'
+import { VibeChatMainScreen } from '../../src/components/agent'
 import { KeyboardStickyView } from 'react-native-keyboard-controller'
 import { BlurView } from 'expo-blur'
 import { File as ExpoFile, Paths } from 'expo-file-system'
@@ -46,7 +44,7 @@ const FALLBACK_PILL_HORIZONTAL_PADDING = 10
 const FALLBACK_TAB_COUNT = 4
 
 
-// Page Indices (4 swipeable pages - agent is now a root-level push screen)
+// Page indices for the tab pager. Vibe stays inside the tab stack.
 const PAGES = {
     contacts: 0,
     calls: 1,
@@ -232,6 +230,7 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
 });
 
 export default function TabLayout() {
+    const router = useRouter()
     const { colors, effectiveTheme } = useThemeStore()
     const activeWallpaperTheme = useWallpaperStore(s => s.activeTheme)
     const { user } = useAuthStore()
@@ -345,13 +344,6 @@ export default function TabLayout() {
     const [shouldRenderStoryCamera, setShouldRenderStoryCamera] = useState(false)
     const storyProgress = useSharedValue(0)
     const storyMountTimerRef = useRef<any>(null)
-    const nativeAgentSurfaceRef = useRef<NativeAgentChatSurfaceRef | null>(null)
-    const nativeAgentSurfaceId = useMemo(() => 'tabs-native-agent-surface', [])
-    const nativeAgentModule = useMemo(() => getNativeChatAgentModule(), [])
-    const nativeAgentAvailable = Platform.OS === 'ios' && !!nativeAgentModule && (nativeAgentModule.isSupported?.() ?? true)
-
-    const router = useRouter()
-
     const resolvedWallpaperTheme = useMemo(() => {
         const resolved = resolveThemeVariant(activeWallpaperTheme, effectiveTheme === 'dark')
         const bg = Array.isArray(resolved.backgroundGradient) ? resolved.backgroundGradient : []
@@ -361,57 +353,8 @@ export default function TabLayout() {
         }
     }, [activeWallpaperTheme, colors.background, effectiveTheme])
 
-    const nativeAgentAppearance = useMemo(() => ({
-        backgroundMode: 'solid' as const,
-        nativeThemeId: `agent-${effectiveTheme}`,
-        nativeThemeIsDark: effectiveTheme === 'dark',
-        wallpaperGradient: [colors.background, colors.background],
-        wallpaperOpacity: 1,
-        wallpaperPatternGradient: [],
-        wallpaperPatternLocations: undefined,
-        wallpaperPatternOpacity: 0,
-        wallpaperMaskKey: undefined,
-        bubbleMeGradient: resolvedWallpaperTheme.bubbleMeGradient || [resolvedWallpaperTheme.bubbleMe, resolvedWallpaperTheme.bubbleMe],
-        bubbleThemColor: resolvedWallpaperTheme.bubbleThem || colors.card,
-        textColorMe: resolvedWallpaperTheme.textColorMe || colors.text,
-        textColorThem: resolvedWallpaperTheme.textColorThem || colors.text,
-        timeColorThem: colors.textSecondary,
-    }), [colors.card, colors.text, colors.textSecondary, effectiveTheme, resolvedWallpaperTheme])
-
-    // Wire up global input for Agent vibe mode.
-    // On iOS native builds we forward into the native surface; other platforms keep the JS path.
-
-    const handleVibeSubmit = useCallback((text: string) => {
-        if (!text.trim()) return;
-        console.log("[TabsLayout] received global submit for Vibe text:", text);
-        if (nativeAgentAvailable && nativeAgentSurfaceRef.current) {
-            void nativeAgentSurfaceRef.current.submitText(text.trim());
-            return;
-        }
-        try {
-            const store = useAgentStore.getState();
-            if (!store.activeConversationId) {
-                store.createConversation(text.substring(0, 20));
-            }
-            store.sendMessage(text);
-        } catch (e) {
-            console.error("[TabsLayout] Vibe send error:", e);
-        }
-        // Then emit globally so AgentChatScreen can clear input and jump to bottom
-        DeviceEventEmitter.emit('onVibeSubmit', text);
-    }, [nativeAgentAvailable]);
-
-    const safeRouterPush = useCallback((path: string, source: string) => {
-        try {
-            console.log(`[TabsLayout] ${source} -> ${path}`)
-            router.push(path as any)
-        } catch (error) {
-            console.error(`[TabsLayout] ${source} navigation failed`, error)
-        }
-    }, [router])
-
     // Bottom bar stays mounted so edit actions can replace the main tabs in place.
-    const showBottomBar = true
+    const showBottomBar = currentTab !== 'vibe'
 
     // Tab Press Handler — instant switch with lazy mount
     const handleTabPress = useCallback((page: PageName) => {
@@ -575,6 +518,7 @@ export default function TabLayout() {
                         <HomeScreen
                             onChatSelect={(id) => setActiveChat(id)}
                             onOpenStoryCamera={openStoryCamera}
+                            onOpenVibe={() => handleTabPress('vibe')}
                         />
                     </AnimatedView>
                 )}
@@ -591,25 +535,11 @@ export default function TabLayout() {
                         pointerEvents={currentTab === 'vibe' ? 'auto' : 'none'}
                         style={[StyleSheet.absoluteFill, currentTab === 'vibe' ? styles.pageVisible : styles.pageHidden]}
                     >
-                        {nativeAgentAvailable ? (
-                            <NativeAgentChatSurface
-                                ref={nativeAgentSurfaceRef}
-                                forceRender
-                                surfaceId={nativeAgentSurfaceId}
-                                appearance={nativeAgentAppearance}
-                                onNativeEvent={(event: any) => {
-                                    const payload = event?.nativeEvent ?? event ?? {};
-                                    if (payload?.type === 'headerBack') {
-                                        handleTabPress('home')
-                                    }
-                                }}
-                                onNativeError={(error, context) => {
-                                    console.warn('[tabs/native-agent]', context, error)
-                                }}
-                            />
-                        ) : (
-                            <AgentChatScreen onBack={() => handleTabPress('home')} />
-                        )}
+                        <VibeChatMainScreen
+                            onBack={() => handleTabPress('home')}
+                            onOpenBuilder={() => router.push('/agent?mode=builder')}
+                            onOpenSettings={() => router.push('/agent-settings')}
+                        />
                     </AnimatedView>
                 )}
 
@@ -628,8 +558,8 @@ export default function TabLayout() {
                                 activeTintColor={colors.primary || (isDark ? '#e5e5e5' : '#007AFF')}
                                 inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
                                 isDark={isDark}
-                                isVibeExpanded={currentTab === 'vibe'}
-                                onVibeSubmit={handleVibeSubmit}
+                                isVibeExpanded={false}
+                                onVibeSubmit={() => {}}
                                 bottomBarFadeStyle={bottomBarFadeStyle}
                                 t={t}
                                 editMode={homeEditMode}
@@ -729,7 +659,7 @@ export default function TabLayout() {
                                         inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
                                         isDark={isDark}
                                         editMode={homeEditMode}
-                                        onVibePress={() => safeRouterPush('/agent', 'android-bottom-vibe-tab')}
+                                        onVibePress={() => handleTabPress('vibe')}
                                     />
                                 ) : (
                                     <NativeTabBar

@@ -1,8 +1,10 @@
 defmodule VibeWeb.ChatChannel do
   use VibeWeb, :channel
+  alias Vibe.Agents
   alias Vibe.Chat
   alias Vibe.Notifications
   alias Vibe.AI.GroupAgent
+  alias Vibe.AI.StandaloneAgent
   require Logger
 
   @impl true
@@ -46,7 +48,8 @@ defmodule VibeWeb.ChatChannel do
         type: data["type"] || "text",
         timestamp: data["timestamp"] || :os.system_time(:millisecond),
         reply_to_id: data["replyToId"],
-        media_url: data["mediaUrl"]
+        media_url: data["mediaUrl"],
+        metadata: data["metadata"] || %{}
       }
 
       # BROADCAST IMMEDIATELY for instant message delivery
@@ -218,19 +221,50 @@ defmodule VibeWeb.ChatChannel do
   # ── Agent Dispatch ──
 
   defp maybe_dispatch_agent(chat_id, data, user_id) do
-    Logger.info("[ChatChannel] maybe_dispatch_agent chat_id=#{chat_id} keys=#{inspect(Map.keys(data))} agentMention=#{inspect(data["agentMention"])} agentText=#{inspect(data["agentText"])}")
+    Logger.info("[ChatChannel] maybe_dispatch_agent chat_id=#{chat_id} keys=#{inspect(Map.keys(data))} agentMention=#{inspect(data["agentMention"])} mentionedAgentId=#{inspect(data["mentionedAgentId"] || data["mentioned_agent_id"])}")
 
     agent_mention = data["agentMention"] || false
+    mentioned_agent_id = data["mentionedAgentId"] || data["mentioned_agent_id"]
+    mentioned_agent_username = data["mentionedAgentUsername"] || data["mentioned_agent_username"]
     agent_text = data["agentText"]
     reply_to_id = data["replyToId"] || data["reply_to_id"]
+    reply_message =
+      case reply_to_id do
+        value when is_binary(value) and value != "" -> Chat.get_message(chat_id, value, user_id)
+        _ -> nil
+      end
 
-    # Check if this is a direct @mention
-    is_direct_mention = agent_mention && is_binary(agent_text) && agent_text != ""
+    standalone_agent =
+      cond do
+        is_binary(mentioned_agent_id) and String.trim(mentioned_agent_id) != "" ->
+          Agents.get_agent(mentioned_agent_id)
 
-    # Check if this is a reply to an agent message (follow-up without @mention)
-    is_reply_to_agent =
-      if !is_direct_mention && is_binary(reply_to_id) && reply_to_id != "" do
-        case Chat.get_message(chat_id, reply_to_id, user_id) do
+        is_binary(mentioned_agent_username) and String.trim(mentioned_agent_username) != "" ->
+          Agents.get_agent_by_username(mentioned_agent_username)
+
+        match?(%{from_id: _}, reply_message) ->
+          Agents.get_agent_by_shadow_user(reply_message.from_id)
+
+        true ->
+          nil
+      end
+
+    standalone_agent =
+      standalone_agent ||
+        case Chat.get_room_type(chat_id) do
+          "dm" ->
+            chat_id
+            |> Chat.get_participant_ids()
+            |> Enum.reject(&(&1 == user_id))
+            |> Enum.find_value(&Agents.get_agent_by_shadow_user/1)
+
+          _ ->
+            nil
+        end
+
+    group_trigger? =
+      agent_mention ||
+        case reply_message do
           %{from_id: from_id} ->
             normalized_from = from_id |> to_string() |> String.downcase() |> String.trim()
             normalized_agent = GroupAgent.agent_user_id() |> String.downcase() |> String.trim()
@@ -239,24 +273,27 @@ defmodule VibeWeb.ChatChannel do
           _ ->
             false
         end
-      else
-        false
+
+    dispatch_text =
+      case normalize_dispatch_text(agent_text, data) do
+        nil -> nil
+        value -> value
       end
 
-    if is_direct_mention || is_reply_to_agent do
-      # For reply-to-agent, use the plain text from the message since there's no agentText
-      dispatch_text =
-        if is_direct_mention do
-          agent_text
-        else
-          # Extract text from the message payload for reply-to-agent
-          data["agentText"] || data["pushPreview"] || data["textPreview"] || data["text"] || ""
-        end
+    attachment_context = extract_agent_attachment_context(chat_id, data, user_id)
 
-      if is_binary(dispatch_text) && String.trim(dispatch_text) != "" do
-        trigger_type = if is_direct_mention, do: "mention", else: "reply"
-        attachment_context = extract_agent_attachment_context(chat_id, data, user_id)
+    cond do
+      standalone_agent && is_binary(dispatch_text) ->
+        trigger_type =
+          cond do
+            is_binary(mentioned_agent_id) or is_binary(mentioned_agent_username) -> "mention"
+            reply_message -> "reply"
+            true -> "dm"
+          end
+        spawn_standalone_dispatch(chat_id, standalone_agent, dispatch_text, data, attachment_context, trigger_type)
 
+      group_trigger? && is_binary(dispatch_text) ->
+        trigger_type = if agent_mention, do: "mention", else: "reply"
         metadata = %{
           "image_urls" => attachment_context.image_urls,
           "document_urls" => attachment_context.document_urls,
@@ -265,53 +302,108 @@ defmodule VibeWeb.ChatChannel do
           "trigger_type" => trigger_type
         }
 
-        Task.start(fn ->
-          Logger.info("[ChatChannel] Dispatching agent (#{trigger_type}) for chat #{chat_id} text=#{String.slice(dispatch_text, 0..100)}")
+        spawn_group_dispatch(chat_id, dispatch_text, user_id, metadata)
 
-          # Broadcast typing indicator from agent
-          VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "typing", %{
-            "userId" => GroupAgent.agent_user_id(),
-            "isAgent" => true
-          })
-
-          VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "agent-progress", %{
-            "userId" => GroupAgent.agent_user_id(),
-            "isAgent" => true,
-            "label" => "Thinking...",
-            "status" => "running"
-          })
-
-          try do
-            case GroupAgent.handle_mention(chat_id, dispatch_text, user_id, metadata) do
-              {:ok, _response} ->
-                Logger.info("[ChatChannel] Agent responded in chat #{chat_id}")
-
-              {:error, :no_agent} ->
-                Logger.debug("[ChatChannel] No agent configured for chat #{chat_id}")
-
-              {:error, reason} ->
-                Logger.error("[ChatChannel] Agent dispatch failed for chat #{chat_id}: #{inspect(reason)}")
-            end
-          after
-            VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "agent-progress", %{
-              "userId" => GroupAgent.agent_user_id(),
-              "isAgent" => true,
-              "status" => "done"
-            })
-
-            # Stop typing indicator
-            VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "stop-typing", %{
-              "userId" => GroupAgent.agent_user_id(),
-              "isAgent" => true
-            })
-          end
-        end)
-      else
-        Logger.info("[ChatChannel] Reply to agent but empty text for chat #{chat_id}")
-      end
-    else
-      Logger.info("[ChatChannel] No agent mention detected for chat #{chat_id}")
+      true ->
+        Logger.info("[ChatChannel] No agent mention detected for chat #{chat_id}")
     end
+  end
+
+  defp spawn_standalone_dispatch(chat_id, agent, dispatch_text, data, attachment_context, trigger_type) do
+    Task.start(fn ->
+      broadcast_agent_activity(chat_id, agent.agent_user_id, "Thinking...", "running")
+
+      try do
+        attachments =
+          attachment_context_to_attachments(attachment_context)
+
+        case StandaloneAgent.handle_chat_message(
+               agent,
+               chat_id,
+               dispatch_text,
+               attachments: attachments,
+               reply_to_id: data["id"]
+             ) do
+          {:ok, _response} ->
+            Logger.info("[ChatChannel] Standalone agent responded chat_id=#{chat_id} agent_id=#{agent.id}")
+
+          {:error, reason} ->
+            Logger.error("[ChatChannel] Standalone agent dispatch failed chat_id=#{chat_id} agent_id=#{agent.id} reason=#{inspect(reason)}")
+        end
+      after
+        stop_agent_activity(chat_id, agent.agent_user_id)
+      end
+    end)
+  end
+
+  defp spawn_group_dispatch(chat_id, dispatch_text, user_id, metadata) do
+    Task.start(fn ->
+      broadcast_agent_activity(chat_id, GroupAgent.agent_user_id(), "Thinking...", "running")
+
+      try do
+        case GroupAgent.handle_mention(chat_id, dispatch_text, user_id, metadata) do
+          {:ok, _response} ->
+            Logger.info("[ChatChannel] Agent responded in chat #{chat_id}")
+
+          {:error, :no_agent} ->
+            Logger.debug("[ChatChannel] No agent configured for chat #{chat_id}")
+
+          {:error, reason} ->
+            Logger.error("[ChatChannel] Agent dispatch failed for chat #{chat_id}: #{inspect(reason)}")
+        end
+      after
+        stop_agent_activity(chat_id, GroupAgent.agent_user_id())
+      end
+    end)
+  end
+
+  defp normalize_dispatch_text(agent_text, data) do
+    value =
+      cond do
+        is_binary(agent_text) and String.trim(agent_text) != "" ->
+          agent_text
+
+        true ->
+          data["pushPreview"] || data["textPreview"] || data["text"] || data["body"]
+      end
+
+    case value do
+      text when is_binary(text) and String.trim(text) != "" -> String.trim(text)
+      _ -> nil
+    end
+  end
+
+  defp broadcast_agent_activity(chat_id, agent_user_id, label, status) do
+    VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "typing", %{
+      "userId" => agent_user_id,
+      "isAgent" => true
+    })
+
+    VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "agent-progress", %{
+      "userId" => agent_user_id,
+      "isAgent" => true,
+      "label" => label,
+      "status" => status
+    })
+  end
+
+  defp stop_agent_activity(chat_id, agent_user_id) do
+    VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "agent-progress", %{
+      "userId" => agent_user_id,
+      "isAgent" => true,
+      "status" => "done"
+    })
+
+    VibeWeb.Endpoint.broadcast!("chat:#{chat_id}", "stop-typing", %{
+      "userId" => agent_user_id,
+      "isAgent" => true
+    })
+  end
+
+  defp attachment_context_to_attachments(%{image_urls: image_urls, document_urls: document_urls}) do
+    image_urls
+    |> Enum.map(&%{type: "image", url: &1})
+    |> Kernel.++(Enum.map(document_urls, &%{type: "file", url: &1}))
   end
 
   defp extract_agent_attachment_context(chat_id, data, user_id) do

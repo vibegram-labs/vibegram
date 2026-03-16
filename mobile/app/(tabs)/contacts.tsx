@@ -27,6 +27,7 @@ import * as Haptics from 'expo-haptics';
 import Swipeable from 'react-native-gesture-handler/Swipeable';
 import { Animated as RNAnimated } from 'react-native';
 import { syncContactsWithServer } from '../../src/lib/contact-sync';
+import DefaultAvatar from '../../src/components/avatar/DefaultAvatar';
 
 const withAlpha = (color: string, alpha: number): string => {
     if (!color) return `rgba(127, 127, 127, ${alpha})`;
@@ -39,8 +40,6 @@ const withAlpha = (color: string, alpha: number): string => {
     }
     return color;
 };
-
-const getInitials = (name: string) => (name || '?').substring(0, 1).toUpperCase();
 
 interface ContactRowProps {
     contact: any;
@@ -125,18 +124,12 @@ const ContactRow = React.memo(({ contact, colors, theme, onPress, onDelete, isEd
                             }
                         ]}
                     >
-                        <View style={styles.avatarContainer}>
-                            <SafeLiquidGlass style={styles.avatarGlass} blurIntensity={10} tint={theme === 'dark' ? 'dark' : 'light'}>
-                                {contact.profileImage ? (
-                                    <Image source={{ uri: contact.profileImage }} style={styles.avatarImage} />
-                                ) : (
-                                    <View style={styles.avatarPlaceholder}>
-                                        <Text style={[styles.avatarText, { color: colors.text }]}>
-                                            {getInitials(contact.username)}
-                                        </Text>
-                                    </View>
-                                )}
-                            </SafeLiquidGlass>
+                        <View style={[styles.avatarContainer, { zIndex: 3, elevation: 3 }]}>
+                            {contact.profileImage ? (
+                                <Image source={{ uri: contact.profileImage }} style={styles.avatarImage} />
+                            ) : (
+                                <DefaultAvatar seed={contact.id || contact.username} theme={theme} size={60} />
+                            )}
                         </View>
                         <View style={styles.contactInfo}>
                             <Text style={[styles.contactName, { color: colors.text }]} numberOfLines={1}>
@@ -300,10 +293,16 @@ export default function ContactsScreen() {
                             <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                                 {filtered.slice(0, 5).map(c => (
                                     <TouchableOpacity key={c.id} style={{ marginRight: 15, alignItems: 'center' }} onPress={() => handleContactPress(c)}>
-                                        <SafeLiquidGlass style={{ width: 50, height: 50, borderRadius: 25, overflow: 'hidden' }} blurIntensity={10} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
-                                            {c.profileImage ? <Image source={{ uri: c.profileImage }} style={{ width: 50, height: 50 }} /> :
-                                                <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: withAlpha(colors.text, 0.05) }}><Text style={{ color: colors.text }}>{getInitials(c.username)}</Text></View>}
-                                        </SafeLiquidGlass>
+                                        {c.profileImage ? (
+                                            <Image source={{ uri: c.profileImage }} style={styles.recentAvatarImage} />
+                                        ) : (
+                                            <DefaultAvatar
+                                                seed={c.id || c.username}
+                                                theme={effectiveTheme}
+                                                size={60}
+                                                style={styles.recentAvatarPlaceholder}
+                                            />
+                                        )}
                                         <Text style={{ color: colors.text, fontSize: 11, marginTop: 4, maxWidth: 60 }} numberOfLines={1}>{c.username}</Text>
                                     </TouchableOpacity>
                                 ))}
@@ -400,12 +399,12 @@ const styles = StyleSheet.create({
     searchBar: { flexDirection: 'row', alignItems: 'center', height: 44, borderRadius: 18, backgroundColor: 'rgba(127,127,127,0.1)', overflow: 'hidden' },
     searchInput: { flex: 1, height: '100%', paddingHorizontal: 10, justifyContent: 'center', fontSize: 16 },
     listContainer: { marginTop: 4 },
-    contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 10, paddingHorizontal: 16 },
-    avatarContainer: { marginRight: 12 },
-    avatarGlass: { width: 50, height: 50, borderRadius: 25, overflow: 'hidden' },
-    avatarImage: { width: '100%', height: '100%' },
-    avatarPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(127,127,127,0.1)' },
-    avatarText: { fontSize: 18, fontWeight: '700' },
+    contactRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 16 },
+    avatarContainer: { marginRight: 14, width: 60, height: 60, borderRadius: 30, overflow: 'hidden' },
+    avatarImage: { width: '100%', height: '100%', borderRadius: 30 },
+    avatarPlaceholder: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center', borderRadius: 30 },
+    recentAvatarImage: { width: 60, height: 60, borderRadius: 30 },
+    recentAvatarPlaceholder: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
     contactInfo: { flex: 1 },
     contactName: { fontSize: 17, fontWeight: '600' },
     contactStatus: { fontSize: 13, marginTop: 1, opacity: 0.8 },

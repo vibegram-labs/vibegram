@@ -107,10 +107,18 @@ export default function ChatListRoute() {
         || (typeof message?.text === 'string' && message.text)
         || '';
       const timestampMs = toTimestampMs(message?.timestampMs ?? message?.timestamp);
-      const messageUploadProgress =
+      const nativeUploadProgress = toNumber(
+        message?.uploadProgress
+          ?? message?.upload_progress
+          ?? message?.extra?.uploadProgress
+          ?? message?.extra?.upload_progress,
+      );
+      const storeUploadProgress =
         messageId && Object.prototype.hasOwnProperty.call(uploadProgress, messageId)
           ? uploadProgress[messageId]
           : undefined;
+      const messageUploadProgress =
+        typeof nativeUploadProgress === 'number' ? nativeUploadProgress : storeUploadProgress;
       return {
         id: messageId,
         chatId: message?.chatId || effectiveChatId || undefined,

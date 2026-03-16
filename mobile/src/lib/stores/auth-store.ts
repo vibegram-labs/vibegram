@@ -98,11 +98,10 @@ export const useAuthStore = create<AuthState>()(
                 await AuthManager.getInstance().logout();
 
                 try {
-                    // Ensure socket is disconnected to reset initialization flag
-                    const { useChatStore } = require('../ChatStore');
-                    useChatStore.getState().disconnect();
+                    const { clearSessionScopedClientCaches } = require('../session-cache');
+                    await clearSessionScopedClientCaches(null);
                 } catch (e) {
-                    console.warn('Failed to disconnect socket on logout', e);
+                    console.warn('Failed to clear client caches on logout', e);
                 }
 
                 set({ user: null, isAuthenticated: false, isSessionExpired: false });

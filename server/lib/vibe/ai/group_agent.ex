@@ -255,6 +255,19 @@ defmodule Vibe.AI.GroupAgent do
   def available_tool_names, do: Enum.map(@tools, & &1.name)
 
   @doc """
+  Returns the tool set that can be used by standalone agents.
+  Standalone agents reuse document and analysis tools but cannot pin chat messages.
+  """
+  def standalone_available_tools do
+    Enum.reject(@tools, &(&1.name == "pin_message"))
+  end
+
+  @doc """
+  Returns standalone-capable tool names.
+  """
+  def standalone_tool_names, do: Enum.map(standalone_available_tools(), & &1.name)
+
+  @doc """
   Normalize enabled tools list coming from API input/database.
   Falls back to all available tools if list is empty or invalid.
   Mandatory tools are always enabled even if omitted in selections.
@@ -277,6 +290,28 @@ defmodule Vibe.AI.GroupAgent do
     selected_set = MapSet.new(selected ++ mandatory)
     Enum.filter(available, &MapSet.member?(selected_set, &1))
   end
+
+  @doc """
+  Executes a standalone-safe group-agent tool. Chat-scoped tools require a vibe chat id.
+  """
+  def execute_standalone_tool(name, input, user_id, chat_id) do
+    cond do
+      name == "pin_message" ->
+        %{ok: false, tool: name, error: "pin_message is not available for standalone agents"}
+
+      name not in standalone_tool_names() ->
+        %{ok: false, tool: name, error: "Unknown standalone tool: #{name}"}
+
+      name in ~w[create_document find_rows edit_rows delete_rows export_rows delete_document] and not valid_chat_id?(chat_id) ->
+        %{ok: false, tool: name, error: "This tool requires vibeChatId and an attached Vibe chat"}
+
+      true ->
+        execute_tool_with_recovery(name, input, user_id, chat_id, 1)
+    end
+  end
+
+  defp valid_chat_id?(chat_id) when is_binary(chat_id), do: String.trim(chat_id) != ""
+  defp valid_chat_id?(_chat_id), do: false
 
   @doc """
   Generate an enhanced system prompt from short admin input.

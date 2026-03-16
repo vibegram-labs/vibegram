@@ -16,6 +16,10 @@ internal data class ChatNativeHomeListRow(
   val peerUserId: String?,
   val avatarUri: String?,
   val avatarFallback: String,
+  val avatarGradientStartLight: String?,
+  val avatarGradientEndLight: String?,
+  val avatarGradientStartDark: String?,
+  val avatarGradientEndDark: String?,
   val isSavedMessages: Boolean,
 ) {
   fun withPresence(isTyping: Boolean, isOnline: Boolean): ChatNativeHomeListRow {
@@ -72,6 +76,18 @@ internal fun parseChatNativeHomeRows(
     val avatarFallback =
       raw["avatarFallback"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
         ?: title.take(1).uppercase()
+    val avatarGradientStartLight =
+      raw["avatarGradientStartLight"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        ?: raw["avatar_gradient_start_light"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+    val avatarGradientEndLight =
+      raw["avatarGradientEndLight"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        ?: raw["avatar_gradient_end_light"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+    val avatarGradientStartDark =
+      raw["avatarGradientStartDark"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        ?: raw["avatar_gradient_start_dark"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+    val avatarGradientEndDark =
+      raw["avatarGradientEndDark"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+        ?: raw["avatar_gradient_end_dark"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
 
     ChatNativeHomeListRow(
       chatId = chatId,
@@ -87,6 +103,10 @@ internal fun parseChatNativeHomeRows(
       peerUserId = peerUserId,
       avatarUri = avatarUri,
       avatarFallback = avatarFallback,
+      avatarGradientStartLight = avatarGradientStartLight,
+      avatarGradientEndLight = avatarGradientEndLight,
+      avatarGradientStartDark = avatarGradientStartDark,
+      avatarGradientEndDark = avatarGradientEndDark,
       isSavedMessages = isSavedMessages,
     )
   }

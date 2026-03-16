@@ -1,10 +1,50 @@
 import React from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { Menu, X } from 'lucide-react';
 
 export const Header = () => {
     const navigate = useNavigate();
+    const location = useLocation();
     const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
+    const isDocsPage = location.pathname.startsWith('/docs');
+
+    const navLinks = isDocsPage
+        ? [
+            { label: 'Overview', href: '#overview' },
+            { label: 'Integrate', href: '#integrate' },
+            { label: 'Customize', href: '#customize' },
+            { label: 'Callbacks', href: '#callbacks' },
+        ]
+        : [
+            { label: 'Features', href: '#features' },
+            { label: 'Network', href: '#network' },
+            { label: 'Security', href: '#security' },
+            { label: 'Docs', href: '/docs/agents' },
+        ];
+
+    const handleLinkClick = (href: string) => {
+        setMobileMenuOpen(false);
+
+        if (href.startsWith('/')) {
+            navigate(href);
+            return;
+        }
+
+        const pageRoot = isDocsPage ? '/docs/agents' : '/';
+
+        if (location.pathname !== pageRoot) {
+            navigate(`${pageRoot}${href}`);
+            return;
+        }
+
+        const targetId = href.replace(/^#/, '');
+        const node = document.getElementById(targetId);
+
+        if (node) {
+            node.scrollIntoView({ behavior: 'smooth', block: 'start' });
+            window.history.replaceState(null, '', `${pageRoot}${href}`);
+        }
+    };
 
     return (
         <nav className="landing-nav">
@@ -15,13 +55,22 @@ export const Header = () => {
 
                 <div className="nav-center">
                     <div className={`nav-links ${mobileMenuOpen ? 'open' : ''}`}>
-                        <a href="#features" onClick={() => setMobileMenuOpen(false)}>Features</a>
-                        <a href="#network" onClick={() => setMobileMenuOpen(false)}>Network</a>
-                        <a href="#security" onClick={() => setMobileMenuOpen(false)}>Security</a>
+                        {navLinks.map((link) => (
+                            <button
+                                key={link.label}
+                                type="button"
+                                onClick={() => handleLinkClick(link.href)}
+                            >
+                                {link.label}
+                            </button>
+                        ))}
                     </div>
                 </div>
 
                 <div className="nav-actions">
+                    {!isDocsPage && (
+                        <button className="btn-text" onClick={() => navigate('/docs/agents')}>Docs</button>
+                    )}
                     <button className="btn-text" onClick={() => navigate('/app')}>Sign In</button>
                     <button className="btn-primary" onClick={() => navigate('/app')}>Join</button>
 

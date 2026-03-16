@@ -7,7 +7,8 @@ import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wal
 import { useChatStore } from '../../src/lib/ChatStore'
 import { useCallStore } from '../../src/lib/stores/CallStore'
 import { useUIStore } from '../../src/lib/stores/ui-store'
-import { Copy, Check, Pin, VolumeX, Trash2, Pencil, Settings, User, Search, CheckCircle, Smartphone, Plus, X, Shield, Bookmark, Archive } from 'lucide-react-native'
+import { useContactStore } from '../../src/lib/stores/contact-store'
+import { Copy, Check, Pin, VolumeX, Trash2, Pencil, Settings, Search, CheckCircle, Smartphone, Plus, X, Shield, Archive, MessageCircle } from 'lucide-react-native'
 import { PlusCircleVibeIcon, AnimatedShieldIcon, EditChatVibeIcon, VibeLogoIcon, VibeAgentLogo } from '../../src/components/Icons'
 import * as Clipboard from 'expo-clipboard'
 import * as Haptics from 'expo-haptics'
@@ -31,7 +32,10 @@ import { useSavedMessagesStore } from '../../src/lib/stores/saved-messages-store
 import NativeHomeListSurface, { isNativeHomeListAvailable, type NativeHomeListRow } from '../../src/native/home/NativeHomeListSurface'
 import { getNativeChatEngineModule } from '../../src/native/chat'
 import { mapMessagesToNativeRows, type RuntimeChatMessage } from '../../src/native/chat/mapper'
+import { apiClient } from '../../src/lib/api-client'
 import { theme } from '../../src/lib/theme'
+import DefaultAvatar from '../../src/components/avatar/DefaultAvatar'
+import { getAvatarGradientSet } from '../../src/lib/avatar-colors'
 
 const NATIVE_HOME_LIST_DEV_REMOUNT_KEY = __DEV__ ? `dev-${Date.now()}` : 'stable'
 
@@ -209,6 +213,7 @@ const normalizeChatType = (value: unknown): 'dm' | 'group' | 'channel' => {
 interface HomeScreenProps {
     onChatSelect?: (chatId: string) => void;
     onOpenStoryCamera?: () => void;
+    onOpenVibe?: () => void;
 }
 
 type PendingHomeActionKind = 'delete' | 'clear';
@@ -435,25 +440,17 @@ const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onD
                         ]}
                     >
                         <View style={styles.avatarContainer}>
-                            <SafeLiquidGlass
-                                style={[styles.avatarGlass, { backgroundColor: withAlpha(colors.text, 0.12) }]}
-                                blurIntensity={10}
-                                tint={theme === 'dark' ? 'dark' : 'light'}
-                            >
-                                {chat.chatId === 'saved_messages' ? (
-                                    <View style={[styles.avatarPlaceholder, { backgroundColor: colors.primary + '20' }]}>
-                                        <Bookmark size={24} color={colors.primary} fill={colors.primary} />
-                                    </View>
-                                ) : chat.friendImage ? (
-                                    <Image source={{ uri: chat.friendImage }} style={styles.avatarImage} />
-                                ) : (
-                                    <View style={styles.avatarPlaceholder}>
-                                        <Text style={[styles.avatarText, { color: colors.text }]}>
-                                            {(chat.friendName || chat.username || chat.friendId || 'U').substring(0, 1).toUpperCase()}
-                                        </Text>
-                                    </View>
-                                )}
-                            </SafeLiquidGlass>
+                            {chat.chatId === 'saved_messages' ? (
+                                <DefaultAvatar variant="saved" theme={theme} size={60} />
+                            ) : chat.friendImage ? (
+                                <Image source={{ uri: chat.friendImage }} style={[styles.avatarImage, styles.avatarFallbackCircle]} />
+                            ) : (
+                                <DefaultAvatar
+                                    seed={chat.friendId || chat.chatId || chat.friendName || chat.username}
+                                    theme={theme}
+                                    size={60}
+                                />
+                            )}
                             {isOnline && chat.chatId !== 'saved_messages' && (
                                 <View style={[
                                     styles.onlineIndicator,
@@ -582,14 +579,15 @@ const PulseBar = ({ delay }: { delay: number }) => {
     return <Animated.View style={style} />;
 };
 
-export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScreenProps) {
+export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe }: HomeScreenProps) {
     const { user } = useAuthStore()
     const { colors, effectiveTheme } = useThemeStore()
     const activeWallpaperTheme = useWallpaperStore((s) => s.activeTheme)
-    const { setActiveChat, chats, isLoading, loadChats, deleteChat, clearChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected } = useChatStore()
+    const { setActiveChat, chats, isLoading, loadChats, deleteChat, clearChat, pinChat, toggleMuteChat, toggleMarkUnread, typingUsers, onlineUsers, isConnected, startChat } = useChatStore()
     const { savedMessages, sync: syncSavedMessages } = useSavedMessagesStore()
     const { callStatus, remoteUser, callDuration, callType } = useCallStore()
     const { feed, myStories } = useStoryStore()
+    const { contacts } = useContactStore()
     const onlineUsersList = onlineUsers ? Array.from(onlineUsers) : [];
     const nativeEngineModule = useMemo(() => getNativeChatEngineModule(), [])
     const nativeSavedMessagesEnabled = !!nativeEngineModule?.fetchSavedMessages
@@ -676,6 +674,10 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     const [isSearchActive, setIsSearchActive] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const searchInputRef = useRef<TextInput>(null);
+    const [isAtSearchLoading, setIsAtSearchLoading] = useState(false)
+    const [atSearchError, setAtSearchError] = useState('')
+    const [atSearchResult, setAtSearchResult] = useState<any | null>(null)
+    const atSearchSeq = useRef(0)
     const [isPullRefreshing, setIsPullRefreshing] = useState(false)
     const hasStories = feed.length > 0 || myStories.length > 0
     const homeSavedMessages = useMemo(() => {
@@ -691,6 +693,93 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
     )
     const nativeListTopOffset = insets.top + (Platform.OS === 'android' ? 64 : 50)
     const nativeHomeContentTopInset = nativeListTopOffset + estimatedNativeHeaderHeight
+    const atSearchQuery = useMemo(() => {
+        const value = searchQuery.trim()
+        if (!value.startsWith('@')) return ''
+        return value.slice(1).trim().toLowerCase()
+    }, [searchQuery])
+
+    const isAtBuilderQuery = atSearchQuery === 'vibeagent'
+
+    useEffect(() => {
+        if (!isSearchActive) {
+            setIsAtSearchLoading(false)
+            setAtSearchError('')
+            setAtSearchResult(null)
+            return
+        }
+
+        if (!atSearchQuery) {
+            setIsAtSearchLoading(false)
+            setAtSearchError('')
+            setAtSearchResult(null)
+            return
+        }
+
+        const seq = ++atSearchSeq.current
+
+        if (isAtBuilderQuery) {
+            setIsAtSearchLoading(false)
+            setAtSearchError('')
+            setAtSearchResult({
+                isBuilder: true,
+                username: 'vibeagent',
+                userId: '',
+                profileImage: null,
+                isAgent: true,
+                description: 'Open setup chat',
+            })
+            return
+        }
+
+        if (atSearchQuery.length < 2) {
+            setIsAtSearchLoading(false)
+            setAtSearchError('Type at least 2 letters')
+            setAtSearchResult(null)
+            return
+        }
+
+        setIsAtSearchLoading(true)
+        setAtSearchError('')
+        setAtSearchResult(null)
+
+        const timer = setTimeout(async () => {
+            try {
+                const result = await apiClient.findUserByName(atSearchQuery)
+
+                if (atSearchSeq.current !== seq || !isSearchActive) return
+
+                if (!result) {
+                    setAtSearchError('No account found for that username')
+                    setAtSearchResult(null)
+                    return
+                }
+
+                const userId = String(result.userId || result.id || '').trim()
+                if (userId && userId === user?.userId) {
+                    setAtSearchError('You cannot open a chat with yourself')
+                    setAtSearchResult(null)
+                    return
+                }
+
+                setAtSearchResult(result)
+            } catch (error) {
+                if (atSearchSeq.current !== seq || !isSearchActive) return
+                console.warn('[home] @-search failed', error)
+                setAtSearchError('No account found')
+                setAtSearchResult(null)
+            } finally {
+                if (atSearchSeq.current === seq && isSearchActive) {
+                    setIsAtSearchLoading(false)
+                }
+            }
+        }, 350)
+
+        return () => {
+            clearTimeout(timer)
+            setIsAtSearchLoading(false)
+        }
+    }, [atSearchQuery, isSearchActive, isAtBuilderQuery, user?.userId])
 
     const loadSavedMessagesPreview = useCallback(async () => {
         if (!user?.userId) {
@@ -745,6 +834,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             if (chat.messages && chat.messages.length > 0) return true;
             if (chat.unreadCount > 0 || chat.markedUnread) return true;
             if (chat.friendId && typingUsers.has(chat.friendId.toUpperCase())) return true;
+            // Keep any DM that has a friendId — it was created intentionally
+            // and should appear immediately in the native home list
+            if (chat.friendId) return true;
+            if (getChatSortTimestamp(chat) > 0) return true;
+            console.log(`[home/allChats] filtering out chat`, { chatId: chat.chatId, type: chat.type, friendId: chat.friendId, updatedAt: chat.updatedAt, hasLastMessage: !!chat.lastMessage });
             return false;
         });
         if (pendingDeleteChatId) {
@@ -768,8 +862,8 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             }
         }
         const sorted = list
-            .map((chat: any) => (
-                chat.chatId === pendingClearChatId
+            .map((chat: any) => {
+                const pendingClearedChat = chat.chatId === pendingClearChatId
                     ? {
                         ...chat,
                         messages: [],
@@ -778,12 +872,26 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         unreadCount: 0,
                         markedUnread: false,
                     }
-                    : chat
-            ))
+                    : chat;
+
+                if (pendingClearedChat.friendId) {
+                    const contact = contacts.find(c => (c.id || '').toUpperCase() === (pendingClearedChat.friendId || '').toUpperCase());
+                    if (contact && contact.username) {
+                        return {
+                            ...pendingClearedChat,
+                            friendName: contact.username,
+                            name: pendingClearedChat.type === 'group' || pendingClearedChat.type === 'channel'
+                                ? pendingClearedChat.name
+                                : contact.username
+                        }
+                    }
+                }
+                return pendingClearedChat;
+            })
             .sort((a: any, b: any) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         console.log(`[home/allChats] chats=${chats.length} homeSaved=${homeSavedMessages.length} final=${sorted.length}`);
         return sorted;
-    }, [chats, homeSavedMessages, pendingHomeAction, typingUsers, user?.userId]);
+    }, [chats, homeSavedMessages, pendingHomeAction, typingUsers, user?.userId, contacts]);
 
     const filteredChats = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
@@ -857,6 +965,13 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             const isOnline = !useNativeEnginePresence && canShowPeerPresence && onlineUsers.has(friendId)
             const preview = isTyping ? 'typing...' : getMessageText(chat.lastMessage)
             const lastMsgTime = chat.lastMessage ? timeAgo(chat.lastMessage.timestamp || chat.updatedAt) : ''
+            const avatarSeed = chat.chatId === 'saved_messages'
+                ? 'saved_messages'
+                : (chat.friendId || chat.chatId || title)
+            const avatarGradient = getAvatarGradientSet(
+                avatarSeed,
+                chat.chatId === 'saved_messages' ? 'saved' : 'user'
+            )
 
             // Skip expensive message→nativeRow mapping when native engine handles previews
             let previewRows: any[] | undefined
@@ -928,6 +1043,10 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 isTyping,
                 isOnline,
                 avatarFallback: title.substring(0, 1).toUpperCase(),
+                avatarGradientStartLight: avatarGradient.light[0],
+                avatarGradientEndLight: avatarGradient.light[1],
+                avatarGradientStartDark: avatarGradient.dark[0],
+                avatarGradientEndDark: avatarGradient.dark[1],
                 previewRows,
             }
         })
@@ -967,7 +1086,49 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
             runOnJS(setIsSearchActive)(false);
         });
         searchInputRef.current?.blur();
+        setSearchQuery('')
+        setAtSearchError('')
+        setAtSearchResult(null)
+        setIsAtSearchLoading(false)
     };
+
+    const handleAtSearchOpen = useCallback(async () => {
+        if (!atSearchQuery) return
+
+        if (isAtBuilderQuery) {
+            handleSearchClose()
+            router.push({ pathname: '/agent', params: { mode: 'builder' } })
+            return
+        }
+
+        const targetUserId = atSearchResult?.userId || atSearchResult?.id
+        if (!targetUserId) return
+
+        safePress('openAtSearchProfile', async () => {
+            try {
+                const friendId = targetUserId
+                const chatId = await startChat(friendId, {
+                    username: atSearchResult.username,
+                    profileImage: atSearchResult.profileImage,
+                    publicKey: atSearchResult.publicKey,
+                })
+
+                setActiveChat(chatId)
+                handleSearchClose()
+
+                router.navigate({
+                    pathname: '/chat',
+                    params: {
+                        id: chatId,
+                        chatType: 'dm',
+                    },
+                })
+            } catch (error) {
+                console.error('[home] startChat from @-search failed', error)
+                setAtSearchError('Could not open chat with that user')
+            }
+        })
+    }, [atSearchQuery, atSearchResult, handleSearchClose, isAtBuilderQuery, router, safePress, setActiveChat, startChat])
 
     const handleOpenStoryCamera = useCallback(() => {
         safePress('openStoryCamera', () => {
@@ -1547,7 +1708,13 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                 Start a conversation to catch the vibe.
             </Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 12, paddingHorizontal: 20, width: '100%', maxWidth: 360 }}>
-                <TouchableOpacity onPress={() => safePress('openAgent', () => router.push('/agent'))} activeOpacity={0.8} style={{ flex: 1 }}>
+                <TouchableOpacity onPress={() => safePress('openAgent', () => {
+                    if (onOpenVibe) {
+                        onOpenVibe()
+                        return
+                    }
+                    router.push('/agent')
+                })} activeOpacity={0.8} style={{ flex: 1 }}>
                     <SafeLiquidGlass
                         style={{ paddingVertical: 12, borderRadius: 24, borderWidth: 1, borderColor: withAlpha(colors.text, 0.1), alignItems: 'center' }}
                         blurIntensity={15}
@@ -1773,7 +1940,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                             renderItem={renderItem}
                             extraData={[typingUsers, onlineUsers, selectedConversations, isEditing, chats.length, homeSavedMessages.length, savedMessagesPreviewLoaded]}
                             keyExtractor={item => item.chatId}
-                            contentContainerStyle={[styles.listContent, { paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }]}
+                            contentContainerStyle={[
+                                styles.listContent,
+                                filteredChats.length === 0 && savedMessagesPreviewLoaded ? styles.listContentEmpty : null,
+                                { paddingTop: insets.top + (Platform.OS === 'android' ? 64 : 50) }
+                            ]}
                             showsVerticalScrollIndicator={false}
                             onScroll={onScroll}
                             scrollEventThrottle={16}
@@ -1872,6 +2043,71 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                             )}
                         </View>
                     )}
+
+                    {isSearchActive && searchQuery.trim().startsWith('@') && !atSearchQuery ? (
+                        <View style={{ paddingHorizontal: 18, paddingTop: 8 }}>
+                            <Text style={{ color: colors.textSecondary, fontSize: 15 }}>Type a username after @</Text>
+                        </View>
+                    ) : null}
+
+                    {isSearchActive && !!atSearchQuery && (
+                        <View style={{ flex: 1, paddingHorizontal: 14 }}>
+                            <Text style={{ color: colors.textSecondary, fontSize: 13, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>Users</Text>
+
+                            {isAtSearchLoading ? (
+                                <View style={{ paddingVertical: 18, alignItems: 'flex-start' }}>
+                                    <ActivityIndicator size="small" color={colors.text} />
+                                </View>
+                            ) : null}
+
+                            {!!atSearchError ? (
+                                <Text style={{ color: colors.textSecondary, fontSize: 15 }}>{atSearchError}</Text>
+                            ) : null}
+
+                            {atSearchResult ? (
+                                <TouchableOpacity
+                                    onPress={handleAtSearchOpen}
+                                    style={{
+                                        backgroundColor: colors.card,
+                                        borderRadius: 18,
+                                        padding: 12,
+                                        flexDirection: 'row',
+                                        alignItems: 'center',
+                                        justifyContent: 'space-between',
+                                        borderWidth: 1,
+                                        borderColor: withAlpha(colors.text, 0.12),
+                                    }}
+                                >
+                                    <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
+                                        <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: withAlpha(colors.primary, 0.2), overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
+                                            {atSearchResult.isBuilder ? (
+                                                <MessageCircle size={21} color={colors.primary} />
+                                            ) : atSearchResult.profileImage ? (
+                                                <Image source={{ uri: atSearchResult.profileImage }} style={{ width: 42, height: 42 }} />
+                                            ) : (
+                                                <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 16 }}>
+                                                    {(atSearchResult.username || '?').slice(0, 1).toUpperCase()}
+                                                </Text>
+                                            )}
+                                        </View>
+
+                                        <View style={{ flex: 1 }}>
+                                            <Text style={{ fontSize: 16, color: colors.text, fontWeight: '600' }}>
+                                                {atSearchResult.username ? `@${atSearchResult.username}` : atSearchResult.description || '@vibeagent'}
+                                            </Text>
+                                            <Text style={{ color: colors.textSecondary, marginTop: 2, fontSize: 13 }}>
+                                                {atSearchResult.isBuilder
+                                                    ? atSearchResult.description
+                                                    : (atSearchResult.isAgent ? 'Agent' : 'User')
+                                                }
+                                            </Text>
+                                        </View>
+                                    </View>
+                                    <Text style={{ color: colors.primary, fontSize: 12, fontWeight: '600' }}>Open</Text>
+                                </TouchableOpacity>
+                            ) : null}
+                        </View>
+                    )}
                 </View>
             </Animated.View >
 
@@ -1904,6 +2140,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera }: HomeScre
                         value={searchQuery}
                         onChangeText={setSearchQuery}
                         onBlur={handleSearchClose}
+                        onSubmitEditing={() => {
+                            if (atSearchResult || isAtBuilderQuery) {
+                                handleAtSearchOpen()
+                            }
+                        }}
                     />
                     <Animated.View style={[cancelBtnStyle, { overflow: 'hidden', alignItems: 'flex-end' }]}>
                         <TouchableOpacity onPress={handleSearchClose} style={{ padding: 4 }}>
@@ -2013,6 +2254,9 @@ const styles = StyleSheet.create({
     listContent: {
         paddingBottom: 100,
     },
+    listContentEmpty: {
+        flexGrow: 1,
+    },
     chatRowPressable: {
         flexDirection: 'row',
         alignItems: 'center',
@@ -2045,26 +2289,12 @@ const styles = StyleSheet.create({
     avatarContainer: {
         marginRight: 14,
     },
-    avatarGlass: {
-        width: 60,
-        height: 60,
-        borderRadius: 999,
-        overflow: 'hidden',
-    },
     avatarImage: {
         width: '100%',
         height: '100%',
     },
-    avatarPlaceholder: {
-        width: '100%',
-        height: '100%',
-        alignItems: 'center',
-        justifyContent: 'center',
-        backgroundColor: 'rgba(127, 127, 127, 0.12)'
-    },
-    avatarText: {
-        fontSize: 20,
-        fontWeight: '600',
+    avatarFallbackCircle: {
+        borderRadius: 999,
     },
     chatRowContent: {
         flex: 1,
@@ -2116,9 +2346,11 @@ const styles = StyleSheet.create({
         zIndex: 100
     },
     emptyStateContainer: {
-        padding: 20,
-        paddingTop: 60,
-        alignItems: 'center'
+        flex: 1,
+        paddingHorizontal: 20,
+        paddingBottom: 110,
+        alignItems: 'center',
+        justifyContent: 'center',
     },
     emptyDescription: {
         fontSize: 16,

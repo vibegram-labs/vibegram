@@ -1176,6 +1176,7 @@ export default function ChatListScreen({
     const setActiveChat = useChatStore(s => s.setActiveChat);
     const loadMessages = useChatStore(s => s.loadMessages);
     const sendMessage = useChatStore(s => s.sendMessage);
+    const cancelUpload = useChatStore(s => s.cancelUpload);
     const editMessage = useChatStore(s => s.editMessage);
     const retryMessage = useChatStore(s => s.retryMessage);
     const deleteFailedMessage = useChatStore(s => s.deleteFailedMessage);
@@ -2045,6 +2046,8 @@ export default function ChatListScreen({
         });
     }, [effectiveChatId, shouldUseNativeList, spawnReactionFx]);
 
+    const sendAttachmentMessageRef = useRef<((type: BubbleMessageType, attachmentText: string, metadata: Record<string, any>) => Promise<void>) | null>(null);
+
     const handleNativeSurfaceEvent = useCallback((event: { nativeEvent: Record<string, unknown> } | Record<string, unknown>) => {
         const nativeEvent = extractNativePayload(event);
         const type = typeof nativeEvent.type === 'string' ? nativeEvent.type : '';
@@ -2180,6 +2183,35 @@ export default function ChatListScreen({
             return;
         }
 
+        if (type === 'cancelOutgoingUpload') {
+            const messageId = typeof nativeEvent.messageId === 'string' ? nativeEvent.messageId.trim() : '';
+            if (!effectiveChatId || !messageId) return;
+            try {
+                const nativeChatEngine = getNativeChatEngineModule();
+                const nativeCancel = nativeChatEngine?.cancelOutgoingMessage;
+                if (typeof nativeCancel === 'function') {
+                    void Promise.resolve(nativeCancel({
+                        chatId: effectiveChatId,
+                        messageId,
+                    })).catch((error) => {
+                        console.warn('[Native] cancelOutgoingMessage failed:', {
+                            effectiveChatId,
+                            messageId,
+                            error: String(error),
+                        });
+                    });
+                }
+            } catch (error) {
+                console.warn('[Native] cancelOutgoingMessage bridge failed:', {
+                    effectiveChatId,
+                    messageId,
+                    error: String(error),
+                });
+            }
+            cancelUpload(effectiveChatId, messageId);
+            return;
+        }
+
         if (type === 'attachmentPressed') {
             showToast('Native attachment menu is not wired yet', 'info');
             return;
@@ -2189,7 +2221,7 @@ export default function ChatListScreen({
             const uriRaw = nativeEvent.uri;
             const captionRaw = nativeEvent.caption;
             if (typeof uriRaw !== 'string' || !effectiveChatId) return;
-            void sendMessage(effectiveChatId, typeof captionRaw === 'string' ? captionRaw : '', 'image', { mediaUrl: uriRaw });
+            void sendAttachmentMessageRef.current?.('image', typeof captionRaw === 'string' ? captionRaw : '', { mediaUrl: uriRaw });
             return;
         }
 
@@ -2199,7 +2231,7 @@ export default function ChatListScreen({
             const widthRaw = typeof nativeEvent.width === 'number' ? nativeEvent.width : undefined;
             const heightRaw = typeof nativeEvent.height === 'number' ? nativeEvent.height : undefined;
             if (typeof urlRaw !== 'string' || urlRaw.trim().length === 0 || !effectiveChatId) return;
-            void sendMessage(effectiveChatId, '', 'gif', {
+            void sendAttachmentMessageRef.current?.('gif', '', {
                 mediaUrl: urlRaw,
                 previewUrl: typeof previewRaw === 'string' ? previewRaw : urlRaw,
                 width: widthRaw,
@@ -2216,7 +2248,7 @@ export default function ChatListScreen({
             const widthRaw = typeof nativeEvent.width === 'number' ? nativeEvent.width : undefined;
             const heightRaw = typeof nativeEvent.height === 'number' ? nativeEvent.height : undefined;
             if (!effectiveChatId || !stickerIdRaw || !packIdRaw) return;
-            void sendAttachmentMessage('sticker', '', {
+            void sendAttachmentMessageRef.current?.('sticker', '', {
                 stickerId: stickerIdRaw,
                 stickerPackId: packIdRaw,
                 packId: packIdRaw,
@@ -2233,7 +2265,7 @@ export default function ChatListScreen({
             const uriRaw = nativeEvent.uri;
             const nameRaw = nativeEvent.name;
             if (typeof uriRaw !== 'string' || !effectiveChatId) return;
-            void sendMessage(effectiveChatId, typeof nameRaw === 'string' ? nameRaw : 'File', 'file', {
+            void sendAttachmentMessageRef.current?.('file', typeof nameRaw === 'string' ? nameRaw : 'File', {
                 mediaUrl: uriRaw,
                 fileName: typeof nameRaw === 'string' ? nameRaw : 'File',
             });
@@ -2244,7 +2276,7 @@ export default function ChatListScreen({
             const latitude = typeof nativeEvent.latitude === 'number' ? nativeEvent.latitude : NaN;
             const longitude = typeof nativeEvent.longitude === 'number' ? nativeEvent.longitude : NaN;
             if (!effectiveChatId || !Number.isFinite(latitude) || !Number.isFinite(longitude)) return;
-            void sendMessage(effectiveChatId, '', 'location', { latitude, longitude });
+            void sendAttachmentMessageRef.current?.('location', '', { latitude, longitude });
             return;
         }
 
@@ -2255,7 +2287,7 @@ export default function ChatListScreen({
                 ? nativeEvent.waveform.filter((v: unknown) => typeof v === 'number').map((v: number) => Math.max(0, Math.min(1, v)))
                 : undefined;
             if (typeof uriRaw !== 'string' || !effectiveChatId) return;
-            void sendMessage(effectiveChatId, '', 'voice', {
+            void sendAttachmentMessageRef.current?.('voice', '', {
                 mediaUrl: uriRaw,
                 duration: durationRaw,
                 fileName: 'voice-message.m4a',
@@ -2268,7 +2300,7 @@ export default function ChatListScreen({
             const uriRaw = nativeEvent.uri;
             const durationRaw = typeof nativeEvent.duration === 'number' ? nativeEvent.duration : 0;
             if (typeof uriRaw !== 'string' || !effectiveChatId) return;
-            void sendMessage(effectiveChatId, '', 'video', {
+            void sendAttachmentMessageRef.current?.('video', '', {
                 mediaUrl: uriRaw,
                 duration: durationRaw,
                 fileName: 'video-note.mov',
@@ -2387,7 +2419,7 @@ export default function ChatListScreen({
         const message = messages.find((entry) => entry.id === messageIdRaw);
         if (!message) return;
         void handleBubbleMenuAction(actionRaw as BubbleMenuAction, message);
-    }, [messages, handleBubbleMenuAction, onReplySwipeHaptic, openReplyComposer, commitReactionLocally, effectiveChatId, sendMessage, onTypingStatusChange, onRecordingUiChange, replyTo, shouldUseNativeList, nativeChatEnabled, showToast, extractNativePayload, sendDebug]);
+    }, [messages, handleBubbleMenuAction, onReplySwipeHaptic, openReplyComposer, commitReactionLocally, effectiveChatId, sendMessage, cancelUpload, onTypingStatusChange, onRecordingUiChange, replyTo, shouldUseNativeList, nativeChatEnabled, showToast, extractNativePayload, sendDebug]);
 
     const handleNativeSurfaceError = useCallback((error: unknown, context: string) => {
         console.error(`[ChatList] Native surface error in ${context}`, error);
@@ -2729,11 +2761,11 @@ export default function ChatListScreen({
         if (shouldUseNativeList && nativeChatEnabled) {
             try {
                 const mediaUrl = typeof metadata?.mediaUrl === 'string' ? metadata.mediaUrl.trim() : '';
-                const isRemoteMediaUrl = mediaUrl.startsWith('http://') || mediaUrl.startsWith('https://') || mediaUrl.startsWith('data:');
                 const canUseNativeNow =
                     type === 'location'
                     || type === 'contact'
-                    || (['gif', 'image', 'file', 'voice', 'video', 'music', 'sticker'].includes(type) && isRemoteMediaUrl);
+                    || type === 'sticker'
+                    || (['gif', 'image', 'file', 'voice', 'video', 'music'].includes(type) && mediaUrl.length > 0);
                 if (canUseNativeNow) {
                     const nativeChatEngine = getNativeChatEngineModule();
                     const nativeSend = nativeChatEngine?.sendMessage;
@@ -2779,6 +2811,7 @@ export default function ChatListScreen({
             // Send errors are surfaced by ChatStore status updates.
         }
     }, [effectiveChatId, sendMessage, shouldUseNativeList, nativeChatEnabled, nativeChatJsFallbackEnabled]);
+    sendAttachmentMessageRef.current = sendAttachmentMessage;
 
     useEffect(() => {
         if (!incomingVideoNote) return;
@@ -2873,31 +2906,50 @@ export default function ChatListScreen({
 
     const nativeRows = useMemo(() => {
         const t0 = Date.now();
-        const rows = mapMessagesToNativeRows(visibleMessages.map((message) => ({
-            id: message.id,
-            chatId: message.chatId,
-            fromId: message.fromId,
-            timestamp: message.timestamp,
-            text: message.text,
-            type: message.type,
-            status: message.status,
-            mediaUrl: message.mediaUrl,
-            fileName: message.fileName,
-            duration: message.duration,
-            metadata: message.extra && typeof message.extra === 'object' ? message.extra : undefined,
-            waveform: Array.isArray(message.extra?.waveform)
-                ? message.extra?.waveform.filter((v: unknown) => typeof v === 'number').map((v: number) => Math.max(0, Math.min(1, v)))
-                : undefined,
-            isVideoNote: !!message.isVideoNote,
-            uploadProgress: uploadProgressById?.[message.id] || 0,
-            isMe: message.isMe,
-            timestampMs: message.timestampMs,
-            isEdited: message.isEdited,
-            editedAt: message.editedAt,
-            replyToId: message.replyToId,
-            reactionEmoji: message.reactionEmoji,
-            encryptedContent: message.encryptedContent,
-        })));
+        const rows = mapMessagesToNativeRows(visibleMessages.map((message) => {
+            const rawMessage = message as any;
+            const nativeUploadProgress =
+                (typeof rawMessage?.uploadProgress === 'number' && Number.isFinite(rawMessage.uploadProgress))
+                    ? rawMessage.uploadProgress
+                    : (typeof rawMessage?.upload_progress === 'number' && Number.isFinite(rawMessage.upload_progress))
+                        ? rawMessage.upload_progress
+                        : (typeof rawMessage?.extra?.uploadProgress === 'number' && Number.isFinite(rawMessage.extra.uploadProgress))
+                            ? rawMessage.extra.uploadProgress
+                            : (typeof rawMessage?.extra?.upload_progress === 'number' && Number.isFinite(rawMessage.extra.upload_progress))
+                                ? rawMessage.extra.upload_progress
+                                : undefined;
+            const fallbackUploadProgress = uploadProgressById?.[message.id];
+            return {
+                id: message.id,
+                chatId: message.chatId,
+                fromId: message.fromId,
+                timestamp: message.timestamp,
+                text: message.text,
+                type: message.type,
+                status: message.status,
+                mediaUrl: message.mediaUrl,
+                fileName: message.fileName,
+                duration: message.duration,
+                metadata: message.extra && typeof message.extra === 'object' ? message.extra : undefined,
+                waveform: Array.isArray(message.extra?.waveform)
+                    ? message.extra?.waveform.filter((v: unknown) => typeof v === 'number').map((v: number) => Math.max(0, Math.min(1, v)))
+                    : undefined,
+                isVideoNote: !!message.isVideoNote,
+                uploadProgress:
+                    typeof nativeUploadProgress === 'number'
+                        ? nativeUploadProgress
+                        : (typeof fallbackUploadProgress === 'number' && Number.isFinite(fallbackUploadProgress))
+                            ? fallbackUploadProgress
+                            : undefined,
+                isMe: message.isMe,
+                timestampMs: message.timestampMs,
+                isEdited: message.isEdited,
+                editedAt: message.editedAt,
+                replyToId: message.replyToId,
+                reactionEmoji: message.reactionEmoji,
+                encryptedContent: message.encryptedContent,
+            };
+        }));
         chatListPerfLog('nativeRows:map', {
             visibleMessages: visibleMessages.length,
             rows: rows.length,

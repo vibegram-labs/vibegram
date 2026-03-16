@@ -36,6 +36,9 @@ export interface Message {
 
     // Circular video note (like Telegram's video messages)
     isVideoNote?: boolean;
+    isAgentMessage?: boolean;
+    agentName?: string;
+    agentId?: string;
 }
 
 export type ChatType = 'dm' | 'group' | 'channel';

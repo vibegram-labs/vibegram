@@ -1,5 +1,7 @@
 package expo.modules.vibechatnative
 
+import android.util.Log
+
 import android.annotation.SuppressLint
 import android.app.AlertDialog
 import android.content.Context
@@ -393,8 +395,14 @@ class ChatNativeHomeListView(
       ChatEngine.setListener(engineListenerId, null)
       return
     }
-    ChatEngine.setListener(engineListenerId) { reason, _, _ ->
-      if (reason != "peerTyping" && reason != "presenceChanged") return@setListener
+    ChatEngine.setListener(engineListenerId) { reason, chatId, _ ->
+      val shouldRefresh = reason == "peerTyping"
+        || reason == "presenceChanged"
+        || reason == "chatMessageInserted"
+        || reason == "chatMessageChanged"
+        || reason == "chatRowsReloaded"
+      if (!shouldRefresh) return@setListener
+      Log.d("ChatNativeHomeList", "engine event reason=$reason chatId=$chatId — refreshing rows")
       post { renderRowsWithNativePresence() }
     }
   }
@@ -417,7 +425,80 @@ class ChatNativeHomeListView(
     }
     val isTyping = ChatEngine.isTyping(mapOf("chatId" to row.chatId))
     val isOnline = ChatEngine.isUserOnline(peerUserId)
-    return row.withPresence(isTyping = isTyping, isOnline = isOnline)
+    // When JS preview is the generic fallback, try to resolve from native engine
+    val resolvedPreview = resolvePreviewFromEngine(row)
+    return if (resolvedPreview != null && resolvedPreview != row.preview) {
+      row.copy(preview = resolvedPreview, isTyping = isTyping, isOnline = isOnline)
+    } else {
+      row.withPresence(isTyping = isTyping, isOnline = isOnline)
+    }
+  }
+
+  /**
+   * Query ChatEngine's live message rows for this chat and extract the last
+   * message preview text. Returns null if no native messages are available.
+   */
+  private fun resolvePreviewFromEngine(row: ChatNativeHomeListRow): String? {
+    // Only resolve if the JS side sent a generic/empty preview
+    val jsPreview = row.preview.trim()
+    if (jsPreview.isNotEmpty()
+        && jsPreview != "Start a conversation"
+        && jsPreview != "Message") {
+      return null // JS already has a real preview
+    }
+    try {
+      val liveRows = ChatEngine.getLiveMessageRows(mapOf("chatId" to row.chatId))
+      if (liveRows.isNotEmpty()) {
+        // Find the most recent message by timestampMs
+        val lastEntry = liveRows.values
+          .maxByOrNull {
+            val msg = it["message"] as? Map<*, *>
+            (msg?.get("timestampMs") as? Number)?.toLong() ?: 0L
+          }
+        val msg = lastEntry?.get("message") as? Map<*, *>
+        val text = msg?.get("text")?.toString()?.trim()
+        if (!text.isNullOrEmpty()) {
+          Log.d("ChatNativeHomeList", "resolvePreviewFromEngine chatId=${row.chatId} → \"${text.take(40)}\"")
+          return text
+        }
+        // Fall back to type-based preview
+        val type = msg?.get("type")?.toString()?.lowercase()
+        val typePreview = when (type) {
+          "image" -> "Photo"
+          "voice" -> "Voice message"
+          "gif" -> "GIF"
+          "sticker" -> "Sticker"
+          "video" -> "Video"
+          "file" -> msg["fileName"]?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: "Document"
+          else -> null
+        }
+        if (typePreview != null) return typePreview
+      }
+      // Also check history rows
+      val historyRows = ChatEngine.getChatRows(mapOf("chatId" to row.chatId))
+      if (historyRows.isNotEmpty()) {
+        val lastRow = historyRows.lastOrNull { it["kind"] == "message" }
+        val msg = lastRow?.get("message") as? Map<*, *>
+        val text = msg?.get("text")?.toString()?.trim()
+        if (!text.isNullOrEmpty()) {
+          Log.d("ChatNativeHomeList", "resolvePreviewFromEngine (history) chatId=${row.chatId} → \"${text.take(40)}\"")
+          return text
+        }
+        val type = msg?.get("type")?.toString()?.lowercase()
+        return when (type) {
+          "image" -> "Photo"
+          "voice" -> "Voice message"
+          "gif" -> "GIF"
+          "sticker" -> "Sticker"
+          "video" -> "Video"
+          "file" -> msg["fileName"]?.toString()?.trim()?.takeIf { it.isNotEmpty() } ?: "Document"
+          else -> null
+        }
+      }
+    } catch (e: Throwable) {
+      Log.w("ChatNativeHomeList", "resolvePreviewFromEngine failed chatId=${row.chatId}", e)
+    }
+    return null
   }
 
   private fun showNativePreview(row: ChatNativeHomeListRow) {
@@ -679,7 +760,12 @@ class ChatNativeHomeListView(
 
     override fun onBindViewHolder(holder: ViewHolder, position: Int) {
       val row = rows[position]
-      holder.card.bind(row, isDark, resolveAvatarBackgroundColor())
+      holder.card.bind(
+        row,
+        isDark,
+        resolveAvatarBackgroundColor(),
+        resolveAvatarGradientColors(row),
+      )
       holder.itemView.setOnTouchListener { _, event ->
         when (event.actionMasked) {
           MotionEvent.ACTION_DOWN -> holder.card.setPressedVisual(true)
@@ -707,6 +793,17 @@ class ChatNativeHomeListView(
       val raw = previewAppearance[key] as? String ?: return null
       return try {
         Color.parseColor(raw.trim())
+      } catch (_: IllegalArgumentException) {
+        null
+      }
+    }
+
+    private fun resolveAvatarGradientColors(row: ChatNativeHomeListRow): IntArray? {
+      val startRaw = if (isDark) row.avatarGradientStartDark else row.avatarGradientStartLight
+      val endRaw = if (isDark) row.avatarGradientEndDark else row.avatarGradientEndLight
+      if (startRaw.isNullOrBlank() || endRaw.isNullOrBlank()) return null
+      return try {
+        intArrayOf(Color.parseColor(startRaw.trim()), Color.parseColor(endRaw.trim()))
       } catch (_: IllegalArgumentException) {
         null
       }

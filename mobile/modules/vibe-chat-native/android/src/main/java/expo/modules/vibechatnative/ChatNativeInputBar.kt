@@ -44,8 +44,10 @@ import expo.modules.vibechatnative.R
 import java.io.File
 import java.util.UUID
 import kotlin.math.abs
+import kotlin.math.log10
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
 
 internal class ChatNativeInputBar(
@@ -60,6 +62,13 @@ internal class ChatNativeInputBar(
     fun onAttachmentLocation(latitude: Double, longitude: Double, caption: String?)
     fun onSendText(text: String, messageId: String)
     fun onSendTextWithAgentMention(text: String, agentText: String, messageId: String)
+    fun onSendTextWithStandaloneAgentMention(
+      text: String,
+      agentText: String,
+      agentUsername: String,
+      messageId: String,
+    )
+    fun onRequestVibeAgentBuilder()
     fun onRecordingState(isRecording: Boolean, isLocked: Boolean)
     fun onRecordingVad(level: Float)
     fun onRecordingCanceled()
@@ -849,18 +858,61 @@ internal class ChatNativeInputBar(
     if (text.isEmpty()) return
     val messageId = UUID.randomUUID().toString().lowercase()
 
-    // Detect @vibe mention for group agent (mirrors iOS ChatInputBar)
-    val lowered = text.lowercase()
-    if (lowered.contains("@vibe")) {
-      val agentText = text
-        .replace(Regex("@vibe", RegexOption.IGNORE_CASE), "")
-        .trim()
-      val finalAgentText = agentText.ifEmpty { text }
-      listener?.onSendTextWithAgentMention(text, finalAgentText, messageId)
-    } else {
-      listener?.onSendText(text, messageId)
+    when (val mentionIntent = resolveMentionIntent(text)) {
+      is MentionIntent.Builder -> listener?.onRequestVibeAgentBuilder()
+      is MentionIntent.Group -> listener?.onSendTextWithAgentMention(text, mentionIntent.agentText, messageId)
+      is MentionIntent.Standalone ->
+        listener?.onSendTextWithStandaloneAgentMention(
+          text,
+          mentionIntent.agentText,
+          mentionIntent.username,
+          messageId,
+        )
+      is MentionIntent.None -> listener?.onSendText(text, messageId)
     }
     input.setText("")
+  }
+
+  private sealed class MentionIntent {
+    object None : MentionIntent()
+    object Builder : MentionIntent()
+    data class Group(val agentText: String) : MentionIntent()
+    data class Standalone(val username: String, val agentText: String) : MentionIntent()
+  }
+
+  private fun resolveMentionIntent(text: String): MentionIntent {
+    val matches =
+      Regex("""(?:^|\s)@([A-Za-z0-9_]{3,30})\b""", RegexOption.IGNORE_CASE)
+        .findAll(text)
+        .mapNotNull { match ->
+          match.groups[1]?.value?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }
+        }
+        .distinct()
+        .toList()
+
+    if (matches.contains("vibeagent")) {
+      return MentionIntent.Builder
+    }
+
+    if (matches.size != 1) {
+      return MentionIntent.None
+    }
+
+    val username = matches.first()
+    val stripped =
+      text
+        .replace(Regex("@${Regex.escape(username)}", RegexOption.IGNORE_CASE), "")
+        .trim()
+
+    if (stripped.isEmpty()) {
+      return MentionIntent.None
+    }
+
+    return if (username == "vibe") {
+      MentionIntent.Group(stripped)
+    } else {
+      MentionIntent.Standalone(username, stripped)
+    }
   }
 
   private fun hasTypedText(): Boolean {
@@ -1081,7 +1133,7 @@ internal class ChatNativeInputBar(
             0
           }
         recordingAmplitudes.add(amplitude)
-        val normalized = (amplitude / 32767f).coerceIn(0f, 1f)
+        val normalized = normalizeRecordingAmplitude(amplitude)
         listener?.onRecordingVad(normalized)
         applyVadVisual(normalized)
 
@@ -1162,7 +1214,7 @@ internal class ChatNativeInputBar(
       listener?.onVoiceRecorded(
         Uri.fromFile(outputFile).toString(),
         durationMs.toDouble() / 1000.0,
-        buildWaveform(recordingAmplitudes, 40),
+        buildWaveform(recordingAmplitudes, 28),
       )
     } else {
       outputFile?.delete()
@@ -1179,22 +1231,74 @@ internal class ChatNativeInputBar(
 
   private fun buildWaveform(samples: List<Int>, bins: Int): List<Float> {
     if (samples.isEmpty() || bins <= 0) return emptyList()
-    val out = ArrayList<Float>(bins)
-    val chunk = max(1, samples.size / bins)
-    var i = 0
-    while (i < samples.size && out.size < bins) {
-      var maxAmp = 0
-      var j = i
-      val end = min(samples.size, i + chunk)
-      while (j < end) {
-        maxAmp = max(maxAmp, samples[j])
-        j++
-      }
-      out.add((maxAmp / 32767f).coerceIn(0f, 1f))
-      i += chunk
+    val normalized =
+      samples
+        .map(::normalizeRecordingAmplitude)
+        .filter { it.isFinite() }
+    if (normalized.isEmpty()) return List(bins) { 0.18f }
+
+    val stretched = stretchWaveform(normalized)
+    if (stretched.size == bins) {
+      return smoothWaveform(stretched)
     }
-    while (out.size < bins) out.add(0f)
-    return out
+
+    val bucketSize = stretched.size.toFloat() / bins.toFloat()
+    val out = ArrayList<Float>(bins)
+    for (index in 0 until bins) {
+      val start = kotlin.math.floor(index * bucketSize).toInt()
+      val clampedStart = start.coerceIn(0, stretched.lastIndex)
+      val end =
+        min(
+          stretched.size,
+          kotlin.math.floor((index + 1) * bucketSize).toInt().coerceAtLeast(clampedStart + 1),
+        )
+      if (start < end) {
+        var sum = 0f
+        var peak = 0f
+        for (i in start until end) {
+          val value = stretched[i]
+          sum += value
+          if (value > peak) peak = value
+        }
+        val avg = sum / (end - start).toFloat()
+        out.add(max(0.12f, ((avg * 0.72f) + (peak * 0.28f)).coerceIn(0f, 1f)))
+      } else {
+        out.add(max(0.12f, stretched[clampedStart]))
+      }
+    }
+    return smoothWaveform(out)
+  }
+
+  private fun normalizeRecordingAmplitude(amplitude: Int): Float {
+    val clampedAmplitude = amplitude.coerceAtLeast(1)
+    val ratio = (clampedAmplitude / 32767f).coerceIn(1f / 32767f, 1f)
+    val minDb = -45.0
+    val db = 20.0 * log10(ratio.toDouble())
+    return (((db - minDb) / -minDb).toFloat()).coerceIn(0f, 1f)
+  }
+
+  private fun stretchWaveform(values: List<Float>): List<Float> {
+    if (values.isEmpty()) return emptyList()
+    val sorted = values.sorted()
+    val lowIndex = ((sorted.lastIndex) * 0.12f).roundToInt().coerceIn(0, sorted.lastIndex)
+    val highIndex = ((sorted.lastIndex) * 0.92f).roundToInt().coerceIn(lowIndex, sorted.lastIndex)
+    val floor = sorted[lowIndex]
+    val ceiling = max(sorted[highIndex], floor + 0.08f)
+    val range = ceiling - floor
+    return values.map { value ->
+      val normalized = ((value - floor) / range).coerceIn(0f, 1f)
+      max(0.12f, normalized.pow(0.82f))
+    }
+  }
+
+  private fun smoothWaveform(values: List<Float>): List<Float> {
+    if (values.size <= 2) return values.map { it.coerceIn(0.12f, 1f) }
+    return values.indices.map { index ->
+      val left = values[max(0, index - 1)]
+      val center = values[index]
+      val right = values[min(values.size - 1, index + 1)]
+      ((left * 0.2f) + (center * 0.6f) + (right * 0.2f)).coerceIn(0.12f, 1f)
+    }
   }
 
   private fun circleDrawable(

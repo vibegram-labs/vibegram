@@ -16,7 +16,8 @@ import SafeLiquidGlass from '../../components/native/SafeLiquidGlass';
 import AnimatedGlassButton from '../../components/native/AnimatedGlassButton';
 import { interpolate } from 'react-native-reanimated';
 import { useAuthStore } from '../../lib/stores/auth-store';
-import { X, MessageCircle, Phone, UserCheck, Check, Search, ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, UserPlus, UserMinus, User } from 'lucide-react-native';
+import { X, MessageCircle, Phone, UserCheck, Check, Search, ArrowLeft, ArrowRight, ChevronLeft, ChevronRight, UserPlus, UserMinus } from 'lucide-react-native';
+import { ContactsIcon } from '../../components/Icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { LayoutAnimation, Platform, UIManager } from 'react-native';
 import WallpaperBackground from './WallpaperBackground';
@@ -40,6 +41,8 @@ interface FoundUser {
     profileImage?: string;
     phoneNumber?: string;
     publicKey?: string;
+    isAgent?: boolean;
+    agentId?: string;
 }
 
 const withAlpha = (color: string, alpha: number) => {
@@ -87,30 +90,30 @@ const ActionPill = ({ icon, label, onPress, disabled, success, successLabel }: a
                 blurIntensity={10}
                 tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
                 style={{
-                    height: 64,
+                    height: 72,
                     borderRadius: 16,
-                    backgroundColor: withAlpha(success ? '#22c55e' : colors.card, success ? 0.2 : 0.5),
+                    backgroundColor: withAlpha(colors.card, 0.5),
                     alignItems: 'center',
                     justifyContent: 'center',
-                    borderWidth: success ? 1 : 0,
-                    borderColor: withAlpha('#22c55e', 0.3),
+                    borderWidth: 0,
+                    borderColor: 'transparent',
                     gap: 6,
                     overflow: 'hidden'
                 }}
             >
                 <Animated.View style={[{ alignItems: 'center', justifyContent: 'center' }, iconStyle]}>
                     {success ? (
-                        <Check size={24} color="#22c55e" strokeWidth={3} />
+                        <Check size={24} color={colors.text} strokeWidth={2} />
                     ) : (
                         React.cloneElement(icon, { size: 24, color: colors.text, strokeWidth: 2 })
                     )}
                 </Animated.View>
                 <Animated.View style={textStyle}>
-                    <Text style={{ 
-                        color: success ? '#22c55e' : colors.text, 
-                        fontSize: 13, 
-                        fontWeight: success ? '700' : '500', 
-                        letterSpacing: 0.2 
+                    <Text style={{
+                        color: colors.text,
+                        fontSize: 13,
+                        fontWeight: '600',
+                        letterSpacing: 0.1
                     }}>
                         {success ? (successLabel || 'Added') : label}
                     </Text>
@@ -144,7 +147,6 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
 
     // View: 'search' = find user, 'card' = user card with actions
     const [view, setView] = useState<'search' | 'card'>('search');
-    const [isAddingContact, setIsAddingContact] = useState(false);
 
     const isLight = effectiveTheme === 'light';
     const isDark = effectiveTheme === 'dark';
@@ -322,7 +324,7 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
         headerProgress.value = withTiming(1, SMOOTH_TIMING);
     };
 
-    const handleSaveContact = () => {
+    const handleSaveContact = (silent = false) => {
         if (!foundUser?.userId) return;
 
         upsertContact({
@@ -337,21 +339,24 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
             friendImage: foundUser.profileImage
         });
 
-        setIsAddingContact(false);
-        showToast('Saved to contacts', 'success');
+        if (!silent) {
+            showToast('Saved to contacts', 'success');
+        }
     };
 
     const goBackToSearch = () => {
         setView('search');
-        setIsAddingContact(false); // Reset add contact state
-        setFirstName('');
-        setLastName('');
         contentTranslateX.value = withTiming(0, SMOOTH_TIMING);
         headerProgress.value = withTiming(0, SMOOTH_TIMING);
     };
 
     const handleMessage = () => {
         if (!foundUser?.userId) return;
+
+        // Auto-save contact if info was provided
+        if (firstName.trim()) {
+            handleSaveContact(true);
+        }
 
         const friendId = foundUser.userId;
         const friendName = contactDisplayName;
@@ -433,94 +438,130 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                     tint={effectiveTheme === 'dark' ? 'dark' : 'light'}
                 >
                     <TouchableOpacity
-                        onPress={view === 'search' ? goToCard : handleMessage}
-                        disabled={view === 'search' && (!foundUser || loading)}
+                        onPress={view === 'search' ? goToCard : () => { if (!isAdded) handleSaveContact(false); }}
+                        disabled={(view === 'search' && (!foundUser || loading)) || (view === 'card' && isAdded)}
                         style={styles.iconBtnCircle}
                         activeOpacity={0.85}
                     >
                         {view === 'card' ? (
-                            <Check size={20} color="#fff" strokeWidth={2.5} />
+                            isAdded ? (
+                                <UserCheck size={20} color="#fff" strokeWidth={2.5} />
+                            ) : (
+                                <UserPlus size={20} color="#fff" strokeWidth={2.5} />
+                            )
                         ) : (
-                            <ArrowRight size={20} color="#fff" strokeWidth={2.5} />
+                            <ArrowRight
+                                size={20}
+                                color={(view === 'search' && (!foundUser || loading)) ? colors.text : "#fff"}
+                                strokeWidth={2.5}
+                            />
                         )}
                     </TouchableOpacity>
                 </SafeLiquidGlass>
             </View>
-
             <View style={styles.contentContainer}>
                 <Animated.View style={[styles.slider, sliderStyle]}>
                     {/* --- PAGE 0: SEARCH --- */}
                     <Animated.View entering={FadeIn} style={[styles.page, { width: SCREEN_WIDTH }]}>
-                        {/* Search input */}
+                        {/* Search input section */}
                         <View style={styles.sectionWrapper}>
                             <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>FIND USER</Text>
-                            <View style={styles.sectionContainer}>
-                                <SafeLiquidGlass
-                                    style={[styles.glassCard, { borderWidth: 1, borderColor: withAlpha(colors.text, 0.05) }]}
-                                    blurIntensity={10}
-                                    tint={isDark ? 'dark' : 'light'}
-                                >
-                                    <View style={[StyleSheet.absoluteFill, { backgroundColor: withAlpha(colors.card, 0.5) }]} />
-                                    <View style={styles.row}>
-                                        <Search size={18} color={colors.textSecondary} style={{ marginRight: 12 }} />
-                                        <TextInput
-                                            style={[styles.rowInput, { color: colors.text }]}
-                                            placeholder="Search by username, phone, or ID"
-                                            placeholderTextColor={withAlpha(colors.text, 0.35)}
-                                            value={inputValue}
-                                            onChangeText={(t) => {
-                                                setInputValue(t);
-                                                setError('');
-                                            }}
-                                            autoCapitalize="none"
-                                            autoCorrect={false}
-                                            autoFocus
-                                            onSubmitEditing={() => handleSearch(true)}
-                                        />
-                                        {loading ? (
-                                            <ActivityIndicator size="small" color={colors.primary} />
-                                        ) : inputValue ? (
-                                            <TouchableOpacity
-                                                onPress={() => { setInputValue(''); setFoundUser(null); setError(''); }}
-                                                style={{ padding: 6 }}
-                                            >
-                                                <X size={16} color={colors.textSecondary} />
-                                            </TouchableOpacity>
-                                        ) : null}
-                                    </View>
-
-                                    {!!foundUser && (
-                                        <Animated.View entering={FadeIn}>
-                                            <View style={{ height: 1, backgroundColor: withAlpha(colors.text, 0.05) }} />
-                                            <TouchableOpacity
-                                                onPress={goToCard}
-                                                style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20 }}
-                                                activeOpacity={0.7}
-                                            >
-                                                <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: colors.primary, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }}>
-                                                    {foundUser.profileImage ? (
-                                                        <Image source={{ uri: foundUser.profileImage }} style={{ width: 44, height: 44 }} />
-                                                    ) : (
-                                                        <Text style={{ fontSize: 18, fontWeight: '600', color: '#fff' }}>
-                                                            {(foundUser.username || '?')[0].toUpperCase()}
-                                                        </Text>
-                                                    )}
-                                                </View>
-                                                <View style={{ flex: 1, marginLeft: 12 }}>
-                                                    <Text style={{ fontSize: 16, fontWeight: '600', color: colors.text }}>{foundUser.username}</Text>
-                                                    <Text style={{ fontSize: 14, color: colors.textSecondary }}>
-                                                        {foundUser.phoneNumber ? foundUser.phoneNumber : `@${foundUser.username}`}
-                                                    </Text>
-                                                </View>
-                                                <ChevronRight size={20} color={colors.textSecondary} />
-                                            </TouchableOpacity>
-                                        </Animated.View>
-                                    )}
-                                </SafeLiquidGlass>
+                            <View style={[styles.sectionContainer, { backgroundColor: withAlpha(colors.card, 1) }]}>
+                                <View style={styles.row}>
+                                    <Search size={18} color={colors.textSecondary} style={{ marginRight: 12 }} />
+                                    <TextInput
+                                        style={[styles.rowInput, { color: colors.text }]}
+                                        placeholder="Search by username, phone, or ID"
+                                        placeholderTextColor={withAlpha(colors.text, 0.35)}
+                                        value={inputValue}
+                                        onChangeText={(t) => {
+                                            setInputValue(t);
+                                            setError('');
+                                        }}
+                                        autoCapitalize="none"
+                                        autoCorrect={false}
+                                        autoFocus
+                                        onSubmitEditing={() => handleSearch(true)}
+                                    />
+                                    {loading ? (
+                                        <ActivityIndicator size="small" color={colors.primary} />
+                                    ) : inputValue ? (
+                                        <TouchableOpacity
+                                            onPress={() => { setInputValue(''); setFoundUser(null); setError(''); }}
+                                            style={{ padding: 6 }}
+                                        >
+                                            <X size={16} color={colors.textSecondary} />
+                                        </TouchableOpacity>
+                                    ) : null}
+                                </View>
                             </View>
-
-                            {error ? <Text style={styles.errorText}>{error}</Text> : null}
                         </View>
+
+                        {/* Search results & Add Contact info */}
+                        {!!foundUser && (
+                            <Animated.View entering={FadeIn.delay(50)} style={{ marginTop: 24 }}>
+                                <View style={[styles.sectionContainer, { backgroundColor: withAlpha(colors.card, 1) }]}>
+                                    <TouchableOpacity
+                                        onPress={goToCard}
+                                        style={{ flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 20 }}
+                                        activeOpacity={0.7}
+                                    >
+                                        <View style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: withAlpha(colors.cyan, 0.12), overflow: 'hidden', alignItems: 'center', justifyContent: 'center' }}>
+                                            {foundUser.profileImage ? (
+                                                <Image source={{ uri: foundUser.profileImage }} style={{ width: 44, height: 44 }} />
+                                            ) : (
+                                                <ContactsIcon size={22} color={colors.cyan} focused />
+                                            )}
+                                        </View>
+                                        <View style={{ flex: 1, marginLeft: 12 }}>
+                                            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+                                                <Text style={{ fontSize: 16, fontWeight: '600', color: colors.text }}>{foundUser.username}</Text>
+                                                {foundUser.isAgent ? (
+                                                    <View style={{ paddingHorizontal: 8, paddingVertical: 3, borderRadius: 999, backgroundColor: withAlpha(colors.primary, 0.14) }}>
+                                                        <Text style={{ fontSize: 11, fontWeight: '700', color: colors.primary }}>AGENT</Text>
+                                                    </View>
+                                                ) : null}
+                                            </View>
+                                            <Text style={{ fontSize: 14, color: colors.textSecondary }}>
+                                                {foundUser.phoneNumber ? foundUser.phoneNumber : `@${foundUser.username}`}
+                                            </Text>
+                                        </View>
+                                        <ChevronRight size={20} color={colors.textSecondary} />
+                                    </TouchableOpacity>
+                                </View>
+
+                                {!isAdded && (
+                                    <View style={{ marginTop: 24 }}>
+                                        <Text style={[styles.sectionHeader, { color: colors.textSecondary }]}>SAVE CONTACT NAME</Text>
+                                        <View style={[styles.sectionContainer, { backgroundColor: withAlpha(colors.card, 1) }]}>
+                                            <View style={styles.row}>
+                                                <Text style={[styles.rowLabel, { color: colors.text }]}>First Name</Text>
+                                                <TextInput
+                                                    style={[styles.rowInput, { color: colors.text }]}
+                                                    value={firstName}
+                                                    onChangeText={setFirstName}
+                                                    placeholder="Required"
+                                                    placeholderTextColor={withAlpha(colors.text, 0.3)}
+                                                />
+                                            </View>
+                                            <View style={[styles.divider, { backgroundColor: withAlpha(colors.text, 0.06) }]} />
+                                            <View style={styles.row}>
+                                                <Text style={[styles.rowLabel, { color: colors.text }]}>Last Name</Text>
+                                                <TextInput
+                                                    style={[styles.rowInput, { color: colors.text }]}
+                                                    value={lastName}
+                                                    onChangeText={setLastName}
+                                                    placeholder="Optional"
+                                                    placeholderTextColor={withAlpha(colors.text, 0.3)}
+                                                />
+                                            </View>
+                                        </View>
+                                    </View>
+                                )}
+                            </Animated.View>
+                        )}
+
+                        {error ? <Text style={styles.errorText}>{error}</Text> : null}
                     </Animated.View>
 
                     {/* --- PAGE 1: USER CARD --- */}
@@ -532,14 +573,12 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                                     <View style={{ alignItems: 'center', marginBottom: 24 }}>
                                         <SafeLiquidGlass
                                             blurIntensity={20}
-                                            style={{ width: 118, height: 118, borderRadius: 59, backgroundColor: withAlpha(colors.text, 0.1), overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}
+                                            style={{ width: 118, height: 118, borderRadius: 59, backgroundColor: withAlpha(colors.cyan, 0.12), overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginBottom: 16 }}
                                         >
                                             {foundUser.profileImage ? (
                                                 <Image source={{ uri: foundUser.profileImage }} style={{ width: 118, height: 118 }} />
                                             ) : (
-                                                <Text style={{ fontSize: 44, fontWeight: '700', color: colors.text }}>
-                                                    {(contactDisplayName || '?').substring(0, 1).toUpperCase()}
-                                                </Text>
+                                                <ContactsIcon size={58} color={colors.cyan} focused />
                                             )}
                                         </SafeLiquidGlass>
 
@@ -550,6 +589,14 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                                         <Text style={{ fontSize: 18, fontWeight: '500', color: colors.primary, marginTop: 4 }}>
                                             @{foundUser.username}
                                         </Text>
+
+                                        {foundUser.isAgent ? (
+                                            <View style={{ marginTop: 10, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999, backgroundColor: withAlpha(colors.primary, 0.14) }}>
+                                                <Text style={{ fontSize: 12, fontWeight: '700', color: colors.primary }}>
+                                                    Agent{foundUser.agentId ? ` • ${foundUser.agentId.slice(0, 8)}` : ''}
+                                                </Text>
+                                            </View>
+                                        ) : null}
 
                                         {foundUser.phoneNumber && (
                                             <Text style={{ fontSize: 14, color: colors.textSecondary, marginTop: 10 }}>
@@ -570,58 +617,15 @@ export default function NewChatModal({ onClose, onFullClose }: NewChatModalProps
                                             label="Call"
                                             onPress={() => showToast('Coming soon!', 'info')}
                                         />
+                                        {/* Added UserPlus Action Pill for Contact Addition */}
                                         <ActionPill
                                             icon={<UserPlus />}
                                             label="Add Contact"
                                             success={isAdded}
-                                            successLabel="Saved"
-                                            onPress={() => {
-                                                LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-                                                setIsAddingContact(!isAddingContact);
-                                            }}
+                                            successLabel="Added"
+                                            onPress={() => handleSaveContact(false)}
                                         />
                                     </View>
-
-                                    {isAddingContact && !isAdded && (
-                                        <View style={{ marginTop: 8 }}>
-                                            <Text style={[styles.sectionHeader, { color: colors.textSecondary, marginLeft: 0 }]}>CONTACT NAME</Text>
-                                            <View style={[styles.sectionContainer, { backgroundColor: withAlpha(colors.card, 0.6) }]}>
-                                                <View style={styles.row}>
-                                                    <Text style={[styles.rowLabel, { color: colors.text }]}>First Name</Text>
-                                                    <TextInput
-                                                        style={[styles.rowInput, { color: colors.text }]}
-                                                        value={firstName}
-                                                        onChangeText={setFirstName}
-                                                        placeholder="Required"
-                                                        placeholderTextColor={withAlpha(colors.text, 0.3)}
-                                                    />
-                                                </View>
-                                                <View style={[styles.divider, { backgroundColor: withAlpha(colors.text, 0.06) }]} />
-                                                <View style={styles.row}>
-                                                    <Text style={[styles.rowLabel, { color: colors.text }]}>Last Name</Text>
-                                                    <TextInput
-                                                        style={[styles.rowInput, { color: colors.text }]}
-                                                        value={lastName}
-                                                        onChangeText={setLastName}
-                                                        placeholder="Optional"
-                                                        placeholderTextColor={withAlpha(colors.text, 0.3)}
-                                                    />
-                                                </View>
-                                            </View>
-                                            
-                                            <TouchableOpacity
-                                                onPress={handleSaveContact}
-                                                disabled={!firstName.trim()}
-                                                style={[styles.saveBtn, { 
-                                                    backgroundColor: colors.primary, 
-                                                    marginTop: 16,
-                                                    opacity: firstName.trim() ? 1 : 0.6
-                                                }]}
-                                            >
-                                                <Text style={{ color: '#fff', fontWeight: '600', fontSize: 16 }}>Save Contact</Text>
-                                            </TouchableOpacity>
-                                        </View>
-                                    )}
                                 </View>
                             ) : (
                                 <View style={{ paddingTop: 30, alignItems: 'center' }}>
@@ -682,14 +686,14 @@ const styles = StyleSheet.create({
 
     sectionWrapper: { marginTop: 14 },
     sectionHeader: { fontSize: 13, fontWeight: '600', marginBottom: 8, marginLeft: 12, opacity: 0.6, letterSpacing: 0.5, textTransform: 'uppercase' },
-    sectionContainer: { borderRadius: 26, overflow: 'hidden' },
+    sectionContainer: { borderRadius: 23, overflow: 'hidden' },
     glassBtnCircle: { width: 44, height: 44, borderRadius: 22, overflow: 'hidden', alignItems: 'center', justifyContent: 'center' },
     iconBtnCircle: { width: 44, height: 44, alignItems: 'center', justifyContent: 'center' },
-    glassCard: { width: '100%', borderRadius: 26, overflow: 'hidden' },
+    glassCard: { width: '100%', borderRadius: 23, overflow: 'hidden' },
 
-    row: { flexDirection: 'row', alignItems: 'center', paddingVertical: 16, paddingHorizontal: 20, minHeight: 58 },
+    row: { flexDirection: 'row', alignItems: 'center', paddingHorizontal: 20, height: 46 },
     rowLabel: { fontSize: 16, fontWeight: '500', width: 98 },
-    rowInput: { flex: 1, fontSize: 16, fontWeight: '500', paddingVertical: 0 },
+    rowInput: { flex: 1, fontSize: 16, fontWeight: '500', paddingVertical: 0, height: '100%' },
     rowValue: { flex: 1, fontSize: 15, fontWeight: '500', textAlign: 'right' },
     divider: { height: 1, marginLeft: 20 },
 
@@ -778,15 +782,15 @@ const styles = StyleSheet.create({
         flex: 1,
     },
     miniInput: {
-        height: 44,
-        borderRadius: 10,
+        height: 46,
+        borderRadius: 23,
         paddingHorizontal: 12,
         fontSize: 16,
     },
     saveBtn: {
         marginTop: 8,
-        height: 44,
-        borderRadius: 10,
+        height: 46,
+        borderRadius: 23,
         alignItems: 'center',
         justifyContent: 'center'
     },

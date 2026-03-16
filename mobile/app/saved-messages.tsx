@@ -479,10 +479,17 @@ export default function SavedMessagesScreen() {
         const runtimeMessages: RuntimeChatMessage[] = filteredMessages.map((message: any) => {
             const fromId = typeof message?.fromId === 'string' ? message.fromId : undefined;
             const messageId = typeof message?.id === 'string' ? message.id : String(message?.id || '');
-            const uploadValue =
+            const nativeUploadValue = [
+                message?.uploadProgress,
+                message?.upload_progress,
+                message?.extra?.uploadProgress,
+                message?.extra?.upload_progress,
+            ].find((value: unknown): value is number => typeof value === 'number' && Number.isFinite(value));
+            const storeUploadValue =
                 messageId && Object.prototype.hasOwnProperty.call(uploadProgress, messageId)
                     ? uploadProgress[messageId]
                     : undefined;
+            const uploadValue = typeof nativeUploadValue === 'number' ? nativeUploadValue : storeUploadValue;
             return {
                 id: messageId,
                 chatId: 'saved_messages',

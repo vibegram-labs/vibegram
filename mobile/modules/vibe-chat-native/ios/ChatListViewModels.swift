@@ -451,11 +451,8 @@ private func firstNonEmptyString(
   return nil
 }
 
-private func parseWaveform(_ raw: Any?) -> [CGFloat]? {
-  guard let array = raw as? [Any], !array.isEmpty else {
-    return nil
-  }
-  let mapped: [CGFloat] = array.compactMap { item in
+private func normalizedWaveformSamples(from rawList: [Any]) -> [CGFloat]? {
+  let mapped: [CGFloat] = rawList.compactMap { item in
     if let num = item as? NSNumber {
       return CGFloat(truncating: num)
     }
@@ -475,6 +472,96 @@ private func parseWaveform(_ raw: Any?) -> [CGFloat]? {
     .filter { $0.isFinite }
     .map { max(0.0, min(1.0, $0)) }
   return normalized.isEmpty ? nil : normalized
+}
+
+private func waveformBitValue(
+  data: UnsafeRawPointer,
+  length: Int,
+  bitOffset: Int,
+  bitWidth: Int
+) -> Int32 {
+  guard length > 0, bitWidth > 0 else { return 0 }
+
+  let byteOffset = bitOffset / 8
+  guard byteOffset < length else { return 0 }
+
+  let normalizedData = data.advanced(by: byteOffset)
+  let normalizedBitOffset = bitOffset % 8
+  let mask = UInt32((1 << bitWidth) - 1)
+
+  var value: UInt32 = 0
+  let bytesToCopy = min(MemoryLayout<UInt32>.size, length - byteOffset)
+  memcpy(&value, normalizedData, bytesToCopy)
+
+  return Int32((value >> UInt32(normalizedBitOffset)) & mask)
+}
+
+private func decodeTelegramWaveformBitstream(_ data: Data, bitsPerSample: Int = 5) -> [CGFloat]? {
+  guard !data.isEmpty, bitsPerSample > 0 else { return nil }
+
+  let sampleCount = (data.count * 8) / bitsPerSample
+  guard sampleCount > 0 else { return nil }
+
+  let maxValue = CGFloat((1 << bitsPerSample) - 1)
+  guard maxValue > 0 else { return nil }
+
+  var result: [CGFloat] = []
+  result.reserveCapacity(sampleCount)
+
+  data.withUnsafeBytes { bytes in
+    guard let baseAddress = bytes.baseAddress else { return }
+    for index in 0..<sampleCount {
+      let value = waveformBitValue(
+        data: baseAddress,
+        length: data.count,
+        bitOffset: index * bitsPerSample,
+        bitWidth: bitsPerSample
+      )
+      result.append(max(0.0, min(1.0, CGFloat(value) / maxValue)))
+    }
+  }
+
+  return result.isEmpty ? nil : result
+}
+
+private func parseWaveform(_ raw: Any?) -> [CGFloat]? {
+  if let array = raw as? [Any], !array.isEmpty {
+    return normalizedWaveformSamples(from: array)
+  }
+
+  if let nsArray = raw as? NSArray, nsArray.count > 0 {
+    return normalizedWaveformSamples(from: nsArray.compactMap { $0 })
+  }
+
+  if let data = raw as? Data {
+    return decodeTelegramWaveformBitstream(data)
+  }
+
+  if let text = raw as? String {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+
+    if trimmed.hasPrefix("["),
+      let jsonData = trimmed.data(using: .utf8),
+      let json = try? JSONSerialization.jsonObject(with: jsonData),
+      let array = json as? [Any]
+    {
+      return normalizedWaveformSamples(from: array)
+    }
+
+    if let data = Data(base64Encoded: trimmed),
+      let decoded = decodeTelegramWaveformBitstream(data)
+    {
+      return decoded
+    }
+
+    let tokens = trimmed.split { $0 == "," || $0 == " " || $0 == "\n" || $0 == "\t" }
+    if !tokens.isEmpty {
+      return normalizedWaveformSamples(from: tokens.map(String.init))
+    }
+  }
+
+  return nil
 }
 
 private func optionalDoubleEqual(_ lhs: Double?, _ rhs: Double?, epsilon: Double = 0.0001) -> Bool {

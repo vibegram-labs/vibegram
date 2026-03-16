@@ -76,6 +76,7 @@ export default function ChatScreen() {
   const loadMessages = useChatStore((s) => s.loadMessages);
   const initSocket = useChatStore((s) => s.initSocket);
   const uploadProgress = useChatStore((s) => s.uploadProgress);
+  const cancelUpload = useChatStore((s) => s.cancelUpload);
   const onlineUsers = useChatStore((s) => s.onlineUsers);
   const typingUsers = useChatStore((s) => s.typingUsers);
 
@@ -246,10 +247,18 @@ export default function ChatScreen() {
         || (typeof message?.text === 'string' && message.text)
         || '';
       const timestampMs = toTimestampMs(message?.timestampMs ?? message?.timestamp);
-      const messageUploadProgress =
+      const nativeUploadProgress = toNumber(
+        message?.uploadProgress
+          ?? message?.upload_progress
+          ?? message?.extra?.uploadProgress
+          ?? message?.extra?.upload_progress,
+      );
+      const storeUploadProgress =
         messageId && Object.prototype.hasOwnProperty.call(uploadProgress, messageId)
           ? uploadProgress[messageId]
           : undefined;
+      const messageUploadProgress =
+        typeof nativeUploadProgress === 'number' ? nativeUploadProgress : storeUploadProgress;
       return {
         id: messageId,
         chatId: message?.chatId || effectiveChatId || undefined,
@@ -272,6 +281,22 @@ export default function ChatScreen() {
         replyToId: typeof message?.replyToId === 'string' ? message.replyToId : undefined,
         reactionEmoji: typeof message?.reactionEmoji === 'string' ? message.reactionEmoji : undefined,
         encryptedContent: typeof message?.encryptedContent === 'string' ? message.encryptedContent : undefined,
+        plainContent:
+          (typeof message?.plainContent === 'string' ? message.plainContent : undefined)
+          || (typeof message?.plain_content === 'string' ? message.plain_content : undefined)
+          || (typeof message?.plaintext === 'string' ? message.plaintext : undefined),
+        agentName:
+          (typeof message?.agentName === 'string' ? message.agentName : undefined)
+          || (typeof message?.agent_name === 'string' ? message.agent_name : undefined)
+          || (typeof message?.extra?.agentName === 'string' ? message.extra.agentName : undefined),
+        agentId:
+          (typeof message?.agentId === 'string' ? message.agentId : undefined)
+          || (typeof message?.agent_id === 'string' ? message.agent_id : undefined)
+          || (typeof message?.extra?.agentId === 'string' ? message.extra.agentId : undefined),
+        isAgentMessage:
+          message?.isAgentMessage === true
+          || message?.is_agent_message === true
+          || message?.extra?.isAgentMessage === true,
       };
     });
 
@@ -316,6 +341,11 @@ export default function ChatScreen() {
 
     if (type === 'headerBack') {
       router.back();
+      return;
+    }
+
+    if (type === 'openVibeAgentBuilder') {
+      router.push('/agent?mode=builder');
       return;
     }
 
@@ -425,6 +455,23 @@ export default function ChatScreen() {
       isGroup: isGroupOrChannel,
     };
 
+    if (type === 'cancelOutgoingUpload') {
+      const messageId = typeof payload.messageId === 'string' ? payload.messageId.trim() : '';
+      if (!messageId) return;
+      void callNativeEngine('cancelOutgoingMessage', {
+        chatId: effectiveChatId,
+        messageId,
+      }).catch((error) => {
+        console.warn('[chat/native-main] cancelOutgoingMessage failed', {
+          chatId: effectiveChatId,
+          messageId,
+          error,
+        });
+      });
+      cancelUpload(effectiveChatId, messageId);
+      return;
+    }
+
     if (type === 'mediaReplyRequested') {
       // Native side already sets the reply banner in the input bar.
       return;
@@ -465,6 +512,12 @@ export default function ChatScreen() {
         text,
         timestampMs: toNumber(payload.timestampMs ?? payload.timestamp) ?? Date.now(),
         replyToId: typeof payload.replyToMessageId === 'string' ? payload.replyToMessageId : undefined,
+        agentMention: payload.agentMention === true,
+        agentText: typeof payload.agentText === 'string' ? payload.agentText : undefined,
+        mentionedAgentUsername:
+          typeof payload.mentionedAgentUsername === 'string'
+            ? payload.mentionedAgentUsername
+            : undefined,
       });
       return;
     }
@@ -610,6 +663,7 @@ export default function ChatScreen() {
     activeChat?.friendId,
     activeChat?.muted,
     callNativeEngine,
+    cancelUpload,
     effectiveChatId,
     loadChats,
     router,

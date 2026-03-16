@@ -10,6 +10,8 @@ private struct ChatProfileRow {
   let fileSize: Int64?
   let timestampMs: Int64?
   let isPinned: Bool
+  let duration: CGFloat?
+  let waveform: [CGFloat]?
 
   static func parse(_ raw: [String: Any]) -> ChatProfileRow? {
     let message = raw["message"] as? [String: Any] ?? raw
@@ -50,6 +52,14 @@ private struct ChatProfileRow {
       || (message["pinned"] as? Bool == true)
       || (raw["pinned"] as? Bool == true)
 
+    let duration: CGFloat? = {
+      if let val = message["duration"] as? NSNumber { return CGFloat(val.floatValue) }
+      if let val = raw["duration"] as? NSNumber { return CGFloat(val.floatValue) }
+      return nil
+    }()
+
+    let waveform = parseChatProfileWaveform(message["waveform"] ?? raw["waveform"])
+
     return ChatProfileRow(
       messageId: messageId,
       type: type,
@@ -58,9 +68,97 @@ private struct ChatProfileRow {
       fileName: fileName,
       fileSize: fileSize,
       timestampMs: timestampMs,
-      isPinned: isPinned
+      isPinned: isPinned,
+      duration: duration,
+      waveform: waveform
     )
   }
+}
+
+private func normalizeChatProfileWaveformArray(_ rawList: [Any]) -> [CGFloat]? {
+  let values: [CGFloat] = rawList.compactMap { item in
+    if let number = item as? NSNumber {
+      return CGFloat(truncating: number)
+    }
+    if let text = item as? String, let value = Double(text) {
+      return CGFloat(value)
+    }
+    return nil
+  }
+  let normalized = values.filter { $0.isFinite }.map { max(0.0, min(1.0, $0)) }
+  return normalized.isEmpty ? nil : normalized
+}
+
+private func chatProfileWaveformBitValue(
+  data: UnsafeRawPointer,
+  length: Int,
+  bitOffset: Int,
+  bitWidth: Int
+) -> Int32 {
+  guard length > 0, bitWidth > 0 else { return 0 }
+
+  let byteOffset = bitOffset / 8
+  guard byteOffset < length else { return 0 }
+
+  let normalizedData = data.advanced(by: byteOffset)
+  let normalizedBitOffset = bitOffset % 8
+  let mask = UInt32((1 << bitWidth) - 1)
+
+  var value: UInt32 = 0
+  let bytesToCopy = min(MemoryLayout<UInt32>.size, length - byteOffset)
+  memcpy(&value, normalizedData, bytesToCopy)
+
+  return Int32((value >> UInt32(normalizedBitOffset)) & mask)
+}
+
+private func decodeChatProfileWaveformBitstream(_ data: Data, bitsPerSample: Int = 5) -> [CGFloat]? {
+  guard !data.isEmpty, bitsPerSample > 0 else { return nil }
+
+  let sampleCount = (data.count * 8) / bitsPerSample
+  guard sampleCount > 0 else { return nil }
+
+  let maxValue = CGFloat((1 << bitsPerSample) - 1)
+  var result: [CGFloat] = []
+  result.reserveCapacity(sampleCount)
+
+  data.withUnsafeBytes { bytes in
+    guard let baseAddress = bytes.baseAddress else { return }
+    for index in 0..<sampleCount {
+      let value = chatProfileWaveformBitValue(
+        data: baseAddress,
+        length: data.count,
+        bitOffset: index * bitsPerSample,
+        bitWidth: bitsPerSample
+      )
+      result.append(max(0.0, min(1.0, CGFloat(value) / maxValue)))
+    }
+  }
+
+  return result.isEmpty ? nil : result
+}
+
+private func parseChatProfileWaveform(_ raw: Any?) -> [CGFloat]? {
+  if let array = raw as? [Any], !array.isEmpty {
+    return normalizeChatProfileWaveformArray(array)
+  }
+
+  guard let text = raw as? String else { return nil }
+  let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+  guard !trimmed.isEmpty else { return nil }
+
+  if trimmed.hasPrefix("["),
+    let data = trimmed.data(using: .utf8),
+    let json = try? JSONSerialization.jsonObject(with: data),
+    let array = json as? [Any]
+  {
+    return normalizeChatProfileWaveformArray(array)
+  }
+
+  if let data = Data(base64Encoded: trimmed) {
+    return decodeChatProfileWaveformBitstream(data)
+  }
+
+  return nil
 }
 
 private struct ChatProfileLinkItem {
@@ -207,8 +305,10 @@ private final class ChatProfileFilterButton: UIControl {
       highlightView.topAnchor.constraint(equalTo: chromeView.contentView.topAnchor),
       highlightView.bottomAnchor.constraint(equalTo: chromeView.contentView.bottomAnchor),
 
-      titleLabel.leadingAnchor.constraint(equalTo: chromeView.contentView.leadingAnchor, constant: 14),
-      titleLabel.trailingAnchor.constraint(equalTo: chromeView.contentView.trailingAnchor, constant: -14),
+      titleLabel.leadingAnchor.constraint(
+        equalTo: chromeView.contentView.leadingAnchor, constant: 14),
+      titleLabel.trailingAnchor.constraint(
+        equalTo: chromeView.contentView.trailingAnchor, constant: -14),
       titleLabel.centerYAnchor.constraint(equalTo: chromeView.contentView.centerYAnchor),
     ])
   }
@@ -464,6 +564,122 @@ private final class ChatProfileMediaContentCell: UITableViewCell {
   }
 }
 
+private final class ChatProfileVoiceContentCell: UITableViewCell, VoicePlayableCell {
+  static let reuseIdentifier = "ChatProfileVoiceContentCell"
+
+  let voiceButtonView = VoicePlayProgressView()
+  private let titleLabel = UILabel()
+  private let subtitleLabel = UILabel()
+  private let dateLabel = UILabel()
+  private var messageId: String?
+  private var mediaUrl: String?
+
+  override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+    super.init(style: style, reuseIdentifier: reuseIdentifier)
+    selectionStyle = .none
+    backgroundColor = .clear
+    contentView.backgroundColor = .clear
+
+    voiceButtonView.isUserInteractionEnabled = false
+    contentView.addSubview(voiceButtonView)
+
+    titleLabel.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
+    contentView.addSubview(titleLabel)
+
+    subtitleLabel.font = UIFont.systemFont(ofSize: 14, weight: .medium)
+    contentView.addSubview(subtitleLabel)
+
+    dateLabel.font = UIFont.systemFont(ofSize: 14, weight: .regular)
+    dateLabel.textAlignment = .right
+    contentView.addSubview(dateLabel)
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let bounds = contentView.bounds.insetBy(dx: 16.0, dy: 8.0)
+
+    let buttonSize: CGFloat = 44.0
+    voiceButtonView.frame = CGRect(
+      x: bounds.minX,
+      y: bounds.minY + floor((bounds.height - buttonSize) * 0.5),
+      width: buttonSize,
+      height: buttonSize
+    )
+
+    let textX = voiceButtonView.frame.maxX + 12.0
+
+    let dateWidth: CGFloat = 70.0
+    dateLabel.frame = CGRect(
+      x: bounds.maxX - dateWidth,
+      y: bounds.minY + 6.0,
+      width: dateWidth,
+      height: 20.0
+    )
+
+    let textWidth = max(20.0, dateLabel.frame.minX - textX - 8.0)
+    titleLabel.frame = CGRect(
+      x: textX,
+      y: bounds.minY + 6.0,
+      width: textWidth,
+      height: 20.0
+    )
+
+    subtitleLabel.frame = CGRect(
+      x: textX,
+      y: titleLabel.frame.maxY + 2.0,
+      width: textWidth,
+      height: 18.0
+    )
+  }
+
+  override func setHighlighted(_ highlighted: Bool, animated: Bool) {
+    super.setHighlighted(highlighted, animated: animated)
+    UIView.animate(withDuration: highlighted ? 0.08 : 0.16) {
+      self.contentView.alpha = highlighted ? 0.74 : 1.0
+    }
+  }
+
+  func configure(
+    title: String,
+    subtitle: String,
+    row: ChatProfileRow,
+    titleColor: UIColor,
+    subtitleColor: UIColor,
+    accentColor: UIColor
+  ) {
+    messageId = row.messageId
+    mediaUrl = row.mediaUrl
+
+    titleLabel.text = title
+    titleLabel.textColor = titleColor
+
+    subtitleLabel.text = subtitle
+    subtitleLabel.textColor = subtitleColor
+
+    let dateMs = row.timestampMs ?? 0
+    if dateMs > 0 {
+      let date = Date(timeIntervalSince1970: TimeInterval(dateMs) / 1000.0)
+      let formatter = DateFormatter()
+      formatter.dateStyle = .none
+      formatter.timeStyle = .short
+      dateLabel.text = formatter.string(from: date)
+    } else {
+      dateLabel.text = ""
+    }
+    dateLabel.textColor = subtitleColor.withAlphaComponent(0.6)
+
+    voiceButtonView.applyStyle(fillColor: accentColor, iconTint: .white, ringTint: accentColor)
+  }
+
+  func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat) {
+    voiceButtonView.setPlaybackState(isPlaying: isPlaying, progress: progress, level: level)
+  }
+}
+
 final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDelegate {
   public var onViewportChanged = EventDispatcher()
   public var onNativeEvent = EventDispatcher()
@@ -534,7 +750,8 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
   private var currentRowSeparatorColor: UIColor = UIColor(white: 0.0, alpha: 0.08)
   private var currentRowHighlightColor: UIColor = UIColor(white: 0.0, alpha: 0.04)
   private var currentRowCardColor: UIColor = UIColor.white
-  private var currentRowAccentColor: UIColor = UIColor(red: 0.17, green: 0.65, blue: 0.71, alpha: 1.0)
+  private var currentRowAccentColor: UIColor = UIColor(
+    red: 0.17, green: 0.65, blue: 0.71, alpha: 1.0)
   private var currentRowIconBackgroundColor: UIColor = UIColor(
     red: 0.17,
     green: 0.65,
@@ -800,9 +1017,16 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
     tableView.dataSource = self
     tableView.delegate = self
     tableView.separatorStyle = .none
-    tableView.register(ChatProfileListRowCell.self, forCellReuseIdentifier: ChatProfileListRowCell.reuseIdentifier)
-    tableView.register(ChatProfileTabStripCell.self, forCellReuseIdentifier: ChatProfileTabStripCell.reuseIdentifier)
-    tableView.register(ChatProfileMediaContentCell.self, forCellReuseIdentifier: ChatProfileMediaContentCell.reuseIdentifier)
+    tableView.register(
+      ChatProfileListRowCell.self, forCellReuseIdentifier: ChatProfileListRowCell.reuseIdentifier)
+    tableView.register(
+      ChatProfileTabStripCell.self, forCellReuseIdentifier: ChatProfileTabStripCell.reuseIdentifier)
+    tableView.register(
+      ChatProfileMediaContentCell.self,
+      forCellReuseIdentifier: ChatProfileMediaContentCell.reuseIdentifier)
+    tableView.register(
+      ChatProfileVoiceContentCell.self,
+      forCellReuseIdentifier: ChatProfileVoiceContentCell.reuseIdentifier)
     tableView.separatorInset = UIEdgeInsets(top: 0.0, left: 16.0, bottom: 0.0, right: 16.0)
     tableView.contentInsetAdjustmentBehavior = .never
     if #available(iOS 15.0, *) {
@@ -1716,7 +1940,7 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
       return 60.0
     case .content:
       switch activeTab {
-      case .media, .gifs:
+      case .voice, .media, .gifs:
         return 72.0
       default:
         return 68.0
@@ -1731,12 +1955,35 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
     guard let row = contentRow(at: indexPath.row) else {
       return UITableViewCell(style: .default, reuseIdentifier: nil)
     }
+    if activeTab == .voice {
+      guard
+        let cell = tableView.dequeueReusableCell(
+          withIdentifier: ChatProfileVoiceContentCell.reuseIdentifier,
+          for: indexPath
+        ) as? ChatProfileVoiceContentCell
+      else {
+        return UITableViewCell(style: .default, reuseIdentifier: nil)
+      }
+
+      cell.configure(
+        title: contentTitle(for: row, index: indexPath.row),
+        subtitle: contentSubtitle(for: row),
+        row: row,
+        titleColor: currentTextColor,
+        subtitleColor: currentSecondaryTextColor,
+        accentColor: currentRowAccentColor
+      )
+      VoiceBubblePlaybackCoordinator.shared.bind(cell: cell, messageId: row.messageId)
+      return cell
+    }
 
     if activeTab == .media || activeTab == .gifs {
-      guard let cell = tableView.dequeueReusableCell(
-        withIdentifier: ChatProfileMediaContentCell.reuseIdentifier,
-        for: indexPath
-      ) as? ChatProfileMediaContentCell else {
+      guard
+        let cell = tableView.dequeueReusableCell(
+          withIdentifier: ChatProfileMediaContentCell.reuseIdentifier,
+          for: indexPath
+        ) as? ChatProfileMediaContentCell
+      else {
         return UITableViewCell(style: .default, reuseIdentifier: nil)
       }
       cell.backgroundColor = .clear
@@ -1760,10 +2007,12 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
       return cell
     }
 
-    guard let cell = tableView.dequeueReusableCell(
-      withIdentifier: ChatProfileListRowCell.reuseIdentifier,
-      for: indexPath
-    ) as? ChatProfileListRowCell else {
+    guard
+      let cell = tableView.dequeueReusableCell(
+        withIdentifier: ChatProfileListRowCell.reuseIdentifier,
+        for: indexPath
+      ) as? ChatProfileListRowCell
+    else {
       return UITableViewCell(style: .default, reuseIdentifier: nil)
     }
 
@@ -1786,10 +2035,12 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
 
     switch section {
     case .info:
-      guard let cell = tableView.dequeueReusableCell(
-        withIdentifier: ChatProfileListRowCell.reuseIdentifier,
-        for: indexPath
-      ) as? ChatProfileListRowCell else {
+      guard
+        let cell = tableView.dequeueReusableCell(
+          withIdentifier: ChatProfileListRowCell.reuseIdentifier,
+          for: indexPath
+        ) as? ChatProfileListRowCell
+      else {
         return UITableViewCell(style: .default, reuseIdentifier: nil)
       }
       let infoRows = currentInfoRows()
@@ -1837,10 +2088,12 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
       return cell
 
     case .tabs:
-      guard let cell = tableView.dequeueReusableCell(
-        withIdentifier: ChatProfileTabStripCell.reuseIdentifier,
-        for: indexPath
-      ) as? ChatProfileTabStripCell else {
+      guard
+        let cell = tableView.dequeueReusableCell(
+          withIdentifier: ChatProfileTabStripCell.reuseIdentifier,
+          for: indexPath
+        ) as? ChatProfileTabStripCell
+      else {
         return UITableViewCell(style: .default, reuseIdentifier: nil)
       }
       inlineTabsCell = cell
@@ -1861,10 +2114,16 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
     }
   }
 
-  func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
-    guard indexPath.section == Section.tabs.rawValue else { return }
-    if inlineTabsCell === cell {
+  func tableView(
+    _ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath
+  ) {
+    guard let section = Section(rawValue: indexPath.section) else { return }
+    if section == .tabs, inlineTabsCell === cell {
       inlineTabsCell = nil
+    } else if section == .content {
+      if let voiceCell = cell as? VoicePlayableCell {
+        VoiceBubblePlaybackCoordinator.shared.unbind(cell: voiceCell)
+      }
     }
   }
 
@@ -1899,6 +2158,15 @@ final class ChatProfileMainView: ExpoView, UITableViewDataSource, UITableViewDel
 
     case .content:
       guard let row = contentRow(at: indexPath.row) else { return }
+      if activeTab == .voice {
+        if let cell = tableView.cellForRow(at: indexPath) as? VoicePlayableCell {
+          VoiceBubblePlaybackCoordinator.shared.toggle(
+            cell: cell, messageId: row.messageId, mediaURL: row.mediaUrl
+          )
+        }
+        return
+      }
+
       var payload: [String: Any] = [
         "type": "profileContentPressed",
         "tab": activeTab.rawValue,

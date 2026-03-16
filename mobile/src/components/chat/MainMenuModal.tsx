@@ -26,6 +26,7 @@ import AnimatedGlassButton from '../native/AnimatedGlassButton'
 import SafeLiquidGlass from '../native/SafeLiquidGlass'
 import { EditChatVibeIcon } from '../Icons'
 import NewChatModal from './NewChatModal'
+import GlassToast from '../ui/GlassToast'
 
 const MaskedViewAny = MaskedView as any
 const AnimatedView = Animated.View as any
@@ -730,8 +731,7 @@ export default function MainMenuModal({ visible, onClose, parentScale }: MainMen
                     )}
                 </View>
             </GestureHandlerRootViewAny>
-
-
+            <GlassToast />
         </Modal>
     )
 }

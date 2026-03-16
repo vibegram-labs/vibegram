@@ -23,6 +23,7 @@ import LottieView from 'lottie-react-native';
 import Swipeable from 'react-native-gesture-handler/Swipeable';
 import { Animated as RNAnimated } from 'react-native';
 import { Stack } from 'expo-router';
+import DefaultAvatar from '../../src/components/avatar/DefaultAvatar';
 
 const withAlpha = (color: string, alpha: number): string => {
     if (!color) return `rgba(127, 127, 127, ${alpha})`;
@@ -72,7 +73,7 @@ const callRecordKey = (record: CallHistoryRecord, index: number): string => {
     return `call_${remoteId}_${ts}_${index}`;
 };
 
-const CALL_ROW_HEIGHT = 76;
+const CALL_ROW_HEIGHT = 88;
 
 interface CallRowProps {
     record: CallHistoryRecord;
@@ -140,11 +141,12 @@ const CallRow = React.memo(({ record, colors, theme, isEditing, onDelete }: Call
             <Animated.View style={[{ flex: 1 }, rStyle]}>
                 <Swipeable renderRightActions={renderRightActions} friction={2} rightThreshold={40} onSwipeableWillOpen={() => Haptics.selectionAsync()} containerStyle={{ overflow: 'visible' }} enabled={!isEditing}>
                     <Pressable style={({ pressed }) => [styles.callRow, { backgroundColor: pressed ? withAlpha(colors.text, 0.05) : 'transparent', borderBottomColor: withAlpha(colors.text, 0.03) }]}>
-                        <View style={styles.avatarContainer}>
-                            <SafeLiquidGlass style={styles.avatarGlass} blurIntensity={10} tint={theme === 'dark' ? 'dark' : 'light'}>
-                                {record.remoteUser.userImage ? <Image source={{ uri: record.remoteUser.userImage }} style={styles.avatarImage} /> :
-                                    <View style={styles.avatarPlaceholder}><Text style={[styles.avatarText, { color: colors.text }]}>{(record.remoteUser.userName || '?').substring(0, 1).toUpperCase()}</Text></View>}
-                            </SafeLiquidGlass>
+                        <View style={[styles.avatarContainer, { zIndex: 3, elevation: 3 }]}>
+                            {record.remoteUser.userImage ? (
+                                <Image source={{ uri: record.remoteUser.userImage }} style={styles.avatarImage} />
+                            ) : (
+                                <DefaultAvatar seed={record.remoteUser.userId || record.remoteUser.userName} theme={theme} size={60} />
+                            )}
                         </View>
                         <View style={styles.callInfo}>
                             <Text style={[styles.callName, { color: record.status === 'missed' ? '#ef4444' : colors.text }]} numberOfLines={1}>{record.remoteUser.userName}</Text>
@@ -285,10 +287,16 @@ export default function CallsScreen() {
                                 <ScrollView horizontal showsHorizontalScrollIndicator={false}>
                                     {stableCallHistory.slice(0, 5).map((c, index) => (
                                         <TouchableOpacity key={callRecordKey(c, index)} style={{ marginRight: 15, alignItems: 'center' }}>
-                                            <SafeLiquidGlass style={{ width: 50, height: 50, borderRadius: 25, overflow: 'hidden' }} blurIntensity={10} tint={effectiveTheme === 'dark' ? 'dark' : 'light'}>
-                                                {c.remoteUser.userImage ? <Image source={{ uri: c.remoteUser.userImage }} style={{ width: 50, height: 50 }} /> :
-                                                    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: withAlpha(colors.text, 0.05) }}><Text style={{ color: colors.text }}>{(c.remoteUser.userName || '?').substring(0, 1).toUpperCase()}</Text></View>}
-                                            </SafeLiquidGlass>
+                                            {c.remoteUser.userImage ? (
+                                                <Image source={{ uri: c.remoteUser.userImage }} style={styles.recentAvatarImage} />
+                                            ) : (
+                                                <DefaultAvatar
+                                                    seed={c.remoteUser.userId || c.remoteUser.userName}
+                                                    theme={effectiveTheme}
+                                                    size={60}
+                                                    style={styles.recentAvatarPlaceholder}
+                                                />
+                                            )}
                                             <Text style={{ color: colors.text, fontSize: 11, marginTop: 4, maxWidth: 60 }} numberOfLines={1}>{c.remoteUser.userName}</Text>
                                         </TouchableOpacity>
                                     ))}
@@ -389,12 +397,12 @@ const styles = StyleSheet.create({
     searchInput: { flex: 1, height: '100%', paddingHorizontal: 10, justifyContent: 'center', fontSize: 16 },
     listContentContainer: { paddingTop: 0 },
     listContentContainerEmpty: { flexGrow: 1 },
-    callRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 12, paddingHorizontal: 16 },
-    avatarContainer: { marginRight: 12 },
-    avatarGlass: { width: 50, height: 50, borderRadius: 25, overflow: 'hidden' },
-    avatarImage: { width: '100%', height: '100%' },
-    avatarPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(127,127,127,0.1)' },
-    avatarText: { fontSize: 18, fontWeight: '700' },
+    callRow: { flexDirection: 'row', alignItems: 'center', paddingVertical: 14, paddingHorizontal: 16 },
+    avatarContainer: { marginRight: 14, width: 60, height: 60, borderRadius: 30, overflow: 'hidden' },
+    avatarImage: { width: '100%', height: '100%', borderRadius: 30 },
+    avatarPlaceholder: { width: '100%', height: '100%', alignItems: 'center', justifyContent: 'center', borderRadius: 30 },
+    recentAvatarImage: { width: 60, height: 60, borderRadius: 30 },
+    recentAvatarPlaceholder: { width: 60, height: 60, borderRadius: 30, alignItems: 'center', justifyContent: 'center' },
     callInfo: { flex: 1 },
     callName: { fontSize: 17, fontWeight: '600' },
     callMeta: { fontSize: 13 },

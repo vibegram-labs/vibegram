@@ -91,6 +91,24 @@ export const CallsIcon = ({ size = 24, color = "#000", focused = false }: IconPr
     </AnimatedTabIcon>
 );
 
+export const AvatarPersonIcon = ({ size = 24, color = "#fff" }: IconProps) => (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path
+            d="M12 12C14.21 12 16 10.21 16 8C16 5.79 14.21 4 12 4C9.79 4 8 5.79 8 8C8 10.21 9.79 12 12 12ZM12 14C9.33 14 4 15.34 4 18V20H20V18C20 15.34 14.67 14 12 14Z"
+            fill={color}
+        />
+    </Svg>
+);
+
+export const AvatarBookmarkIcon = ({ size = 24, color = "#fff" }: IconProps) => (
+    <Svg width={size} height={size} viewBox="0 0 24 24" fill="none">
+        <Path
+            d="M6 4C6 2.9 6.9 2 8 2H16C17.1 2 18 2.9 18 4V22L12 19L6 22V4Z"
+            fill={color}
+        />
+    </Svg>
+);
+
 export const SettingsIcon = ({ size = 24, color = "#000", focused = false, imageUri, name }: IconProps & { imageUri?: string, name?: string }) => (
     <AnimatedTabIcon focused={focused} size={size} noSpring>
         <View style={{
@@ -857,4 +875,3 @@ export const HeaderSearchIcon = ({ size = 24, color = "#000", strokeWidth = 1.5 
         <Path d="M21 21l-4.35-4.35" />
     </Svg>
 );
-

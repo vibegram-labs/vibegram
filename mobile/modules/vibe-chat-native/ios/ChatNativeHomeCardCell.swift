@@ -83,6 +83,7 @@ final class ChatNativeHomeCardCell: UITableViewCell {
   private var leadingFullSwipeSpec: ChatNativeHomeSwipeActionSpec?
   private var trailingFullSwipeSpec: ChatNativeHomeSwipeActionSpec?
   private let largeSwipeHapticGenerator = UIImpactFeedbackGenerator(style: .medium)
+  private let avatarGradientLayerName = "avatarGradient"
 
   weak var swipeDelegate: ChatNativeHomeCardCellSwipeDelegate?
 
@@ -104,6 +105,7 @@ final class ChatNativeHomeCardCell: UITableViewCell {
     lastAvatarURLString = nil
     avatarImageView.image = nil
     avatarFallbackIconView.isHidden = false
+    avatarContainer.layer.sublayers?.removeAll(where: { $0.name == self.avatarGradientLayerName })
     unreadBadge.isHidden = true
     muteIconView.isHidden = true
     pinIconView.isHidden = true
@@ -140,6 +142,7 @@ final class ChatNativeHomeCardCell: UITableViewCell {
     row: ChatNativeHomeListRow,
     isDark: Bool,
     avatarBackgroundColor: UIColor?,
+    avatarGradientColors: (UIColor, UIColor)?,
     isEditing: Bool,
     isEditSelected: Bool
   ) {
@@ -204,38 +207,19 @@ final class ChatNativeHomeCardCell: UITableViewCell {
     editSelectionCheckView.isHidden = !(isEditing && isEditSelected)
     editSelectionCheckView.tintColor = isDark ? UIColor.black : UIColor.white
 
-    if row.isSavedMessages {
-      avatarFallbackIconView.image = UIImage(systemName: "bookmark.fill")
-      avatarFallbackIconView.tintColor = .white
+    avatarFallbackIconView.image = UIImage(systemName: row.isSavedMessages ? "bookmark.fill" : "person.fill")
+    avatarFallbackIconView.tintColor = .white
 
-      let gradientStart =
-        isDark
-        ? UIColor(red: 77 / 255, green: 217 / 255, blue: 229 / 255, alpha: 1)
-        : UIColor(red: 43 / 255, green: 165 / 255, blue: 181 / 255, alpha: 1)
-      let gradientEnd =
-        isDark
-        ? UIColor(red: 43 / 255, green: 165 / 255, blue: 181 / 255, alpha: 1)
-        : UIColor(red: 0 / 255, green: 122 / 255, blue: 124 / 255, alpha: 1)
-
-      var gradient =
-        avatarContainer.layer.sublayers?.first(where: { $0.name == "savedMessagesGradient" })
-        as? CAGradientLayer
-      if gradient == nil {
-        gradient = CAGradientLayer()
-        gradient?.name = "savedMessagesGradient"
-        avatarContainer.layer.insertSublayer(gradient!, at: 0)
-      }
-      gradient?.colors = [gradientStart.cgColor, gradientEnd.cgColor]
-      gradient?.startPoint = CGPoint(x: 0.5, y: 0)
-      gradient?.endPoint = CGPoint(x: 0.5, y: 1)
-      gradient?.frame = CGRect(x: 0, y: 0, width: 60, height: 60)
-
-      avatarContainer.backgroundColor = .clear
+    let resolvedAvatarGradientColors =
+      avatarGradientColors
+      ?? (row.isSavedMessages ? Self.savedMessagesGradientColors(isDark: isDark) : nil)
+    if let resolvedAvatarGradientColors {
+      applyAvatarGradient(
+        startColor: resolvedAvatarGradientColors.0,
+        endColor: resolvedAvatarGradientColors.1
+      )
     } else {
-      avatarContainer.layer.sublayers?.removeAll(where: { $0.name == "savedMessagesGradient" })
-      let fallbackIconName = "person.fill"
-      avatarFallbackIconView.image = UIImage(systemName: fallbackIconName)
-      avatarFallbackIconView.tintColor = isDark ? UIColor.white : UIColor.darkText
+      avatarContainer.layer.sublayers?.removeAll(where: { $0.name == avatarGradientLayerName })
       let avatarBackground =
         avatarBackgroundColor
         ?? (isDark
@@ -287,9 +271,37 @@ final class ChatNativeHomeCardCell: UITableViewCell {
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    avatarContainer.layer.sublayers?.first(where: { $0.name == "savedMessagesGradient" })?.frame =
+    avatarContainer.layer.sublayers?.first(where: { $0.name == avatarGradientLayerName })?.frame =
       avatarContainer.bounds
     layoutSwipeActionViews()
+  }
+
+  private func applyAvatarGradient(startColor: UIColor, endColor: UIColor) {
+    var gradient =
+      avatarContainer.layer.sublayers?.first(where: { $0.name == avatarGradientLayerName })
+      as? CAGradientLayer
+    if gradient == nil {
+      gradient = CAGradientLayer()
+      gradient?.name = avatarGradientLayerName
+      avatarContainer.layer.insertSublayer(gradient!, at: 0)
+    }
+    gradient?.colors = [startColor.cgColor, endColor.cgColor]
+    gradient?.startPoint = CGPoint(x: 0.5, y: 0)
+    gradient?.endPoint = CGPoint(x: 0.5, y: 1)
+    gradient?.frame = avatarContainer.bounds
+    avatarContainer.backgroundColor = .clear
+  }
+
+  private static func savedMessagesGradientColors(isDark: Bool) -> (UIColor, UIColor) {
+    let startColor =
+      isDark
+      ? UIColor(red: 77 / 255, green: 217 / 255, blue: 229 / 255, alpha: 1)
+      : UIColor(red: 43 / 255, green: 165 / 255, blue: 181 / 255, alpha: 1)
+    let endColor =
+      isDark
+      ? UIColor(red: 43 / 255, green: 165 / 255, blue: 181 / 255, alpha: 1)
+      : UIColor(red: 0 / 255, green: 122 / 255, blue: 124 / 255, alpha: 1)
+    return (startColor, endColor)
   }
 
   private func configureView() {
@@ -343,7 +355,7 @@ final class ChatNativeHomeCardCell: UITableViewCell {
     avatarFallbackIconView.translatesAutoresizingMaskIntoConstraints = false
     avatarFallbackIconView.contentMode = .scaleAspectFit
     avatarFallbackIconView.image = UIImage(systemName: "person.fill")
-    avatarFallbackIconView.tintColor = UIColor.darkGray
+    avatarFallbackIconView.tintColor = UIColor.white
 
     editSelectionBackgroundView.translatesAutoresizingMaskIntoConstraints = false
     editSelectionBackgroundView.backgroundColor = .clear

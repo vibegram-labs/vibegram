@@ -634,7 +634,7 @@ private class NativeRowsAdapter(
       holder.inlineAttachmentView.visibility = View.GONE
       voicePlayback.detach(holder)
       holder.voiceWaveView.updatePlayback(0f, 0f, false)
-      holder.voiceWaveView.setWaveform(null)
+      holder.voiceWaveView.setWaveform(null, null)
       holder.voiceButton.setPlaybackState(isPlaying = false, progress = 0f)
       holder.agentSenderLabel.visibility = View.GONE
     } else if (holder is TypingRowViewHolder) {
@@ -718,7 +718,7 @@ private class NativeRowsAdapter(
       statusView.visibility = View.GONE
       agentSenderLabel.visibility = View.GONE
       inlineAttachmentView.visibility = View.GONE
-      voiceWaveView.setWaveform(null)
+      voiceWaveView.setWaveform(null, null)
       container.setOnLongClickListener(null)
       return
     }
@@ -750,7 +750,7 @@ private class NativeRowsAdapter(
     inlineAttachmentSubtitleView.setTextColor(if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.76f) else withAlpha(appearance.textColorThem, 0.70f))
     timeView.setTextColor(if (effectiveIsMe) appearance.timeColorMe else appearance.timeColorThem)
     voiceDurationView.text = formatDuration(item.duration)
-    voiceWaveView.setWaveform(item.waveform)
+    voiceWaveView.setWaveform(item.waveform, item.duration)
 
     val lp = bubbleContainer.layoutParams as FrameLayout.LayoutParams
     lp.gravity = if (effectiveIsMe) Gravity.END else Gravity.START
@@ -830,47 +830,137 @@ private class NativeRowsAdapter(
       inlineAttachmentView.visibility = View.GONE
       inlineAttachmentView.setOnClickListener(null)
       voiceContainer.visibility = View.VISIBLE
-      bubbleContainer.minimumWidth = dp(258)
+      bubbleContainer.minimumWidth = dp(26)
+      val accentColor = bubbleMeGradient.firstOrNull() ?: Color.BLUE
       val voiceTextColor = if (effectiveIsMe) appearance.textColorMe else appearance.textColorThem
-      val voiceFillColor = if (effectiveIsMe) Color.argb(245, 255, 255, 255) else Color.argb(230, 255, 255, 255)
-      val voiceIconTint =
-        if (effectiveIsMe) {
-          bubbleMeGradient.firstOrNull() ?: Color.BLUE
-        } else {
-          withAlpha(voiceTextColor, 0.95f)
-        }
-      val voiceRingTint = withAlpha(voiceTextColor, 0.74f)
+
+      val voiceFillColor = if (effectiveIsMe) Color.WHITE else accentColor
+      val voiceIconTint = if (effectiveIsMe) accentColor else Color.WHITE
+
       voiceButton.applyStyle(
         fillColor = voiceFillColor,
         iconTint = voiceIconTint,
-        ringTint = voiceRingTint,
+        ringTint = Color.TRANSPARENT,
       )
       voiceDurationView.setTextColor(if (effectiveIsMe) withAlpha(appearance.textColorMe, 0.78f) else withAlpha(appearance.textColorThem, 0.78f))
       voiceDurationView.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-      voiceWaveView.setColors(
-        activeColor = withAlpha(voiceTextColor, 0.95f),
-        inactiveColor = withAlpha(voiceTextColor, 0.34f),
-      )
-      voiceButton.setOnClickListener {
-        voicePlayback.toggle(this, item)
-      }
-      val isExternallyActive =
-        externalVoiceMessageId != null &&
-          item.messageId != null &&
-          externalVoiceMessageId == item.messageId
-      if (isExternallyActive) {
-        voicePlayback.detach(this)
-        voiceWaveView.updatePlayback(externalVoiceProgress, if (externalVoiceIsPlaying) 0.2f else 0f, externalVoiceIsPlaying)
-        voiceButton.setPlaybackState(isPlaying = externalVoiceIsPlaying, progress = externalVoiceProgress)
-      } else {
-        voicePlayback.bind(this, item)
-      }
 
-      if (item.uploadProgress != null && item.uploadProgress > 0f && item.uploadProgress < 1f) {
-        voiceUploadProgressView.visibility = View.VISIBLE
-        voiceUploadProgressView.progress = item.uploadProgress
+      val activeWave = if (effectiveIsMe) Color.WHITE else accentColor
+      val inactiveWave = if (effectiveIsMe) withAlpha(Color.WHITE, 0.45f) else withAlpha(accentColor, 0.35f)
+
+      voiceWaveView.setColors(
+        activeColor = activeWave,
+        inactiveColor = inactiveWave,
+      )
+
+      val buttonSize = voiceButton.preferredButtonSizePx()
+      val buttonStart = dp(4)
+      val waveformGap = dp(10)
+      val topInset = dp(8)
+      val bottomInset = dp(5)
+      val durationGap = dp(2)
+      val rightInset = dp(8)
+      val waveformHeight = voiceWaveView.preferredContentHeightPx()
+      voiceDurationView.measure(
+        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+        View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
+      )
+      val durationWidth = voiceDurationView.measuredWidth.coerceAtLeast(dp(40))
+      val durationHeight = voiceDurationView.measuredHeight.coerceAtLeast(dp(14))
+      val maxBubbleWidth = (context.resources.displayMetrics.widthPixels * 0.72f).toInt()
+      val maxWaveWidth =
+        (maxBubbleWidth -
+          bubbleContainer.paddingLeft -
+          bubbleContainer.paddingRight -
+          buttonStart -
+          buttonSize -
+          waveformGap -
+          rightInset).coerceAtLeast(dp(96))
+      val waveformWidth = voiceWaveView.preferredContentWidth(maxWaveWidth)
+      val contentColumnWidth = kotlin.math.max(waveformWidth, durationWidth)
+      val voiceContainerWidth = buttonStart + buttonSize + waveformGap + contentColumnWidth + rightInset
+      val contentBlockHeight = waveformHeight + durationGap + durationHeight
+      val voiceContainerHeight =
+        kotlin.math.max(
+          contentBlockHeight + topInset + bottomInset,
+          buttonSize + dp(4),
+        )
+
+      (voiceContainer.layoutParams as? FrameLayout.LayoutParams)?.let { voiceLp ->
+        voiceLp.width = voiceContainerWidth
+        voiceLp.height = voiceContainerHeight
+        voiceLp.gravity = Gravity.START or Gravity.TOP
+        voiceContainer.layoutParams = voiceLp
+      }
+      val buttonTop = ((voiceContainerHeight - buttonSize) * 0.5f).roundToInt()
+      (voiceButton.layoutParams as? FrameLayout.LayoutParams)?.let { buttonLp ->
+        buttonLp.width = buttonSize
+        buttonLp.height = buttonSize
+        buttonLp.gravity = Gravity.START or Gravity.TOP
+        buttonLp.leftMargin = buttonStart
+        buttonLp.topMargin = buttonTop
+        voiceButton.layoutParams = buttonLp
+      }
+      (voiceUploadProgressView.layoutParams as? FrameLayout.LayoutParams)?.let { progressLp ->
+        progressLp.width = buttonSize
+        progressLp.height = buttonSize
+        progressLp.gravity = Gravity.START or Gravity.TOP
+        progressLp.leftMargin = buttonStart
+        progressLp.topMargin = buttonTop
+        voiceUploadProgressView.layoutParams = progressLp
+      }
+      val contentStart = buttonStart + buttonSize + waveformGap
+      // Vertically center the waveform+duration block relative to the container
+      val contentTop = ((voiceContainerHeight - contentBlockHeight) * 0.5f).roundToInt()
+      (voiceWaveView.layoutParams as? FrameLayout.LayoutParams)?.let { waveLp ->
+        waveLp.width = waveformWidth
+        waveLp.height = waveformHeight
+        waveLp.gravity = Gravity.START or Gravity.TOP
+        waveLp.leftMargin = contentStart
+        waveLp.topMargin = contentTop
+        voiceWaveView.layoutParams = waveLp
+      }
+      (voiceDurationView.layoutParams as? FrameLayout.LayoutParams)?.let { durationLp ->
+        durationLp.width = durationWidth
+        durationLp.height = durationHeight
+        durationLp.gravity = Gravity.START or Gravity.TOP
+        durationLp.leftMargin = contentStart
+        durationLp.topMargin = contentTop + waveformHeight + durationGap
+        voiceDurationView.layoutParams = durationLp
+      }
+      val uploadProgress =
+        item.uploadProgress?.takeIf { it.isFinite() }?.coerceIn(0f, 1f)
+      val isUploading = uploadProgress != null && uploadProgress < 1f
+      voiceButton.setUploadState(isUploading = isUploading, progress = uploadProgress)
+      if (isUploading) {
+        voiceUploadProgressView.visibility = View.GONE
+        voicePlayback.detach(this)
+        voiceWaveView.updatePlayback(uploadProgress ?: 0f, 0f, false)
+        voiceButton.setOnClickListener {
+          val messageId = item.messageId?.takeIf { it.isNotBlank() } ?: return@setOnClickListener
+          emitNativeEvent(
+            mapOf(
+              "type" to "cancelOutgoingUpload",
+              "messageId" to messageId,
+            ),
+          )
+        }
       } else {
         voiceUploadProgressView.visibility = View.GONE
+        voiceButton.setOnClickListener {
+          voicePlayback.toggle(this, item)
+        }
+        val isExternallyActive =
+          externalVoiceMessageId != null &&
+            item.messageId != null &&
+            externalVoiceMessageId == item.messageId
+        if (isExternallyActive) {
+          voicePlayback.detach(this)
+          voiceWaveView.updatePlayback(externalVoiceProgress, if (externalVoiceIsPlaying) 0.2f else 0f, externalVoiceIsPlaying)
+          voiceButton.setPlaybackState(isPlaying = externalVoiceIsPlaying, progress = externalVoiceProgress)
+        } else {
+          voicePlayback.bind(this, item)
+        }
       }
     } else {
       bubbleContainer.setPadding(dp(10), dp(7), dp(10), if (hasInlineAttachment) dp(7) else dp(7))
@@ -879,10 +969,11 @@ private class NativeRowsAdapter(
       voiceUploadProgressView.visibility = View.GONE
       bubbleContainer.minimumWidth = dp(26)
       voiceButton.setOnClickListener(null)
+      voiceButton.setUploadState(isUploading = false, progress = null)
       voiceButton.setPlaybackState(isPlaying = false, progress = 0f)
       voicePlayback.detach(this)
       voiceWaveView.updatePlayback(0f, 0f, false)
-      voiceWaveView.setWaveform(null)
+      voiceWaveView.setWaveform(null, null)
 
       val timeWidth = kotlin.math.ceil(timeView.paint.measureText(item.timestamp ?: "")).toInt()
       val statusReserve = if (showStatus) dp(16 + 3) else 0
@@ -1513,6 +1604,55 @@ class ChatListView(
             "agentText" to agentText,
           ),
         )
+      }
+
+      override fun onSendTextWithStandaloneAgentMention(
+        text: String,
+        agentText: String,
+        agentUsername: String,
+        messageId: String,
+      ) {
+        val trimmed = text.trim()
+        if (trimmed.isEmpty()) return
+        if (nativeSendEnabled) {
+          val chatId = engineChatId.trim()
+          val myUserId = engineMyUserId.trim()
+          val peerUserId = enginePeerUserId.trim()
+          if (chatId.isEmpty()) {
+            Log.w("ChatListView", "native ChatEngine standalone agent send blocked: empty chatId messageId=$messageId")
+            return
+          }
+          diffExecutor.execute {
+            ChatEngine.sendMessage(
+              mapOf(
+                "chatId" to chatId,
+                "messageId" to messageId,
+                "type" to "text",
+                "text" to trimmed,
+                "myUserId" to myUserId,
+                "peerUserId" to peerUserId,
+                "isGroup" to engineIsGroupOrChannel,
+                "agentText" to agentText,
+                "mentionedAgentUsername" to agentUsername,
+              ),
+            )
+          }
+          return
+        }
+
+        emitNativeEvent(
+          mapOf(
+            "type" to "sendMessage",
+            "text" to trimmed,
+            "messageId" to messageId,
+            "agentText" to agentText,
+            "mentionedAgentUsername" to agentUsername,
+          ),
+        )
+      }
+
+      override fun onRequestVibeAgentBuilder() {
+        emitNativeEvent(mapOf("type" to "openVibeAgentBuilder"))
       }
 
       override fun onRecordingState(isRecording: Boolean, isLocked: Boolean) {

@@ -2,15 +2,30 @@ defmodule VibeWeb.ChatController do
   use VibeWeb, :controller
   alias Vibe.Chat
   alias Vibe.Accounts
+  alias Vibe.Agents
   require Logger
 
   def create(conn, %{"friendId" => friend_id}) do
     my_id = conn.assigns.current_user.id
 
     # Validate friend exists to avoid foreign key errors.
-    if is_nil(Accounts.get_user(friend_id)) do
-      conn |> put_status(:not_found) |> json(%{error: "User not found"})
-    else
+    case Accounts.get_user(friend_id) do
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "User not found"})
+
+      %{is_agent: true} ->
+        if Agents.published_agent_user?(friend_id) do
+          do_create_chat(conn, my_id, friend_id)
+        else
+          conn |> put_status(:forbidden) |> json(%{error: "Agent not available"})
+        end
+
+      _user ->
+        do_create_chat(conn, my_id, friend_id)
+    end
+  end
+
+  defp do_create_chat(conn, my_id, friend_id) do
     # Check if chat already exists
     case Chat.find_chat_between_users(my_id, friend_id) do
       id when not is_nil(id) ->
@@ -19,6 +34,7 @@ defmodule VibeWeb.ChatController do
           :restored ->
             # Chat was deleted, now restored - return empty messages (fresh start)
             json(conn, %{chatId: id, messages: [], nextCursor: nil, hasMore: false})
+
           :not_deleted ->
             # Chat exists and wasn't deleted - return only the latest page
             page = Chat.get_messages_for_user_page(id, my_id, limit: 30)
@@ -47,7 +63,6 @@ defmodule VibeWeb.ChatController do
             page = Chat.get_messages_for_user_page(chat_id, my_id, limit: 30)
             json(conn, %{chatId: chat_id, messages: page.messages, nextCursor: page.next_cursor, hasMore: page.has_more})
         end
-    end
     end
   end
 

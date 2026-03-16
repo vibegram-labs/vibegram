@@ -165,7 +165,12 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
     addView(divider)
   }
 
-  fun bind(row: ChatNativeHomeListRow, isDark: Boolean, avatarBackgroundColor: Int?) {
+  fun bind(
+    row: ChatNativeHomeListRow,
+    isDark: Boolean,
+    avatarBackgroundColor: Int?,
+    avatarGradientColors: IntArray?,
+  ) {
     val primary = if (isDark) Color.WHITE else Color.rgb(22, 28, 36)
     val secondary = if (isDark) Color.rgb(190, 196, 207) else Color.rgb(114, 123, 138)
     val typing = if (isDark) Color.rgb(138, 202, 255) else Color.rgb(43, 135, 210)
@@ -182,10 +187,18 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
     avatarFallbackIcon.setImageResource(
       if (row.isSavedMessages) R.drawable.ic_avatar_bookmark else R.drawable.ic_avatar_person,
     )
-    avatarFallbackIcon.setColorFilter(if (isDark) Color.WHITE else Color.DKGRAY)
-    avatarContainer.background = circleDrawable(
-      avatarBackgroundColor ?: if (isDark) Color.argb(20, 248, 246, 252) else Color.argb(13, 26, 26, 31),
-    )
+    avatarFallbackIcon.setColorFilter(Color.WHITE)
+    val resolvedAvatarGradientColors =
+      avatarGradientColors ?: if (row.isSavedMessages) savedMessagesGradientColors(isDark) else null
+    avatarContainer.background =
+      if (resolvedAvatarGradientColors != null) {
+        circleGradientDrawable(resolvedAvatarGradientColors[0], resolvedAvatarGradientColors[1])
+      } else {
+        circleDrawable(
+          avatarBackgroundColor
+            ?: if (isDark) Color.argb(20, 248, 246, 252) else Color.argb(13, 26, 26, 31),
+        )
+      }
     loadAvatar(row.avatarUri)
 
     onlineDot.visibility = if (row.isOnline) VISIBLE else GONE
@@ -309,6 +322,23 @@ internal class ChatNativeHomeCardView(context: Context) : FrameLayout(context) {
       if (strokeWidthPx > 0) {
         setStroke(strokeWidthPx, strokeColor)
       }
+    }
+  }
+
+  private fun circleGradientDrawable(startColor: Int, endColor: Int): GradientDrawable {
+    return GradientDrawable(
+      GradientDrawable.Orientation.TOP_BOTTOM,
+      intArrayOf(startColor, endColor),
+    ).apply {
+      shape = GradientDrawable.OVAL
+    }
+  }
+
+  private fun savedMessagesGradientColors(isDark: Boolean): IntArray {
+    return if (isDark) {
+      intArrayOf(Color.rgb(77, 217, 229), Color.rgb(43, 165, 181))
+    } else {
+      intArrayOf(Color.rgb(43, 165, 181), Color.rgb(0, 122, 124))
     }
   }
 

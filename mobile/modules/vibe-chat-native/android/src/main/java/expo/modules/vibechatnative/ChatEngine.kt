@@ -258,6 +258,8 @@ internal object ChatEngine {
   private val nativePendingDeletePushRefs = linkedMapOf<String, Pair<String, String>>() // ref -> (chatId,messageId)
   private val pendingOutboundDraftsByMessageId = linkedMapOf<String, Map<String, Any?>>()
   private val pendingOutboundQueueByChat = linkedMapOf<String, MutableList<String>>()
+  private val activeMediaUploadCallsByMessageId = linkedMapOf<String, Call>()
+  private val canceledOutboundMessageIds = linkedSetOf<String>()
   private val nativeTypingStateByChatId = linkedMapOf<String, Boolean>()
   private val peerTypingUserIdsByChatId = linkedMapOf<String, MutableSet<String>>()
   private val nativeRecordingStateByChatId = linkedMapOf<String, Boolean>()
@@ -834,6 +836,12 @@ internal object ChatEngine {
       nativePendingDeletePushRefs.clear()
       pendingOutboundDraftsByMessageId.clear()
       pendingOutboundQueueByChat.clear()
+      onlineUsers.clear()
+      lastSeenByUserId.clear()
+      surfaceBindings.clear()
+      openChatChannels.clear()
+      receiptIndex.clear()
+      localStatusIndex.clear()
       nativeTypingStateByChatId.clear()
       peerTypingUserIdsByChatId.clear()
       nativeRecordingStateByChatId.clear()
@@ -843,6 +851,9 @@ internal object ChatEngine {
       historyLoadingChats.clear()
       liveMessageRowsByChat.clear()
       deletedMessageIdsByChat.clear()
+      chatPeerUserIdsByChatId.clear()
+      friendPublicKeysByUserId.clear()
+      configuredUserId = null
       // Clear cached private key on disconnect to reduce memory exposure.
       cachedDecryptPrivateKey = null
       cachedDecryptPrivateKeyPem = null
@@ -1055,6 +1066,7 @@ internal object ChatEngine {
     val messageId = normalized(payload["messageId"] ?: payload["message_id"])
       ?: return mapOf("accepted" to false, "reason" to "invalid_message")
     return synchronized(lock) {
+      canceledOutboundMessageIds.remove(messageId)
       val draft = pendingOutboundDraftsByMessageId[messageId]
         ?: return@synchronized mapOf("accepted" to false, "reason" to "missing_draft", "messageId" to messageId)
       val chatId =
@@ -1076,10 +1088,17 @@ internal object ChatEngine {
         normalized(payload["chatId"] ?: payload["chat_id"])
           ?: normalized(draft?.get("chatId") ?: draft?.get("chat_id"))
           ?: return@synchronized mapOf("accepted" to false, "reason" to "invalid_chat", "messageId" to messageId)
+      val hadActiveUpload = activeMediaUploadCallsByMessageId.remove(messageId)?.also { it.cancel() } != null
+      canceledOutboundMessageIds.add(messageId)
       removeQueuedOutboundDraftLocked(chatId, messageId, dropDraft = true)
+      setLiveMessageUploadProgressLocked(chatId, messageId, null)
       upsertLocalStatusLocked(chatId, messageId, "error")
-      appendJournalLocked("native-outgoing-cancel", mapOf("chatId" to chatId, "messageId" to messageId))
+      appendJournalLocked(
+        "native-outgoing-cancel",
+        mapOf("chatId" to chatId, "messageId" to messageId, "hadActiveUpload" to hadActiveUpload),
+      )
       emitChangeLocked("outgoingMessageCanceled", chatId, messageId)
+      emitChangeLocked("chatMessageChanged", chatId, messageId)
       emitChangeLocked("messageStatusChanged", chatId, messageId)
       mapOf("accepted" to true, "messageId" to messageId, "state" to "canceled")
     }
@@ -1169,6 +1188,7 @@ internal object ChatEngine {
     )
 
     return synchronized(lock) {
+      canceledOutboundMessageIds.remove(messageId)
       val effectivePayload = LinkedHashMap(payload)
       val isGroup = (payload["isGroup"] as? Boolean == true) || (payload["isGroupOrChannel"] as? Boolean == true)
       Log.i("ChatEngine", "sendMessage START chatId=$chatId messageId=$messageId isGroup=$isGroup")
@@ -1222,6 +1242,13 @@ internal object ChatEngine {
       upsertLocalStatusLocked(chatId, messageId, "sending")
       emitChangeLocked("chatMessageInserted", chatId, messageId)
       emitChangeLocked("messageStatusChanged", chatId, messageId)
+      val shouldSeedNativeUploadProgress =
+        setOf("image", "gif", "file", "voice", "video", "music").contains(type) &&
+          !mediaUrl.isNullOrBlank() &&
+          isLocalMediaUri(mediaUrl!!)
+      if (shouldSeedNativeUploadProgress) {
+        setLiveMessageUploadProgressLocked(chatId, messageId, 0.02f)
+      }
       Log.i("ChatEngine", "sendMessage optimistic row emitted in ${System.currentTimeMillis() - optimisticStartMs}ms chatId=$chatId messageId=$messageId")
 
       val apiBaseUrl = apiBaseUrlLocked()
@@ -1264,6 +1291,7 @@ internal object ChatEngine {
         if (needsUpload) {
           if (apiBaseUrl.isNullOrBlank() || token.isNullOrBlank() || userId.isNullOrBlank()) {
             synchronized(lock) {
+              setLiveMessageUploadProgressLocked(chatId, messageId, null)
               upsertLocalStatusLocked(chatId, messageId, "pending")
               queueOutboundDraftLocked(chatId, messageId, effectivePayload, "missing_upload_config")
               appendJournalLocked(
@@ -1283,10 +1311,20 @@ internal object ChatEngine {
               "native-media-upload-start",
               mapOf("chatId" to chatId, "messageId" to messageId, "type" to type),
             )
+            setLiveMessageUploadProgressLocked(chatId, messageId, 0.08f)
           }
 
-          val uploadResult = uploadLocalMediaLocked(mediaUrl!!, type, fileName, userId, token, apiBaseUrl) { p ->
+          val uploadResult = uploadLocalMediaLocked(
+            localUri = mediaUrl!!,
+            messageType = type,
+            fileNameHint = fileName,
+            userId = userId,
+            token = token,
+            apiBaseUrl = apiBaseUrl,
+            messageId = messageId,
+          ) { p ->
             synchronized(lock) {
+              if (canceledOutboundMessageIds.contains(messageId)) return@synchronized
               setLiveMessageUploadProgressLocked(chatId, messageId, p * 0.90f)
             }
           }
@@ -1294,6 +1332,14 @@ internal object ChatEngine {
           synchronized(lock) {
             when (uploadResult) {
               is LocalMediaUploadOutcome.Success -> {
+                if (canceledOutboundMessageIds.contains(messageId)) {
+                  setLiveMessageUploadProgressLocked(chatId, messageId, null)
+                  upsertLocalStatusLocked(chatId, messageId, "error")
+                  emitChangeLocked("chatMessageChanged", chatId, messageId)
+                  emitChangeLocked("messageStatusChanged", chatId, messageId)
+                  canceledOutboundMessageIds.remove(messageId)
+                  return@Thread
+                }
                 finalMediaUrl = uploadResult.value.remoteUrl
                 if (finalFileName.isNullOrBlank()) finalFileName = uploadResult.value.fileName
                 if (finalFileSize == null) finalFileSize = uploadResult.value.fileSize
@@ -1319,6 +1365,7 @@ internal object ChatEngine {
                 if (finalFileSize != null) optimisticMessage["fileSize"] = finalFileSize
                 optimisticRow["message"] = optimisticMessage
                 upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
+                setLiveMessageUploadProgressLocked(chatId, messageId, 0.96f)
                 appendJournalLocked(
                   "native-media-upload-ok",
                   mapOf("chatId" to chatId, "messageId" to messageId, "url" to finalMediaUrl),
@@ -1335,6 +1382,7 @@ internal object ChatEngine {
                   "ChatEngine",
                   "sendMessage uploadFailed chatId=$chatId messageId=$messageId type=$type reason=$reason retryable=$shouldQueue localUri=${mediaUrl?.take(160)}",
                 )
+                setLiveMessageUploadProgressLocked(chatId, messageId, null)
                 upsertLocalStatusLocked(chatId, messageId, if (shouldQueue) "pending" else "error")
                 appendJournalLocked(
                   "native-media-upload-error",
@@ -1344,9 +1392,21 @@ internal object ChatEngine {
                 if (shouldQueue) {
                   queueOutboundDraftLocked(chatId, messageId, effectivePayload, reason)
                 }
+                canceledOutboundMessageIds.remove(messageId)
                 return@Thread
               }
             }
+          }
+        }
+
+        synchronized(lock) {
+          if (canceledOutboundMessageIds.contains(messageId)) {
+            setLiveMessageUploadProgressLocked(chatId, messageId, null)
+            upsertLocalStatusLocked(chatId, messageId, "error")
+            emitChangeLocked("chatMessageChanged", chatId, messageId)
+            emitChangeLocked("messageStatusChanged", chatId, messageId)
+            canceledOutboundMessageIds.remove(messageId)
+            return@Thread
           }
         }
 
@@ -1442,8 +1502,28 @@ internal object ChatEngine {
           "latitude" to null,
           "longitude" to null,
         )
+        if ((payload["agentMention"] as? Boolean) == true) {
+          wirePayload["agentMention"] = true
+          (payload["agentText"] as? String)?.takeIf { it.isNotBlank() }?.let {
+            wirePayload["agentText"] = it
+          }
+        }
+        (payload["mentionedAgentUsername"] as? String)?.takeIf { it.isNotBlank() }?.let {
+          wirePayload["mentionedAgentUsername"] = it
+          (payload["agentText"] as? String)?.takeIf { value -> value.isNotBlank() }?.let { agentText ->
+            wirePayload["agentText"] = agentText
+          }
+        }
 
         synchronized(lock) {
+          if (canceledOutboundMessageIds.contains(messageId)) {
+            setLiveMessageUploadProgressLocked(chatId, messageId, null)
+            upsertLocalStatusLocked(chatId, messageId, "error")
+            emitChangeLocked("chatMessageChanged", chatId, messageId)
+            emitChangeLocked("messageStatusChanged", chatId, messageId)
+            canceledOutboundMessageIds.remove(messageId)
+            return@Thread
+          }
           optimisticMessage["encryptedContent"] = encryptedContent
           optimisticRow["message"] = optimisticMessage
           upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
@@ -2135,6 +2215,7 @@ internal object ChatEngine {
     val replyToId = normalized(metadata["replyToId"] ?: metadata["reply_to_id"] ?: payload["replyToId"])
     val contact = metadata["contact"] ?: payload["contact"]
     val isVideoNote = metadata["isVideoNote"] ?: payload["isVideoNote"]
+    val waveform = metadata["waveform"] ?: payload["waveform"]
     val stickerId = normalized(metadata["stickerId"] ?: payload["stickerId"])
     val stickerPackId = normalized(
       metadata["stickerPackId"] ?: metadata["packId"] ?: payload["stickerPackId"] ?: payload["packId"],
@@ -2183,6 +2264,7 @@ internal object ChatEngine {
       if (width != null) encryptedPayload["width"] = width
       if (height != null) encryptedPayload["height"] = height
       if (duration != null) encryptedPayload["duration"] = duration
+      if (waveform != null) encryptedPayload["waveform"] = waveform
       if (!replyToId.isNullOrBlank()) encryptedPayload["replyToId"] = replyToId
       if (contact != null) encryptedPayload["contact"] = contact
       if (isVideoNote != null) encryptedPayload["isVideoNote"] = isVideoNote
@@ -2211,6 +2293,7 @@ internal object ChatEngine {
     if (width != null) extraPayload["width"] = width
     if (height != null) extraPayload["height"] = height
     if (duration != null) extraPayload["duration"] = duration
+    if (waveform != null) extraPayload["waveform"] = waveform
     if (!replyToId.isNullOrBlank()) extraPayload["replyToId"] = replyToId
     if (isVideoNote != null) extraPayload["isVideoNote"] = isVideoNote
     if (!stickerId.isNullOrBlank()) extraPayload["stickerId"] = stickerId
@@ -2909,7 +2992,12 @@ internal object ChatEngine {
 
   private fun upsertLocalStatusLocked(chatId: String, messageId: String, status: String) {
     val chatMap = localStatusIndex.getOrPut(chatId) { linkedMapOf() }
-    chatMap[messageId] = strongerDisplayStatus(chatMap[messageId], status)
+    val nextStatus = strongerDisplayStatus(chatMap[messageId], status)
+    chatMap[messageId] = nextStatus
+    setLiveMessageStatusLocked(chatId, messageId, nextStatus)
+    if (nextStatus == "sent" || nextStatus == "delivered" || nextStatus == "read" || nextStatus == "error") {
+      setLiveMessageUploadProgressLocked(chatId, messageId, null)
+    }
     state["localStatusCount"] = localStatusIndex.values.sumOf { it.size }
     state["updatedAt"] = System.currentTimeMillis()
   }
@@ -3215,11 +3303,24 @@ internal object ChatEngine {
     }
   }
 
-  private fun setLiveMessageUploadProgressLocked(chatId: String, messageId: String, progress: Float) {
+  private fun setLiveMessageStatusLocked(chatId: String, messageId: String, status: String) {
     val row = liveMessageRowsByChat[chatId]?.get(messageId) ?: return
     val nextRow = LinkedHashMap(row)
     val msg = (nextRow["message"] as? Map<*, *>)?.let { LinkedHashMap(it) } ?: return
-    msg["uploadProgress"] = progress
+    msg["status"] = status
+    nextRow["message"] = msg
+    liveMessageRowsByChat[chatId]?.put(messageId, nextRow)
+  }
+
+  private fun setLiveMessageUploadProgressLocked(chatId: String, messageId: String, progress: Float?) {
+    val row = liveMessageRowsByChat[chatId]?.get(messageId) ?: return
+    val nextRow = LinkedHashMap(row)
+    val msg = (nextRow["message"] as? Map<*, *>)?.let { LinkedHashMap(it) } ?: return
+    if (progress != null && progress.isFinite()) {
+      msg["uploadProgress"] = progress.coerceIn(0f, 1f)
+    } else {
+      msg.remove("uploadProgress")
+    }
     nextRow["message"] = msg
     liveMessageRowsByChat[chatId]?.put(messageId, nextRow)
     emitChangeLocked("chatMessageChanged", chatId, messageId)
@@ -3422,12 +3523,20 @@ internal object ChatEngine {
     if ((type.equals("voice", ignoreCase = true) || type.equals("music", ignoreCase = true)) && isMe) {
       val existingMessage = findMessagePayloadLocked(chatId, messageId)
       val localPlaybackUrl = extractLocalPlaybackMediaUrlFromMessage(existingMessage)
+      val localWaveform = extractWaveformFromMessage(existingMessage)
       if (!localPlaybackUrl.isNullOrBlank()) {
         Log.d(
           "ChatEngine",
           "preserve local voice url on incoming echo chatId=$chatId messageId=$messageId local=${localPlaybackUrl.take(120)}",
         )
         row = mergeLocalPlaybackMediaUrlIntoRow(row, localPlaybackUrl)
+      }
+      if (extractWaveformFromMessage((row["message"] as? Map<*, *>)).isNullOrEmpty() && !localWaveform.isNullOrEmpty()) {
+        Log.d(
+          "ChatEngine",
+          "preserve local waveform on incoming echo chatId=$chatId messageId=$messageId bars=${localWaveform.size}",
+        )
+        row = mergeWaveformIntoRow(row, localWaveform)
       }
     }
     upsertLiveMessageRowLocked(chatId, messageId, row)
@@ -3564,6 +3673,15 @@ internal object ChatEngine {
     return null
   }
 
+  private fun extractWaveformFromMessage(message: Map<*, *>?): List<Any?>? {
+    if (message == null) return null
+    val direct = message["waveform"] as? List<*>
+    if (!direct.isNullOrEmpty()) return direct.toList()
+    val metadata = message["metadata"] as? Map<*, *>
+    val metaWaveform = metadata?.get("waveform") as? List<*>
+    return if (!metaWaveform.isNullOrEmpty()) metaWaveform.toList() else null
+  }
+
   private fun mergeLocalPlaybackMediaUrlIntoRow(
     row: Map<String, Any?>,
     localUrl: String,
@@ -3577,6 +3695,24 @@ internal object ChatEngine {
     val mutableMetadata = linkedMapOf<String, Any?>()
     metadataRaw?.forEach { (k, v) -> if (k != null) mutableMetadata[k.toString()] = v }
     mutableMetadata["localMediaUrl"] = localUrl
+    mutableMessage["metadata"] = mutableMetadata
+    mutableRow["message"] = mutableMessage
+    return mutableRow
+  }
+
+  private fun mergeWaveformIntoRow(
+    row: Map<String, Any?>,
+    waveform: List<Any?>,
+  ): Map<String, Any?> {
+    val mutableRow = LinkedHashMap(row)
+    val messageRaw = mutableRow["message"] as? Map<*, *> ?: return mutableRow
+    val mutableMessage = linkedMapOf<String, Any?>()
+    messageRaw.forEach { (k, v) -> if (k != null) mutableMessage[k.toString()] = v }
+    mutableMessage["waveform"] = waveform
+    val metadataRaw = mutableMessage["metadata"] as? Map<*, *>
+    val mutableMetadata = linkedMapOf<String, Any?>()
+    metadataRaw?.forEach { (k, v) -> if (k != null) mutableMetadata[k.toString()] = v }
+    mutableMetadata["waveform"] = waveform
     mutableMessage["metadata"] = mutableMetadata
     mutableRow["message"] = mutableMessage
     return mutableRow
@@ -3698,6 +3834,7 @@ internal object ChatEngine {
     userId: String,
     token: String,
     apiBaseUrl: String,
+    messageId: String? = null,
     onProgress: ((Float) -> Unit)? = null,
   ): LocalMediaUploadOutcome {
     val uploadUrl = resolveUploadUrl(apiBaseUrl) ?: return LocalMediaUploadOutcome.Failure("invalid_upload_url")
@@ -3744,11 +3881,26 @@ internal object ChatEngine {
       .header("ngrok-skip-browser-warning", "true")
       .header("Authorization", "Bearer $token")
       .build()
+    val call = mediaUploadHttpClient.newCall(request)
+    if (!messageId.isNullOrBlank()) {
+      synchronized(lock) {
+        activeMediaUploadCallsByMessageId[messageId] = call
+      }
+    }
     val response = try {
-      mediaUploadHttpClient.newCall(request).execute()
+      call.execute()
     } catch (t: Throwable) {
+      if (!messageId.isNullOrBlank()) {
+        synchronized(lock) {
+          if (activeMediaUploadCallsByMessageId[messageId] === call) {
+            activeMediaUploadCallsByMessageId.remove(messageId)
+          }
+        }
+      }
       val reason =
-        if (t is SocketTimeoutException || t is InterruptedIOException) {
+        if (call.isCanceled() || t.message?.contains("canceled", ignoreCase = true) == true) {
+          "upload_canceled"
+        } else if (t is SocketTimeoutException || t is InterruptedIOException) {
           "upload_timeout"
         } else {
           "upload_failed"
@@ -3761,6 +3913,13 @@ internal object ChatEngine {
       return LocalMediaUploadOutcome.Failure(reason)
     }
     response.use { res ->
+      if (!messageId.isNullOrBlank()) {
+        synchronized(lock) {
+          if (activeMediaUploadCallsByMessageId[messageId] === call) {
+            activeMediaUploadCallsByMessageId.remove(messageId)
+          }
+        }
+      }
       if (!res.isSuccessful) {
         Log.w(
           "ChatEngine",

@@ -903,8 +903,11 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     var mediaHeight: CGFloat
     switch row.visualKind {
     case .voice:
-      targetWidth = 242.0
-      mediaHeight = 44.0
+      let dur = max(1.0, min(30.0, row.duration ?? 1.0))
+      let frac = CGFloat((Double(dur) - log(Double(max(2.0, dur)))) / 15.0)
+      let minW = 100.0 + meta.total
+      targetWidth = minW + max(0.0, min(1.0, frac)) * (maxContentWidth - minW)
+      mediaHeight = 50.0
     case .videoNote:
       targetWidth = 200.0
       mediaHeight = 200.0
@@ -951,16 +954,19 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
       bubbleWidth = max(meta.total, contentWidth)
       bubbleHeight = bodyHeight + reactionHeightOffset
     } else {
+      let isVoice = row.visualKind == .voice
       bodyHeight =
-        isFullBleed ? mediaHeight : (mediaHeight + metaTopSpacing + bubbleMetaHeight)
+        (isFullBleed || isVoice) ? mediaHeight : (mediaHeight + metaTopSpacing + bubbleMetaHeight)
       bubbleWidth =
         isFullBleed
         ? max(bubbleMinWidth, contentWidth)
         : max(bubbleMinWidth, contentWidth + (bubbleHorizontalPadding * 2.0))
+      let topPad = isVoice ? 2.0 : bubbleTopPadding
+      let bottomPad = isVoice ? 4.0 : bubbleBottomPadding
       bubbleHeight =
         isFullBleed
         ? max(56.0, bodyHeight + reactionHeightOffset)
-        : max(56.0, bodyHeight + bubbleTopPadding + bubbleBottomPadding + reactionHeightOffset)
+        : max(48.0, bodyHeight + topPad + bottomPad + reactionHeightOffset)
     }
     return ChatMessageBubbleLayoutMetrics(
       bubbleWidth: bubbleWidth,
@@ -1160,9 +1166,9 @@ final class BubbleUploadProgressView: UIView {
 }
 
 final class VoicePlayProgressView: UIView {
+  private let fluidVisualizer = FluidVADVisualizer()
   private let fillView = UIView()
   private let iconView = UIImageView()
-  private let ringTrackLayer = CAShapeLayer()
   private let ringProgressLayer = CAShapeLayer()
   private var iconTintColor = UIColor.systemBlue
   private var isUploading = false
@@ -1174,20 +1180,17 @@ final class VoicePlayProgressView: UIView {
     isUserInteractionEnabled = true
     backgroundColor = .clear
 
+    fluidVisualizer.isUserInteractionEnabled = false
+    addSubview(fluidVisualizer)
+
     fillView.isUserInteractionEnabled = false
     fillView.backgroundColor = UIColor(white: 1.0, alpha: 0.96)
     fillView.layer.cornerCurve = .continuous
     addSubview(fillView)
 
-    ringTrackLayer.fillColor = UIColor.clear.cgColor
-    ringTrackLayer.strokeColor = UIColor.white.withAlphaComponent(0.3).cgColor
-    ringTrackLayer.lineWidth = 2.2
-    ringTrackLayer.lineCap = .round
-    layer.addSublayer(ringTrackLayer)
-
     ringProgressLayer.fillColor = UIColor.clear.cgColor
     ringProgressLayer.strokeColor = UIColor.systemBlue.cgColor
-    ringProgressLayer.lineWidth = 2.2
+    ringProgressLayer.lineWidth = 2.4
     ringProgressLayer.lineCap = .round
     ringProgressLayer.strokeStart = 0.0
     ringProgressLayer.strokeEnd = 0.0
@@ -1214,6 +1217,8 @@ final class VoicePlayProgressView: UIView {
     fillView.frame = fillFrame
     fillView.layer.cornerRadius = diameter * 0.5
 
+    fluidVisualizer.frame = bounds
+
     let ringRadius = max(2.0, (diameter * 0.5) + 1.8)
     let center = CGPoint(x: bounds.midX, y: bounds.midY)
     let ringPath = UIBezierPath(
@@ -1222,9 +1227,7 @@ final class VoicePlayProgressView: UIView {
       startAngle: -.pi / 2,
       endAngle: (.pi * 3.0) / 2.0,
       clockwise: true)
-    ringTrackLayer.frame = bounds
     ringProgressLayer.frame = bounds
-    ringTrackLayer.path = ringPath.cgPath
     ringProgressLayer.path = ringPath.cgPath
 
     iconView.frame = CGRect(
@@ -1239,27 +1242,29 @@ final class VoicePlayProgressView: UIView {
     fillView.backgroundColor = fillColor
     iconTintColor = iconTint
     iconView.tintColor = iconTintColor
-    ringTrackLayer.strokeColor = ringTint.withAlphaComponent(0.28).cgColor
+    fluidVisualizer.applyColor(ringTint.withAlphaComponent(0.35))
     ringProgressLayer.strokeColor = ringTint.cgColor
     if isUploading {
       updateUploadRingVisual()
     }
   }
 
-  func setPlaybackState(isPlaying: Bool, progress: CGFloat) {
+  func setPlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat = 0.0) {
     guard !isUploading else { return }
     ringProgressLayer.removeAnimation(forKey: uploadSpinAnimationKey)
     ringProgressLayer.strokeStart = 0.0
+    ringProgressLayer.strokeEnd = 0.0 // Never show ring for playback
     let symbol = isPlaying ? "pause.fill" : "play.fill"
     let config = UIImage.SymbolConfiguration(pointSize: 17, weight: .bold)
     iconView.image = UIImage(systemName: symbol, withConfiguration: config)
     iconView.tintColor = iconTintColor
 
-    let clamped = max(0.0, min(1.0, progress))
-    CATransaction.begin()
-    CATransaction.setDisableActions(true)
-    ringProgressLayer.strokeEnd = clamped
-    CATransaction.commit()
+    fluidVisualizer.level = level
+    if isPlaying {
+      if fluidVisualizer.alpha < 0.05 { fluidVisualizer.start() }
+    } else {
+      fluidVisualizer.stop()
+    }
   }
 
   func setUploadState(isUploading: Bool, progress: CGFloat?) {
@@ -1284,14 +1289,27 @@ final class VoicePlayProgressView: UIView {
       ringProgressLayer.strokeEnd = 0.0
       return
     }
-    let config = UIImage.SymbolConfiguration(pointSize: 17, weight: .bold)
-    iconView.image = UIImage(systemName: "play.fill", withConfiguration: config)
+    let config = UIImage.SymbolConfiguration(pointSize: 15, weight: .bold)
+    iconView.image = UIImage(systemName: "xmark", withConfiguration: config)
     iconView.tintColor = iconTintColor
 
     if let uploadProgress {
       ringProgressLayer.removeAnimation(forKey: uploadSpinAnimationKey)
+      // Smooth determinate progress
+      let targetProgress = max(0.04, uploadProgress)
+      let currentProgress = ringProgressLayer.presentation()?.strokeEnd ?? ringProgressLayer.strokeEnd
+
+      CATransaction.begin()
+      CATransaction.setDisableActions(true)
       ringProgressLayer.strokeStart = 0.0
-      ringProgressLayer.strokeEnd = max(0.04, uploadProgress)
+      ringProgressLayer.strokeEnd = targetProgress
+      CATransaction.commit()
+
+      let anim = CABasicAnimation(keyPath: "strokeEnd")
+      anim.fromValue = currentProgress
+      anim.toValue = targetProgress
+      anim.duration = 0.15
+      ringProgressLayer.add(anim, forKey: "stroke_fill")
       return
     }
 
@@ -1312,9 +1330,10 @@ final class VoicePlayProgressView: UIView {
 }
 
 final class VoiceWaveformView: UIView {
-  private let barCount = 52
+  private var barCount = 40
   private var barLayers: [CALayer] = []
   private var barEnvelope: [CGFloat] = []
+  private var rawSamples: [CGFloat]?
   private var playbackProgress: CGFloat = 0.0
   private var level: CGFloat = 0.0
   private var isPlaying = false
@@ -1325,13 +1344,6 @@ final class VoiceWaveformView: UIView {
     super.init(frame: frame)
     isUserInteractionEnabled = false
     backgroundColor = .clear
-    barEnvelope = Self.makeDefaultEnvelope(count: barCount)
-    for _ in 0..<barCount {
-      let layer = CALayer()
-      layer.backgroundColor = inactiveColor.cgColor
-      barLayers.append(layer)
-      self.layer.addSublayer(layer)
-    }
   }
 
   required init?(coder: NSCoder) {
@@ -1340,6 +1352,22 @@ final class VoiceWaveformView: UIView {
 
   override func layoutSubviews() {
     super.layoutSubviews()
+    let expectedBarWidth: CGFloat = 2.0
+    let expectedSpacing: CGFloat = 2.0
+    let newCount = max(1, Int(bounds.width / (expectedBarWidth + expectedSpacing)))
+    if newCount != barCount || barLayers.isEmpty {
+      barCount = newCount
+      barLayers.forEach { $0.removeFromSuperlayer() }
+      barLayers.removeAll()
+      for _ in 0..<barCount {
+        let layer = CALayer()
+        layer.backgroundColor = inactiveColor.cgColor
+        layer.cornerCurve = .continuous
+        barLayers.append(layer)
+        self.layer.addSublayer(layer)
+      }
+      rebuildEnvelope()
+    }
     applyBarFrames()
   }
 
@@ -1350,9 +1378,15 @@ final class VoiceWaveformView: UIView {
   }
 
   func setWaveform(_ samples: [CGFloat]?) {
-    guard let samples, !samples.isEmpty else {
+    rawSamples = samples
+    rebuildEnvelope()
+    applyBarFrames()
+  }
+
+  private func rebuildEnvelope() {
+    guard barCount > 0 else { return }
+    guard let samples = rawSamples, !samples.isEmpty else {
       barEnvelope = Self.makeDefaultEnvelope(count: barCount)
-      applyBarFrames()
       return
     }
     let normalized =
@@ -1361,47 +1395,33 @@ final class VoiceWaveformView: UIView {
       .map { max(0.0, min(1.0, $0)) }
     guard !normalized.isEmpty else {
       barEnvelope = Self.makeDefaultEnvelope(count: barCount)
-      applyBarFrames()
       return
     }
 
-    let resampled: [CGFloat]
-    if normalized.count == barCount {
-      resampled = normalized
-    } else {
-      var output: [CGFloat] = []
-      output.reserveCapacity(barCount)
-      let bucketSize = CGFloat(normalized.count) / CGFloat(barCount)
-      for index in 0..<barCount {
-        let start = Int(floor(CGFloat(index) * bucketSize))
-        let end = min(normalized.count, Int(floor(CGFloat(index + 1) * bucketSize)))
-        if start < end {
-          let slice = normalized[start..<end]
-          let peak = slice.max() ?? 0.0
-          let sumSquares = slice.reduce(CGFloat(0.0)) { partial, value in
-            partial + (value * value)
-          }
-          let rms = sqrt(sumSquares / CGFloat(slice.count))
-          // Telegram-like waveform body: dominant peaks with mild RMS stabilization.
-          let energy = max(peak * 0.82, rms * 0.72)
-          output.append(max(0.0, min(1.0, pow(energy, 0.9))))
-        } else {
-          output.append(normalized[min(max(0, start), normalized.count - 1)])
-        }
-      }
-      resampled = output
+    var resampled = Array(repeating: CGFloat.zero, count: barCount)
+    for index in 0..<normalized.count {
+      let bucketIndex = min(barCount - 1, (index * barCount) / max(1, normalized.count))
+      resampled[bucketIndex] = max(resampled[bucketIndex], normalized[index])
     }
 
-    barEnvelope = Self.shaped(Self.smoothed(Self.smoothed(resampled)))
-    applyBarFrames()
+    if let maxSample = resampled.max(), maxSample > 0.0001 {
+      let inverseScale = 1.0 / maxSample
+      resampled = resampled.map { max(0.0, min(1.0, $0 * inverseScale)) }
+    } else {
+      barEnvelope = Self.makeDefaultEnvelope(count: barCount)
+      return
+    }
+
+    if resampled.allSatisfy({ $0 <= 0.001 }) {
+      barEnvelope = Self.makeDefaultEnvelope(count: barCount)
+      return
+    }
+
+    barEnvelope = resampled
   }
 
   func setPlayback(progress: CGFloat, level: CGFloat, isPlaying: Bool) {
-    let clamped = max(0.0, min(1.0, progress))
-    playbackProgress =
-      isPlaying
-      ? (playbackProgress + ((clamped - playbackProgress) * 0.22))
-      : clamped
+    playbackProgress = max(0.0, min(1.0, progress))
     self.level = max(0.0, min(1.0, level))
     self.isPlaying = isPlaying
     applyBarFrames()
@@ -1409,26 +1429,27 @@ final class VoiceWaveformView: UIView {
 
   private func applyBarFrames() {
     guard !barLayers.isEmpty, bounds.width > 1.0, bounds.height > 1.0 else { return }
-    let spacing: CGFloat = 1.0
-    let totalSpacing = spacing * CGFloat(max(0, barCount - 1))
-    let barWidth = max(1.0, floor((bounds.width - totalSpacing) / CGFloat(barCount)))
-    let minHeight = max(2.0, floor(bounds.height * 0.20))
-    let maxHeight = max(minHeight + 1.0, floor(bounds.height * 0.88))
-    let dynamicGain = isPlaying ? (1.0 + (level * 0.16)) : 1.0
+    let barWidth: CGFloat = 2.0
+    let spacing: CGFloat = 2.0
+    let minHeight: CGFloat = 2.0
+    let peakHeight = max(minHeight, min(bounds.height, 18.0))
     let progressX = max(0.0, min(bounds.width, playbackProgress * bounds.width))
     var x: CGFloat = 0.0
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     for (index, barLayer) in barLayers.enumerated() {
-      let amplitude = max(0.10, min(1.0, barEnvelope[index] * dynamicGain))
-      let barHeight = minHeight + ((maxHeight - minHeight) * amplitude)
-      let y = floor((bounds.height - barHeight) * 0.5)
+      let amplitude = max(0.0, min(1.0, barEnvelope[index]))
+      let barHeight = max(minHeight, peakHeight * amplitude)
       let barStart = x
       let barEnd = x + barWidth
+
       let fillFraction = max(0.0, min(1.0, (progressX - barStart) / max(1.0, barEnd - barStart)))
-      barLayer.frame = CGRect(x: x, y: y, width: barWidth, height: floor(barHeight))
-      barLayer.cornerRadius = min(barWidth * 0.5, 1.0)
+      let renderedHeight = max(1.0, floor(barHeight))
+      let y = floor(bounds.height - renderedHeight)
+
+      barLayer.frame = CGRect(x: x, y: y, width: barWidth, height: renderedHeight)
+      barLayer.cornerRadius = barWidth * 0.5
       barLayer.backgroundColor = blendedColor(fraction: fillFraction)
       x += barWidth + spacing
     }
@@ -1492,10 +1513,14 @@ final class VoiceWaveformView: UIView {
   }
 }
 
+protocol VoicePlayableCell: AnyObject {
+  func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat)
+}
+
 final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   static let shared = VoiceBubblePlaybackCoordinator()
 
-  private weak var activeCell: ChatListCell?
+  private weak var activeCell: VoicePlayableCell?
   private var activeMessageId: String?
   private var player: AVAudioPlayer?
   private var displayLink: CADisplayLink?
@@ -1513,7 +1538,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     player?.stop()
   }
 
-  func bind(cell: ChatListCell, messageId: String?) {
+  func bind(cell: VoicePlayableCell, messageId: String?) {
     guard let messageId, !messageId.isEmpty else {
       cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
       return
@@ -1528,13 +1553,13 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
   }
 
-  func unbind(cell: ChatListCell) {
+  func unbind(cell: VoicePlayableCell) {
     if activeCell === cell {
       activeCell = nil
     }
   }
 
-  func toggle(cell: ChatListCell, messageId: String?, mediaURL: String?) {
+  func toggle(cell: VoicePlayableCell, messageId: String?, mediaURL: String?) {
     let loggedMessageId = messageId ?? "-"
     let loggedMedia = shortMediaURL(mediaURL)
     NSLog(
@@ -1596,7 +1621,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     playLocalURL(resolvedURL, messageId: messageId, cell: cell)
   }
 
-  private func playRemoteURL(_ url: URL, messageId: String, cell: ChatListCell) {
+  private func playRemoteURL(_ url: URL, messageId: String, cell: VoicePlayableCell) {
     // Use Caches directory (persists across app sessions, unlike tmp/ which is wiped)
     let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
     let cacheDir = caches.appendingPathComponent("voice-cache", isDirectory: true)
@@ -1715,12 +1740,12 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     task.resume()
   }
 
-  private func playLocalURL(_ resolvedURL: URL, messageId: String, cell: ChatListCell) {
+  private func playLocalURL(_ url: URL, messageId: String, cell: VoicePlayableCell) {
     do {
       try AVAudioSession.sharedInstance().setCategory(
         .playback, mode: .default, options: [.duckOthers])
       try AVAudioSession.sharedInstance().setActive(true)
-      let nextPlayer = try AVAudioPlayer(contentsOf: resolvedURL)
+      let nextPlayer = try AVAudioPlayer(contentsOf: url)
       nextPlayer.delegate = self
       nextPlayer.prepareToPlay()
       nextPlayer.isMeteringEnabled = true
@@ -1869,7 +1894,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   }
 }
 
-final class ChatListCell: UICollectionViewCell {
+final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   static let reuseIdentifier = "ChatListCell"
   private static let reactionBadgeBaseSize = CGSize(width: 34.0, height: 24.0)
   private static let reactionBadgeInsetLeft: CGFloat = 8.0
@@ -1930,6 +1955,7 @@ final class ChatListCell: UICollectionViewCell {
   private var lastReactionDebugSignature: String?
   var resolveDisplayStatus: ((ChatListRow) -> String?)?
   var onVoiceBubbleTap: ((ChatListRow) -> Void)?
+  var onVoiceUploadCancelTap: ((ChatListRow) -> Void)?
   var onInlineAttachmentTap: ((ChatListRow) -> Void)?
   var onMediaNaturalSizeResolved: ((String?, String, CGSize) -> Void)?
 
@@ -2283,6 +2309,7 @@ final class ChatListCell: UICollectionViewCell {
     bubbleView.clearAgentStyle()
     tailView.clearAgentTailStyle()
     onVoiceBubbleTap = nil
+    onVoiceUploadCancelTap = nil
     onInlineAttachmentTap = nil
     onMediaNaturalSizeResolved = nil
     row = nil
@@ -2473,6 +2500,8 @@ final class ChatListCell: UICollectionViewCell {
       let metaY: CGFloat
       if isFullBleed {
         metaY = bubbleFrame.maxY - bubbleMetaHeight - 8
+      } else if row.visualKind == .voice {
+        metaY = mediaFrame.maxY - bubbleMetaHeight + 2.0
       } else {
         metaY = mediaFrame.maxY + metaTopSpacing
       }
@@ -2677,7 +2706,7 @@ final class ChatListCell: UICollectionViewCell {
       mediaTitleLabel.isHidden = true
       mediaDetailLabel.isHidden = false
       mediaWaveformView.isHidden = false
-      mediaDetailLabel.text = formatBubbleDuration(seconds: row.duration)
+      mediaDetailLabel.text = "\(formatBubbleDuration(seconds: row.duration)) \u{2022}"
       mediaDetailLabel.textAlignment = .left
       mediaDetailLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
       mediaContainerView.backgroundColor = .clear
@@ -2703,7 +2732,7 @@ final class ChatListCell: UICollectionViewCell {
         isUploading: row.shouldShowUploadOverlay,
         progress: uploadProgress
       )
-      mediaVoiceButtonView.isUserInteractionEnabled = !row.shouldShowUploadOverlay
+      mediaVoiceButtonView.isUserInteractionEnabled = true
 
     case .video:
       mediaImageView.isHidden = false
@@ -3008,22 +3037,22 @@ final class ChatListCell: UICollectionViewCell {
 
     switch row.visualKind {
     case .voice:
-      let insetX: CGFloat = 4.0
-      let buttonSize: CGFloat = 44.0
+      let insetX: CGFloat = 6.0
+      let buttonSize: CGFloat = 50.0  // Button view size, inner rendered symbol will be smaller
       mediaVoiceButtonView.frame = CGRect(
         x: insetX,
         y: floor((height - buttonSize) * 0.5),
         width: buttonSize,
         height: buttonSize
       )
-      let textStartX = mediaVoiceButtonView.frame.maxX + 10.0
+      let textStartX = mediaVoiceButtonView.frame.maxX + 4.0
       let rightInset: CGFloat = 8.0
-      let waveY: CGFloat = 10.0
-      let waveHeight: CGFloat = 16.0
+      let waveY: CGFloat = 7.0
+      let waveHeight: CGFloat = 20.0
       mediaDetailLabel.frame = CGRect(
         x: textStartX,
-        y: waveY + waveHeight + 2.0,
-        width: 56.0,
+        y: waveY + waveHeight + 4.0,
+        width: 50.0,
         height: 14.0
       )
       mediaWaveformView.frame = CGRect(
@@ -3161,7 +3190,10 @@ final class ChatListCell: UICollectionViewCell {
 
   @objc private func handleVoiceTap() {
     guard let row, row.visualKind == .voice else { return }
-    guard !row.shouldShowUploadOverlay else { return }
+    if row.shouldShowUploadOverlay {
+      onVoiceUploadCancelTap?(row)
+      return
+    }
     if let onVoiceBubbleTap {
       onVoiceBubbleTap(row)
       return
@@ -3184,7 +3216,7 @@ final class ChatListCell: UICollectionViewCell {
     return inlineAttachmentView.frame.contains(local)
   }
 
-  fileprivate func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat) {
+  func applyVoicePlaybackState(isPlaying: Bool, progress: CGFloat, level: CGFloat) {
     if let row, row.shouldShowUploadOverlay {
       let uploadProgress: CGFloat?
       if let value = row.uploadProgress, value.isFinite {
@@ -3201,7 +3233,7 @@ final class ChatListCell: UICollectionViewCell {
       return
     }
     mediaVoiceButtonView.setUploadState(isUploading: false, progress: nil)
-    mediaVoiceButtonView.setPlaybackState(isPlaying: isPlaying, progress: progress)
+    mediaVoiceButtonView.setPlaybackState(isPlaying: isPlaying, progress: progress, level: level)
     mediaWaveformView.setPlayback(progress: progress, level: level, isPlaying: isPlaying)
   }
 

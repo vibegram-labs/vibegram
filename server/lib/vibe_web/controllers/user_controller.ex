@@ -1,6 +1,7 @@
 defmodule VibeWeb.UserController do
   use VibeWeb, :controller
   alias Vibe.Accounts
+  alias Vibe.Agents
   alias VibeWeb.Presence
   require Logger
   @max_contact_match_numbers 500
@@ -266,6 +267,7 @@ defmodule VibeWeb.UserController do
   defp render_user(conn, user, viewer) do
     is_self = viewer && viewer.id == user.id
     is_online = user.show_online_status and user_online?(user.id)
+    agent_id = if user.is_agent, do: Agents.agent_id_for_user(user.id), else: nil
 
     phone_number =
       cond do
@@ -277,6 +279,8 @@ defmodule VibeWeb.UserController do
     json(conn, %{
       userId: user.id,
       username: user.username,
+      isAgent: user.is_agent || false,
+      agentId: agent_id,
       name: user.name,
       phoneNumber: phone_number,
       publicKey: user.public_key,
@@ -307,9 +311,13 @@ defmodule VibeWeb.UserController do
   defp user_online?(_), do: false
 
   defp render_contact_match(user, _viewer) do
+    agent_id = if user.is_agent, do: Agents.agent_id_for_user(user.id), else: nil
+
     %{
       userId: user.id,
       username: user.username,
+      isAgent: user.is_agent || false,
+      agentId: agent_id,
       name: user.name,
       phoneNumber: if(user.privacy_phone_number == "everybody", do: user.phone_number, else: nil),
       publicKey: user.public_key,

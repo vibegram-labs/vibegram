@@ -1423,6 +1423,13 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     cell.onMediaNaturalSizeResolved = { [weak self] messageId, mediaURL, size in
       self?.handleResolvedMediaSize(messageId: messageId, mediaURL: mediaURL, size: size)
     }
+    cell.onVoiceUploadCancelTap = { [weak self] row in
+      guard let self, let messageId = row.messageId, !messageId.isEmpty else { return }
+      self.onNativeEvent([
+        "type": "cancelOutgoingUpload",
+        "messageId": messageId,
+      ])
+    }
     // Removed onVoiceBubbleTap so iOS uses Native Audio playback for Voice bubbles (like Android)
     cell.setExternalVoicePlayback(
       messageId: activeVoicePlaybackMessageId,
@@ -1457,6 +1464,15 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       lowerMediaURL.contains("/uploads/agent-docs/")
       || lowerMediaURL.contains("/api/agent/document/")
     if isVoiceVisual {
+      if row.shouldShowUploadOverlay {
+        if let messageId = row.messageId, !messageId.isEmpty {
+          onNativeEvent([
+            "type": "cancelOutgoingUpload",
+            "messageId": messageId,
+          ])
+        }
+        return
+      }
       if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
         VoiceBubblePlaybackCoordinator.shared.toggle(
           cell: cell, messageId: row.messageId, mediaURL: mediaURL
@@ -2815,7 +2831,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
   // MARK: - Native Send (synchronous, no bridge delay)
 
-  private func handleNativeSend(text: String, agentMention: Bool = false, agentText: String? = nil)
+  private func handleNativeSend(
+    text: String,
+    agentMention: Bool = false,
+    agentText: String? = nil,
+    mentionedAgentUsername: String? = nil
+  )
   {
     let messageId = UUID().uuidString.lowercased()
     let now = Date()
@@ -2934,6 +2955,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         sendPayload["agentMention"] = true
         sendPayload["agentText"] = agentText
       }
+      if let mentionedAgentUsername, !mentionedAgentUsername.isEmpty {
+        sendPayload["mentionedAgentUsername"] = mentionedAgentUsername
+        if let agentText, !agentText.isEmpty {
+          sendPayload["agentText"] = agentText
+        }
+      }
       DispatchQueue.global(qos: .userInitiated).async { [weak self] in
         let result = ChatEngine.shared.sendMessage(sendPayload)
         let accepted = (result["accepted"] as? Bool) == true
@@ -2997,6 +3024,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       if agentMention, let agentText {
         sendPayload["agentMention"] = true
         sendPayload["agentText"] = agentText
+      }
+      if let mentionedAgentUsername, !mentionedAgentUsername.isEmpty {
+        sendPayload["mentionedAgentUsername"] = mentionedAgentUsername
+        if let agentText, !agentText.isEmpty {
+          sendPayload["agentText"] = agentText
+        }
       }
       onNativeEvent(sendPayload)
     }
@@ -3388,6 +3421,22 @@ extension ChatListView: ChatInputBarDelegate {
 
   func inputBarDidSendWithAgentMention(text: String, agentText: String) {
     handleNativeSend(text: text, agentMention: true, agentText: agentText)
+  }
+
+  func inputBarDidSendWithStandaloneAgentMention(
+    text: String,
+    agentText: String,
+    agentUsername: String
+  ) {
+    handleNativeSend(
+      text: text,
+      agentText: agentText,
+      mentionedAgentUsername: agentUsername
+    )
+  }
+
+  func inputBarDidRequestVibeAgentBuilder() {
+    onNativeEvent(["type": "openVibeAgentBuilder"])
   }
 
   func inputBarDidTapAttachment() {

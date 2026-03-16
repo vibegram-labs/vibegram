@@ -25,8 +25,8 @@ import Animated, {
 } from 'react-native-reanimated'
 import { LinearGradient } from 'expo-linear-gradient'
 import * as Haptics from 'expo-haptics'
-import { Plus } from 'lucide-react-native'
 import { PlusCircleVibeIcon } from '../Icons'
+import DefaultAvatar from '../avatar/DefaultAvatar'
 
 import { useThemeStore } from '../../lib/stores/theme-store'
 
@@ -78,7 +78,7 @@ export default function StoryAvatar({
     isCompact,
     isOnline = false,
 }: StoryAvatarProps) {
-    const { colors } = useThemeStore()
+    const { colors, effectiveTheme } = useThemeStore()
     const dimensions = SIZES[size]
 
     // Scale animation on press
@@ -207,29 +207,12 @@ export default function StoryAvatar({
                                 ]}
                             />
                         ) : (
-                            <View
-                                style={[
-                                    styles.avatarPlaceholder,
-                                    {
-                                        width: dimensions.avatar - (hasStory ? dimensions.border * 2 : 0),
-                                        height: dimensions.avatar - (hasStory ? dimensions.border * 2 : 0),
-                                        borderRadius: (dimensions.avatar - (hasStory ? dimensions.border * 2 : 0)) / 2,
-                                        backgroundColor: colors.elevated
-                                    }
-                                ]}
-                            >
-                                <Text
-                                    style={[
-                                        styles.avatarText,
-                                        {
-                                            color: colors.text,
-                                            fontSize: dimensions.avatar / 3
-                                        }
-                                    ]}
-                                >
-                                    {(username || userId || 'U')[0].toUpperCase()}
-                                </Text>
-                            </View>
+                            <DefaultAvatar
+                                seed={userId || username}
+                                theme={effectiveTheme}
+                                size={dimensions.avatar - (hasStory ? dimensions.border * 2 : 0)}
+                                style={styles.avatarPlaceholder}
+                            />
                         )}
                     </View>
 
@@ -306,9 +289,6 @@ const styles = StyleSheet.create({
     avatarPlaceholder: {
         alignItems: 'center',
         justifyContent: 'center',
-    },
-    avatarText: {
-        fontWeight: '700',
     },
     addButton: {
         position: 'absolute',
