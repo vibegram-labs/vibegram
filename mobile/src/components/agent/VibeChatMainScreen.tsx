@@ -32,7 +32,7 @@ const buildIntroMessage = (mode: Mode, selectedAgentLabel?: string | null, sugge
       'I can create, configure, and explain how to integrate agents for you.',
       selectedAgentLabel
         ? `Current draft: ${selectedAgentLabel}`
-        : 'Describe the agent naturally. Slash commands are optional shortcuts.',
+        : 'Describe the agent naturally. I can set the prompt, webhook, ids, and integration details for you.',
     ];
     const topSuggestions = (suggestions || []).slice(0, 3);
     if (topSuggestions.length > 0) {
@@ -181,6 +181,7 @@ export default function VibeChatMainScreen({
         isMe: isUser,
         isAgentMessage: !isUser,
         agentName: !isUser ? (isBuilderMode ? 'VibeAgent' : 'Vibe') : undefined,
+        isStreaming: !isUser && (message as any)?.isStreaming === true,
       };
     });
 
@@ -335,7 +336,7 @@ export default function VibeChatMainScreen({
         contentPaddingTop={0}
         contentPaddingBottom={Math.max(14, insets.bottom + 8)}
         inputBarEnabled
-        inputPlaceholder={isBuilderMode ? 'Describe your agent or use /command' : 'Message Vibe'}
+        inputPlaceholder={isBuilderMode ? 'Describe your agent, or type /' : 'Message Vibe'}
         nativeSendEnabled={false}
         headerTitle={headerTitle}
         headerSubtitle={headerSubtitle}

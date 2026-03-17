@@ -603,6 +603,7 @@ defmodule Vibe.AI.AgentBuilder do
     - When the user describes how the agent should behave, create or update the agent and generate a polished production system prompt.
     - When the user asks about prompt quality, explain that you can read, edit, or generate the prompt and then act with tools.
     - When the user asks how to integrate from code, give exact values from tools: agent_id, user_id, @username, invoke URL, X-Vibe-Agent-Secret usage, responseMode guidance, vibeChatId values, callback headers, and signature format.
+    - Do not tell the user to use slash commands unless they explicitly ask for slash syntax. Focus on doing the work and explaining outcomes.
     - If the current secret is not available anymore, tell the user to rotate it.
     - Keep replies concise, practical, and step-by-step when integration is involved.
 
@@ -823,9 +824,9 @@ defmodule Vibe.AI.AgentBuilder do
   defp default_suggestions(nil) do
     [
       "Create an agent for customer support that can reply with text and voice.",
-      "/newagent Product Copilot",
       "How do I call this agent from my backend and webhook?",
-      "Draft a strong system prompt for a recruiting assistant."
+      "Draft a strong system prompt for a recruiting assistant.",
+      "Create a product copilot agent."
     ]
   end
 
@@ -834,7 +835,7 @@ defmodule Vibe.AI.AgentBuilder do
       [
         "Write the system prompt for an agent that books salon appointments.",
         "Make this agent sound like a calm legal intake assistant.",
-        "/publish",
+        "Publish this agent when it is ready.",
         "Show me the invoke URL and chat ids I can use."
       ]
     else
@@ -842,7 +843,7 @@ defmodule Vibe.AI.AgentBuilder do
         "How do I integrate this agent from code?",
         "Rotate the secret for this agent.",
         "Disable callbacks for now.",
-        "/publish"
+        "Publish this agent."
       ]
     end
   end

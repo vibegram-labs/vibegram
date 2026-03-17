@@ -76,8 +76,8 @@ interface VibeAgentBuilderState {
 const defaultSuggestions = [
     'Create an agent that answers customer questions and can send voice replies.',
     'How do I call this agent from my backend and webhook?',
-    '/newagent Product Copilot',
     'Write the prompt for a recruiting assistant.',
+    'Create a product copilot agent.',
 ];
 
 const createLocalMessageId = (prefix: 'user' | 'assistant') => {

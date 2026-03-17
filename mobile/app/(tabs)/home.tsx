@@ -1,6 +1,7 @@
 
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { View, Text, FlatList, TouchableOpacity, StyleSheet, Platform, Pressable, Image, ActivityIndicator, TextInput, RefreshControl, AppState, AppStateStatus, ScrollView, LayoutChangeEvent } from 'react-native'
+import AsyncStorage from '@react-native-async-storage/async-storage'
 import { useAuthStore } from '../../src/lib/stores/auth-store'
 import { useThemeStore } from '../../src/lib/stores/theme-store'
 import { resolveThemeVariant, useWallpaperStore } from '../../src/lib/stores/wallpaper-store'
@@ -36,6 +37,7 @@ import { apiClient } from '../../src/lib/api-client'
 import { theme } from '../../src/lib/theme'
 import DefaultAvatar from '../../src/components/avatar/DefaultAvatar'
 import { getAvatarGradientSet } from '../../src/lib/avatar-colors'
+import { useVibeAgentBuilderStore } from '../../src/lib/agent/VibeAgentBuilderStore'
 
 const NATIVE_HOME_LIST_DEV_REMOUNT_KEY = __DEV__ ? `dev-${Date.now()}` : 'stable'
 
@@ -230,6 +232,16 @@ const SEARCH_BAR_HEIGHT = 44;
 const SEARCH_BAR_VERTICAL_PADDING = 14;
 const SEARCH_BAR_BLOCK_HEIGHT = SEARCH_BAR_HEIGHT + (SEARCH_BAR_VERTICAL_PADDING * 2);
 const HOME_UNDO_WINDOW_MS = 10_000;
+const HOME_RECENT_SEARCH_LIMIT = 8;
+
+interface HomeRecentSearchProfile {
+    userId: string;
+    username: string;
+    profileImage?: string | null;
+    isAgent?: boolean;
+    isBuilder?: boolean;
+    description?: string;
+}
 
 // Swipeable Chat Row Component 
 const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onDelete, onPin, onMute, onMarkRead, isEditing, isSelected, isTyping, isOnline }: any) => {
@@ -549,6 +561,71 @@ const ChatRowCard = React.memo(({ chat, colors, theme, onPress, onLongPress, onD
         prev.chat.muted === next.chat.muted;
 })
 
+const SearchProfileRow = React.memo(({
+    profile,
+    colors,
+    theme,
+    onPress,
+}: {
+    profile: any;
+    colors: any;
+    theme: string;
+    onPress: (profile: any) => void;
+}) => {
+    const title = profile?.isBuilder
+        ? 'Vibe Agent'
+        : (profile?.displayName || (profile?.username ? `@${profile.username}` : 'Profile'));
+    const subtitle = profile?.isBuilder
+        ? (profile?.description || 'Open agent setup chat')
+        : (profile?.username
+            ? `${profile.isAgent ? 'Agent' : 'User'}  •  @${profile.username}`
+            : (profile?.isAgent ? 'Agent' : 'User'));
+
+    return (
+        <Pressable
+            onPress={() => onPress(profile)}
+            style={({ pressed }) => [
+                {
+                    flexDirection: 'row',
+                    alignItems: 'center',
+                    paddingHorizontal: 16,
+                    paddingVertical: 14,
+                    borderBottomWidth: 1,
+                    borderBottomColor: withAlpha(colors.text, 0.03),
+                    backgroundColor: pressed ? withAlpha(colors.text, 0.05) : 'transparent',
+                },
+            ]}
+        >
+            <View style={{ width: 60, height: 60, borderRadius: 30, overflow: 'hidden', marginRight: 14 }}>
+                {profile?.profileImage ? (
+                    <Image source={{ uri: profile.profileImage }} style={{ width: '100%', height: '100%', borderRadius: 30 }} />
+                ) : profile?.isBuilder ? (
+                    <DefaultAvatar seed="vibeagent" theme={theme} size={60} />
+                ) : (
+                    <DefaultAvatar
+                        seed={profile?.userId || profile?.id || profile?.username || 'profile'}
+                        theme={theme}
+                        size={60}
+                    />
+                )}
+            </View>
+
+            <View style={{ flex: 1 }}>
+                <Text style={{ color: colors.text, fontSize: 17, fontWeight: '600' }} numberOfLines={1}>
+                    {title}
+                </Text>
+                <Text style={{ color: colors.textSecondary, fontSize: 13, marginTop: 2 }} numberOfLines={2}>
+                    {subtitle}
+                </Text>
+            </View>
+
+            <View style={{ marginLeft: 10, opacity: 0.45 }}>
+                <MessageCircle size={18} color={withAlpha(colors.text, 0.35)} />
+            </View>
+        </Pressable>
+    );
+});
+
 const withLog = (data: any, label: string) => {
     // Helper to debug rendering
     return data;
@@ -594,17 +671,24 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
     const [nativeSavedMessages, setNativeSavedMessages] = useState<any[]>([])
     const [usesNativeSavedMessagesPreview, setUsesNativeSavedMessagesPreview] = useState(false)
     const [savedMessagesPreviewLoaded, setSavedMessagesPreviewLoaded] = useState(false)
-
-
+    const builderConversationId = useVibeAgentBuilderStore((state) => state.conversationId)
+    const builderMessages = useVibeAgentBuilderStore((state) => state.messages)
+    const builderAgent = useVibeAgentBuilderStore((state) => state.agent)
+    const loadAgentBuilder = useVibeAgentBuilderStore((state) => state.load)
 
     const insets = useSafeAreaInsets()
     const [copied, setCopied] = useState(false)
     const router = useRouter()
     const [isEditing, setIsEditing] = useState(false)
+    const [recentSearchProfiles, setRecentSearchProfiles] = useState<HomeRecentSearchProfile[]>([])
     const setHomeEditing = useUIStore(s => s.setHomeEditing)
     const setHomeEditSelectionCount = useUIStore(s => s.setHomeEditSelectionCount)
     const homeEditAction = useUIStore(s => s.homeEditAction)
     const homeEditActionRequestId = useUIStore(s => s.homeEditActionRequestId)
+    const recentSearchStorageKey = useMemo(
+        () => `home_recent_search_profiles_v1:${user?.userId || 'anonymous'}`,
+        [user?.userId]
+    )
     const safePress = useCallback((label: string, action: () => void | Promise<void>) => {
         try {
             // console.log(`[HomeScreen] press:${label}`)
@@ -638,6 +722,35 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
         }
     }, [setHomeEditing, setHomeEditSelectionCount])
 
+    useEffect(() => {
+        let isMounted = true
+
+        const loadRecentSearchProfiles = async () => {
+            try {
+                const raw = await AsyncStorage.getItem(recentSearchStorageKey)
+                if (!isMounted) return
+                if (!raw) {
+                    setRecentSearchProfiles([])
+                    return
+                }
+
+                const parsed = JSON.parse(raw)
+                setRecentSearchProfiles(Array.isArray(parsed) ? parsed.slice(0, HOME_RECENT_SEARCH_LIMIT) : [])
+            } catch (error) {
+                console.warn('[home] failed to load recent search profiles', error)
+                if (isMounted) {
+                    setRecentSearchProfiles([])
+                }
+            }
+        }
+
+        void loadRecentSearchProfiles()
+
+        return () => {
+            isMounted = false
+        }
+    }, [recentSearchStorageKey])
+
     // Context Menu State
     const [contextMenuVisible, setContextMenuVisible] = useState(false);
     const [selectedChat, setSelectedChat] = useState<any>(null);
@@ -659,6 +772,28 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
     const [storyViewerIndex, setStoryViewerIndex] = useState(0);
 
     const scrollY = useSharedValue(0);
+    const persistRecentSearchProfile = useCallback(async (profile: any) => {
+        const username = typeof profile?.username === 'string' ? profile.username.trim() : ''
+        const userId = String(profile?.userId || profile?.id || '').trim()
+        if (!username || !userId) return
+
+        const nextProfile: HomeRecentSearchProfile = {
+            userId,
+            username,
+            profileImage: typeof profile?.profileImage === 'string' ? profile.profileImage : null,
+            isAgent: profile?.isAgent === true,
+        }
+
+        let nextProfiles: HomeRecentSearchProfile[] = []
+        setRecentSearchProfiles((prev) => {
+            nextProfiles = [
+                nextProfile,
+                ...prev.filter((item) => item.userId !== nextProfile.userId && item.username !== nextProfile.username),
+            ].slice(0, HOME_RECENT_SEARCH_LIMIT)
+            return nextProfiles
+        })
+        await AsyncStorage.setItem(recentSearchStorageKey, JSON.stringify(nextProfiles))
+    }, [recentSearchStorageKey])
 
     const onScroll = useAnimatedScrollHandler({
         onScroll: (event) => {
@@ -680,26 +815,46 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
     const atSearchSeq = useRef(0)
     const [isPullRefreshing, setIsPullRefreshing] = useState(false)
     const hasStories = feed.length > 0 || myStories.length > 0
+    const hasBuilderConversation = builderMessages.length > 0
     const homeSavedMessages = useMemo(() => {
         const source = usesNativeSavedMessagesPreview ? nativeSavedMessages : savedMessages
         return [...source].sort((a, b) => getSavedMessageSortTimestamp(b) - getSavedMessageSortTimestamp(a))
     }, [nativeSavedMessages, savedMessages, usesNativeSavedMessagesPreview])
     const estimatedNativeHeaderHeight = useMemo(
         () => {
-            if (chats.length === 0 && homeSavedMessages.length === 0) return 0;
+            if (chats.length === 0 && homeSavedMessages.length === 0 && !hasBuilderConversation) return 0;
             return SEARCH_BAR_BLOCK_HEIGHT + (hasStories ? 108 : 0);
         },
-        [hasStories, chats.length, homeSavedMessages.length]
+        [hasStories, chats.length, hasBuilderConversation, homeSavedMessages.length]
     )
     const nativeListTopOffset = insets.top + (Platform.OS === 'android' ? 64 : 50)
     const nativeHomeContentTopInset = nativeListTopOffset + estimatedNativeHeaderHeight
     const atSearchQuery = useMemo(() => {
         const value = searchQuery.trim()
-        if (!value.startsWith('@')) return ''
-        return value.slice(1).trim().toLowerCase()
+        if (!value) return ''
+        return (value.startsWith('@') ? value.slice(1) : value).trim().toLowerCase()
     }, [searchQuery])
 
     const isAtBuilderQuery = atSearchQuery === 'vibeagent'
+    const matchingRecentSearchProfiles = useMemo(() => {
+        if (!atSearchQuery) return recentSearchProfiles
+        return recentSearchProfiles.filter((profile) => {
+            const username = String(profile?.username || '').toLowerCase()
+            const description = String(profile?.description || '').toLowerCase()
+            return username.includes(atSearchQuery) || description.includes(atSearchQuery)
+        })
+    }, [atSearchQuery, recentSearchProfiles])
+    const visibleRecentSearchMatches = useMemo(() => {
+        const activeUserId = String(atSearchResult?.userId || atSearchResult?.id || '').trim()
+        const activeUsername = String(atSearchResult?.username || '').trim().toLowerCase()
+        return matchingRecentSearchProfiles.filter((profile) => {
+            const profileUserId = String(profile?.userId || '').trim()
+            const profileUsername = String(profile?.username || '').trim().toLowerCase()
+            if (activeUserId && profileUserId && activeUserId === profileUserId) return false
+            if (activeUsername && profileUsername && activeUsername === profileUsername) return false
+            return true
+        })
+    }, [atSearchResult, matchingRecentSearchProfiles])
 
     useEffect(() => {
         if (!isSearchActive) {
@@ -732,13 +887,6 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
             return
         }
 
-        if (atSearchQuery.length < 2) {
-            setIsAtSearchLoading(false)
-            setAtSearchError('Type at least 2 letters')
-            setAtSearchResult(null)
-            return
-        }
-
         setIsAtSearchLoading(true)
         setAtSearchError('')
         setAtSearchResult(null)
@@ -762,10 +910,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                     return
                 }
 
+                void persistRecentSearchProfile(result)
                 setAtSearchResult(result)
             } catch (error) {
                 if (atSearchSeq.current !== seq || !isSearchActive) return
-                console.warn('[home] @-search failed', error)
+                console.warn('[home] username search failed', error)
                 setAtSearchError('No account found')
                 setAtSearchResult(null)
             } finally {
@@ -779,7 +928,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
             clearTimeout(timer)
             setIsAtSearchLoading(false)
         }
-    }, [atSearchQuery, isSearchActive, isAtBuilderQuery, user?.userId])
+    }, [atSearchQuery, isSearchActive, isAtBuilderQuery, persistRecentSearchProfile, user?.userId])
 
     const loadSavedMessagesPreview = useCallback(async () => {
         if (!user?.userId) {
@@ -820,9 +969,38 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
     useFocusEffect(
         useCallback(() => {
             void loadSavedMessagesPreview()
-        }, [loadSavedMessagesPreview])
+            void loadAgentBuilder()
+        }, [loadAgentBuilder, loadSavedMessagesPreview])
     )
 
+
+    const builderChatPreview = useMemo(() => {
+        if (!hasBuilderConversation) return null
+
+        const lastMessage = builderMessages[builderMessages.length - 1]
+        const updatedAt = lastMessage?.timestamp ?? Date.now()
+
+        return {
+            chatId: builderConversationId || 'vibeagent_builder',
+            name: 'Vibe Agent',
+            friendName: '@vibeagent',
+            username: 'vibeagent',
+            friendId: builderAgent?.userId || 'vibeagent_builder',
+            friendImage: builderAgent?.avatarUrl || null,
+            avatarUrl: builderAgent?.avatarUrl || null,
+            lastMessage: {
+                id: lastMessage?.id || `builder-last-${updatedAt}`,
+                content: lastMessage?.content || 'Agent setup',
+                text: lastMessage?.content || 'Agent setup',
+                timestamp: updatedAt,
+            },
+            updatedAt,
+            unreadCount: 0,
+            type: 'direct',
+            messages: builderMessages,
+            isBuilderChat: true,
+        } as any
+    }, [builderAgent?.avatarUrl, builderAgent?.userId, builderConversationId, builderMessages, hasBuilderConversation])
 
     const allChats = useMemo(() => {
         const pendingDeleteChatId = pendingHomeAction?.kind === 'delete' ? pendingHomeAction.chatId : null
@@ -843,6 +1021,13 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
         });
         if (pendingDeleteChatId) {
             list = list.filter((chat: any) => chat.chatId !== pendingDeleteChatId)
+        }
+        if (
+            builderChatPreview
+            && builderChatPreview.chatId !== pendingDeleteChatId
+            && !list.find((chat: any) => chat.chatId === builderChatPreview.chatId)
+        ) {
+            list.push(builderChatPreview)
         }
         if (homeSavedMessages.length > 0) {
             const lastMsg = homeSavedMessages[0] as any;
@@ -891,7 +1076,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
             .sort((a: any, b: any) => getChatSortTimestamp(b) - getChatSortTimestamp(a));
         console.log(`[home/allChats] chats=${chats.length} homeSaved=${homeSavedMessages.length} final=${sorted.length}`);
         return sorted;
-    }, [chats, homeSavedMessages, pendingHomeAction, typingUsers, user?.userId, contacts]);
+    }, [builderChatPreview, chats, contacts, homeSavedMessages, pendingHomeAction, typingUsers, user?.userId]);
 
     const filteredChats = useMemo(() => {
         const q = searchQuery.trim().toLowerCase()
@@ -1092,27 +1277,29 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
         setIsAtSearchLoading(false)
     };
 
-    const handleAtSearchOpen = useCallback(async () => {
-        if (!atSearchQuery) return
+    const handleAtSearchOpen = useCallback(async (target?: any) => {
+        const resolvedTarget = target || atSearchResult
+        if (!resolvedTarget && !isAtBuilderQuery) return
 
-        if (isAtBuilderQuery) {
+        if (resolvedTarget?.isBuilder || isAtBuilderQuery) {
             handleSearchClose()
             router.push({ pathname: '/agent', params: { mode: 'builder' } })
             return
         }
 
-        const targetUserId = atSearchResult?.userId || atSearchResult?.id
+        const targetUserId = resolvedTarget?.userId || resolvedTarget?.id
         if (!targetUserId) return
 
         safePress('openAtSearchProfile', async () => {
             try {
                 const friendId = targetUserId
                 const chatId = await startChat(friendId, {
-                    username: atSearchResult.username,
-                    profileImage: atSearchResult.profileImage,
-                    publicKey: atSearchResult.publicKey,
+                    username: resolvedTarget.username,
+                    profileImage: resolvedTarget.profileImage,
+                    publicKey: resolvedTarget.publicKey,
                 })
 
+                void persistRecentSearchProfile(resolvedTarget)
                 setActiveChat(chatId)
                 handleSearchClose()
 
@@ -1124,11 +1311,11 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                     },
                 })
             } catch (error) {
-                console.error('[home] startChat from @-search failed', error)
+                console.error('[home] startChat from username search failed', error)
                 setAtSearchError('Could not open chat with that user')
             }
         })
-    }, [atSearchQuery, atSearchResult, handleSearchClose, isAtBuilderQuery, router, safePress, setActiveChat, startChat])
+    }, [atSearchResult, handleSearchClose, isAtBuilderQuery, persistRecentSearchProfile, router, safePress, setActiveChat, startChat])
 
     const handleOpenStoryCamera = useCallback(() => {
         safePress('openStoryCamera', () => {
@@ -1316,6 +1503,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                     lastReloadRef.current = now;
                     loadChats();
                     void loadSavedMessagesPreview();
+                    void loadAgentBuilder();
                     // Ensure connection is active upon resume
                     if (!useChatStore.getState().isConnected) {
                         useChatStore.getState().disconnect();
@@ -1330,7 +1518,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
         return () => {
             subscription.remove();
         };
-    }, [loadChats, loadSavedMessagesPreview]);
+    }, [loadAgentBuilder, loadChats, loadSavedMessagesPreview]);
 
     const handleChatPress = useCallback((item: any) => {
         safePress(`openChat:${item?.chatId || 'unknown'}`, () => {
@@ -1338,6 +1526,10 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
             if (item.chatId === 'saved_messages') {
                 router.push('/saved-messages');
                 return;
+            }
+            if (item?.isBuilderChat) {
+                router.push({ pathname: '/agent', params: { mode: 'builder' } })
+                return
             }
             const chatType = normalizeChatType(item?.type)
             // console.log('[HomeScreen] Navigating to /chat:', item.chatId);
@@ -1550,11 +1742,12 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
             await Promise.all([
                 Promise.resolve(loadChats()),
                 Promise.resolve(loadSavedMessagesPreview()),
+                Promise.resolve(loadAgentBuilder()),
             ])
         } finally {
             setIsPullRefreshing(false)
         }
-    }, [isPullRefreshing, loadChats, loadSavedMessagesPreview])
+    }, [isPullRefreshing, loadAgentBuilder, loadChats, loadSavedMessagesPreview])
 
     const handleNativeHomeEvent = useCallback((event: any) => {
         const payload = event?.nativeEvent ?? event ?? {}
@@ -2000,24 +2193,43 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                 <View style={{ flex: 1, backgroundColor: colors.background, paddingTop: insets.top + 8 + SEARCH_BAR_BLOCK_HEIGHT + 8 }}>
                     {isSearchActive && searchQuery === '' && (
                         <View style={{ flex: 1 }}>
+                            {recentSearchProfiles.length > 0 && (
+                                <View style={{ marginTop: 6 }}>
+                                    <Text style={{ color: colors.textSecondary, fontSize: 13, marginLeft: 24, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                        Recent Searches
+                                    </Text>
+                                    <View>
+                                        {recentSearchProfiles.map((profile) => (
+                                            <SearchProfileRow
+                                                key={`recent-search:${profile.userId}:${profile.username}`}
+                                                profile={profile}
+                                                colors={colors}
+                                                theme={effectiveTheme}
+                                                onPress={handleAtSearchOpen}
+                                            />
+                                        ))}
+                                    </View>
+                                </View>
+                            )}
+
                             {/* Latest Chat Preview */}
-                            {chats.length > 0 && (
+                            {allChats.length > 0 && (
                                 <View style={{ paddingHorizontal: 14, marginVertical: 10 }}>
                                     <View style={{ flexDirection: 'row', alignItems: 'center' }}>
                                         <StoryAvatar
-                                            userId={chats[0].friendId}
-                                            username={chats[0].friendName}
-                                            profileImage={chats[0].friendImage}
+                                            userId={allChats[0].friendId}
+                                            username={allChats[0].friendName || allChats[0].name}
+                                            profileImage={allChats[0].friendImage || allChats[0].avatarUrl}
                                             size="medium"
                                             showName
-                                            isOnline={onlineUsers.has(chats[0].friendId?.toUpperCase())}
+                                            isOnline={onlineUsers.has(allChats[0].friendId?.toUpperCase())}
                                         />
                                     </View>
                                 </View>
                             )}
 
                             {/* Recent activities Section at Top */}
-                            {chats.length > 0 && (
+                            {allChats.length > 0 && (
                                 <View style={{ marginTop: 10 }}>
                                     <Text style={{ color: colors.textSecondary, fontSize: 13, marginLeft: 24, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>Recent</Text>
                                     <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 25 }}>
@@ -2044,68 +2256,53 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                         </View>
                     )}
 
-                    {isSearchActive && searchQuery.trim().startsWith('@') && !atSearchQuery ? (
-                        <View style={{ paddingHorizontal: 18, paddingTop: 8 }}>
-                            <Text style={{ color: colors.textSecondary, fontSize: 15 }}>Type a username after @</Text>
-                        </View>
-                    ) : null}
-
-                    {isSearchActive && !!atSearchQuery && (
-                        <View style={{ flex: 1, paddingHorizontal: 14 }}>
-                            <Text style={{ color: colors.textSecondary, fontSize: 13, marginBottom: 12, textTransform: 'uppercase', letterSpacing: 0.5 }}>Users</Text>
-
-                            {isAtSearchLoading ? (
-                                <View style={{ paddingVertical: 18, alignItems: 'flex-start' }}>
-                                    <ActivityIndicator size="small" color={colors.text} />
+                    {isSearchActive && !!searchQuery.trim() && (
+                        <View style={{ flex: 1 }}>
+                            {visibleRecentSearchMatches.length > 0 && (
+                                <View style={{ marginBottom: 6 }}>
+                                    <Text style={{ color: colors.textSecondary, fontSize: 13, marginLeft: 24, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                        Recent Matches
+                                    </Text>
+                                    {visibleRecentSearchMatches.slice(0, 4).map((profile) => (
+                                        <SearchProfileRow
+                                            key={`recent-match:${profile.userId}:${profile.username}`}
+                                            profile={profile}
+                                            colors={colors}
+                                            theme={effectiveTheme}
+                                            onPress={handleAtSearchOpen}
+                                        />
+                                    ))}
                                 </View>
-                            ) : null}
+                            )}
 
-                            {!!atSearchError ? (
-                                <Text style={{ color: colors.textSecondary, fontSize: 15 }}>{atSearchError}</Text>
-                            ) : null}
+                            {!!atSearchQuery && (
+                                <View style={{ marginTop: visibleRecentSearchMatches.length > 0 ? 6 : 0 }}>
+                                    <Text style={{ color: colors.textSecondary, fontSize: 13, marginLeft: 24, marginBottom: 8, textTransform: 'uppercase', letterSpacing: 0.5 }}>
+                                        Profiles
+                                    </Text>
 
-                            {atSearchResult ? (
-                                <TouchableOpacity
-                                    onPress={handleAtSearchOpen}
-                                    style={{
-                                        backgroundColor: colors.card,
-                                        borderRadius: 18,
-                                        padding: 12,
-                                        flexDirection: 'row',
-                                        alignItems: 'center',
-                                        justifyContent: 'space-between',
-                                        borderWidth: 1,
-                                        borderColor: withAlpha(colors.text, 0.12),
-                                    }}
-                                >
-                                    <View style={{ flexDirection: 'row', alignItems: 'center', flex: 1 }}>
-                                        <View style={{ width: 42, height: 42, borderRadius: 21, backgroundColor: withAlpha(colors.primary, 0.2), overflow: 'hidden', alignItems: 'center', justifyContent: 'center', marginRight: 12 }}>
-                                            {atSearchResult.isBuilder ? (
-                                                <MessageCircle size={21} color={colors.primary} />
-                                            ) : atSearchResult.profileImage ? (
-                                                <Image source={{ uri: atSearchResult.profileImage }} style={{ width: 42, height: 42 }} />
-                                            ) : (
-                                                <Text style={{ color: colors.primary, fontWeight: '700', fontSize: 16 }}>
-                                                    {(atSearchResult.username || '?').slice(0, 1).toUpperCase()}
-                                                </Text>
-                                            )}
+                                    {isAtSearchLoading ? (
+                                        <View style={{ paddingHorizontal: 16, paddingVertical: 18, alignItems: 'flex-start' }}>
+                                            <ActivityIndicator size="small" color={colors.text} />
                                         </View>
+                                    ) : null}
 
-                                        <View style={{ flex: 1 }}>
-                                            <Text style={{ fontSize: 16, color: colors.text, fontWeight: '600' }}>
-                                                {atSearchResult.username ? `@${atSearchResult.username}` : atSearchResult.description || '@vibeagent'}
-                                            </Text>
-                                            <Text style={{ color: colors.textSecondary, marginTop: 2, fontSize: 13 }}>
-                                                {atSearchResult.isBuilder
-                                                    ? atSearchResult.description
-                                                    : (atSearchResult.isAgent ? 'Agent' : 'User')
-                                                }
-                                            </Text>
-                                        </View>
-                                    </View>
-                                    <Text style={{ color: colors.primary, fontSize: 12, fontWeight: '600' }}>Open</Text>
-                                </TouchableOpacity>
-                            ) : null}
+                                    {atSearchResult ? (
+                                        <SearchProfileRow
+                                            profile={atSearchResult}
+                                            colors={colors}
+                                            theme={effectiveTheme}
+                                            onPress={handleAtSearchOpen}
+                                        />
+                                    ) : null}
+
+                                    {!!atSearchError && !isAtSearchLoading && !atSearchResult && visibleRecentSearchMatches.length === 0 ? (
+                                        <Text style={{ color: colors.textSecondary, fontSize: 15, paddingHorizontal: 18, paddingTop: 8 }}>
+                                            {atSearchError}
+                                        </Text>
+                                    ) : null}
+                                </View>
+                            )}
                         </View>
                     )}
                 </View>
@@ -2133,7 +2330,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                     <TextInput
                         ref={searchInputRef}
                         autoFocus={false}
-                        placeholder="Search"
+                        placeholder="Search chats or usernames"
                         placeholderTextColor={withAlpha(colors.text, 0.5)}
                         style={{ flex: 1, marginLeft: 8, color: colors.text, fontSize: 16 }}
                         editable={isSearchActive}
@@ -2143,6 +2340,8 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                         onSubmitEditing={() => {
                             if (atSearchResult || isAtBuilderQuery) {
                                 handleAtSearchOpen()
+                            } else if (visibleRecentSearchMatches.length > 0) {
+                                handleAtSearchOpen(visibleRecentSearchMatches[0])
                             }
                         }}
                     />

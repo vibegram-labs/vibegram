@@ -35,6 +35,7 @@ export interface NativeChatMessagePayload {
   isAgentMessage?: boolean;
   agentName?: string;
   plainContent?: string;
+  isStreaming?: boolean;
 }
 
 export interface NativeChatMessageRow {

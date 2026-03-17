@@ -32,6 +32,7 @@ export interface RuntimeChatMessage {
   agentId?: string;
   isAgentMessage?: boolean;
   metadata?: Record<string, unknown>;
+  isStreaming?: boolean;
 }
 
 const toDayKey = (timestampMs: number) => {
@@ -159,6 +160,7 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
         )
         : undefined,
       plainContent: isAgentMessage ? (current.plainContent || current.text) : undefined,
+      isStreaming: current.isStreaming === true,
     };
 
     rows.push({
