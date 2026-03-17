@@ -135,6 +135,33 @@ internal class ChatNativeInputBar(
   private var slideHintLabelAnimator: ObjectAnimator? = null
   private var lastTimerPulseSecond = -1
   private var vadVisualLevel = 0f
+  private var readyBannerAction: ReadyBannerAction = ReadyBannerAction.None
+
+  private data class ReadyCommandSuggestion(
+    val command: String,
+    val insertion: String,
+    val description: String,
+  )
+
+  private sealed class ReadyBannerAction {
+    object None : ReadyBannerAction()
+    object Mention : ReadyBannerAction()
+    data class Slash(val suggestion: ReadyCommandSuggestion) : ReadyBannerAction()
+  }
+
+  companion object {
+    private val builderSlashSuggestions =
+      listOf(
+        ReadyCommandSuggestion("/newagent", "/newagent ", "Create a new agent"),
+        ReadyCommandSuggestion("/agents", "/agents", "List your agents"),
+        ReadyCommandSuggestion("/select", "/select ", "Select an existing draft"),
+        ReadyCommandSuggestion("/prompt", "/prompt ", "Set the system prompt"),
+        ReadyCommandSuggestion("/webhook", "/webhook ", "Set the callback URL"),
+        ReadyCommandSuggestion("/publish", "/publish", "Publish the active agent"),
+        ReadyCommandSuggestion("/secret", "/secret rotate", "Rotate the invoke secret"),
+        ReadyCommandSuggestion("/help", "/help", "Show builder help"),
+      )
+  }
 
   private val longPressRunnable = Runnable {
     longPressArmed = false
@@ -324,6 +351,7 @@ internal class ChatNativeInputBar(
     mentionDescLabel.textSize = 12f
     mentionDescLabel.setTextColor(Color.argb(180, 255, 255, 255))
     mentionBanner.addView(mentionDescLabel)
+    mentionBanner.setOnClickListener { handleReadyBannerTap() }
 
     textContainer.addView(mentionBanner)
 
@@ -915,6 +943,113 @@ internal class ChatNativeInputBar(
     }
   }
 
+  private fun supportsBuilderSlashCommands(): Boolean {
+    val hint = input.hint?.toString()?.lowercase().orEmpty()
+    return hint.contains("@vibeagent")
+  }
+
+  private fun resolveReadyBannerAction(text: String): ReadyBannerAction {
+    resolveSlashSuggestion(text)?.let { suggestion ->
+      return ReadyBannerAction.Slash(suggestion)
+    }
+
+    val shouldShowMention =
+      text.isNotEmpty() &&
+        text.lastIndexOf('@').let { atIndex ->
+          if (atIndex < 0) {
+            false
+          } else {
+            val afterAt = text.substring(atIndex + 1).lowercase()
+            val isAtStart = atIndex == 0
+            val isPrecededBySpace = !isAtStart && text[atIndex - 1].isWhitespace()
+            (isAtStart || isPrecededBySpace) &&
+              !afterAt.contains(" ") &&
+              ("vibe".startsWith(afterAt) || afterAt.isEmpty())
+          }
+        }
+
+    return if (shouldShowMention) ReadyBannerAction.Mention else ReadyBannerAction.None
+  }
+
+  private fun resolveSlashSuggestion(text: String): ReadyCommandSuggestion? {
+    if (!supportsBuilderSlashCommands()) return null
+
+    val match =
+      Regex("""(?:^|\s)(/[A-Za-z]*)$""")
+        .find(text)
+        ?: return null
+
+    val token = match.groupValues.getOrElse(1) { "" }.lowercase()
+    if (!token.startsWith("/")) return null
+    if (token == "/") return builderSlashSuggestions.firstOrNull()
+    return builderSlashSuggestions.firstOrNull { it.command.startsWith(token) }
+  }
+
+  private fun applyReadyBannerAction(action: ReadyBannerAction) {
+    readyBannerAction = action
+    when (action) {
+      ReadyBannerAction.None -> {
+        mentionBanner.visibility = View.GONE
+      }
+
+      ReadyBannerAction.Mention -> {
+        mentionNameLabel.text = "@vibe"
+        mentionDescLabel.text = "Ask AI"
+        mentionBanner.visibility = View.VISIBLE
+      }
+
+      is ReadyBannerAction.Slash -> {
+        mentionNameLabel.text = action.suggestion.command
+        mentionDescLabel.text = action.suggestion.description
+        mentionBanner.visibility = View.VISIBLE
+      }
+    }
+  }
+
+  private fun handleReadyBannerTap() {
+    when (val action = readyBannerAction) {
+      ReadyBannerAction.None -> return
+
+      ReadyBannerAction.Mention -> {
+        val text = input.text?.toString().orEmpty()
+        val updated =
+          if (text.contains("@")) {
+            val lastAt = text.lastIndexOf('@')
+            if (lastAt >= 0) {
+              text.substring(0, lastAt) + "@vibe "
+            } else {
+              "@vibe "
+            }
+          } else {
+            if (text.isBlank()) "@vibe " else "$text @vibe "
+          }
+        input.setText(updated)
+        input.setSelection(updated.length)
+      }
+
+      is ReadyBannerAction.Slash -> {
+        applySlashSuggestion(action.suggestion)
+      }
+    }
+
+    applyReadyBannerAction(ReadyBannerAction.None)
+    input.requestFocus()
+  }
+
+  private fun applySlashSuggestion(suggestion: ReadyCommandSuggestion) {
+    val text = input.text?.toString().orEmpty()
+    val updated =
+      Regex("""(?:^|\s)(/[A-Za-z]*)$""")
+        .replace(text, { match ->
+          val token = match.groupValues.getOrElse(1) { "" }
+          match.value.removeSuffix(token) + suggestion.insertion
+        })
+
+    val finalText = if (updated == text) suggestion.insertion else updated
+    input.setText(finalText)
+    input.setSelection(finalText.length)
+  }
+
   private fun hasTypedText(): Boolean {
     return input.text?.toString()?.trim()?.isNotEmpty() == true
   }
@@ -922,11 +1057,10 @@ internal class ChatNativeInputBar(
   private fun refreshVisualState() {
     val textStr = input.text?.toString() ?: ""
     val hasText = textStr.trim().isNotEmpty()
-    val hasVibe = textStr.lowercase().contains("@vibe")
-    if (hasVibe && !isRecording) {
-      mentionBanner.visibility = View.VISIBLE
+    if (!isRecording) {
+      applyReadyBannerAction(resolveReadyBannerAction(textStr))
     } else {
-      mentionBanner.visibility = View.GONE
+      applyReadyBannerAction(ReadyBannerAction.None)
     }
     val actionFill =
       when {

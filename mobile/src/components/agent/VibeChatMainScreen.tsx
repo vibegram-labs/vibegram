@@ -29,8 +29,10 @@ const BUILDER_SURFACE_ID = 'vibe-builder-chat';
 const buildIntroMessage = (mode: Mode, selectedAgentLabel?: string | null, suggestions?: string[]) => {
   if (mode === 'builder') {
     const lines = [
-      'I can create and configure agents for you.',
-      selectedAgentLabel ? `Current draft: ${selectedAgentLabel}` : 'Start with /newagent <name>.',
+      'I can create, configure, and explain how to integrate agents for you.',
+      selectedAgentLabel
+        ? `Current draft: ${selectedAgentLabel}`
+        : 'Describe the agent naturally. Slash commands are optional shortcuts.',
     ];
     const topSuggestions = (suggestions || []).slice(0, 3);
     if (topSuggestions.length > 0) {
@@ -302,7 +304,7 @@ export default function VibeChatMainScreen({
     )
     : VIBE_SUBTITLE;
   const profileBio = isBuilderMode
-    ? 'Create, publish, and update standalone Vibe agents in chat.'
+    ? 'Create agents in chat, describe them naturally, and get the exact invoke URL, webhook setup, and vibeChatId guidance.'
     : 'Ask questions, generate content, and jump into @vibeagent when you want to build a standalone agent.';
 
   return (
@@ -333,7 +335,7 @@ export default function VibeChatMainScreen({
         contentPaddingTop={0}
         contentPaddingBottom={Math.max(14, insets.bottom + 8)}
         inputBarEnabled
-        inputPlaceholder={isBuilderMode ? 'Message @vibeagent' : 'Message Vibe'}
+        inputPlaceholder={isBuilderMode ? 'Describe your agent or use /command' : 'Message Vibe'}
         nativeSendEnabled={false}
         headerTitle={headerTitle}
         headerSubtitle={headerSubtitle}

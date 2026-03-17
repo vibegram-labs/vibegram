@@ -797,6 +797,7 @@ final class ChatInputBar: UIView {
   private let mentionBannerGap: CGFloat = 4
   private var mentionActive = false  // true when @vibe is confirmed in text
   private let mentionBorderGlowLayer = CALayer()
+  private var readyBannerAction: ReadyBannerAction = .none
 
   private(set) var barHeight: CGFloat = 0
   var bottomSafeAreaInset: CGFloat = 0 {
@@ -2102,19 +2103,26 @@ final class ChatInputBar: UIView {
   }
 
   @objc private func mentionBannerTapped() {
-    // Find the last @ in the current text and replace @partial with @vibe
-    let text = textView.text ?? ""
-    if let lastAtRange = text.range(of: "@", options: .backwards) {
-      let beforeAt = text[text.startIndex..<lastAtRange.lowerBound]
-      textView.text = beforeAt + "@vibe "
-    } else {
-      textView.text = (text.isEmpty ? "" : text + " ") + "@vibe "
+    switch readyBannerAction {
+    case .none:
+      return
+
+    case .mention:
+      let text = textView.text ?? ""
+      if let lastAtRange = text.range(of: "@", options: .backwards) {
+        let beforeAt = text[text.startIndex..<lastAtRange.lowerBound]
+        textView.text = beforeAt + "@vibe "
+      } else {
+        textView.text = (text.isEmpty ? "" : text + " ") + "@vibe "
+      }
+      setMentionActive(true)
+
+    case .slash(let suggestion):
+      applySlashSuggestion(suggestion)
     }
-    setMentionBannerVisible(false, animated: true)
-    setMentionActive(true)
-    // Trigger text change processing
+
+    setReadyBannerAction(.none, animated: true)
     textViewDidChange(textView)
-    // Keep focus so user can type their question
     textView.becomeFirstResponder()
   }
 
@@ -2168,6 +2176,25 @@ final class ChatInputBar: UIView {
     }
   }
 
+  private func setReadyBannerAction(_ action: ReadyBannerAction, animated: Bool) {
+    readyBannerAction = action
+
+    switch action {
+    case .none:
+      setMentionBannerVisible(false, animated: animated)
+
+    case .mention:
+      mentionNameLabel.text = "@vibe"
+      mentionDescLabel.text = "Ask AI"
+      setMentionBannerVisible(true, animated: animated)
+
+    case .slash(let suggestion):
+      mentionNameLabel.text = suggestion.command
+      mentionDescLabel.text = suggestion.description
+      setMentionBannerVisible(true, animated: animated)
+    }
+  }
+
   private func layoutMentionBannerContents() {
     let b = mentionBanner.bounds
     guard b.width > 0, b.height > 0 else { return }
@@ -2197,6 +2224,10 @@ final class ChatInputBar: UIView {
     }
   }
 
+  private var supportsBuilderSlashCommands: Bool {
+    placeholder.lowercased().contains("@vibeagent")
+  }
+
   private func updateMentionBorderGlow(pillFrame: CGRect) {
     let textString = (textView.text ?? "").lowercased()
     let hasMention = textString.contains("@vibe") || textString.contains("@vibeagent")
@@ -2211,6 +2242,29 @@ final class ChatInputBar: UIView {
     case builder
     case standalone(username: String, agentText: String)
   }
+
+  private struct ReadyCommandSuggestion {
+    let command: String
+    let insertion: String
+    let description: String
+  }
+
+  private enum ReadyBannerAction {
+    case none
+    case mention
+    case slash(ReadyCommandSuggestion)
+  }
+
+  private static let builderSlashSuggestions: [ReadyCommandSuggestion] = [
+    ReadyCommandSuggestion(command: "/newagent", insertion: "/newagent ", description: "Create a new agent"),
+    ReadyCommandSuggestion(command: "/agents", insertion: "/agents", description: "List your agents"),
+    ReadyCommandSuggestion(command: "/select", insertion: "/select ", description: "Select an existing draft"),
+    ReadyCommandSuggestion(command: "/prompt", insertion: "/prompt ", description: "Set the system prompt"),
+    ReadyCommandSuggestion(command: "/webhook", insertion: "/webhook ", description: "Set the callback URL"),
+    ReadyCommandSuggestion(command: "/publish", insertion: "/publish", description: "Publish the active agent"),
+    ReadyCommandSuggestion(command: "/secret", insertion: "/secret rotate", description: "Rotate the invoke secret"),
+    ReadyCommandSuggestion(command: "/help", insertion: "/help", description: "Show builder help"),
+  ]
 
   private func resolveMentionIntent(in text: String) -> MentionIntent {
     guard let regex = try? NSRegularExpression(
@@ -2253,6 +2307,69 @@ final class ChatInputBar: UIView {
     }
 
     return stripped.isEmpty ? .none : .standalone(username: username, agentText: stripped)
+  }
+
+  private func resolveReadyBannerAction(in text: String) -> ReadyBannerAction {
+    if let suggestion = resolveSlashSuggestion(in: text) {
+      return .slash(suggestion)
+    }
+
+    let shouldShowMention: Bool = {
+      guard !text.isEmpty else { return false }
+      guard let lastAtIndex = text.lastIndex(of: "@") else { return false }
+      let afterAt = text[text.index(after: lastAtIndex)...].lowercased()
+      let isAtStart = lastAtIndex == text.startIndex
+      let isPrecededBySpace = !isAtStart && text[text.index(before: lastAtIndex)] == " "
+      guard isAtStart || isPrecededBySpace else { return false }
+      guard !afterAt.contains(" ") else { return false }
+      return "vibe".hasPrefix(afterAt) || afterAt.isEmpty
+    }()
+
+    return shouldShowMention ? .mention : .none
+  }
+
+  private func resolveSlashSuggestion(in text: String) -> ReadyCommandSuggestion? {
+    guard supportsBuilderSlashCommands else { return nil }
+    guard let regex = try? NSRegularExpression(pattern: "(?:^|\\s)(/[A-Za-z]*)$", options: []) else {
+      return nil
+    }
+
+    let nsText = text as NSString
+    let range = NSRange(location: 0, length: nsText.length)
+    guard let match = regex.firstMatch(in: text, options: [], range: range), match.numberOfRanges > 1 else {
+      return nil
+    }
+
+    let token = nsText.substring(with: match.range(at: 1)).lowercased()
+    guard token.hasPrefix("/") else { return nil }
+
+    if token == "/" {
+      return Self.builderSlashSuggestions.first
+    }
+
+    return Self.builderSlashSuggestions.first { $0.command.hasPrefix(token) }
+  }
+
+  private func applySlashSuggestion(_ suggestion: ReadyCommandSuggestion) {
+    let text = textView.text ?? ""
+
+    guard let regex = try? NSRegularExpression(pattern: "(?:^|\\s)(/[A-Za-z]*)$", options: []) else {
+      textView.text = suggestion.insertion
+      return
+    }
+
+    let nsText = text as NSString
+    let range = NSRange(location: 0, length: nsText.length)
+
+    guard let match = regex.firstMatch(in: text, options: [], range: range), match.numberOfRanges > 1 else {
+      textView.text = suggestion.insertion
+      return
+    }
+
+    let replacementRange = match.range(at: 1)
+    let updated = nsText.replacingCharacters(in: replacementRange, with: suggestion.insertion)
+    textView.text = updated
+    textView.selectedRange = NSRange(location: (updated as NSString).length, length: 0)
   }
 
   @objc private func cancelOverlayTapped() {
@@ -2580,9 +2697,7 @@ final class ChatInputBar: UIView {
         guard let self = self, self.isRecording else { return }
         if let recorder = self.audioRecorder, recorder.isRecording {
           recorder.updateMeters()
-          let db = recorder.averagePower(forChannel: 0)
-          let minDb: Float = -45.0
-          let level = max(0.0, min(1.0, CGFloat((db - minDb) / (-minDb))))
+          let level = normalizedRecorderWaveformLevel(recorder)
           self.micVADView.level = level
           self.recordingWaveformSamples.append(level)
           if self.recordingWaveformSamples.count > 480 {
@@ -2903,14 +3018,29 @@ final class ChatInputBar: UIView {
     }
   }
 
+  private func normalizedRecorderWaveformLevel(_ recorder: AVAudioRecorder) -> CGFloat {
+    let averageDb = recorder.averagePower(forChannel: 0)
+    let peakDb = recorder.peakPower(forChannel: 0)
+    let effectiveDb = max(averageDb, peakDb - 4.0)
+    let amplitude = CGFloat(pow(10.0, effectiveDb / 20.0))
+    let silenceFloor: CGFloat = 0.015
+    let normalized = max(0.0, min(1.0, (amplitude - silenceFloor) / (1.0 - silenceFloor)))
+    return pow(normalized, 0.72)
+  }
+
   private func downsampleWaveform(_ samples: [CGFloat], targetCount: Int) -> [Double] {
     guard targetCount > 0 else { return [] }
+    let silenceThreshold: CGFloat = 0.02
     let sanitized =
       samples
       .map { max(0.0, min(1.0, $0)) }
       .filter { $0.isFinite }
+      .map { sample in
+        guard sample > silenceThreshold else { return 0.0 }
+        return (sample - silenceThreshold) / (1.0 - silenceThreshold)
+      }
     guard !sanitized.isEmpty else {
-      return Array(repeating: 0.18, count: targetCount)
+      return Array(repeating: 0.0, count: targetCount)
     }
 
     var peakSamples = Array(repeating: CGFloat.zero, count: targetCount)
@@ -2922,7 +3052,7 @@ final class ChatInputBar: UIView {
     }
 
     let averagePeak = peakSamples.reduce(0.0, +) / CGFloat(targetCount)
-    let normalizationPeak = max(0.12, averagePeak * 1.8)
+    let normalizationPeak = max(0.04, averagePeak * 1.8)
 
     var result: [Double] = []
     result.reserveCapacity(targetCount)
@@ -2931,8 +3061,8 @@ final class ChatInputBar: UIView {
       result.append(Double(max(0.0, min(1.0, normalized))))
     }
 
-    if result.allSatisfy({ $0 <= 0.001 }) {
-      return Array(repeating: 0.18, count: targetCount)
+    if result.allSatisfy({ $0 <= 0.003 }) {
+      return Array(repeating: 0.0, count: targetCount)
     }
 
     return result
@@ -3044,21 +3174,7 @@ extension ChatInputBar: UITextViewDelegate {
     let textString = tv.text ?? ""
     delegate?.inputBarTextDidChange(text: textString)
 
-    // Detect @ typing for mention suggestion banner
-    let shouldShowMention: Bool = {
-      guard !textString.isEmpty else { return false }
-      guard let lastAtIndex = textString.lastIndex(of: "@") else { return false }
-      let afterAt = textString[textString.index(after: lastAtIndex)...].lowercased()
-      // Must be at start or preceded by space
-      let isAtStart = lastAtIndex == textString.startIndex
-      let isPrecededBySpace = !isAtStart && textString[textString.index(before: lastAtIndex)] == " "
-      guard isAtStart || isPrecededBySpace else { return false }
-      // No space in the partial match
-      guard !afterAt.contains(" ") else { return false }
-      // "vibe" must start with what's typed after @
-      return "vibe".hasPrefix(afterAt) || afterAt.isEmpty
-    }()
-    setMentionBannerVisible(shouldShowMention, animated: true)
+    setReadyBannerAction(resolveReadyBannerAction(in: textString), animated: true)
 
     // Highlight @vibe in real-time
     if let textStorage = tv.textStorage as NSTextStorage? {

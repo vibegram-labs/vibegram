@@ -8,6 +8,7 @@ export interface VibeAgentBuilderMessage {
     role: 'user' | 'assistant';
     content: string;
     timestamp?: number;
+    isStreaming?: boolean;
 }
 
 export interface VibeStandaloneAgent {
@@ -44,6 +45,7 @@ interface BuilderSessionPayload {
     draftPatch?: Record<string, unknown>;
     agent?: VibeStandaloneAgent | null;
     suggestions?: string[];
+    latestSecret?: string | null;
 }
 
 interface VibeAgentBuilderState {
@@ -72,11 +74,39 @@ interface VibeAgentBuilderState {
 }
 
 const defaultSuggestions = [
-    '/newagent Sales Assistant',
-    '/agents',
-    '/prompt You are a concise travel planner',
-    '/help',
+    'Create an agent that answers customer questions and can send voice replies.',
+    'How do I call this agent from my backend and webhook?',
+    '/newagent Product Copilot',
+    'Write the prompt for a recruiting assistant.',
 ];
+
+const createLocalMessageId = (prefix: 'user' | 'assistant') => {
+    return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+};
+
+const chunkReplyText = (value: string) => {
+    const tokens = value.split(/(\s+)/).filter(Boolean);
+    const chunks: string[] = [];
+    let current = '';
+
+    for (const token of tokens) {
+        const nextValue = `${current}${token}`;
+        if (nextValue.length > 42 && current.trim().length > 0) {
+            chunks.push(current);
+            current = token;
+        } else {
+            current = nextValue;
+        }
+    }
+
+    if (current.length > 0) {
+        chunks.push(current);
+    }
+
+    return chunks.length > 0 ? chunks : [value];
+};
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
 const resolveAuthToken = async (): Promise<string | null> => {
     const existing = AuthManager.getInstance().getSession();
@@ -127,6 +157,7 @@ const applySession = (payload: BuilderSessionPayload) => ({
     messages: Array.isArray(payload.messages) ? payload.messages : [],
     draftPatch: payload.draftPatch || {},
     agent: payload.agent || null,
+    latestSecret: typeof payload.latestSecret === 'string' ? payload.latestSecret : null,
     suggestions: Array.isArray(payload.suggestions) && payload.suggestions.length > 0
         ? payload.suggestions
         : defaultSuggestions,
@@ -183,8 +214,10 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
         const trimmed = message.trim();
         if (!trimmed) return;
 
-        const { activeAgentId } = get();
+        const { activeAgentId, conversationId } = get();
         const sentAt = Date.now();
+        const userMessageId = createLocalMessageId('user');
+        const assistantMessageId = createLocalMessageId('assistant');
 
         set((state) => ({
             isSending: true,
@@ -192,9 +225,17 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
             messages: [
                 ...state.messages,
                 {
+                    id: userMessageId,
                     role: 'user',
                     content: trimmed,
                     timestamp: sentAt,
+                },
+                {
+                    id: assistantMessageId,
+                    role: 'assistant',
+                    content: '',
+                    timestamp: sentAt + 1,
+                    isStreaming: true,
                 },
             ],
         }));
@@ -203,6 +244,7 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
             const payload = await apiRequest('/api/vibeagent/chat', {
                 method: 'POST',
                 body: JSON.stringify({
+                    conversationId,
                     message: trimmed,
                     activeAgentId,
                 }),
@@ -210,27 +252,58 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
 
             await get().refreshAgents();
 
+            const reply = typeof payload?.reply === 'string' && payload.reply.trim().length > 0
+                ? payload.reply.trim()
+                : 'Configured.';
+            const chunks = chunkReplyText(reply);
+
             set((state) => ({
-                ...applySession({
-                    conversationId: payload?.conversationId || state.conversationId,
-                    activeAgentId: payload?.activeAgentId || state.activeAgentId,
-                    messages: [
-                        ...state.messages,
-                        {
-                            role: 'assistant',
-                            content: payload?.reply || '',
-                            timestamp: Date.now(),
-                        },
-                    ],
-                    draftPatch: payload?.draftPatch || {},
-                    agent: payload?.agent || state.agent,
-                    suggestions: payload?.suggestions,
-                }),
+                conversationId: payload?.conversationId || state.conversationId,
+                activeAgentId: payload?.activeAgentId || state.activeAgentId,
+                draftPatch: payload?.draftPatch || {},
+                agent: payload?.agent || state.agent,
+                latestSecret: typeof payload?.latestSecret === 'string' ? payload.latestSecret : state.latestSecret,
+                suggestions: Array.isArray(payload?.suggestions) && payload.suggestions.length > 0
+                    ? payload.suggestions
+                    : state.suggestions,
                 isSending: false,
+                messages: state.messages.map((entry) => (
+                    entry.id === assistantMessageId
+                        ? {
+                            ...entry,
+                            content: '',
+                            timestamp: Date.now(),
+                            isStreaming: true,
+                        }
+                        : entry
+                )),
             }));
+
+            let streamed = '';
+            for (let index = 0; index < chunks.length; index += 1) {
+                streamed += chunks[index];
+                const isLast = index === chunks.length - 1;
+
+                set((state) => ({
+                    messages: state.messages.map((entry) => (
+                        entry.id === assistantMessageId
+                            ? {
+                                ...entry,
+                                content: streamed,
+                                isStreaming: !isLast,
+                            }
+                            : entry
+                    )),
+                }));
+
+                if (!isLast) {
+                    await sleep(index === 0 ? 70 : 26);
+                }
+            }
         } catch (error: any) {
             set({
                 isSending: false,
+                messages: get().messages.filter((entry) => entry.id !== assistantMessageId),
                 error: error?.message || 'Failed to send builder message',
             });
         }
