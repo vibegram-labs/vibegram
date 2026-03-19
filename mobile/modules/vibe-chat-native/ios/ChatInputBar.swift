@@ -4,6 +4,8 @@ import PhotosUI
 import UIKit
 import UniformTypeIdentifiers
 
+private let chatGapDebugOverlayEnabled = false
+
 // MARK: - Delegate
 
 protocol ChatInputBarDelegate: AnyObject {
@@ -20,7 +22,11 @@ protocol ChatInputBarDelegate: AnyObject {
   func inputBarTextDidChange(text: String)
   func inputBarHeightDidChange()
   // Rich attachment callbacks (mirrors AttachmentMenu.tsx)
-  func inputBarDidSelectImage(uri: String, caption: String?)
+  func inputBarDidSelectImage(
+    uri: String,
+    caption: String?,
+    transitionCapture: ChatAttachmentTransitionCapture?
+  )
   func inputBarDidSelectGif(
     id: String,
     url: String,
@@ -125,16 +131,17 @@ private final class ChatComposerTextView: UITextView {
   }
 }
 
+private final class ChatGifPanelPassthroughWindow: UIWindow {
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    let view = super.hitTest(point, with: event)
+    return view === self || view === rootViewController?.view ? nil : view
+  }
+}
+
 private final class ChatGifPanelPassthroughView: UIView {
-  override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
-    for subview in subviews.reversed()
-    where !subview.isHidden && subview.alpha > 0.01 && subview.isUserInteractionEnabled {
-      let converted = subview.convert(point, from: self)
-      if subview.point(inside: converted, with: event) {
-        return true
-      }
-    }
-    return false
+  override func hitTest(_ point: CGPoint, with event: UIEvent?) -> UIView? {
+    let view = super.hitTest(point, with: event)
+    return view == self ? nil : view
   }
 }
 
@@ -707,6 +714,7 @@ final class ChatInputBar: UIView {
   private weak var gifOverlayController: ChatGifPanelOverlayController?
   private var gifPanelVisible = false
   private var pendingGifPanelCloseForKeyboard = false
+  private var lastGifPanelGeometrySignature: String?
   private let defaultGifPanelHeight: CGFloat = 320
   private var lastKnownKeyboardHeight: CGFloat = 0
   private var isVideoMode: Bool = false
@@ -752,6 +760,9 @@ final class ChatInputBar: UIView {
   private let backgroundBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
   private let backgroundOverlayView = UIView()
   private let backgroundGradientLayer = CAGradientLayer()
+  private let gapDebugBarOverlay = UIView()
+  private let gapDebugSafeInsetBand = UIView()
+  private let gapDebugLabel = UILabel()
 
   // Appearance
   private var appearance = ChatListAppearance.fallback
@@ -979,12 +990,11 @@ final class ChatInputBar: UIView {
 
   override func didMoveToWindow() {
     super.didMoveToWindow()
-    maybePrepareGifPanel()
     if window == nil {
-      tearDownGifOverlayWindowIfNeeded()
-    } else {
-      updateGifPanelOverlayFrame()
+      gifPanel.hostViewController = nil
+      return
     }
+    maybePrepareGifPanel()
   }
 
   // MARK: - Setup
@@ -1003,6 +1013,29 @@ final class ChatInputBar: UIView {
     ]
     backgroundGradientLayer.locations = [0.1, 1.0]
     backgroundMaskView.layer.mask = backgroundGradientLayer
+
+    if chatGapDebugOverlayEnabled {
+      gapDebugBarOverlay.isUserInteractionEnabled = false
+      gapDebugBarOverlay.backgroundColor = UIColor.orange.withAlphaComponent(0.18)
+      gapDebugBarOverlay.layer.borderColor = UIColor.orange.withAlphaComponent(0.95).cgColor
+      gapDebugBarOverlay.layer.borderWidth = 1
+
+      gapDebugSafeInsetBand.isUserInteractionEnabled = false
+      gapDebugSafeInsetBand.backgroundColor = UIColor.yellow.withAlphaComponent(0.5)
+      gapDebugBarOverlay.addSubview(gapDebugSafeInsetBand)
+
+      gapDebugLabel.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+      gapDebugLabel.textColor = .white
+      gapDebugLabel.backgroundColor = UIColor.orange.withAlphaComponent(0.84)
+      gapDebugLabel.textAlignment = .center
+      gapDebugLabel.layer.cornerRadius = 4
+      gapDebugLabel.clipsToBounds = true
+      gapDebugBarOverlay.addSubview(gapDebugLabel)
+
+      addSubview(gapDebugBarOverlay)
+    }
+
+    addSubview(gifPanel)
 
     // ── 1. Content row ────────────────────────────────────────────────────
     // No full-bar glass. The bar background is transparent; each element
@@ -1480,7 +1513,9 @@ final class ChatInputBar: UIView {
     let bannerExtra: CGFloat = replyBannerExtra + mentionBannerExtra
     let pillH = clampedTextH + textInsetV * 2 + bannerExtra
 
-    let totalH = topVPad + pillH + bottomVPad + safeBottom
+    let composerHeight = topVPad + pillH + bottomVPad + safeBottom
+    let panelHeight = gifPanelVisible ? preferredGifPanelHeight() : 0
+    let totalH = composerHeight + panelHeight
     let prevH = barHeight
     barHeight = totalH
 
@@ -1489,14 +1524,47 @@ final class ChatInputBar: UIView {
 
     // ── View frames (CAN animate when triggered from UIView.animate) ──
     let blurExtraY = backgroundMaskTopOverlap
-    let blurTotalH = barHeight + blurExtraY
+    let blurTotalH = composerHeight + blurExtraY
     backgroundMaskView.frame = CGRect(x: 0, y: -blurExtraY, width: w, height: blurTotalH)
     backgroundBlurView.frame = backgroundMaskView.bounds
     backgroundOverlayView.frame = backgroundBlurView.bounds
 
+    if chatGapDebugOverlayEnabled {
+      gapDebugBarOverlay.isHidden = false
+      gapDebugBarOverlay.frame = CGRect(x: 0, y: 0, width: w, height: composerHeight)
+
+      let safeBandHeight = max(0, safeBottom)
+      gapDebugSafeInsetBand.isHidden = safeBandHeight <= 0.5
+      gapDebugSafeInsetBand.frame = CGRect(
+        x: 0,
+        y: max(0, composerHeight - safeBandHeight),
+        width: w,
+        height: safeBandHeight
+      )
+
+      let labelWidth = min(max(220, w * 0.72), max(220, w - 16))
+      let labelBandHeight = max(safeBandHeight, 22)
+      let labelY = max(4, composerHeight - labelBandHeight + 2)
+      gapDebugLabel.frame = CGRect(x: 8, y: labelY, width: labelWidth, height: 18)
+      gapDebugLabel.text = String(
+        format: "BAR %.0f SAFE %.0f RAW %.0f KB %.0f PNL %.0f",
+        barHeight,
+        safeBottom,
+        bottomSafeAreaInset,
+        keyboardHeightForPanels,
+        presentedBottomAccessoryHeight
+      )
+      bringSubviewToFront(gapDebugBarOverlay)
+    } else {
+      gapDebugBarOverlay.isHidden = true
+    }
+
     let rowY = topVPad
     let rowH = pillH
     contentRow.frame = CGRect(x: 0, y: rowY, width: w, height: rowH)
+
+    gifPanel.frame = CGRect(x: 0, y: composerHeight, width: w, height: panelHeight)
+    gifPanel.isHidden = !gifPanelVisible && gifPanel.alpha <= 0.01
 
     // Side buttons are perfectly circular
     // Pin them to the bottom of the pill, aligned with the text input box,
@@ -1662,7 +1730,23 @@ final class ChatInputBar: UIView {
       delegate?.inputBarHeightDidChange()
     }
 
-    updateGifPanelOverlayFrame()
+    if chatGapDebugOverlayEnabled {
+      bringSubviewToFront(gapDebugBarOverlay)
+    }
+    bringSubviewToFront(contentRow)
+    contentRow.bringSubviewToFront(attachGlass)
+    contentRow.bringSubviewToFront(micGlass)
+    contentRow.bringSubviewToFront(micVADView)
+    contentRow.bringSubviewToFront(pillGlass)
+    pillContainer.bringSubviewToFront(sendButton)
+    pillContainer.bringSubviewToFront(gifButton)
+    if mentionBannerVisible || !mentionBanner.isHidden {
+      pillContainer.bringSubviewToFront(mentionBanner)
+    }
+    if replyBannerVisible || replyBannerAnimatingOut || !replyBanner.isHidden {
+      pillContainer.bringSubviewToFront(replyBanner)
+    }
+
   }
 
   // MARK: - Glass
@@ -1819,14 +1903,7 @@ final class ChatInputBar: UIView {
 
   private func maybePrepareGifPanel() {
     guard window != nil else { return }
-    if let overlayController = gifOverlayController {
-      gifPanel.hostViewController = overlayController
-      gifPanel.prepareIfNeeded()
-      return
-    }
-    if gifPanel.hostViewController == nil {
-      gifPanel.hostViewController = findViewController()
-    }
+    gifPanel.hostViewController = findViewController()
     gifPanel.prepareIfNeeded()
   }
 
@@ -1859,7 +1936,7 @@ final class ChatInputBar: UIView {
     tearDownGifOverlayWindowIfNeeded()
 
     guard let windowScene = hostWindow.windowScene else { return nil }
-    let overlayWindow = UIWindow(windowScene: windowScene)
+    let overlayWindow = ChatGifPanelPassthroughWindow(windowScene: windowScene)
     overlayWindow.frame = windowScene.coordinateSpace.bounds
     overlayWindow.backgroundColor = .clear
     overlayWindow.windowLevel = UIWindow.Level(
@@ -1902,16 +1979,10 @@ final class ChatInputBar: UIView {
     else {
       return CGRect(x: panelX, y: bounds.height, width: panelWidth, height: panelHeight)
     }
-    let originInHostWindow = convert(CGPoint(x: panelX, y: bounds.height), to: hostWindow)
+    let originInHostWindow = convert(CGPoint(x: panelX, y: 0), to: hostWindow)
     let originInOverlay = overlayWindow.convert(originInHostWindow, from: hostWindow)
-    
-    var finalHeight = panelHeight
-    let screenBottomGap = overlayWindow.bounds.height - (originInOverlay.y + finalHeight)
-    if screenBottomGap > 0 {
-      finalHeight += screenBottomGap
-    }
-    
-    return CGRect(x: originInOverlay.x, y: originInOverlay.y, width: panelWidth, height: finalHeight)
+    let panelY = overlayWindow.bounds.height - panelHeight
+    return CGRect(x: originInOverlay.x, y: panelY, width: panelWidth, height: panelHeight)
   }
 
   private func updateGifPanelOverlayFrame() {
@@ -1920,11 +1991,41 @@ final class ChatInputBar: UIView {
     overlayController.view.frame = gifOverlayWindow?.bounds ?? overlayController.view.frame
     gifPanel.frame = desiredGifPanelFrame()
     gifPanel.isHidden = false
+    debugLogGifPanelGeometryIfNeeded(context: "updateGifPanelOverlayFrame")
+  }
+
+  private func debugLogGifPanelGeometryIfNeeded(context: String) {
+    guard gifPanelVisible, let overlayWindow = gifOverlayWindow else { return }
+    let signature = [
+      context,
+      NSCoder.string(for: frame),
+      NSCoder.string(for: bounds),
+      NSCoder.string(for: safeAreaInsets),
+      NSCoder.string(for: gifPanel.frame),
+      NSCoder.string(for: overlayWindow.frame),
+      String(format: "%.1f", preferredGifPanelHeight()),
+      String(format: "%.1f", bottomSafeAreaInset),
+      String(format: "%.1f", keyboardHeightForPanels),
+    ].joined(separator: "|")
+    guard signature != lastGifPanelGeometrySignature else { return }
+    lastGifPanelGeometrySignature = signature
+    NSLog(
+      "[ChatGifPanelHostDebug] context=%@ inputFrame=%@ inputBounds=%@ inputSafe=%@ panelFrame=%@ overlayFrame=%@ preferredHeight=%.1f bottomSafe=%.1f keyboardHeight=%.1f",
+      context,
+      NSCoder.string(for: frame),
+      NSCoder.string(for: bounds),
+      NSCoder.string(for: safeAreaInsets),
+      NSCoder.string(for: gifPanel.frame),
+      NSCoder.string(for: overlayWindow.frame),
+      preferredGifPanelHeight(),
+      bottomSafeAreaInset,
+      keyboardHeightForPanels
+    )
   }
 
   private func setGifPanelVisible(_ visible: Bool, animated: Bool) {
     guard visible != gifPanelVisible else { return }
-    let overlayOffset = max(18, min(48, preferredGifPanelHeight() * 0.12))
+    let panelOffset = max(18, min(48, preferredGifPanelHeight() * 0.12))
     gifPanelVisible = visible
     if visible {
       pendingGifPanelCloseForKeyboard = false
@@ -1944,12 +2045,10 @@ final class ChatInputBar: UIView {
     let shouldAnimate = animated
 
     if visible {
-      _ = ensureGifOverlayHost()
       maybePrepareGifPanel()
       gifPanel.setPanelVisible(true)
-      updateGifPanelOverlayFrame()
       gifPanel.layer.removeAllAnimations()
-      gifPanel.transform = shouldAnimate ? CGAffineTransform(translationX: 0, y: overlayOffset) : .identity
+      gifPanel.transform = shouldAnimate ? CGAffineTransform(translationX: 0, y: panelOffset) : .identity
       gifPanel.alpha = shouldAnimate ? 0 : 1
       gifPanel.isHidden = false
       if shouldAnimate {
@@ -1959,7 +2058,6 @@ final class ChatInputBar: UIView {
           options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState],
           animations: {
             applyChanges()
-            self.updateGifPanelOverlayFrame()
             self.gifPanel.alpha = 1
             self.gifPanel.transform = .identity
           }
@@ -1975,13 +2073,13 @@ final class ChatInputBar: UIView {
     }
 
     gifPanel.layer.removeAllAnimations()
-    let cleanupOverlay = {
+    let cleanupPanel = {
       self.gifPanel.alpha = 0
-      self.gifPanel.transform = CGAffineTransform(translationX: 0, y: overlayOffset)
+      self.gifPanel.transform = CGAffineTransform(translationX: 0, y: panelOffset)
     }
     let finishHide = {
       self.gifPanel.transform = .identity
-      self.tearDownGifOverlayWindowIfNeeded()
+      self.gifPanel.isHidden = true
     }
 
     if shouldAnimate {
@@ -1991,7 +2089,7 @@ final class ChatInputBar: UIView {
         options: [.curveEaseInOut, .allowUserInteraction, .beginFromCurrentState],
         animations: {
           applyChanges()
-          cleanupOverlay()
+          cleanupPanel()
         },
         completion: { _ in
           finishHide()
@@ -2023,13 +2121,20 @@ final class ChatInputBar: UIView {
     } else {
       sheet.sourceButtonFrameInWindow = attachGlass.convert(attachGlass.bounds, to: nil)
     }
-    sheet.onSelectImage = { [weak self] uri, caption in
-      self?.delegate?.inputBarDidSelectImage(uri: uri, caption: caption)
+    sheet.onSelectImage = { [weak self] uri, caption, transitionCapture in
+      self?.attachmentSheet = nil
+      self?.delegate?.inputBarDidSelectImage(
+        uri: uri,
+        caption: caption,
+        transitionCapture: transitionCapture
+      )
     }
     sheet.onSelectFile = { [weak self] uri, name in
+      self?.attachmentSheet = nil
       self?.delegate?.inputBarDidSelectFile(uri: uri, name: name)
     }
     sheet.onSelectLocation = { [weak self] lat, lon in
+      self?.attachmentSheet = nil
       self?.delegate?.inputBarDidSelectLocation(latitude: lat, longitude: lon)
     }
     attachmentSheet = sheet

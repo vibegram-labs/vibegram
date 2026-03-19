@@ -1,3 +1,4 @@
+import AVFoundation
 import ExpoModulesCore
 import QuickLook
 import UIKit
@@ -64,6 +65,7 @@ private let chatListSendVerticalTiming = CAMediaTimingFunction(
   Float(0.91025390625)
 )
 private let chatReactionDebugLogs = true
+private let chatGapDebugOverlayEnabled = false
 
 public final class ChatListView: ExpoView, UICollectionViewDataSource,
   UICollectionViewDelegateFlowLayout
@@ -87,6 +89,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private let scrollToneOverlay = UIView()
   private let scrollToneTopLayer = CAGradientLayer()
   private let scrollToneBottomLayer = CAGradientLayer()
+  private let gapDebugOverlay = UIView()
+  private let gapDebugLabel = UILabel()
   var rows: [ChatListRow] = []
   private var appearance = ChatListAppearance.fallback
   private var queuedAppearanceAfterSendTransition: ChatListAppearance?
@@ -96,6 +100,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var lastKnownViewportWidth: CGFloat = 0.0
   private var lastKnownViewportHeight: CGFloat = 0.0
   private var contentPaddingTop: CGFloat = sectionTopInset
+  private var requestedContentPaddingBottom: CGFloat = sectionBottomInset
   private var contentPaddingBottom: CGFloat = sectionBottomInset
   private var isApplyingRowsUpdate = false
   private var _setRowsGeneration: UInt = 0
@@ -106,6 +111,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var engineChatId: String = ""
   private var engineMyUserId: String = ""
   private var enginePeerUserId: String = ""
+  private var enginePeerDisplayName: String = ""
   private var engineOpenedChatId: String = ""
   private var statusAuthorityEnabled = false
   private var nativeOutgoingRowsById: [String: [String: Any]] = [:]
@@ -131,6 +137,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var documentPreviewDataSource: ChatListDocumentPreviewDataSource?
   private var documentPreviewCacheByRemoteURL: [String: URL] = [:]
   private var documentPreviewInFlightURLs = Set<String>()
+  private var onDemandRemoteMediaDownloadKeys = Set<String>()
+  private var mediaDownloadProgressByRemoteKey: [String: Double] = [:]
+  private var mediaDownloadObservations: [String: NSKeyValueObservation] = [:]
+  private var mediaDownloadTasks: [String: URLSessionDownloadTask] = [:]
   private var reactionDebugTargetMessageId: String?
   private var reactionDebugTargetEmoji: String?
   private var reactionDebugRemainingRowsChecks: Int = 0
@@ -250,6 +260,23 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     transitionOverlayHost.clipsToBounds = false
     addSubview(transitionOverlayHost)
 
+    if chatGapDebugOverlayEnabled {
+      gapDebugOverlay.isUserInteractionEnabled = false
+      gapDebugOverlay.backgroundColor = UIColor.red.withAlphaComponent(0.24)
+      gapDebugOverlay.layer.borderColor = UIColor.red.withAlphaComponent(0.95).cgColor
+      gapDebugOverlay.layer.borderWidth = 1
+
+      gapDebugLabel.font = .monospacedSystemFont(ofSize: 11, weight: .semibold)
+      gapDebugLabel.textColor = .white
+      gapDebugLabel.backgroundColor = UIColor.red.withAlphaComponent(0.82)
+      gapDebugLabel.textAlignment = .center
+      gapDebugLabel.layer.cornerRadius = 4
+      gapDebugLabel.clipsToBounds = true
+
+      gapDebugOverlay.addSubview(gapDebugLabel)
+      addSubview(gapDebugOverlay)
+    }
+
     setupActivityOverlay()
     setupDebugPanel()
 
@@ -274,6 +301,34 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     return (value * scale).rounded() / scale
   }
 
+  private func layoutGapDebugOverlay() {
+    guard chatGapDebugOverlayEnabled else { return }
+
+    let overlayHeight = max(0, contentPaddingBottom)
+    gapDebugOverlay.isHidden = overlayHeight <= 0.5
+    guard overlayHeight > 0.5 else { return }
+
+    gapDebugOverlay.frame = CGRect(
+      x: 0,
+      y: max(0, bounds.height - overlayHeight),
+      width: bounds.width,
+      height: overlayHeight
+    )
+    let labelWidth = min(max(128, bounds.width * 0.46), max(128, bounds.width - 16))
+    gapDebugLabel.frame = CGRect(x: 8, y: 6, width: labelWidth, height: 18)
+    gapDebugLabel.text = String(
+      format: "LIST inset %.0f req %.0f",
+      contentPaddingBottom,
+      requestedContentPaddingBottom
+    )
+
+    bringSubviewToFront(gapDebugOverlay)
+    if let inputBar {
+      bringSubviewToFront(inputBar)
+    }
+    bringSubviewToFront(transitionOverlayHost)
+  }
+
   private func reactionDebugLog(_ message: String) {
     guard chatReactionDebugLogs else { return }
     NSLog("[ChatReactionDebug] %@", message)
@@ -289,7 +344,11 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
   override public func didMoveToWindow() {
     super.didMoveToWindow()
+    updateChatEngineBinding()
     updateChatEngineChannelBinding()
+    if window != nil {
+      hydrateRowsFromNativeHistoryIfReady(trigger: "didMoveToWindow")
+    }
   }
 
   override public func layoutSubviews() {
@@ -309,6 +368,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       layoutInputBarAndInset()
     }
     layoutActivityOverlay()
+    layoutGapDebugOverlay()
 
     let currentHeight = collectionView.bounds.height
     let currentWidth = collectionView.bounds.width
@@ -1104,13 +1164,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     updateChatEngineBinding()
     updateChatEngineChannelBinding()
     refreshVisibleStatuses(reason: "chatId")
-    // Eagerly load native rows if history is already cached in ChatEngine.
-    // This allows the list to render instantly without waiting for JS props.
-    if statusAuthorityEnabled, !engineChatId.isEmpty,
-      ChatEngine.shared.isChatHistoryLoaded(chatId: engineChatId)
-    {
-      setRows(sourceRowsPayload)
-    }
+    hydrateRowsFromNativeHistoryIfReady(trigger: "chatId")
   }
 
   func setEngineMyUserId(_ value: String) {
@@ -1128,9 +1182,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     refreshVisibleStatuses(reason: "peerUserId")
   }
 
+  func setEnginePeerDisplayName(_ value: String) {
+    let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if enginePeerDisplayName == next { return }
+    enginePeerDisplayName = next
+  }
+
   func setStatusAuthorityEnabled(_ enabled: Bool) {
     if statusAuthorityEnabled == enabled { return }
     statusAuthorityEnabled = enabled
+    if enabled {
+      hydrateRowsFromNativeHistoryIfReady(trigger: "statusAuthorityEnabled")
+    }
     refreshVisibleStatuses(reason: "statusAuthorityEnabled")
   }
 
@@ -1216,12 +1279,15 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   func setContentPaddingBottom(_ value: Double) {
+    let next = max(sectionBottomInset, CGFloat(value))
+    requestedContentPaddingBottom = next
+
     // Native input mode owns bottom inset (bar height + keyboard height).
-    // Ignore external padding updates to prevent keyboard overlap regressions.
+    // Ignore external padding updates while still remembering the requested
+    // value so it can be restored if native input mode is disabled.
     guard !inputBarEnabled else {
       return
     }
-    let next = max(sectionBottomInset, CGFloat(value))
     if abs(next - contentPaddingBottom) <= 0.5 {
       return
     }
@@ -1410,21 +1476,51 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     else {
       return UICollectionViewCell()
     }
+    let row = rows[indexPath.item]
+    let preferredMediaURL = resolvedPreferredMediaURL(for: row)
+    let preferredLocalMediaURLOverride: String? = {
+      guard let preferredMediaURL else { return nil }
+      if let parsed = URL(string: preferredMediaURL), parsed.isFileURL {
+        return preferredMediaURL
+      }
+      if preferredMediaURL.hasPrefix("/") {
+        return preferredMediaURL
+      }
+      return nil
+    }()
     cell.applyAppearance(appearance)
     cell.resolveDisplayStatus = { [weak self] row in
       self?.resolvedDisplayStatus(for: row)
     }
-    cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
+    let mediaDownloadState = remoteMediaDownloadState(for: row)
+    cell.configure(
+      row: row,
+      hiddenMessageId: hiddenMessageId,
+      skipRemoteMediaLoad: mediaDownloadState.needsDownload,
+      preferredLocalMediaURLOverride: preferredLocalMediaURLOverride
+    )
+    cell.applyMediaDownloadState(
+      needsDownload: mediaDownloadState.needsDownload,
+      isDownloading: mediaDownloadState.isDownloading,
+      progress: mediaDownloadState.progress
+    )
     cell.onInlineAttachmentTap = { [weak self] row in
       guard let self else { return }
-      guard let mediaURL = row.mediaUrl, !mediaURL.isEmpty else { return }
-      self.openDocumentInApp(urlString: mediaURL)
+      self.openDocumentInApp(row: row)
     }
     cell.onMediaNaturalSizeResolved = { [weak self] messageId, mediaURL, size in
       self?.handleResolvedMediaSize(messageId: messageId, mediaURL: mediaURL, size: size)
     }
     cell.onVoiceUploadCancelTap = { [weak self] row in
       guard let self, let messageId = row.messageId, !messageId.isEmpty else { return }
+      let downloadState = self.remoteMediaDownloadState(for: row)
+      if downloadState.isDownloading {
+        if let remoteURL = URL(string: row.mediaUrl ?? "") {
+          let remoteKey = self.remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: row.mediaKey)
+          self.mediaDownloadTasks[remoteKey]?.cancel()
+        }
+        return
+      }
       self.onNativeEvent([
         "type": "cancelOutgoingUpload",
         "messageId": messageId,
@@ -1481,22 +1577,41 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     if isVoiceVisual {
       if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
         VoiceBubblePlaybackCoordinator.shared.toggle(
-          cell: cell, messageId: row.messageId, mediaURL: mediaURL
+          cell: cell,
+          messageId: row.messageId,
+          mediaURL: mediaURL,
+          mediaKey: row.mediaKey,
+          fileName: row.fileName
         )
       }
       return
     }
     let isImageVisual = row.visualKind == .media && row.messageType != "file"
     if isImageVisual {
+      let mediaDownloadState = remoteMediaDownloadState(for: row)
+      if mediaDownloadState.needsDownload {
+        startRemoteMediaDownload(for: row, presentOnComplete: true)
+        return
+      }
       let seedImage = (collectionView.cellForItem(at: indexPath) as? ChatListCell)?
         .currentMediaImage()
-      presentImageEditView(for: row, mediaURL: mediaURL, seedImage: seedImage)
+      presentImageEditView(
+        for: row,
+        mediaURL: resolvedPreferredMediaURL(for: row) ?? mediaURL,
+        seedImage: seedImage)
       return
     }
     let isMediaOrVideo =
       row.visualKind == .media || row.visualKind == .video || row.visualKind == .videoNote
+    if isMediaOrVideo {
+      let mediaDownloadState = remoteMediaDownloadState(for: row)
+      if mediaDownloadState.needsDownload {
+        startRemoteMediaDownload(for: row, presentOnComplete: true)
+        return
+      }
+    }
     guard isFileLikeType || hasFileNameHint || isAgentDocURL || isMediaOrVideo else { return }
-    openDocumentInApp(urlString: mediaURL)
+    openDocumentInApp(row: row)
   }
 
   @objc private func handleChatEngineChanged(_ note: Notification) {
@@ -1541,10 +1656,44 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       }
     }
     if reason == "chatRowsReloaded" {
-      setRows(sourceRowsPayload)
+      hydrateRowsFromNativeHistoryIfReady(trigger: "chatRowsReloaded")
       return
     }
     refreshVisibleStatuses(reason: reason)
+  }
+
+  private func hydrateRowsFromNativeHistoryIfReady(trigger: String) {
+    guard statusAuthorityEnabled else { return }
+    let resolvedChatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !resolvedChatId.isEmpty else { return }
+
+    // Restore overlay rows from ChatEngine's live index so messages sent while
+    // the view was detached can render immediately before JS catches up.
+    if nativeEngineRowsById.isEmpty {
+      let liveRows = ChatEngine.shared.getLiveMessageRows(["chatId": resolvedChatId])
+      if !liveRows.isEmpty {
+        for (rawMessageId, row) in liveRows {
+          guard let messageId = normalizedMessageId(rawMessageId) else { continue }
+          nativeEngineRowsById[messageId] = row
+          if !nativeEngineOrder.contains(messageId) {
+            nativeEngineOrder.append(messageId)
+          }
+        }
+        NSLog(
+          "[ChatListView] hydrateRowsFromNativeHistoryIfReady restored overlay from live rows trigger=%@ chatId=%@ count=%d",
+          trigger, resolvedChatId, liveRows.count
+        )
+      }
+    }
+
+    let historyLoaded = ChatEngine.shared.isChatHistoryLoaded(chatId: resolvedChatId)
+    if !historyLoaded && nativeEngineRowsById.isEmpty { return }
+    NSLog(
+      "[ChatListView] hydrateRowsFromNativeHistoryIfReady trigger=%@ chatId=%@ sourceRows=%d overlay=%d historyLoaded=%@",
+      trigger, resolvedChatId, sourceRowsPayload.count, nativeEngineRowsById.count,
+      historyLoaded ? "Y" : "N"
+    )
+    setRows(sourceRowsPayload)
   }
 
   private func updateChatEngineBinding() {
@@ -2186,6 +2335,84 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
   }
 
+  private func queueNativeOutgoingMediaMessage(
+    messageId: String,
+    type: String,
+    localUri: String,
+    caption: String?,
+    timestamp: String,
+    timestampMs: Double,
+    fileName: String? = nil,
+    duration: Double? = nil,
+    mediaSize: CGSize? = nil,
+    thumbnailBase64: String? = nil,
+    replyToId: String? = nil
+  ) {
+    let isPreviousMe: Bool = {
+      if let lastMessageRow = rows.last(where: { $0.kind == .message }) {
+        return lastMessageRow.isMe
+      }
+      return false
+    }()
+
+    let borderTopRightRadius: CGFloat = isPreviousMe ? 5 : 18
+    var metadata: [String: Any] = [
+      "mediaUrl": localUri,
+      "localMediaUrl": localUri,
+      "uploadProgress": 0.027,
+    ]
+    if let fileName { metadata["fileName"] = fileName }
+    if let duration { metadata["duration"] = duration }
+    if let mediaSize, mediaSize.width > 1.0, mediaSize.height > 1.0 {
+      metadata["width"] = Int(mediaSize.width)
+      metadata["height"] = Int(mediaSize.height)
+    }
+    if let thumbnailBase64, !thumbnailBase64.isEmpty {
+      metadata["thumbnailBase64"] = thumbnailBase64
+    }
+
+    var message: [String: Any] = [
+      "id": messageId,
+      "text": caption ?? "",
+      "timestamp": timestamp,
+      "timestampMs": timestampMs,
+      "isMe": true,
+      "status": "pending",
+      "type": type,
+      "mediaUrl": localUri,
+      "localMediaUrl": localUri,
+      "uploadProgress": 0.027,
+      "metadata": metadata,
+      "bubbleShape": [
+        "showTail": true,
+        "borderTopLeftRadius": 18,
+        "borderTopRightRadius": borderTopRightRadius,
+        "borderBottomRightRadius": 18,
+        "borderBottomLeftRadius": 18,
+      ],
+    ]
+    if let fileName { message["fileName"] = fileName }
+    if let duration { message["duration"] = duration }
+    if let mediaSize, mediaSize.width > 1.0, mediaSize.height > 1.0 {
+      message["width"] = Int(mediaSize.width)
+      message["height"] = Int(mediaSize.height)
+    }
+    if let thumbnailBase64, !thumbnailBase64.isEmpty {
+      message["thumbnailBase64"] = thumbnailBase64
+    }
+    if let replyToId { message["replyToId"] = replyToId }
+
+    nativeOutgoingRowsById[messageId] = [
+      "kind": "message",
+      "key": "m-\(messageId)",
+      "message": message,
+    ]
+    if !nativeOutgoingOrder.contains(messageId) {
+      nativeOutgoingOrder.append(messageId)
+    }
+    setRows(sourceRowsPayload)
+  }
+
   private func setNativeOutgoingMessageStatus(_ messageId: String, status: String) {
     guard var row = nativeOutgoingRowsById[messageId],
       var message = row["message"] as? [String: Any]
@@ -2708,6 +2935,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     inputBarEnabled = enabled
 
     if enabled {
+      if abs(contentPaddingBottom - sectionBottomInset) > 0.5 {
+        contentPaddingBottom = sectionBottomInset
+        updateBottomAnchorInset()
+      }
       let bar = ChatInputBar()
       bar.delegate = self
       bar.placeholder = inputBarPlaceholder
@@ -2720,6 +2951,10 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     } else {
       inputBar?.removeFromSuperview()
       inputBar = nil
+      if abs(contentPaddingBottom - requestedContentPaddingBottom) > 0.5 {
+        contentPaddingBottom = requestedContentPaddingBottom
+        updateBottomAnchorInset()
+      }
       NSLog("[ChatListView] native input bar DISABLED")
     }
     setNeedsLayout()
@@ -2792,17 +3027,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let distanceBeforeInsetChange = currentDistanceFromBottom()
     let wasNearBottom = distanceBeforeInsetChange <= listBottomThreshold
 
-    // The composer can reserve either the native keyboard area or a custom
-    // bottom accessory surface like the GIF panel overlay.
-    let effectiveKeyboardHeight = max(keyboardHeight, bar.presentedBottomAccessoryHeight)
-
-    // If keyboard is effectively visible, safe area is handled by keyboard height.
-    // Otherwise, account for bottom safe area in the bar layout.
+    let effectiveKeyboardHeight: CGFloat
     let safeBottom: CGFloat
-    if effectiveKeyboardHeight > 0 {
+    if bar.isGifPanelPresented {
+      effectiveKeyboardHeight = 0
       safeBottom = 0
     } else {
-      safeBottom = safeAreaInsets.bottom
+      effectiveKeyboardHeight = keyboardHeight
+      safeBottom = keyboardHeight > 0 ? 0 : safeAreaInsets.bottom
     }
     bar.bottomSafeAreaInset = safeBottom
 
@@ -2811,12 +3043,16 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     bar.layoutIfNeeded()
     let barH = bar.barHeight
 
-    // Position at bottom, above keyboard
+    // Position at bottom, above keyboard. When the GIF panel is open, `barH`
+    // already includes both the composer and the panel.
     let barY = h - barH - effectiveKeyboardHeight
     bar.frame = CGRect(x: 0, y: barY, width: w, height: barH)
+    bar.alpha = 1
+    bar.isUserInteractionEnabled = true
 
     // Update collection view bottom inset
     let totalBottomPadding = barH + effectiveKeyboardHeight
+
     let baseInsets = flowLayout.sectionInset
     if abs(baseInsets.bottom - totalBottomPadding) > 0.5 {
       contentPaddingBottom = totalBottomPadding
@@ -3041,6 +3277,131 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
   }
 
+  private func makeAttachmentSendTransitionPayload(
+    messageId: String,
+    text: String,
+    timestamp: String,
+    transitionCapture: ChatAttachmentTransitionCapture?
+  ) -> SendTransitionPayload? {
+    guard let transitionCapture else { return nil }
+    let sourceContainerRect: CGRect
+    if let window {
+      sourceContainerRect = convert(transitionCapture.sourceContainerFrameInWindow, from: window)
+    } else {
+      sourceContainerRect = transitionCapture.sourceContainerFrameInWindow
+    }
+    let localRect = CGRect(origin: .zero, size: sourceContainerRect.size)
+    return SendTransitionPayload(
+      messageId: messageId,
+      text: text,
+      timestamp: timestamp,
+      startRect: sourceContainerRect,
+      sourceContainerRect: sourceContainerRect,
+      sourceBackgroundRectInContainer: localRect,
+      sourceContentRectInContainer: localRect,
+      sourceScrollOffset: 0.0,
+      sourceBackgroundSnapshotView: transitionCapture.sourceBackgroundSnapshotView,
+      sourceContentSnapshotView: transitionCapture.sourceContentSnapshotView
+    )
+  }
+
+  private func handleNativeAttachmentSend(
+    uri: String,
+    caption: String?,
+    transitionCapture: ChatAttachmentTransitionCapture?
+  ) {
+    let messageId = UUID().uuidString.lowercased()
+    let now = Date()
+    let timestampMs = now.timeIntervalSince1970 * 1000
+    let formatter = DateFormatter()
+    formatter.dateFormat = "HH:mm"
+    let timestamp = formatter.string(from: now)
+    let replyToMessageId = inputBar?.activeReplyToMessageId
+    let isVideo = isVideoAttachmentURI(uri)
+    let type = isVideo ? "video" : "image"
+    let fileName = localAttachmentFileName(for: uri)
+    let duration = isVideo ? localMediaDurationSeconds(for: uri) : nil
+    let mediaSize = isVideo ? localVideoNaturalSize(for: uri) : localImagePixelSize(for: uri)
+    let thumbnailBase64 = isVideo ? localVideoThumbnailBase64(for: uri) : nil
+    let effectiveText = caption?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+
+    inputBar?.dismissReplyBanner(animated: false)
+    if let transitionPayload = makeAttachmentSendTransitionPayload(
+      messageId: messageId,
+      text: effectiveText,
+      timestamp: timestamp,
+      transitionCapture: transitionCapture
+    ) {
+      hiddenMessageId = messageId
+      pendingSendTransition = transitionPayload
+    }
+
+    queueNativeOutgoingMediaMessage(
+      messageId: messageId,
+      type: type,
+      localUri: uri,
+      caption: effectiveText.isEmpty ? nil : effectiveText,
+      timestamp: timestamp,
+      timestampMs: timestampMs,
+      fileName: fileName,
+      duration: duration,
+      mediaSize: mediaSize,
+      thumbnailBase64: thumbnailBase64,
+      replyToId: replyToMessageId
+    )
+
+    let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let myUserId = engineMyUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let peerUserId = enginePeerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+    if chatId.isEmpty {
+      setNativeOutgoingMessageStatus(messageId, status: "error")
+      return
+    }
+
+    var metadata: [String: Any] = ["mediaUrl": uri]
+    if let fileName, !fileName.isEmpty { metadata["fileName"] = fileName }
+    if let duration { metadata["duration"] = duration }
+    if let mediaSize, mediaSize.width > 1.0, mediaSize.height > 1.0 {
+      metadata["width"] = Int(mediaSize.width)
+      metadata["height"] = Int(mediaSize.height)
+    }
+    if let thumbnailBase64, !thumbnailBase64.isEmpty {
+      metadata["thumbnailBase64"] = thumbnailBase64
+    }
+
+    let sendPayload: [String: Any] = [
+      "chatId": chatId,
+      "messageId": messageId,
+      "type": type,
+      "text": effectiveText,
+      "timestampMs": timestampMs,
+      "replyToId": replyToMessageId as Any,
+      "metadata": metadata,
+      "myUserId": myUserId,
+      "peerUserId": peerUserId,
+      "isGroup": isGroupOrChannel,
+    ]
+
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      let result = ChatEngine.shared.sendMessage(sendPayload)
+      let accepted = (result["accepted"] as? Bool) == true
+      let resolvedStatus: String = {
+        if let stateValue = result["state"] as? String {
+          let normalized = stateValue.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+          if normalized == "error" || normalized == "pending" || normalized == "sent"
+            || normalized == "delivered" || normalized == "read"
+          {
+            return normalized
+          }
+        }
+        return accepted ? "sent" : "error"
+      }()
+      DispatchQueue.main.async {
+        self?.setNativeOutgoingMessageStatus(messageId, status: resolvedStatus)
+      }
+    }
+  }
+
   private func topPresentingViewController() -> UIViewController? {
     var responder: UIResponder? = self
     while let current = responder {
@@ -3070,13 +3431,455 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     collectionView.performBatchUpdates(nil)
   }
 
-  private func resolvedImageEditorHeaderTitle() -> String {
+  private func resolvedMediaPreviewHeaderTitle(for row: ChatListRow?) -> String {
+    if row?.isMe == true {
+      return "You"
+    }
+    let peerDisplayName = enginePeerDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+    if !peerDisplayName.isEmpty {
+      return peerDisplayName
+    }
     let peerUserId = enginePeerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
     let myUserId = engineMyUserId.trimmingCharacters(in: .whitespacesAndNewlines)
-    if peerUserId.isEmpty || (!myUserId.isEmpty && peerUserId.caseInsensitiveCompare(myUserId) == .orderedSame) {
-      return "Saved Messages"
+    if !peerUserId.isEmpty,
+      myUserId.isEmpty || peerUserId.caseInsensitiveCompare(myUserId) != .orderedSame
+    {
+      return peerUserId
     }
-    return peerUserId
+    return "User"
+  }
+
+  private func normalizedMediaExtension(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let ext: String
+    if let url = URL(string: trimmed), !url.pathExtension.isEmpty {
+      ext = url.pathExtension
+    } else {
+      ext = (trimmed as NSString).pathExtension
+    }
+    let normalized = ext.replacingOccurrences(of: ".", with: "").lowercased()
+    return normalized.isEmpty ? nil : normalized
+  }
+
+  private func rowRepresentsVideoMedia(_ row: ChatListRow) -> Bool {
+    if row.visualKind == .video || row.visualKind == .videoNote {
+      return true
+    }
+    let candidates = [
+      normalizedMediaExtension(row.fileName),
+      normalizedMediaExtension(row.mediaUrl),
+      normalizedMediaExtension(row.localMediaUrl),
+    ]
+    return candidates.contains { ext in
+      guard let ext else { return false }
+      return ["mp4", "mov", "m4v", "avi", "mkv", "webm"].contains(ext)
+    }
+  }
+
+  private func mediaRequiresLocalDownload(_ row: ChatListRow) -> Bool {
+    let trimmedKey = row.mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return !trimmedKey.isEmpty
+  }
+
+  private func localFileURL(from raw: String?) -> URL? {
+    guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let parsed = URL(string: trimmed), parsed.isFileURL {
+      return parsed
+    }
+    if trimmed.hasPrefix("/") {
+      return URL(fileURLWithPath: trimmed)
+    }
+    return nil
+  }
+
+  private func localFileSize(at url: URL) -> Int64 {
+    let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+    return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+  }
+
+  private func localVideoHeaderData(url: URL, maxCount: Int = 64) -> Data? {
+    guard
+      let handle = try? FileHandle(forReadingFrom: url),
+      let headerData = try? handle.read(upToCount: maxCount)
+    else {
+      return nil
+    }
+    defer {
+      try? handle.close()
+    }
+    return headerData
+  }
+
+  private func localVideoHeaderSummary(url: URL) -> String {
+    guard let headerData = localVideoHeaderData(url: url), !headerData.isEmpty else {
+      return "none"
+    }
+    let bytes = [UInt8](headerData.prefix(16))
+    let hex = bytes.map { String(format: "%02x", $0) }.joined()
+    var brand = "-"
+    if headerData.count >= 12 {
+      let brandData = headerData.subdata(in: 8..<12)
+      brand = String(data: brandData, encoding: .ascii) ?? "-"
+    }
+    return "hex=\(hex) brand=\(brand)"
+  }
+
+  private func hasRecognizableLocalVideoContainerHeader(url: URL) -> Bool {
+    guard let headerData = localVideoHeaderData(url: url) else { return false }
+    guard headerData.count >= 12 else { return false }
+    if headerData.count >= 8 {
+      let ftypRange = 4..<(min(headerData.count, 32) - 3)
+      if ftypRange.lowerBound < ftypRange.upperBound {
+        for index in ftypRange {
+          if headerData[index] == 0x66,
+            headerData[index + 1] == 0x74,
+            headerData[index + 2] == 0x79,
+            headerData[index + 3] == 0x70
+          {
+            return true
+          }
+        }
+      }
+    }
+    let headerPrefix = [UInt8](headerData.prefix(4))
+    if headerPrefix == [0x1A, 0x45, 0xDF, 0xA3] {
+      return true
+    }
+    return false
+  }
+
+  private func isUsableLocalVideoPreview(url: URL, logContext: String) -> Bool {
+    guard FileManager.default.fileExists(atPath: url.path) else { return false }
+    let byteSize = localFileSize(at: url)
+    guard byteSize > 0 else { return false }
+    let asset = AVURLAsset(url: url)
+    if asset.isPlayable || !asset.tracks(withMediaType: .video).isEmpty {
+      return true
+    }
+    if hasRecognizableLocalVideoContainerHeader(url: url) {
+      NSLog(
+        "[ChatMediaVideo] local accepted by header context=%@ path=%@ bytes=%lld playable=%@ header=%@",
+        logContext,
+        url.path,
+        byteSize,
+        asset.isPlayable ? "Y" : "N",
+        localVideoHeaderSummary(url: url)
+      )
+      return true
+    }
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: 640.0, height: 640.0)
+    do {
+      _ = try generator.copyCGImage(at: .zero, actualTime: nil)
+      return true
+    } catch {
+      NSLog(
+        "[ChatMediaVideo] local unusable context=%@ path=%@ bytes=%lld error=%@ header=%@",
+        logContext,
+        url.path,
+        byteSize,
+        error.localizedDescription,
+        localVideoHeaderSummary(url: url)
+      )
+      return false
+    }
+  }
+
+  private func usableLocalMediaURL(
+    from raw: String?,
+    for row: ChatListRow,
+    logContext: String,
+    allowVideoPlaybackFallback: Bool = false
+  ) -> URL? {
+    guard let localURL = localFileURL(from: raw) else { return nil }
+    guard FileManager.default.fileExists(atPath: localURL.path) else {
+      NSLog(
+        "[ChatMediaChoice] local missing context=%@ msgId=%@ path=%@ remote=%@",
+        logContext,
+        row.messageId ?? "-",
+        localURL.path,
+        row.mediaUrl ?? "-"
+      )
+      return nil
+    }
+    if rowRepresentsVideoMedia(row) {
+      if isUsableLocalVideoPreview(url: localURL, logContext: logContext) {
+        return localURL
+      }
+      if allowVideoPlaybackFallback {
+        let byteSize = localFileSize(at: localURL)
+        if byteSize > 1024 {
+          NSLog(
+            "[ChatMediaVideo] local accepted by playback fallback context=%@ path=%@ bytes=%lld",
+            logContext,
+            localURL.path,
+            byteSize
+          )
+          return localURL
+        }
+      }
+      return nil
+    }
+    if row.visualKind == .media && UIImage(contentsOfFile: localURL.path) == nil {
+      NSLog(
+        "[ChatMediaChoice] local image unusable context=%@ msgId=%@ path=%@ bytes=%lld",
+        logContext,
+        row.messageId ?? "-",
+        localURL.path,
+        localFileSize(at: localURL)
+      )
+      return nil
+    }
+    return localURL
+  }
+
+  private func validatedCachedDownloadedMediaURL(
+    remoteURL: URL,
+    row: ChatListRow,
+    logContext: String
+  ) -> URL? {
+    guard
+      let cachedURL = cachedDownloadedMediaURL(
+        remoteURL: remoteURL,
+        mediaKey: row.mediaKey,
+        fileName: row.fileName
+      )
+    else {
+      return nil
+    }
+    let allowVideoPlaybackFallback =
+      rowRepresentsVideoMedia(row)
+      && (row.mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    if usableLocalMediaURL(
+      from: cachedURL.absoluteString,
+      for: row,
+      logContext: logContext,
+      allowVideoPlaybackFallback: allowVideoPlaybackFallback
+    ) != nil {
+      return cachedURL
+    }
+    let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: row.mediaKey)
+    documentPreviewCacheByRemoteURL.removeValue(forKey: remoteKey)
+    try? FileManager.default.removeItem(at: cachedURL)
+    NSLog(
+      "[ChatMediaChoice] cached invalid context=%@ msgId=%@ removed=%@ remote=%@ hasMediaKey=%@",
+      logContext,
+      row.messageId ?? "-",
+      cachedURL.lastPathComponent,
+      remoteURL.absoluteString,
+      (row.mediaKey?.isEmpty == false) ? "Y" : "N"
+    )
+    return nil
+  }
+
+  private func remoteMediaCacheKey(remoteURL: URL, mediaKey: String?) -> String {
+    let trimmedKey = mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return remoteURL.absoluteString + "|" + trimmedKey
+  }
+
+  private func persistedPreviewLocalURL(
+    remoteURL: URL,
+    mediaKey: String?,
+    fileName: String?,
+    response: URLResponse? = nil,
+    tempURL: URL? = nil
+  ) -> URL {
+    let fileManager = FileManager.default
+    let previewDir = fileManager.temporaryDirectory
+      .appendingPathComponent("vibe-chat-preview-docs", isDirectory: true)
+    try? fileManager.createDirectory(at: previewDir, withIntermediateDirectories: true)
+
+    let preferredName =
+      fileName?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+      ? fileName!
+      : preferredDownloadFileName(remoteURL: remoteURL, response: response)
+    let fallbackTempURL = tempURL ?? remoteURL
+    let preferredExtension = preferredDownloadFileExtension(
+      remoteURL: remoteURL,
+      response: response,
+      fallbackName: preferredName,
+      tempURL: fallbackTempURL
+    )
+    let fileBaseName =
+      preferredName
+      .replacingOccurrences(of: "\\.[A-Za-z0-9]{1,12}$", with: "", options: .regularExpression)
+    let safeBase =
+      (fileBaseName.isEmpty ? "document" : fileBaseName)
+      .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
+    let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: mediaKey)
+    let hashComponent = String(format: "%016llx", UInt64(bitPattern: Int64(remoteKey.hashValue)))
+    let destinationName =
+      "\(safeBase)-\(hashComponent)\(preferredExtension.isEmpty ? "" : ".\(preferredExtension)")"
+    return previewDir.appendingPathComponent(destinationName, isDirectory: false)
+  }
+
+  private func cachedDownloadedMediaURL(
+    remoteURL: URL,
+    mediaKey: String?,
+    fileName: String?
+  ) -> URL? {
+    let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: mediaKey)
+    if let cachedURL = documentPreviewCacheByRemoteURL[remoteKey],
+      FileManager.default.fileExists(atPath: cachedURL.path)
+    {
+      return cachedURL
+    }
+    let persistedURL = persistedPreviewLocalURL(
+      remoteURL: remoteURL,
+      mediaKey: mediaKey,
+      fileName: fileName
+    )
+    guard FileManager.default.fileExists(atPath: persistedURL.path) else {
+      return nil
+    }
+    documentPreviewCacheByRemoteURL[remoteKey] = persistedURL
+    return persistedURL
+  }
+
+  private func remoteMediaDownloadState(for row: ChatListRow) -> (
+    needsDownload: Bool, isDownloading: Bool, progress: Double?
+  ) {
+    guard row.visualKind == .media || row.visualKind == .video || row.visualKind == .videoNote,
+      let mediaURL = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+      let remoteURL = URL(string: mediaURL),
+      let scheme = remoteURL.scheme?.lowercased(),
+      scheme == "http" || scheme == "https"
+    else {
+      return (false, false, nil)
+    }
+
+    let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: row.mediaKey)
+    let shouldShowDownloadState =
+      mediaRequiresLocalDownload(row) || onDemandRemoteMediaDownloadKeys.contains(remoteKey)
+    guard shouldShowDownloadState else {
+      return (false, false, nil)
+    }
+
+    if usableLocalMediaURL(from: row.localMediaUrl, for: row, logContext: "download_state.local")
+      != nil
+    {
+      return (false, false, nil)
+    }
+
+    if validatedCachedDownloadedMediaURL(
+      remoteURL: remoteURL,
+      row: row,
+      logContext: "download_state.cached"
+    ) != nil
+    {
+      return (false, false, nil)
+    }
+
+    let state = (
+      true,
+      documentPreviewInFlightURLs.contains(remoteKey),
+      mediaDownloadProgressByRemoteKey[remoteKey]
+    )
+    NSLog(
+      "[ChatMediaDownload] state msgId=%@ needs=Y downloading=%@ progress=%.3f remote=%@ hasMediaKey=%@ localRaw=%@",
+      row.messageId ?? "-",
+      state.1 ? "Y" : "N",
+      state.2 ?? -1.0,
+      remoteURL.absoluteString,
+      (row.mediaKey?.isEmpty == false) ? "Y" : "N",
+      row.localMediaUrl ?? "nil"
+    )
+    return state
+  }
+
+  private func rowByApplyingLocalMediaURL(
+    _ localMediaURL: String,
+    toMessageId messageId: String,
+    row: [String: Any]
+  ) -> (changed: Bool, row: [String: Any]) {
+    guard var message = row["message"] as? [String: Any],
+      let currentId = (message["id"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+      currentId == messageId
+    else {
+      return (false, row)
+    }
+    let currentLocalMediaURL =
+      (message["localMediaUrl"] as? String)
+      ?? (message["metadata"] as? [String: Any])?["localMediaUrl"] as? String
+    if currentLocalMediaURL == localMediaURL {
+      return (false, row)
+    }
+    message["localMediaUrl"] = localMediaURL
+    var metadata = (message["metadata"] as? [String: Any]) ?? [:]
+    metadata["localMediaUrl"] = localMediaURL
+    message["metadata"] = metadata
+    var patched = row
+    patched["message"] = message
+    return (true, patched)
+  }
+
+  private func cacheDownloadedMediaURL(_ localURL: URL, for row: ChatListRow) {
+    guard let messageId = row.messageId?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !messageId.isEmpty
+    else {
+      return
+    }
+    let localValue = localURL.absoluteString
+    if !sourceRowsPayload.isEmpty {
+      sourceRowsPayload = sourceRowsPayload.map { rowPayload in
+        rowByApplyingLocalMediaURL(localValue, toMessageId: messageId, row: rowPayload).row
+      }
+    }
+    if let rowPayload = nativeOutgoingRowsById[messageId] {
+      nativeOutgoingRowsById[messageId] =
+        rowByApplyingLocalMediaURL(localValue, toMessageId: messageId, row: rowPayload).row
+    }
+    if let rowPayload = nativeEngineRowsById[messageId] {
+      nativeEngineRowsById[messageId] =
+        rowByApplyingLocalMediaURL(localValue, toMessageId: messageId, row: rowPayload).row
+    }
+    setRows(sourceRowsPayload)
+  }
+
+  private func resolvedPreferredMediaURL(for row: ChatListRow) -> String? {
+    if let localURL = usableLocalMediaURL(
+      from: row.localMediaUrl,
+      for: row,
+      logContext: "resolved.local"
+    ) {
+      NSLog(
+        "[ChatMediaChoice] resolved local msgId=%@ path=%@",
+        row.messageId ?? "-",
+        localURL.path
+      )
+      return localURL.absoluteString
+    }
+    if let remoteMediaURL = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+      let remoteURL = URL(string: remoteMediaURL),
+      let scheme = remoteURL.scheme?.lowercased(),
+      scheme == "http" || scheme == "https",
+      let cachedURL = validatedCachedDownloadedMediaURL(
+        remoteURL: remoteURL,
+        row: row,
+        logContext: "resolved.cached"
+      )
+    {
+      NSLog(
+        "[ChatMediaChoice] resolved cached msgId=%@ path=%@ remote=%@",
+        row.messageId ?? "-",
+        cachedURL.path,
+        remoteMediaURL
+      )
+      return cachedURL.absoluteString
+    }
+    if let remote = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines), !remote.isEmpty {
+      NSLog(
+        "[ChatMediaChoice] resolved remote msgId=%@ remote=%@ hasMediaKey=%@",
+        row.messageId ?? "-",
+        remote,
+        (row.mediaKey?.isEmpty == false) ? "Y" : "N"
+      )
+    }
+    return row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
   private func presentImageEditView(for row: ChatListRow, mediaURL: String, seedImage: UIImage?) {
@@ -3087,7 +3890,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       mediaURL: mediaURL,
       initialImage: seedImage,
       initialCaption: row.text,
-      headerTitle: resolvedImageEditorHeaderTitle()
+      headerTitle: resolvedMediaPreviewHeaderTitle(for: row)
     ) { [weak self] payload in
       guard let self else { return }
       var event: [String: Any] = [
@@ -3116,14 +3919,218 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }
   }
 
-  private func openDocumentInApp(urlString: String) {
+  private func startRemoteMediaDownload(for row: ChatListRow, presentOnComplete: Bool) {
+    guard let mediaURL = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+      let remoteURL = URL(string: mediaURL),
+      let scheme = remoteURL.scheme?.lowercased(),
+      scheme == "http" || scheme == "https"
+    else {
+      return
+    }
+
+    let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: row.mediaKey)
+    let shouldTrackOnDemandState =
+      !mediaRequiresLocalDownload(row) && presentOnComplete
+
+    if let cachedURL = validatedCachedDownloadedMediaURL(
+      remoteURL: remoteURL,
+      row: row,
+      logContext: "download_start.cached"
+    ) {
+      NSLog(
+        "[ChatMediaDownload] reuse cached msgId=%@ remote=%@ path=%@",
+        row.messageId ?? "-",
+        remoteURL.absoluteString,
+        cachedURL.path
+      )
+      cacheDownloadedMediaURL(cachedURL, for: row)
+      onDemandRemoteMediaDownloadKeys.remove(remoteKey)
+      if presentOnComplete {
+        openDocumentInApp(
+          urlString: cachedURL.absoluteString,
+          mediaKey: nil,
+          fileName: row.fileName,
+          row: row
+        )
+      }
+      return
+    }
+
+    guard !documentPreviewInFlightURLs.contains(remoteKey) else { return }
+    documentPreviewInFlightURLs.insert(remoteKey)
+    if shouldTrackOnDemandState {
+      onDemandRemoteMediaDownloadKeys.insert(remoteKey)
+    }
+    mediaDownloadProgressByRemoteKey[remoteKey] = 0.027
+    NSLog(
+      "[ChatMediaDownload] start msgId=%@ remote=%@ hasMediaKey=%@ onDemand=%@ fileName=%@",
+      row.messageId ?? "-",
+      remoteURL.absoluteString,
+      (row.mediaKey?.isEmpty == false) ? "Y" : "N",
+      shouldTrackOnDemandState ? "Y" : "N",
+      row.fileName ?? "-"
+    )
+    setRows(sourceRowsPayload)
+
+    var request = URLRequest(url: remoteURL)
+    request.timeoutInterval = 60
+    request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
+    if let authHeader = ChatEngine.shared.authorizationHeaderForAPI() {
+      request.setValue(authHeader, forHTTPHeaderField: "Authorization")
+    }
+
+    let task = Self.documentPreviewSession.downloadTask(with: request) {
+      [weak self] tempURL, response, error in
+      guard let self else { return }
+      let localURL = self.persistDownloadedDocument(
+        tempURL: tempURL,
+        remoteURL: remoteURL,
+        response: response,
+        error: error,
+        mediaKey: row.mediaKey,
+        originalFileName: row.fileName
+      )
+      DispatchQueue.main.async {
+        self.documentPreviewInFlightURLs.remove(remoteKey)
+        self.onDemandRemoteMediaDownloadKeys.remove(remoteKey)
+        self.mediaDownloadObservations.removeValue(forKey: remoteKey)?.invalidate()
+        self.mediaDownloadProgressByRemoteKey.removeValue(forKey: remoteKey)
+        self.mediaDownloadTasks.removeValue(forKey: remoteKey)
+        if let localURL,
+          self.usableLocalMediaURL(
+            from: localURL.absoluteString,
+            for: row,
+            logContext: "download_complete",
+            allowVideoPlaybackFallback: self.rowRepresentsVideoMedia(row)
+              && (row.mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+          ) != nil
+        {
+          self.documentPreviewCacheByRemoteURL[remoteKey] = localURL
+          self.cacheDownloadedMediaURL(localURL, for: row)
+          NSLog(
+            "[ChatMediaDownload] ready msgId=%@ remote=%@ local=%@ bytes=%lld",
+            row.messageId ?? "-",
+            remoteURL.absoluteString,
+            localURL.path,
+            self.localFileSize(at: localURL)
+          )
+          if presentOnComplete {
+            self.openDocumentInApp(
+              urlString: localURL.absoluteString,
+              mediaKey: nil,
+              fileName: row.fileName,
+              row: row
+            )
+          }
+        } else {
+          if let localURL {
+            NSLog(
+              "[ChatMediaDownload] invalid local after download msgId=%@ remote=%@ local=%@ hasMediaKey=%@",
+              row.messageId ?? "-",
+              remoteURL.absoluteString,
+              localURL.path,
+              (row.mediaKey?.isEmpty == false) ? "Y" : "N"
+            )
+            try? FileManager.default.removeItem(at: localURL)
+          }
+          self.setRows(self.sourceRowsPayload)
+          NSLog("[ChatListView] remote media download failed url=%@", remoteURL.absoluteString)
+        }
+      }
+    }
+
+    mediaDownloadObservations[remoteKey] = task.progress.observe(
+      \.fractionCompleted,
+      options: [.initial, .new]
+    ) { [weak self] progress, _ in
+      guard let self else { return }
+      let value = max(0.027, min(1.0, progress.fractionCompleted))
+      DispatchQueue.main.async {
+        let previous = self.mediaDownloadProgressByRemoteKey[remoteKey] ?? 0.0
+        if abs(previous - value) < 0.01 {
+          return
+        }
+        self.mediaDownloadProgressByRemoteKey[remoteKey] = value
+        self.setRows(self.sourceRowsPayload)
+      }
+    }
+    mediaDownloadTasks[remoteKey] = task
+    task.resume()
+  }
+
+  private func openDocumentInApp(row: ChatListRow) {
+    let downloadState = remoteMediaDownloadState(for: row)
+    if downloadState.needsDownload {
+      NSLog(
+        "[ChatMediaOpen] redirect to download msgId=%@ remote=%@ downloading=%@ progress=%.3f",
+        row.messageId ?? "-",
+        row.mediaUrl ?? "-",
+        downloadState.isDownloading ? "Y" : "N",
+        downloadState.progress ?? -1.0
+      )
+      startRemoteMediaDownload(for: row, presentOnComplete: true)
+      return
+    }
+    guard let urlString = resolvedPreferredMediaURL(for: row), !urlString.isEmpty else { return }
+    if rowRepresentsVideoMedia(row),
+      let presenter = topPresentingViewController(),
+      let resolvedURL = URL(string: urlString),
+      let scheme = resolvedURL.scheme?.lowercased(),
+      scheme == "http" || scheme == "https",
+      (row.mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+    {
+      NSLog(
+        "[ChatMediaOpen] remote video streaming msgId=%@ remote=%@ header=%@",
+        row.messageId ?? "-",
+        resolvedURL.absoluteString,
+        resolvedMediaPreviewHeaderTitle(for: row)
+      )
+      let asset = AVURLAsset(
+        url: resolvedURL,
+        options: [AVURLAssetPreferPreciseDurationAndTimingKey: false]
+      )
+      ChatVideoEditModule.presentPreview(
+        from: presenter,
+        asset: asset,
+        initialCaption: row.text,
+        headerTitle: resolvedMediaPreviewHeaderTitle(for: row)
+      )
+      return
+    }
+    NSLog(
+      "[ChatMediaOpen] open msgId=%@ resolved=%@ remote=%@ local=%@",
+      row.messageId ?? "-",
+      urlString,
+      row.mediaUrl ?? "-",
+      row.localMediaUrl ?? "-"
+    )
+    openDocumentInApp(
+      urlString: urlString,
+      mediaKey: row.mediaKey,
+      fileName: row.fileName,
+      row: row
+    )
+  }
+
+  private func openDocumentInApp(
+    urlString: String,
+    mediaKey: String? = nil,
+    fileName: String? = nil,
+    row: ChatListRow? = nil
+  ) {
     let trimmed = urlString.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmed.isEmpty else { return }
     let resolved = ChatEngine.shared.resolveURLForOpen(trimmed) ?? trimmed
     if let remoteURL = URL(string: resolved), let scheme = remoteURL.scheme?.lowercased(),
       scheme == "http" || scheme == "https"
     {
-      openRemoteDocumentInPreview(remoteURL: remoteURL, fallbackURL: resolved)
+      openRemoteDocumentInPreview(
+        remoteURL: remoteURL,
+        fallbackURL: resolved,
+        mediaKey: mediaKey,
+        fileName: fileName,
+        row: row
+      )
       return
     }
 
@@ -3141,18 +4148,22 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     }()
 
     if let localURL = resolvedLocalURL {
-      presentDocumentPreview(localURL: localURL)
+      presentDocumentPreview(localURL: localURL, row: row)
       return
     }
 
     NSLog("[ChatListView] openDocumentInApp unsupported url=%@", resolved)
   }
 
-  private func presentDocumentPreview(localURL: URL) {
+  private func presentDocumentPreview(localURL: URL, row: ChatListRow? = nil) {
     guard let presenter = topPresentingViewController() else {
       NSLog(
         "[ChatListView] presentDocumentPreview skipped - presenter unavailable for %@",
         localURL.path)
+      return
+    }
+
+    if presentVideoPreviewIfSupported(localURL: localURL, presenter: presenter, row: row) {
       return
     }
 
@@ -3167,7 +4178,62 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     presenter.present(preview, animated: true)
   }
 
-  private func openRemoteDocumentInPreview(remoteURL: URL, fallbackURL: String) {
+  private func presentVideoPreviewIfSupported(
+    localURL: URL,
+    presenter: UIViewController,
+    row: ChatListRow?
+  ) -> Bool {
+    let ext = localURL.pathExtension.lowercased()
+    let videoExtensions: Set<String> = ["mp4", "mov", "m4v"]
+    guard videoExtensions.contains(ext) else { return false }
+    let byteSize = localFileSize(at: localURL)
+    guard byteSize > 0 else {
+      NSLog(
+        "[ChatListView] presentVideoPreview skipped empty local path=%@ ext=%@ bytes=%lld",
+        localURL.path,
+        ext,
+        byteSize
+      )
+      return false
+    }
+    if !isUsableLocalVideoPreview(url: localURL, logContext: "present_video") {
+      NSLog(
+        "[ChatListView] presentVideoPreview continuing despite preview validation failure path=%@ ext=%@ bytes=%lld header=%@",
+        localURL.path,
+        ext,
+        byteSize,
+        localVideoHeaderSummary(url: localURL)
+      )
+    }
+
+    let asset = AVURLAsset(
+      url: localURL,
+      options: [AVURLAssetPreferPreciseDurationAndTimingKey: false]
+    )
+    NSLog(
+      "[ChatListView] presentVideoPreview module path=%@ ext=%@ bytes=%lld header=%@ caption=%@",
+      localURL.lastPathComponent,
+      ext,
+      byteSize,
+      localVideoHeaderSummary(url: localURL),
+      row?.text ?? ""
+    )
+    ChatVideoEditModule.presentPreview(
+      from: presenter,
+      asset: asset,
+      initialCaption: row?.text,
+      headerTitle: resolvedMediaPreviewHeaderTitle(for: row)
+    )
+    return true
+  }
+
+  private func openRemoteDocumentInPreview(
+    remoteURL: URL,
+    fallbackURL: String,
+    mediaKey: String?,
+    fileName: String?,
+    row: ChatListRow?
+  ) {
     guard topPresentingViewController() != nil else {
       NSLog(
         "[ChatListView] openRemoteDocumentInPreview skipped - presenter unavailable for %@",
@@ -3175,11 +4241,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return
     }
 
-    let remoteKey = remoteURL.absoluteString
-    if let cachedURL = documentPreviewCacheByRemoteURL[remoteKey],
-      FileManager.default.fileExists(atPath: cachedURL.path)
+    let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: mediaKey)
+    if let cachedURL = cachedDownloadedMediaURL(
+      remoteURL: remoteURL,
+      mediaKey: mediaKey,
+      fileName: fileName
+    )
     {
-      presentDocumentPreview(localURL: cachedURL)
+      presentDocumentPreview(localURL: cachedURL, row: row)
       return
     }
 
@@ -3199,13 +4268,15 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         tempURL: tempURL,
         remoteURL: remoteURL,
         response: response,
-        error: error
+        error: error,
+        mediaKey: mediaKey,
+        originalFileName: fileName
       )
       DispatchQueue.main.async {
         self.documentPreviewInFlightURLs.remove(remoteKey)
         if let localURL {
           self.documentPreviewCacheByRemoteURL[remoteKey] = localURL
-          self.presentDocumentPreview(localURL: localURL)
+          self.presentDocumentPreview(localURL: localURL, row: row)
           return
         }
         NSLog("[ChatListView] openRemoteDocumentInPreview failed url=%@", fallbackURL)
@@ -3218,7 +4289,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     tempURL: URL?,
     remoteURL: URL,
     response: URLResponse?,
-    error: Error?
+    error: Error?,
+    mediaKey: String?,
+    originalFileName: String?
   ) -> URL? {
     guard error == nil, let tempURL else { return nil }
     if let statusCode = (response as? HTTPURLResponse)?.statusCode,
@@ -3236,35 +4309,64 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       return nil
     }
 
-    let preferredName = preferredDownloadFileName(remoteURL: remoteURL, response: response)
-    let preferredExtension = preferredDownloadFileExtension(
+    let destinationURL = persistedPreviewLocalURL(
       remoteURL: remoteURL,
+      mediaKey: mediaKey,
+      fileName: originalFileName,
       response: response,
-      fallbackName: preferredName,
       tempURL: tempURL
     )
-
-    let fileBaseName =
-      preferredName
-      .replacingOccurrences(of: "\\.[A-Za-z0-9]{1,12}$", with: "", options: .regularExpression)
-
-    let safeBase =
-      (fileBaseName.isEmpty ? "document" : fileBaseName)
-      .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
-    let extensionValue = preferredExtension
-    let destinationName =
-      "\(safeBase)-\(UUID().uuidString)\(extensionValue.isEmpty ? "" : ".\(extensionValue)")"
-    let destinationURL = previewDir.appendingPathComponent(destinationName, isDirectory: false)
 
     do {
       if fileManager.fileExists(atPath: destinationURL.path) {
         try fileManager.removeItem(at: destinationURL)
       }
-      try fileManager.moveItem(at: tempURL, to: destinationURL)
+      let trimmedKey = mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      if !trimmedKey.isEmpty {
+        let encryptedData = try Data(contentsOf: tempURL, options: [.mappedIfSafe])
+        guard let decryptedData = ChatEngine.shared.decryptMediaDataIfNeeded(encryptedData, mediaKey: trimmedKey)
+        else {
+          return nil
+        }
+        try decryptedData.write(to: destinationURL, options: [.atomic])
+        try? fileManager.removeItem(at: tempURL)
+      } else {
+        try fileManager.moveItem(at: tempURL, to: destinationURL)
+      }
+      NSLog(
+        "[ChatMediaDownload] persisted remote=%@ local=%@ mime=%@ suggested=%@ bytes=%lld hasMediaKey=%@ header=%@",
+        remoteURL.absoluteString,
+        destinationURL.path,
+        response?.mimeType ?? "nil",
+        response?.suggestedFilename ?? "nil",
+        localFileSize(at: destinationURL),
+        trimmedKey.isEmpty ? "N" : "Y",
+        localVideoHeaderSummary(url: destinationURL)
+      )
       return destinationURL
     } catch {
       do {
-        try fileManager.copyItem(at: tempURL, to: destinationURL)
+        let trimmedKey = mediaKey?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !trimmedKey.isEmpty {
+          let encryptedData = try Data(contentsOf: tempURL, options: [.mappedIfSafe])
+          guard let decryptedData = ChatEngine.shared.decryptMediaDataIfNeeded(encryptedData, mediaKey: trimmedKey)
+          else {
+            return nil
+          }
+          try decryptedData.write(to: destinationURL, options: [.atomic])
+        } else {
+          try fileManager.copyItem(at: tempURL, to: destinationURL)
+        }
+        NSLog(
+          "[ChatMediaDownload] persisted-copy remote=%@ local=%@ mime=%@ suggested=%@ bytes=%lld hasMediaKey=%@ header=%@",
+          remoteURL.absoluteString,
+          destinationURL.path,
+          response?.mimeType ?? "nil",
+          response?.suggestedFilename ?? "nil",
+          localFileSize(at: destinationURL),
+          trimmedKey.isEmpty ? "N" : "Y",
+          localVideoHeaderSummary(url: destinationURL)
+        )
         return destinationURL
       } catch {
         return nil
@@ -3531,10 +4633,38 @@ extension ChatListView: ChatInputBarDelegate {
     ])
   }
 
-  func inputBarDidSelectImage(uri: String, caption: String?) {
+  func inputBarDidSelectImage(
+    uri: String,
+    caption: String?,
+    transitionCapture: ChatAttachmentTransitionCapture?
+  ) {
+    if nativeSendEnabled {
+      handleNativeAttachmentSend(
+        uri: uri,
+        caption: caption,
+        transitionCapture: transitionCapture
+      )
+      return
+    }
     var payload: [String: Any] = ["type": "attachmentImage", "uri": uri]
     if let caption = caption, !caption.isEmpty {
       payload["caption"] = caption
+    }
+    if isVideoAttachmentURI(uri) {
+      if let duration = localMediaDurationSeconds(for: uri) {
+        payload["duration"] = duration
+      }
+      if let fileName = localAttachmentFileName(for: uri), !fileName.isEmpty {
+        payload["name"] = fileName
+      }
+      if let thumbnailBase64 = localVideoThumbnailBase64(for: uri), !thumbnailBase64.isEmpty {
+        payload["thumbnailBase64"] = thumbnailBase64
+      }
+      // Extract natural video dimensions so the bubble sizes correctly.
+      if let size = localVideoNaturalSize(for: uri) {
+        payload["width"] = Int(size.width)
+        payload["height"] = Int(size.height)
+      }
     }
     onNativeEvent(payload)
   }
@@ -3560,6 +4690,135 @@ extension ChatListView: ChatInputBarDelegate {
       "width": width,
       "height": height,
     ])
+  }
+
+  private func isVideoAttachmentURI(_ raw: String) -> Bool {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    let lowercasedValue =
+      (URL(string: trimmed)?.pathExtension.isEmpty == false
+        ? (URL(string: trimmed)?.pathExtension ?? "")
+        : (trimmed as NSString).pathExtension
+      ).lowercased()
+    return ["mp4", "mov", "m4v", "avi", "mkv", "webm"].contains(lowercasedValue)
+  }
+
+  private func localAttachmentFileURL(for raw: String) -> URL? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    if let url = URL(string: trimmed), url.isFileURL {
+      return url
+    }
+    if trimmed.hasPrefix("/") {
+      return URL(fileURLWithPath: trimmed)
+    }
+    return nil
+  }
+
+  private func localAttachmentFileName(for raw: String) -> String? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    if let url = URL(string: trimmed), !url.lastPathComponent.isEmpty {
+      return url.lastPathComponent.removingPercentEncoding ?? url.lastPathComponent
+    }
+    let pathComponent = (trimmed as NSString).lastPathComponent
+    return pathComponent.isEmpty ? nil : pathComponent
+  }
+
+  private func localMediaDurationSeconds(for raw: String) -> Double? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let fileURL = localAttachmentFileURL(for: trimmed)
+    guard let fileURL else { return nil }
+    let duration = AVURLAsset(url: fileURL).duration.seconds
+    guard duration.isFinite, duration > 0 else { return nil }
+    return duration
+  }
+
+  private func localImagePixelSize(for raw: String) -> CGSize? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let fileURL = localAttachmentFileURL(for: trimmed)
+    guard let fileURL else { return nil }
+    if let image = UIImage(contentsOfFile: fileURL.path) {
+      return CGSize(width: image.size.width * image.scale, height: image.size.height * image.scale)
+    }
+    return nil
+  }
+
+  private func localVideoThumbnailImage(for raw: String, maxDimension: CGFloat = 480.0) -> UIImage? {
+    guard let fileURL = localAttachmentFileURL(for: raw) else { return nil }
+    let asset = AVURLAsset(url: fileURL)
+    let generator = AVAssetImageGenerator(asset: asset)
+    generator.appliesPreferredTrackTransform = true
+    generator.maximumSize = CGSize(width: maxDimension, height: maxDimension)
+    let durationSeconds = asset.duration.seconds
+    let safeDuration = durationSeconds.isFinite ? max(0.0, durationSeconds) : 0.0
+    let candidateTimes: [Double] = [0.0, 0.04, 0.12, 0.24, 0.5, 1.0]
+      .filter { safeDuration <= 0.01 || $0 <= safeDuration }
+    for seconds in candidateTimes {
+      do {
+        let cgImage = try generator.copyCGImage(
+          at: CMTime(seconds: seconds, preferredTimescale: 600),
+          actualTime: nil
+        )
+        return UIImage(cgImage: cgImage)
+      } catch {
+        continue
+      }
+    }
+    return nil
+  }
+
+  private func localVideoThumbnailBase64(for raw: String) -> String? {
+    guard let thumbnailImage = localVideoThumbnailImage(for: raw) else {
+      NSLog("[ChatVideoThumb] generation failed uri=%@", raw)
+      return nil
+    }
+    let maxDimension: CGFloat = 480.0
+    let imageSize = thumbnailImage.size
+    let scaleRatio = min(
+      1.0,
+      min(
+        maxDimension / max(1.0, imageSize.width),
+        maxDimension / max(1.0, imageSize.height)
+      )
+    )
+    let targetSize = CGSize(
+      width: max(1.0, floor(imageSize.width * scaleRatio)),
+      height: max(1.0, floor(imageSize.height * scaleRatio))
+    )
+    let renderer = UIGraphicsImageRenderer(size: targetSize)
+    let renderedImage = renderer.image { _ in
+      thumbnailImage.draw(in: CGRect(origin: .zero, size: targetSize))
+    }
+    guard let jpegData = renderedImage.jpegData(compressionQuality: 0.72) else {
+      NSLog("[ChatVideoThumb] jpeg encode failed uri=%@", raw)
+      return nil
+    }
+    NSLog(
+      "[ChatVideoThumb] generated uri=%@ bytes=%lu size=%@",
+      raw,
+      jpegData.count,
+      NSCoder.string(for: CGRect(origin: .zero, size: targetSize))
+    )
+    return jpegData.base64EncodedString()
+  }
+
+  private func localVideoNaturalSize(for raw: String) -> CGSize? {
+    let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return nil }
+    let fileURL = localAttachmentFileURL(for: trimmed)
+    guard let fileURL else { return nil }
+    let asset = AVURLAsset(url: fileURL)
+    guard let track = asset.tracks(withMediaType: .video).first else { return nil }
+    let naturalSize = track.naturalSize
+    // Apply the preferred transform to handle portrait videos correctly.
+    let transformed = naturalSize.applying(track.preferredTransform)
+    let w = abs(transformed.width)
+    let h = abs(transformed.height)
+    guard w > 1, h > 1 else { return nil }
+    return CGSize(width: w, height: h)
   }
 
   func inputBarDidSelectSticker(
