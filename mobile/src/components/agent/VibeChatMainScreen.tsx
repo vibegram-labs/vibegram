@@ -86,8 +86,14 @@ export default function VibeChatMainScreen({
   const builderMessages = useVibeAgentBuilderStore((state) => state.messages);
   const builderSuggestions = useVibeAgentBuilderStore((state) => state.suggestions);
   const builderAgent = useVibeAgentBuilderStore((state) => state.agent);
+  const builderSetupState = useVibeAgentBuilderStore((state) => state.setupState);
+  const builderPendingUiRequest = useVibeAgentBuilderStore((state) => state.pendingUiRequest);
+  const builderReviewSections = useVibeAgentBuilderStore((state) => state.reviewSections);
+  const builderActivity = useVibeAgentBuilderStore((state) => state.activity);
   const builderLoad = useVibeAgentBuilderStore((state) => state.load);
   const sendBuilderMessage = useVibeAgentBuilderStore((state) => state.sendMessage);
+  const submitBuilderUiResponse = useVibeAgentBuilderStore((state) => state.submitUiResponse);
+  const createBuilderDraft = useVibeAgentBuilderStore((state) => state.createDraftFromReview);
 
   const nativeMainModule = useMemo(() => getNativeChatMainModule(), []);
   const nativeAvailable = !!nativeMainModule && (nativeMainModule.isSupported?.() ?? true);
@@ -220,13 +226,33 @@ export default function VibeChatMainScreen({
   }, [
     activeConversation?.id,
     activeConversation?.messages,
+    builderActivity,
     builderAgent?.displayName,
     builderAgent?.username,
     builderConversationId,
     builderMessages,
+    builderPendingUiRequest,
+    builderReviewSections,
+    builderSetupState,
     builderSuggestions,
     isBuilderMode,
     mode,
+  ]);
+
+  const builderSetupPanel = useMemo(() => {
+    if (!isBuilderMode) return null;
+    return {
+      setupState: builderSetupState,
+      pendingUiRequest: builderPendingUiRequest,
+      reviewSections: builderReviewSections,
+      activity: builderActivity,
+    };
+  }, [
+    builderActivity,
+    builderPendingUiRequest,
+    builderReviewSections,
+    builderSetupState,
+    isBuilderMode,
   ]);
 
   const handleSubmit = useCallback(async (rawText: string, optimistic?: NativeOptimisticMessage) => {
@@ -272,6 +298,28 @@ export default function VibeChatMainScreen({
       return;
     }
 
+    if (type === 'builderSetupSubmit' && isBuilderMode) {
+      const requestId = typeof payload.requestId === 'string' ? payload.requestId.trim() : '';
+      if (!requestId) return;
+
+      const answers =
+        payload.answers && typeof payload.answers === 'object'
+          ? (payload.answers as Record<string, unknown>)
+          : {};
+      const optimisticUserContent =
+        typeof payload.summary === 'string' && payload.summary.trim().length > 0
+          ? payload.summary.trim()
+          : undefined;
+
+      void submitBuilderUiResponse(requestId, answers, optimisticUserContent);
+      return;
+    }
+
+    if (type === 'builderReviewCreateDraft' && isBuilderMode) {
+      void createBuilderDraft();
+      return;
+    }
+
     if (type !== 'sendMessage') return;
 
     const text =
@@ -286,7 +334,15 @@ export default function VibeChatMainScreen({
       messageId,
       timestamp,
     });
-  }, [handleSubmit, onBack, onOpenBuilder, onOpenSettings]);
+  }, [
+    createBuilderDraft,
+    handleSubmit,
+    isBuilderMode,
+    onBack,
+    onOpenBuilder,
+    onOpenSettings,
+    submitBuilderUiResponse,
+  ]);
 
   if (!nativeAvailable) {
     return (
@@ -359,6 +415,7 @@ export default function VibeChatMainScreen({
         profileName={headerTitle}
         profileHandle={isBuilderMode ? BUILDER_HANDLE : VIBE_HANDLE}
         profileBio={profileBio}
+        builderSetupPanel={builderSetupPanel}
         onNativeEvent={handleNativeEvent}
         onNativeError={(error, context) => {
           console.warn('[vibe/native-main]', context, error);

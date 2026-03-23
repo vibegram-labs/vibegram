@@ -2,6 +2,14 @@ import { create } from 'zustand';
 
 import AuthManager from '../AuthManager';
 import ProxyManager from '../ProxyManager';
+import type {
+    BuilderActivityItem,
+    BuilderReviewSection,
+    BuilderSetupState,
+    BuilderUiField,
+    BuilderUiRequest,
+    BuilderUiResponsePayload,
+} from './builder-types';
 
 export interface VibeAgentBuilderMessage {
     id?: string;
@@ -54,6 +62,10 @@ interface BuilderSessionPayload {
     agent?: VibeStandaloneAgent | null;
     suggestions?: string[];
     latestSecret?: string | null;
+    setupState?: BuilderSetupState | null;
+    pendingUiRequest?: BuilderUiRequest | null;
+    reviewSections?: BuilderReviewSection[];
+    activity?: BuilderActivityItem[];
 }
 
 interface BuilderStreamDonePayload extends BuilderSessionPayload {
@@ -63,6 +75,13 @@ interface BuilderStreamDonePayload extends BuilderSessionPayload {
 interface BuilderOptimisticMessageOptions {
     messageId?: string;
     timestamp?: number;
+}
+
+interface BuilderInputConfig {
+    message?: string | null;
+    uiResponse?: BuilderUiResponsePayload | null;
+    optimisticUserContent?: string | null;
+    optimistic?: BuilderOptimisticMessageOptions;
 }
 
 interface VibeAgentBuilderState {
@@ -75,12 +94,22 @@ interface VibeAgentBuilderState {
     agent: VibeStandaloneAgent | null;
     suggestions: string[];
     latestSecret: string | null;
+    setupState: BuilderSetupState | null;
+    pendingUiRequest: BuilderUiRequest | null;
+    reviewSections: BuilderReviewSection[];
+    activity: BuilderActivityItem[];
     isLoading: boolean;
     isSending: boolean;
     error: string | null;
     load: () => Promise<void>;
     refreshAgents: () => Promise<void>;
     sendMessage: (message: string, optimistic?: BuilderOptimisticMessageOptions) => Promise<void>;
+    submitUiResponse: (
+        requestId: string,
+        answers: Record<string, unknown>,
+        optimisticUserContent?: string,
+    ) => Promise<void>;
+    createDraftFromReview: () => Promise<void>;
     createAgent: (displayName?: string) => Promise<void>;
     selectAgent: (agentId: string) => Promise<void>;
     publishActive: () => Promise<void>;
@@ -91,24 +120,193 @@ interface VibeAgentBuilderState {
 }
 
 const defaultSuggestions = [
-    'Create an agent that answers customer questions and can send voice replies.',
+    'I need an agent for my shoes store.',
+    'Set up an order operations agent and ask only what you need.',
+    'Create a customer support agent with a publish-ready draft.',
     'How do I call this agent from my backend and webhook?',
-    'Write the prompt for a recruiting assistant.',
-    'Create a product copilot agent.',
 ];
 
 const createLocalMessageId = (prefix: 'user' | 'assistant') => {
     return `${prefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 };
 
+const normalizeString = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return trimmed.length > 0 ? trimmed : null;
+};
+
+const normalizeStringArray = (value: unknown): string[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((item) => normalizeString(item))
+        .filter((item): item is string => !!item);
+};
+
+const normalizeFieldOptions = (value: unknown) => {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((entry) => {
+            if (!entry || typeof entry !== 'object') return null;
+            const option = entry as Record<string, unknown>;
+            const id = normalizeString(option.id);
+            const label = normalizeString(option.label);
+            if (!id || !label) return null;
+            return {
+                id,
+                label,
+                hint: normalizeString(option.hint),
+            };
+        })
+        .filter((entry): entry is { id: string; label: string; hint?: string | null } => !!entry);
+};
+
+const normalizeUiField = (value: unknown): BuilderUiField | null => {
+    if (!value || typeof value !== 'object') return null;
+    const raw = value as Record<string, unknown>;
+    const key = normalizeString(raw.key);
+    const label = normalizeString(raw.label);
+    const type = normalizeString(raw.type);
+    if (!key || !label || !type) return null;
+
+    if (type === 'single_select' || type === 'multi_select') {
+        const options = normalizeFieldOptions(raw.options);
+        if (options.length === 0) return null;
+        return {
+            key,
+            label,
+            type,
+            required: raw.required === true,
+            options,
+            renderHint: raw.renderHint === 'tabs' ? 'tabs' : 'chips',
+            allowCustom: raw.allowCustom === true,
+            placeholder: normalizeString(raw.placeholder),
+            value: raw.value,
+        };
+    }
+
+    if (type === 'text' || type === 'long_text') {
+        return {
+            key,
+            label,
+            type,
+            required: raw.required === true,
+            placeholder: normalizeString(raw.placeholder),
+            value: raw.value,
+        };
+    }
+
+    if (type === 'chat_picker') {
+        return {
+            key,
+            label,
+            type,
+            required: raw.required === true,
+            value: raw.value,
+        };
+    }
+
+    return null;
+};
+
+const normalizeUiRequest = (value: unknown): BuilderUiRequest | null => {
+    if (!value || typeof value !== 'object') return null;
+    const raw = value as Record<string, unknown>;
+    const id = normalizeString(raw.id);
+    const title = normalizeString(raw.title);
+    if (!id || !title) return null;
+
+    const fields = Array.isArray(raw.fields)
+        ? raw.fields.map((field) => normalizeUiField(field)).filter((field): field is BuilderUiField => !!field)
+        : [];
+
+    if (fields.length === 0) return null;
+
+    return {
+        id,
+        presentation: 'sheet',
+        title,
+        description: normalizeString(raw.description),
+        submitLabel: normalizeString(raw.submitLabel) || 'Continue',
+        allowSkip: raw.allowSkip === true,
+        fields,
+    };
+};
+
+const normalizeReviewSections = (value: unknown): BuilderReviewSection[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((entry) => {
+            if (!entry || typeof entry !== 'object') return null;
+            const raw = entry as Record<string, unknown>;
+            const id = normalizeString(raw.id);
+            const title = normalizeString(raw.title);
+            if (!id || !title) return null;
+            const fields = Array.isArray(raw.fields)
+                ? raw.fields.map((field) => normalizeUiField(field)).filter((field): field is BuilderUiField => !!field)
+                : [];
+            return {
+                id,
+                title,
+                summary: normalizeString(raw.summary) || '',
+                editable: raw.editable !== false,
+                requestId: normalizeString(raw.requestId) || `setup:edit:${id}`,
+                fields,
+            };
+        })
+        .filter((entry): entry is BuilderReviewSection => !!entry);
+};
+
+const normalizeSetupState = (value: unknown): BuilderSetupState | null => {
+    if (!value || typeof value !== 'object') return null;
+    const raw = value as Record<string, unknown>;
+    const status = normalizeString(raw.status);
+    const phase = normalizeString(raw.phase);
+    if (!status || !phase) return null;
+
+    return {
+        status: status as BuilderSetupState['status'],
+        phase: phase as BuilderSetupState['phase'],
+        summary: normalizeString(raw.summary),
+        confidence: typeof raw.confidence === 'number' ? raw.confidence : null,
+    };
+};
+
+const normalizeActivity = (value: unknown): BuilderActivityItem[] => {
+    if (!Array.isArray(value)) return [];
+    return value
+        .map((entry) => {
+            if (!entry || typeof entry !== 'object') return null;
+            const raw = entry as Record<string, unknown>;
+            const id = normalizeString(raw.id);
+            const title = normalizeString(raw.title);
+            if (!id || !title) return null;
+            const status = normalizeString(raw.status) || 'pending';
+            return {
+                id,
+                title,
+                status: status as BuilderActivityItem['status'],
+                detail: normalizeString(raw.detail),
+                agentLabel: normalizeString(raw.agentLabel ?? raw.agent_label),
+                prompt: normalizeString(raw.prompt),
+                parentId: normalizeString(raw.parentId ?? raw.parent_id),
+                depth:
+                    typeof raw.depth === 'number' && Number.isFinite(raw.depth)
+                        ? raw.depth
+                        : null,
+            };
+        })
+        .filter((entry): entry is BuilderActivityItem => !!entry);
+};
+
 const resolveAuthToken = async (): Promise<string | null> => {
     const existing = AuthManager.getInstance().getSession();
     if (existing?.loginToken) return existing.loginToken;
-    if ((existing as any)?.token) return (existing as any).token;
+    if ((existing as { token?: string } | null)?.token) return (existing as { token?: string }).token || null;
 
     const restored = await AuthManager.getInstance().init();
     if (restored?.loginToken) return restored.loginToken;
-    if ((restored as any)?.token) return (restored as any).token;
+    if ((restored as { token?: string } | null)?.token) return (restored as { token?: string }).token || null;
     return null;
 };
 
@@ -154,13 +352,48 @@ const applySession = (payload: BuilderSessionPayload) => ({
     suggestions: Array.isArray(payload.suggestions) && payload.suggestions.length > 0
         ? payload.suggestions
         : defaultSuggestions,
+    setupState: normalizeSetupState(payload.setupState),
+    pendingUiRequest: normalizeUiRequest(payload.pendingUiRequest),
+    reviewSections: normalizeReviewSections(payload.reviewSections),
+    activity: normalizeActivity(payload.activity),
 });
 
-const parseSSEBuffer = (buffer: string): { events: Array<{ type: string; data: any }>, remaining: string } => {
-    buffer = buffer.replace(/\r\n/g, '\n');
+const applyBuilderPayload = (
+    current: Pick<VibeAgentBuilderState, 'activeAgentId' | 'draftPatch' | 'agent' | 'latestSecret' | 'suggestions' | 'setupState' | 'pendingUiRequest' | 'reviewSections' | 'activity' | 'conversationId'>,
+    payload: BuilderSessionPayload | null | undefined,
+) => {
+    if (!payload) return current;
+
+    return {
+        conversationId: payload.conversationId || current.conversationId,
+        activeAgentId: payload.activeAgentId || current.activeAgentId,
+        draftPatch: payload.draftPatch || current.draftPatch,
+        agent: payload.agent || current.agent,
+        latestSecret: typeof payload.latestSecret === 'string' ? payload.latestSecret : current.latestSecret,
+        suggestions: Array.isArray(payload.suggestions) && payload.suggestions.length > 0
+            ? payload.suggestions
+            : current.suggestions,
+        setupState: normalizeSetupState(payload.setupState) || current.setupState,
+        pendingUiRequest:
+            payload.pendingUiRequest !== undefined
+                ? normalizeUiRequest(payload.pendingUiRequest)
+                : current.pendingUiRequest,
+        reviewSections:
+            payload.reviewSections !== undefined
+                ? normalizeReviewSections(payload.reviewSections)
+                : current.reviewSections,
+        activity:
+            payload.activity !== undefined
+                ? normalizeActivity(payload.activity)
+                : current.activity,
+    };
+};
+
+const parseSSEBuffer = (buffer: string): { events: Array<{ type: string; data: any }>; remaining: string } => {
+    const normalized = buffer.replace(/\r\n/g, '\n');
     const events: Array<{ type: string; data: any }> = [];
-    const eventChunks = buffer.split('\n\n');
-    const hasCompleteTail = buffer.endsWith('\n\n');
+    const eventChunks = normalized.split('\n\n');
+    const hasCompleteTail = normalized.endsWith('\n\n');
     const completeChunks = hasCompleteTail ? eventChunks.filter(Boolean) : eventChunks.slice(0, -1).filter(Boolean);
     const remaining = hasCompleteTail ? '' : (eventChunks[eventChunks.length - 1] || '');
 
@@ -177,9 +410,7 @@ const parseSSEBuffer = (buffer: string): { events: Array<{ type: string; data: a
         }
 
         const rawData = dataLines.join('\n');
-        if (!rawData || rawData === '[DONE]') {
-            continue;
-        }
+        if (!rawData || rawData === '[DONE]') continue;
 
         try {
             events.push({ type: eventType, data: JSON.parse(rawData) });
@@ -192,11 +423,18 @@ const parseSSEBuffer = (buffer: string): { events: Array<{ type: string; data: a
 };
 
 const streamBuilderChat = async (
-    message: string,
-    conversationId: string | null,
-    activeAgentId: string | null,
+    request: {
+        message?: string | null;
+        uiResponse?: BuilderUiResponsePayload | null;
+        conversationId: string | null;
+        activeAgentId: string | null;
+    },
     handlers: {
         onChunk: (chunk: string) => void;
+        onState: (payload: BuilderSessionPayload) => void;
+        onUiRequest: (payload: BuilderSessionPayload) => void;
+        onDraftPatch: (payload: BuilderSessionPayload) => void;
+        onReviewReady: (payload: BuilderSessionPayload) => void;
         onDone: (payload: BuilderStreamDonePayload) => void;
     },
 ) => {
@@ -212,9 +450,10 @@ const streamBuilderChat = async (
             Accept: 'application/json, text/event-stream',
         },
         body: JSON.stringify({
-            conversationId,
-            message,
-            activeAgentId,
+            conversationId: request.conversationId,
+            activeAgentId: request.activeAgentId,
+            message: request.message,
+            uiResponse: request.uiResponse,
         }),
     });
 
@@ -225,7 +464,9 @@ const streamBuilderChat = async (
         try {
             const parsed = errorText ? JSON.parse(errorText) : {};
             message = parsed?.error || parsed?.message || message;
-        } catch { }
+        } catch {
+            // Ignore JSON parse failures for error responses.
+        }
 
         throw new Error(message);
     }
@@ -235,6 +476,26 @@ const streamBuilderChat = async (
     const processEvent = (eventType: string, data: any) => {
         if (eventType === 'chunk') {
             handlers.onChunk(typeof data?.text === 'string' ? data.text : '');
+            return;
+        }
+
+        if (eventType === 'state') {
+            handlers.onState((data || {}) as BuilderSessionPayload);
+            return;
+        }
+
+        if (eventType === 'ui_request') {
+            handlers.onUiRequest((data || {}) as BuilderSessionPayload);
+            return;
+        }
+
+        if (eventType === 'draft_patch') {
+            handlers.onDraftPatch((data || {}) as BuilderSessionPayload);
+            return;
+        }
+
+        if (eventType === 'review_ready') {
+            handlers.onReviewReady((data || {}) as BuilderSessionPayload);
             return;
         }
 
@@ -288,6 +549,25 @@ const streamBuilderChat = async (
     }
 };
 
+const updateFromPayload = (
+    state: VibeAgentBuilderState,
+    payload: BuilderSessionPayload | null | undefined,
+) => {
+    const next = applyBuilderPayload(state, payload);
+    return {
+        conversationId: next.conversationId,
+        activeAgentId: next.activeAgentId,
+        draftPatch: next.draftPatch,
+        agent: next.agent,
+        latestSecret: next.latestSecret,
+        suggestions: next.suggestions,
+        setupState: next.setupState,
+        pendingUiRequest: next.pendingUiRequest,
+        reviewSections: next.reviewSections,
+        activity: next.activity,
+    };
+};
+
 export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get) => ({
     agents: [],
     quota: null,
@@ -298,6 +578,10 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
     agent: null,
     suggestions: defaultSuggestions,
     latestSecret: null,
+    setupState: null,
+    pendingUiRequest: null,
+    reviewSections: [],
+    activity: [],
     isLoading: false,
     isSending: false,
     error: null,
@@ -339,24 +623,142 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
         const trimmed = message.trim();
         if (!trimmed) return;
 
+        const senderConfig: BuilderInputConfig = {
+            message: trimmed,
+            optimistic,
+            optimisticUserContent: trimmed,
+        };
+
+        const sendInput = async () => {
+            const { activeAgentId, conversationId } = get();
+            const sentAt = typeof optimistic?.timestamp === 'number' && Number.isFinite(optimistic.timestamp)
+                ? optimistic.timestamp
+                : Date.now();
+            const userMessageId = optimistic?.messageId || createLocalMessageId('user');
+            const assistantMessageId = createLocalMessageId('assistant');
+            const userContent = senderConfig.optimisticUserContent?.trim() || null;
+
+            set((state) => ({
+                isSending: true,
+                error: null,
+                messages: [
+                    ...state.messages,
+                    ...(userContent
+                        ? [{
+                            id: userMessageId,
+                            role: 'user' as const,
+                            content: userContent,
+                            timestamp: sentAt,
+                        }]
+                        : []),
+                    {
+                        id: assistantMessageId,
+                        role: 'assistant',
+                        content: '',
+                        timestamp: sentAt + 1,
+                        isStreaming: true,
+                    },
+                ],
+            }));
+
+            try {
+                let streamedReply = '';
+                let completionPayload: BuilderStreamDonePayload | null = null;
+
+                await streamBuilderChat({
+                    message: senderConfig.message || null,
+                    uiResponse: senderConfig.uiResponse || null,
+                    conversationId,
+                    activeAgentId,
+                }, {
+                    onChunk: (chunk) => {
+                        if (!chunk) return;
+                        streamedReply += chunk;
+
+                        set((state) => ({
+                            messages: state.messages.map((entry) => (
+                                entry.id === assistantMessageId
+                                    ? { ...entry, content: streamedReply, isStreaming: true }
+                                    : entry
+                            )),
+                        }));
+                    },
+                    onState: (payload) => {
+                        set((state) => updateFromPayload(state, payload));
+                    },
+                    onUiRequest: (payload) => {
+                        set((state) => updateFromPayload(state, payload));
+                    },
+                    onDraftPatch: (payload) => {
+                        set((state) => updateFromPayload(state, payload));
+                    },
+                    onReviewReady: (payload) => {
+                        set((state) => updateFromPayload(state, payload));
+                    },
+                    onDone: (payload) => {
+                        completionPayload = payload;
+                    },
+                });
+
+                void get().refreshAgents().catch((error) => {
+                    console.warn('[VibeAgentBuilderStore] Failed to refresh agents after stream', error);
+                });
+
+                const reply = typeof completionPayload?.reply === 'string' && completionPayload.reply.trim().length > 0
+                    ? completionPayload.reply.trim()
+                    : (streamedReply.trim().length > 0 ? streamedReply : 'Configured.');
+
+                set((state) => ({
+                    ...updateFromPayload(state, completionPayload),
+                    isSending: false,
+                    messages: state.messages.map((entry) => (
+                        entry.id === assistantMessageId
+                            ? {
+                                ...entry,
+                                content: reply,
+                                timestamp: Date.now(),
+                                isStreaming: false,
+                            }
+                            : entry
+                    )),
+                }));
+            } catch (error: any) {
+                set((state) => ({
+                    isSending: false,
+                    messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
+                    error: error?.message || 'Failed to send builder message',
+                }));
+            }
+        };
+
+        await sendInput();
+    },
+
+    submitUiResponse: async (requestId: string, answers: Record<string, unknown>, optimisticUserContent?: string) => {
+        const normalizedRequestId = normalizeString(requestId);
+        if (!normalizedRequestId) return;
+
         const { activeAgentId, conversationId } = get();
-        const sentAt = typeof optimistic?.timestamp === 'number' && Number.isFinite(optimistic.timestamp)
-            ? optimistic.timestamp
-            : Date.now();
-        const userMessageId = optimistic?.messageId || createLocalMessageId('user');
+        const sentAt = Date.now();
+        const userContent = normalizeString(optimisticUserContent);
+        const userMessageId = createLocalMessageId('user');
         const assistantMessageId = createLocalMessageId('assistant');
 
         set((state) => ({
             isSending: true,
             error: null,
+            pendingUiRequest:
+                state.pendingUiRequest?.id === normalizedRequestId ? null : state.pendingUiRequest,
             messages: [
                 ...state.messages,
-                {
-                    id: userMessageId,
-                    role: 'user',
-                    content: trimmed,
-                    timestamp: sentAt,
-                },
+                ...(userContent
+                    ? [{
+                        id: userMessageId,
+                        role: 'user' as const,
+                        content: userContent,
+                        timestamp: sentAt,
+                    }]
+                    : []),
                 {
                     id: assistantMessageId,
                     role: 'assistant',
@@ -371,46 +773,49 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
             let streamedReply = '';
             let completionPayload: BuilderStreamDonePayload | null = null;
 
-            await streamBuilderChat(trimmed, conversationId, activeAgentId, {
+            await streamBuilderChat({
+                message: null,
+                uiResponse: {
+                    requestId: normalizedRequestId,
+                    answers,
+                },
+                conversationId,
+                activeAgentId,
+            }, {
                 onChunk: (chunk) => {
                     if (!chunk) return;
-
                     streamedReply += chunk;
-
                     set((state) => ({
                         messages: state.messages.map((entry) => (
                             entry.id === assistantMessageId
-                                ? {
-                                    ...entry,
-                                    content: streamedReply,
-                                    isStreaming: true,
-                                }
+                                ? { ...entry, content: streamedReply, isStreaming: true }
                                 : entry
                         )),
                     }));
+                },
+                onState: (payload) => {
+                    set((state) => updateFromPayload(state, payload));
+                },
+                onUiRequest: (payload) => {
+                    set((state) => updateFromPayload(state, payload));
+                },
+                onDraftPatch: (payload) => {
+                    set((state) => updateFromPayload(state, payload));
+                },
+                onReviewReady: (payload) => {
+                    set((state) => updateFromPayload(state, payload));
                 },
                 onDone: (payload) => {
                     completionPayload = payload;
                 },
             });
 
-            void get().refreshAgents().catch((error) => {
-                console.warn('[VibeAgentBuilderStore] Failed to refresh agents after stream', error);
-            });
-
             const reply = typeof completionPayload?.reply === 'string' && completionPayload.reply.trim().length > 0
                 ? completionPayload.reply.trim()
-                : (streamedReply.trim().length > 0 ? streamedReply : 'Configured.');
+                : (streamedReply.trim().length > 0 ? streamedReply : 'Updated the setup.');
 
             set((state) => ({
-                conversationId: completionPayload?.conversationId || state.conversationId,
-                activeAgentId: completionPayload?.activeAgentId || state.activeAgentId,
-                draftPatch: completionPayload?.draftPatch || {},
-                agent: completionPayload?.agent || state.agent,
-                latestSecret: typeof completionPayload?.latestSecret === 'string' ? completionPayload.latestSecret : state.latestSecret,
-                suggestions: Array.isArray(completionPayload?.suggestions) && completionPayload.suggestions.length > 0
-                    ? completionPayload.suggestions
-                    : state.suggestions,
+                ...updateFromPayload(state, completionPayload),
                 isSending: false,
                 messages: state.messages.map((entry) => (
                     entry.id === assistantMessageId
@@ -424,12 +829,16 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                 )),
             }));
         } catch (error: any) {
-            set({
+            set((state) => ({
                 isSending: false,
-                messages: get().messages.filter((entry) => entry.id !== assistantMessageId),
-                error: error?.message || 'Failed to send builder message',
-            });
+                messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
+                error: error?.message || 'Failed to update setup',
+            }));
         }
+    },
+
+    createDraftFromReview: async () => {
+        await get().submitUiResponse('setup:create_draft', {}, 'Create draft');
     },
 
     createAgent: async (displayName?: string) => {

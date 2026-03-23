@@ -159,6 +159,7 @@ public final class ChatMainView: ExpoView,
   private let pagesHost = UIView()
   private let chatPage = UIView()
   private let pinnedBannerView = ChatPinnedBannerView()
+  private let builderSetupBannerView = ChatBuilderSetupBannerView()
   private let profilePage = UIView()
   private let agentPage = UIView()
   private let agentScrollView = UIScrollView()
@@ -218,6 +219,10 @@ public final class ChatMainView: ExpoView,
   private var pinnedBannerMediaUrl: String?
   private var pinnedBannerFileName: String?
   private var pinnedBannerIsFile = false
+  private var builderSetupPanelPayload: ChatBuilderPanelPayload?
+  private var builderSetupNavigationController: UINavigationController?
+  private var lastPresentedBuilderRequestId: String?
+  private var lastPresentedBuilderReviewSignature: String?
   private var avatarUri: String = ""
   private var isChatMuted = false
   private var engineChatId: String = ""
@@ -410,6 +415,13 @@ public final class ChatMainView: ExpoView,
 
   func setDebugAnimationPanel(_ enabled: Bool) {
     chatListView.setDebugAnimationPanel(enabled)
+  }
+
+  func setBuilderSetupPanel(_ value: [String: Any]?) {
+    builderSetupPanelPayload = ChatBuilderPanelPayload(raw: value)
+    refreshBuilderSetupBanner()
+    synchronizeBuilderPanelPresentation()
+    setNeedsLayout()
   }
 
   func applyTransactions(_ transactions: [[String: Any]]) {
@@ -643,10 +655,15 @@ public final class ChatMainView: ExpoView,
     pagesHost.addSubview(chatPage)
     chatPage.addSubview(chatListView)
     chatPage.addSubview(pinnedBannerView)
+    chatPage.addSubview(builderSetupBannerView)
     pinnedBannerView.isHidden = true
     pinnedBannerView.alpha = 0.0
     pinnedBannerView.addTarget(
       self, action: #selector(handlePinnedBannerPressed), for: .touchUpInside)
+    builderSetupBannerView.isHidden = true
+    builderSetupBannerView.alpha = 0.0
+    builderSetupBannerView.addTarget(
+      self, action: #selector(handleBuilderSetupBannerPressed), for: .touchUpInside)
 
     pagesHost.addSubview(profilePage)
     profilePage.addSubview(profileScrollView)
@@ -1980,6 +1997,243 @@ public final class ChatMainView: ExpoView,
     onNativeEvent(payload)
   }
 
+  @objc private func handleBuilderSetupBannerPressed() {
+    guard currentPage == .chat else { return }
+    presentCurrentBuilderPanel(force: true)
+  }
+
+  private func refreshBuilderSetupBanner() {
+    builderSetupBannerView.applyTheme(currentBuilderPanelTheme())
+    builderSetupBannerView.configure(panel: builderSetupPanelPayload)
+    if builderSetupBannerView.isHidden {
+      builderSetupBannerView.alpha = 0.0
+    } else if currentPage == .chat {
+      builderSetupBannerView.alpha = 1.0
+    }
+  }
+
+  private func currentBuilderPanelTheme() -> ChatBuilderPanelTheme {
+    let isDarkTheme = appearance.isDark
+    let chatBackground = appearance.wallpaperGradient.first ?? UIColor.black
+    let profileCardBg = isDarkTheme ? Self.themeDarkCard : Self.themeLightCard
+    let accentColor = appearance.bubbleMeGradient.first ?? appearance.bubbleThemColor
+
+    return ChatBuilderPanelTheme(
+      isDark: isDarkTheme,
+      backgroundColor: chatBackground,
+      cardColor: profileCardBg,
+      textColor: appearance.textColorThem,
+      secondaryTextColor: appearance.timeColorThem.withAlphaComponent(0.85),
+      accentColor: accentColor
+    )
+  }
+
+  private func synchronizeBuilderPanelPresentation() {
+    if builderSetupPanelPayload == nil {
+      dismissPresentedBuilderPanelIfNeeded()
+      return
+    }
+
+    if builderSetupPanelPayload?.pendingUiRequest == nil && currentBuilderReviewSignature() == nil {
+      dismissPresentedBuilderPanelIfNeeded()
+      return
+    }
+
+    presentCurrentBuilderPanel(force: false)
+  }
+
+  private func currentBuilderReviewSignature() -> String? {
+    guard let panel = builderSetupPanelPayload, !panel.reviewSections.isEmpty else { return nil }
+    guard panel.pendingUiRequest == nil else { return nil }
+    guard panel.setupState?.status == "review_ready" || panel.setupState == nil else { return nil }
+
+    let sectionSignature =
+      panel.reviewSections
+      .map { "\($0.id):\($0.requestId):\($0.summary)" }
+      .joined(separator: "|")
+    return "\(panel.setupState?.status ?? "review")#\(sectionSignature)"
+  }
+
+  private func dismissPresentedBuilderPanelIfNeeded() {
+    if let navigationController = builderSetupNavigationController,
+      navigationController.presentingViewController != nil
+    {
+      navigationController.dismiss(animated: true)
+    }
+    builderSetupNavigationController = nil
+  }
+
+  private func presentCurrentBuilderPanel(force: Bool) {
+    guard let panel = builderSetupPanelPayload else { return }
+    if let request = panel.pendingUiRequest {
+      presentBuilderRequest(request, panel: panel, force: force)
+      return
+    }
+
+    if let reviewSignature = currentBuilderReviewSignature() {
+      presentBuilderReview(panel.reviewSections, panel: panel, signature: reviewSignature, force: force)
+      return
+    }
+
+    if force && !panel.activity.isEmpty {
+      presentBuilderProgress(panel)
+    }
+  }
+
+  private func presentBuilderRequest(
+    _ request: ChatBuilderUiRequest,
+    panel: ChatBuilderPanelPayload,
+    force: Bool
+  ) {
+    if let navigationController = builderSetupNavigationController,
+      navigationController.presentingViewController != nil
+    {
+      return
+    }
+    if !force && lastPresentedBuilderRequestId == request.id {
+      return
+    }
+    guard let presenter = topMostViewController() else { return }
+
+    let controller = ChatBuilderPanelController(
+      mode: .request(request),
+      theme: currentBuilderPanelTheme(),
+      setupState: panel.setupState,
+      activity: panel.activity
+    )
+    controller.onSubmitRequest = { [weak self] requestId, answers, summary in
+      var payload: [String: Any] = [
+        "type": "builderSetupSubmit",
+        "requestId": requestId,
+        "answers": answers,
+      ]
+      if let summary, !summary.isEmpty {
+        payload["summary"] = summary
+      }
+      self?.onNativeEvent(payload)
+    }
+    controller.onCreateDraft = { [weak self] in
+      self?.onNativeEvent(["type": "builderReviewCreateDraft"])
+    }
+    controller.onControllerDismissed = { [weak self] in
+      self?.builderSetupNavigationController = nil
+    }
+
+    let navigationController = UINavigationController(rootViewController: controller)
+    navigationController.modalPresentationStyle = .pageSheet
+    if let sheet = navigationController.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 28.0
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+    }
+
+    builderSetupNavigationController = navigationController
+    lastPresentedBuilderRequestId = request.id
+    lastPresentedBuilderReviewSignature = nil
+    presenter.present(navigationController, animated: true)
+  }
+
+  private func presentBuilderReview(
+    _ sections: [ChatBuilderReviewSection],
+    panel: ChatBuilderPanelPayload,
+    signature: String,
+    force: Bool
+  ) {
+    if let navigationController = builderSetupNavigationController,
+      navigationController.presentingViewController != nil
+    {
+      return
+    }
+    if !force && lastPresentedBuilderReviewSignature == signature {
+      return
+    }
+    guard let presenter = topMostViewController() else { return }
+
+    let controller = ChatBuilderPanelController(
+      mode: .review(sections),
+      theme: currentBuilderPanelTheme(),
+      setupState: panel.setupState,
+      activity: panel.activity
+    )
+    controller.onSubmitRequest = { [weak self] requestId, answers, summary in
+      var payload: [String: Any] = [
+        "type": "builderSetupSubmit",
+        "requestId": requestId,
+        "answers": answers,
+      ]
+      if let summary, !summary.isEmpty {
+        payload["summary"] = summary
+      }
+      self?.onNativeEvent(payload)
+    }
+    controller.onCreateDraft = { [weak self] in
+      self?.onNativeEvent(["type": "builderReviewCreateDraft"])
+    }
+    controller.onControllerDismissed = { [weak self] in
+      self?.builderSetupNavigationController = nil
+    }
+
+    let navigationController = UINavigationController(rootViewController: controller)
+    navigationController.modalPresentationStyle = .pageSheet
+    if let sheet = navigationController.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 28.0
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+    }
+
+    builderSetupNavigationController = navigationController
+    lastPresentedBuilderReviewSignature = signature
+    lastPresentedBuilderRequestId = nil
+    presenter.present(navigationController, animated: true)
+  }
+
+  private func presentBuilderProgress(_ panel: ChatBuilderPanelPayload) {
+    if let navigationController = builderSetupNavigationController,
+      navigationController.presentingViewController != nil
+    {
+      return
+    }
+    guard let presenter = topMostViewController() else { return }
+
+    let controller = ChatBuilderPanelController(
+      mode: .progress,
+      theme: currentBuilderPanelTheme(),
+      setupState: panel.setupState,
+      activity: panel.activity
+    )
+    controller.onSubmitRequest = { [weak self] requestId, answers, summary in
+      var payload: [String: Any] = [
+        "type": "builderSetupSubmit",
+        "requestId": requestId,
+        "answers": answers,
+      ]
+      if let summary, !summary.isEmpty {
+        payload["summary"] = summary
+      }
+      self?.onNativeEvent(payload)
+    }
+    controller.onCreateDraft = { [weak self] in
+      self?.onNativeEvent(["type": "builderReviewCreateDraft"])
+    }
+    controller.onControllerDismissed = { [weak self] in
+      self?.builderSetupNavigationController = nil
+    }
+
+    let navigationController = UINavigationController(rootViewController: controller)
+    navigationController.modalPresentationStyle = .pageSheet
+    if let sheet = navigationController.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 28.0
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+    }
+
+    builderSetupNavigationController = navigationController
+    presenter.present(navigationController, animated: true)
+  }
+
   private func refreshHeaderGlass() {
     if #available(iOS 26.0, *) {
       let backEffect = UIGlassEffect()
@@ -2247,11 +2501,21 @@ public final class ChatMainView: ExpoView,
   private func layoutPages() {
     let safeTop = safeAreaInsets.top
     let headerHeight = safeTop + 60.0
-    let pinnedBannerInset: CGFloat =
+    let pinnedBannerVisible =
       pinnedBannerView.isHidden || pinnedBannerView.alpha <= 0.01
-      ? 0.0
-      : (ChatPinnedBannerView.preferredHeight + 12.0)
-    chatListView.setContentPaddingTop(Double(headerHeight + 8.0 + pinnedBannerInset))
+      ? false
+      : true
+    let pinnedBannerInset: CGFloat = pinnedBannerVisible
+      ? (ChatPinnedBannerView.preferredHeight + 12.0)
+      : 0.0
+    let builderBannerVisible =
+      builderSetupBannerView.isHidden || builderSetupBannerView.alpha <= 0.01
+      ? false
+      : true
+    let builderBannerInset: CGFloat = builderBannerVisible
+      ? (ChatBuilderSetupBannerView.preferredHeight + 12.0)
+      : 0.0
+    chatListView.setContentPaddingTop(Double(headerHeight + 8.0 + pinnedBannerInset + builderBannerInset))
     pagesHost.frame = CGRect(
       x: 0.0,
       y: headerHeight,
@@ -2275,7 +2539,18 @@ public final class ChatMainView: ExpoView,
       width: bannerWidth,
       height: ChatPinnedBannerView.preferredHeight
     )
+    let builderBannerY =
+      pinnedBannerVisible
+      ? (pinnedBannerView.frame.maxY + 12.0)
+      : (headerHeight + 8.0)
+    builderSetupBannerView.frame = CGRect(
+      x: 16.0,
+      y: builderBannerY,
+      width: bannerWidth,
+      height: ChatBuilderSetupBannerView.preferredHeight
+    )
     chatPage.bringSubviewToFront(pinnedBannerView)
+    chatPage.bringSubviewToFront(builderSetupBannerView)
 
     if standaloneProfileMode {
       profilePage.frame = bounds
@@ -2523,6 +2798,17 @@ public final class ChatMainView: ExpoView,
       surfaceColor: chatBackground,
       isDark: isDarkTheme
     )
+    builderSetupBannerView.applyTheme(
+      ChatBuilderPanelTheme(
+        isDark: isDarkTheme,
+        backgroundColor: chatBackground,
+        cardColor: profileCardBg,
+        textColor: text,
+        secondaryTextColor: secondary,
+        accentColor: appearance.bubbleMeGradient.first ?? appearance.bubbleThemColor
+      )
+    )
+    refreshBuilderSetupBanner()
 
     profilePage.backgroundColor = profileBackground
     profileScrollView.backgroundColor = profileBackground
@@ -3070,6 +3356,7 @@ public final class ChatMainView: ExpoView,
       agentPage.alpha = 0.0
       agentPage.transform = .identity
       pinnedBannerView.alpha = 0.0
+      builderSetupBannerView.alpha = 0.0
       avatarGlassView.alpha = 0.0
       bringSubviewToFront(profileHeaderContainer)
       applyHeaderGlassMorph(chatFactor: 0.0)
@@ -3151,6 +3438,8 @@ public final class ChatMainView: ExpoView,
       self.savedSearchCancelGlassView.alpha =
         (isChat && self.headerMode == .savedMessages && self.savedSearchExpanded) ? 1.0 : 0.0
       self.pinnedBannerView.alpha = (isChat && !self.pinnedBannerView.isHidden) ? 1.0 : 0.0
+      self.builderSetupBannerView.alpha =
+        (isChat && !self.builderSetupBannerView.isHidden) ? 1.0 : 0.0
       self.profileMenuGlassView.alpha = isProfile ? 1.0 : 0.0
       self.applyHeaderGlassMorph(chatFactor: isChat ? 1.0 : 0.0)
       self.applySavedMessagesSearchPresentation()

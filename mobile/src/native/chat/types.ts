@@ -1,3 +1,10 @@
+import type {
+  BuilderActivityItem,
+  BuilderReviewSection,
+  BuilderSetupState,
+  BuilderUiRequest,
+} from '../../lib/agent/builder-types';
+
 export type NativeRowKind = 'message' | 'day';
 
 export interface NativeBubbleShape {
@@ -149,6 +156,13 @@ export interface NativeChatAgentConfig {
   enabled_tools?: string[];
   enabledTools?: string[];
   canManage?: boolean;
+}
+
+export interface NativeChatBuilderSetupPanel {
+  setupState?: BuilderSetupState | null;
+  pendingUiRequest?: BuilderUiRequest | null;
+  reviewSections?: BuilderReviewSection[];
+  activity?: BuilderActivityItem[];
 }
 
 export interface NativeChatGroupMember {

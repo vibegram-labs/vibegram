@@ -689,8 +689,11 @@ defmodule Vibe.Agents do
 
   def normalize_autonomy_mode(value) do
     case normalize_optional_string(value) do
+      "manual" -> "manual"
       "draft_first" -> "draft_first"
+      "approval_required" -> "approval_required"
       "full_auto" -> "full_auto"
+      "safe_auto" -> "safe_auto"
       _ -> "safe_auto"
     end
   end

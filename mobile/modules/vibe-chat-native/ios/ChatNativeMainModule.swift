@@ -174,6 +174,10 @@ public class ChatNativeMainModule: Module {
         view.setAgentConfig(value)
       }
 
+      Prop("builderSetupPanel") { (view: ChatMainView, value: [String: Any]?) in
+        view.setBuilderSetupPanel(value)
+      }
+
       Events("onViewportChanged", "onNativeEvent")
     }
   }

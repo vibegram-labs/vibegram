@@ -13,49 +13,78 @@ defmodule VibeWeb.VibeagentController do
     end
   end
 
-  def chat(conn, %{"message" => message} = params) do
+  def chat(conn, params) do
     user_id = conn.assigns.current_user.id
     active_agent_id = params["activeAgentId"] || params["active_agent_id"]
+    message = normalize_optional_string(params["message"])
+    ui_response = params["uiResponse"] || params["ui_response"]
 
-    case AgentBuilder.handle_message(user_id, message, active_agent_id: active_agent_id) do
-      {:ok, payload} -> json(conn, payload)
-      {:error, reason} -> conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+    cond do
+      is_binary(message) or is_map(ui_response) ->
+        case AgentBuilder.handle_message(
+               user_id,
+               message,
+               active_agent_id: active_agent_id,
+               ui_response: ui_response
+             ) do
+          {:ok, payload} -> json(conn, payload)
+          {:error, reason} -> conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+        end
+
+      true ->
+        conn |> put_status(:bad_request) |> json(%{error: "message or uiResponse is required"})
     end
   end
 
-  def chat(conn, _params) do
-    conn |> put_status(:bad_request) |> json(%{error: "message is required"})
-  end
-
-  def chat_stream(conn, %{"message" => message} = params) do
+  def chat_stream(conn, params) do
     user_id = conn.assigns.current_user.id
     active_agent_id = params["activeAgentId"] || params["active_agent_id"]
+    message = normalize_optional_string(params["message"])
+    ui_response = params["uiResponse"] || params["ui_response"]
 
-    conn =
+    if is_binary(message) or is_map(ui_response) do
+      conn =
+        conn
+        |> put_resp_content_type("text/event-stream")
+        |> put_resp_header("cache-control", "no-cache")
+        |> put_resp_header("connection", "keep-alive")
+        |> send_chunked(200)
+
+      callback = fn
+        %{type: :text, content: chunk} ->
+          send_sse_event(conn, "chunk", %{text: chunk})
+
+        %{type: :state, data: data} ->
+          send_sse_event(conn, "state", data)
+
+        %{type: :ui_request, data: data} ->
+          send_sse_event(conn, "ui_request", data)
+
+        %{type: :draft_patch, data: data} ->
+          send_sse_event(conn, "draft_patch", data)
+
+        %{type: :review_ready, data: data} ->
+          send_sse_event(conn, "review_ready", data)
+      end
+
+      case AgentBuilder.stream_message(
+             user_id,
+             message,
+             callback,
+             active_agent_id: active_agent_id,
+             ui_response: ui_response
+           ) do
+        {:ok, payload} ->
+          send_sse_event(conn, "done", payload)
+
+        {:error, reason} ->
+          send_sse_event(conn, "error", %{message: to_string(reason)})
+      end
+
       conn
-      |> put_resp_content_type("text/event-stream")
-      |> put_resp_header("cache-control", "no-cache")
-      |> put_resp_header("connection", "keep-alive")
-      |> send_chunked(200)
-
-    callback = fn
-      %{type: :text, content: chunk} ->
-        send_sse_event(conn, "chunk", %{text: chunk})
+    else
+      conn |> put_status(:bad_request) |> json(%{error: "message or uiResponse is required"})
     end
-
-    case AgentBuilder.stream_message(user_id, message, callback, active_agent_id: active_agent_id) do
-      {:ok, payload} ->
-        send_sse_event(conn, "done", payload)
-
-      {:error, reason} ->
-        send_sse_event(conn, "error", %{message: to_string(reason)})
-    end
-
-    conn
-  end
-
-  def chat_stream(conn, _params) do
-    conn |> put_status(:bad_request) |> json(%{error: "message is required"})
   end
 
   defp send_sse_event(conn, event, data) do
@@ -66,4 +95,13 @@ defmodule VibeWeb.VibeagentController do
       {:error, reason} -> Logger.warning("Vibeagent SSE chunk failed: #{inspect(reason)}")
     end
   end
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_optional_string(_value), do: nil
 end

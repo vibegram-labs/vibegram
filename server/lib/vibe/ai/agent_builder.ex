@@ -5,6 +5,7 @@ defmodule Vibe.AI.AgentBuilder do
 
   alias Vibe.Agents
   alias Vibe.AgentConversation
+  alias Vibe.AI.AgentBuilderSetup
   alias Vibe.AI.GroupAgent
   alias Vibe.AI.ToolRegistry
 
@@ -174,28 +175,41 @@ defmodule Vibe.AI.AgentBuilder do
 
   def handle_message(user_id, message, opts \\ []) do
     active_agent_id = Keyword.get(opts, :active_agent_id)
+    ui_response = Keyword.get(opts, :ui_response)
 
-    process_message(user_id, message, active_agent_id)
+    process_message(user_id, message, active_agent_id, ui_response)
   end
 
   def stream_message(user_id, message, callback, opts \\ []) when is_function(callback, 1) do
     active_agent_id = Keyword.get(opts, :active_agent_id)
+    ui_response = Keyword.get(opts, :ui_response)
 
-    process_message(user_id, message, active_agent_id, callback)
+    process_message(user_id, message, active_agent_id, ui_response, callback)
   end
 
-  defp process_message(user_id, message, active_agent_id, callback \\ nil) do
+  defp process_message(user_id, message, active_agent_id, ui_response, callback \\ nil) do
     with {:ok, session} <- Agents.get_or_create_builder_session(user_id) do
-      history = session.messages || []
+      input = %{message: normalize_optional_string(message), ui_response: ui_response}
 
-      _ =
-        AgentConversation.add_message(session.id, %{
-          "role" => "user",
-          "content" => message
-        })
+      cond do
+        AgentBuilderSetup.handles?(input, session.metadata || %{}, active_agent_id) ->
+          AgentBuilderSetup.handle(user_id, session, input, active_agent_id, callback)
 
-      with {:ok, result} <- run_builder_agent(user_id, history, message, active_agent_id, callback) do
-        persist_builder_result(session, user_id, result)
+        is_binary(input.message) ->
+          history = session.messages || []
+
+          _ =
+            AgentConversation.add_message(session.id, %{
+              "role" => "user",
+              "content" => input.message
+            })
+
+          with {:ok, result} <- run_builder_agent(user_id, history, input.message, active_agent_id, callback) do
+            persist_builder_result(session, user_id, result)
+          end
+
+        true ->
+          {:error, "message is required"}
       end
     end
   end
@@ -210,10 +224,16 @@ defmodule Vibe.AI.AgentBuilder do
          conversationId: session.id,
          activeAgentId: active_agent_id,
          messages: session.messages || [],
-         draftPatch: if(active_agent, do: Agents.agent_payload(active_agent), else: %{}),
+         draftPatch:
+           if(active_agent,
+             do: Agents.agent_payload(active_agent),
+             else: normalize_map(session.metadata && session.metadata["draft_state"])
+           ),
          agent: if(active_agent, do: Agents.agent_payload(active_agent), else: nil),
+         latestSecret: session.metadata && session.metadata["latest_secret"],
          suggestions: default_suggestions(active_agent)
-       }}
+       }
+       |> Map.merge(AgentBuilderSetup.session_fields(session.metadata || %{}))}
     end
   end
 
@@ -240,6 +260,7 @@ defmodule Vibe.AI.AgentBuilder do
       |> Map.put("kind", Agents.builder_kind())
       |> Map.put("active_agent_id", next_active_agent_id)
       |> Map.put("draft_state", payload)
+      |> Map.put("latest_secret", latest_secret)
 
     {:ok, updated_session} = Agents.update_builder_session(session, %{metadata: metadata})
 
@@ -252,7 +273,8 @@ defmodule Vibe.AI.AgentBuilder do
        draftPatch: payload,
        agent: if(selected_agent, do: payload, else: nil),
        latestSecret: latest_secret
-     }}
+     }
+     |> Map.merge(AgentBuilderSetup.session_fields(updated_session.metadata || %{}))}
   end
 
   defp run_builder_agent(user_id, history, message, active_agent_id, callback \\ nil) do
@@ -1056,10 +1078,10 @@ defmodule Vibe.AI.AgentBuilder do
 
   defp default_suggestions(nil) do
     [
-      "Create an agent for customer support that can reply with text and voice.",
-      "How do I call this agent from my backend and webhook?",
-      "Draft a strong system prompt for a recruiting assistant.",
-      "Create a product copilot agent."
+      "I need an agent for my shoes store.",
+      "Set up an order operations agent and ask only what you need.",
+      "Create a customer support agent with a publish-ready draft.",
+      "How do I call this agent from my backend and webhook?"
     ]
   end
 
@@ -1104,6 +1126,14 @@ defmodule Vibe.AI.AgentBuilder do
     |> String.trim_trailing(".")
     |> String.slice(0, 140)
   end
+
+  defp normalize_map(value) when is_map(value) do
+    Enum.reduce(value, %{}, fn {key, inner_value}, acc ->
+      Map.put(acc, key, inner_value)
+    end)
+  end
+
+  defp normalize_map(_value), do: %{}
 
   defp extract_text_reply(content_blocks) do
     content_blocks

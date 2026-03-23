@@ -5,6 +5,7 @@ import { getNativeChatMainModule, isNativeChatEnabled } from './runtime';
 import type {
   NativeChatAgentConfig,
   NativeChatAppearance,
+  NativeChatBuilderSetupPanel,
   NativeChatGroupMember,
   NativeChatHeaderMode,
   NativeChatRow,
@@ -70,6 +71,7 @@ interface NativeChatMainSurfaceProps {
   groupMemberCount?: number;
   canManageAgentConfig?: boolean;
   agentConfig?: NativeChatAgentConfig | null;
+  builderSetupPanel?: NativeChatBuilderSetupPanel | null;
   page?: NativeChatMainPage;
   onViewportChanged?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
@@ -108,6 +110,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
     groupMemberCount,
     canManageAgentConfig,
     agentConfig,
+    builderSetupPanel,
     page,
     onViewportChanged,
     onNativeEvent,
@@ -225,6 +228,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         groupMemberCount={groupMemberCount}
         canManageAgentConfig={canManageAgentConfig}
         agentConfig={agentConfig}
+        builderSetupPanel={builderSetupPanel}
         page={page}
         onViewportChanged={(event: any) => {
           try {
