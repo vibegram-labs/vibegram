@@ -6,6 +6,10 @@ defmodule VibeWeb.Router do
     plug VibeWeb.Plugs.RateLimiter, type: :api
   end
 
+  pipeline :api_stream do
+    plug VibeWeb.Plugs.RateLimiter, type: :api
+  end
+
   pipeline :api_authenticated do
     plug VibeWeb.Plugs.ApiAuth, required: true
   end
@@ -129,7 +133,6 @@ defmodule VibeWeb.Router do
     # Builder
     get "/vibeagent/session", VibeagentController, :session
     post "/vibeagent/chat", VibeagentController, :chat
-    post "/vibeagent/chat/stream", VibeagentController, :chat_stream
 
     # Stories
     post "/stories", StoryController, :create
@@ -174,6 +177,12 @@ defmodule VibeWeb.Router do
     # Relay → Bridge registration
     post "/relay/register-bridge", BridgeController, :register_relay
     get "/relay/resolve-bridge", BridgeController, :resolve_relay_bridge
+  end
+
+  scope "/api", VibeWeb do
+    pipe_through [:api_stream, :api_authenticated]
+
+    post "/vibeagent/chat/stream", VibeagentController, :chat_stream
   end
 
   # High-cost / abuse-prone endpoints (require auth + strict rate limit)

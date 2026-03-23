@@ -55,6 +55,11 @@ const getMessageTimestamp = (value: unknown, fallback: number) => {
   return fallback;
 };
 
+type NativeOptimisticMessage = {
+  messageId?: string;
+  timestamp?: number;
+};
+
 export default function VibeChatMainScreen({
   mode = 'default',
   onBack,
@@ -224,14 +229,14 @@ export default function VibeChatMainScreen({
     mode,
   ]);
 
-  const handleSubmit = useCallback(async (rawText: string) => {
+  const handleSubmit = useCallback(async (rawText: string, optimistic?: NativeOptimisticMessage) => {
     const trimmed = rawText.trim();
     if (!trimmed) return;
 
     const currentText = trimmed;
 
     if (isBuilderMode) {
-      await sendBuilderMessage(currentText);
+      await sendBuilderMessage(currentText, optimistic);
       return;
     }
 
@@ -239,7 +244,7 @@ export default function VibeChatMainScreen({
       createConversation(currentText.slice(0, 30));
     }
 
-    sendAgentMessage(currentText);
+    sendAgentMessage(currentText, undefined, false, undefined, optimistic);
   }, [createConversation, isBuilderMode, sendAgentMessage, sendBuilderMessage]);
 
   const handleNativeEvent = useCallback((event: { nativeEvent?: Record<string, unknown> } | Record<string, unknown>) => {
@@ -275,7 +280,12 @@ export default function VibeChatMainScreen({
       || '';
 
     if (!text) return;
-    void handleSubmit(text);
+    const messageId = typeof payload.messageId === 'string' ? payload.messageId : undefined;
+    const timestamp = getMessageTimestamp(payload.timestampMs ?? payload.timestamp, Date.now());
+    void handleSubmit(text, {
+      messageId,
+      timestamp,
+    });
   }, [handleSubmit, onBack, onOpenBuilder, onOpenSettings]);
 
   if (!nativeAvailable) {

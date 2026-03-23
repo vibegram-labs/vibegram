@@ -60,6 +60,11 @@ interface BuilderStreamDonePayload extends BuilderSessionPayload {
     reply?: string | null;
 }
 
+interface BuilderOptimisticMessageOptions {
+    messageId?: string;
+    timestamp?: number;
+}
+
 interface VibeAgentBuilderState {
     agents: VibeStandaloneAgent[];
     quota: VibeAgentQuota | null;
@@ -75,7 +80,7 @@ interface VibeAgentBuilderState {
     error: string | null;
     load: () => Promise<void>;
     refreshAgents: () => Promise<void>;
-    sendMessage: (message: string) => Promise<void>;
+    sendMessage: (message: string, optimistic?: BuilderOptimisticMessageOptions) => Promise<void>;
     createAgent: (displayName?: string) => Promise<void>;
     selectAgent: (agentId: string) => Promise<void>;
     publishActive: () => Promise<void>;
@@ -204,7 +209,7 @@ const streamBuilderChat = async (
         headers: {
             Authorization: `Bearer ${token}`,
             'Content-Type': 'application/json',
-            Accept: 'text/event-stream',
+            Accept: 'application/json, text/event-stream',
         },
         body: JSON.stringify({
             conversationId,
@@ -330,13 +335,15 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
         }
     },
 
-    sendMessage: async (message: string) => {
+    sendMessage: async (message: string, optimistic?: BuilderOptimisticMessageOptions) => {
         const trimmed = message.trim();
         if (!trimmed) return;
 
         const { activeAgentId, conversationId } = get();
-        const sentAt = Date.now();
-        const userMessageId = createLocalMessageId('user');
+        const sentAt = typeof optimistic?.timestamp === 'number' && Number.isFinite(optimistic.timestamp)
+            ? optimistic.timestamp
+            : Date.now();
+        const userMessageId = optimistic?.messageId || createLocalMessageId('user');
         const assistantMessageId = createLocalMessageId('assistant');
 
         set((state) => ({

@@ -19,6 +19,11 @@ interface ToolEvent {
     result?: any;
 }
 
+interface OptimisticSendOptions {
+    messageId?: string;
+    timestamp?: number;
+}
+
 interface AgentState {
     conversations: AgentConversation[];
     activeConversationId: string | null;
@@ -37,7 +42,13 @@ interface AgentState {
     createConversation: (title?: string) => string;
     deleteConversation: (id: string) => void;
     setActiveConversation: (id: string | null) => void;
-    sendMessage: (text: string, images?: string[], isRegenerate?: boolean, truncateAtId?: string) => void;
+    sendMessage: (
+        text: string,
+        images?: string[],
+        isRegenerate?: boolean,
+        truncateAtId?: string,
+        optimistic?: OptimisticSendOptions,
+    ) => void;
     stopStreaming: () => void;
     regenerateLastMessage: () => void;
     clearHistory: () => void;
@@ -575,7 +586,13 @@ export const useAgentStore = create<AgentState>()(
                 }
             },
 
-            sendMessage: (text: string, images?: string[], isRegenerate = false, truncateAtId?: string) => {
+            sendMessage: (
+                text: string,
+                images?: string[],
+                isRegenerate = false,
+                truncateAtId?: string,
+                optimistic?: OptimisticSendOptions,
+            ) => {
                 const { activeConversationId, conversations, isConnected } = get();
 
                 // Ensure connected
@@ -584,7 +601,7 @@ export const useAgentStore = create<AgentState>()(
                     // Retry after a short delay
                     setTimeout(() => {
                         if (get().isConnected) {
-                            get().sendMessage(text, images, isRegenerate, truncateAtId);
+                            get().sendMessage(text, images, isRegenerate, truncateAtId, optimistic);
                         } else {
                             set({ error: 'Failed to connect to AI agent' });
                         }
@@ -599,6 +616,10 @@ export const useAgentStore = create<AgentState>()(
 
                 // 1. Track last message for regenerate
                 lastUserMessage = { text, images };
+                const optimisticTimestamp =
+                    typeof optimistic?.timestamp === 'number' && Number.isFinite(optimistic.timestamp)
+                        ? optimistic.timestamp
+                        : Date.now();
 
                 const convIndex = conversations.findIndex(c => c.id === convId);
                 if (convIndex === -1) return;
@@ -619,7 +640,7 @@ export const useAgentStore = create<AgentState>()(
                     id: Crypto.randomUUID(),
                     role: 'assistant',
                     content: '',
-                    timestamp: Date.now(),
+                    timestamp: optimisticTimestamp + 1,
                     isStreaming: true
                 };
 
@@ -630,10 +651,10 @@ export const useAgentStore = create<AgentState>()(
                 } else {
                     // Add both User and Assistant messages locally
                     const userMsg: AgentMessage = {
-                        id: Crypto.randomUUID(),
+                        id: optimistic?.messageId || Crypto.randomUUID(),
                         role: 'user',
                         content: text,
-                        timestamp: Date.now(),
+                        timestamp: optimisticTimestamp,
                         images
                     };
                     newMessages = [...baseMessages, userMsg, assistantMsg];
