@@ -739,16 +739,48 @@ defmodule Vibe.AI.AgentEventRuntime do
       "attachments" => normalize_attachments_payload(normalized.attachments)
     }
 
-    post_chat_message(agent, thread.chat_id, body, metadata, thread.root_message_id)
+    with {:ok, primary_message} <-
+           maybe_post_event_summary(agent, thread.chat_id, body, metadata, thread.root_message_id),
+         {:ok, _attachment_messages} <-
+           post_event_attachments(
+             agent,
+             thread.chat_id,
+             normalize_attachments_payload(normalized.attachments),
+             metadata,
+             primary_message && primary_message.message_id || thread.root_message_id
+           ) do
+      {:ok, primary_message}
+    end
   end
 
   defp post_system_followup(agent, thread, body, metadata) do
-    post_chat_message(agent, thread.chat_id, body, Map.put(metadata, "eventThreadId", thread.id), thread.root_message_id)
+    post_chat_message(
+      agent,
+      thread.chat_id,
+      body,
+      Map.put(metadata, "eventThreadId", thread.id),
+      thread.root_message_id
+    )
   end
 
   defp post_chat_message(agent, chat_id, body, metadata, reply_to_id) do
+    post_chat_message(agent, chat_id, body, metadata, reply_to_id, [])
+  end
+
+  defp post_chat_message(agent, chat_id, body, metadata, reply_to_id, opts) do
     message_id = Ecto.UUID.generate()
     timestamp = System.system_time(:millisecond)
+    message_type = Keyword.get(opts, :type, "text")
+    media_url = Keyword.get(opts, :media_url)
+
+    metadata =
+      metadata
+      |> maybe_put("fileName", normalize_string(metadata["fileName"] || metadata[:fileName]))
+      |> maybe_put("fileSize", normalize_integer(metadata["fileSize"] || metadata[:fileSize]))
+      |> maybe_put("duration", normalize_number(metadata["duration"] || metadata[:duration]))
+      |> maybe_put("mimeType", normalize_string(metadata["mimeType"] || metadata[:mimeType]))
+      |> maybe_put("caption", normalize_string(metadata["caption"] || metadata[:caption]))
+      |> maybe_put("isVideoNote", normalize_boolean(metadata["isVideoNote"] || metadata[:isVideoNote]))
 
     attrs =
       %{
@@ -756,8 +788,8 @@ defmodule Vibe.AI.AgentEventRuntime do
         chat_id: chat_id,
         from_id: agent.agent_user_id,
         encrypted_content: AgentMessageCrypto.encrypt_for_storage(body || ""),
-        type: "text",
-        media_url: nil,
+        type: message_type,
+        media_url: media_url,
         metadata:
           metadata
           |> Map.put("isAgentMessage", true)
@@ -778,7 +810,13 @@ defmodule Vibe.AI.AgentEventRuntime do
           "encryptedContent" => "",
           "plainContent" => body,
           "plaintext" => body,
-          "type" => "text",
+          "type" => message_type,
+          "mediaUrl" => media_url,
+          "fileName" => metadata["fileName"],
+          "fileSize" => metadata["fileSize"],
+          "duration" => metadata["duration"],
+          "caption" => metadata["caption"] || normalize_string(body),
+          "isVideoNote" => metadata["isVideoNote"],
           "timestamp" => timestamp,
           "status" => "sent",
           "isAgentMessage" => true,
@@ -810,6 +848,52 @@ defmodule Vibe.AI.AgentEventRuntime do
       error ->
         error
     end
+  end
+
+  defp maybe_post_event_summary(agent, chat_id, body, metadata, reply_to_id) do
+    if normalize_string(body) do
+      post_chat_message(agent, chat_id, body, metadata, reply_to_id)
+    else
+      {:ok, nil}
+    end
+  end
+
+  defp post_event_attachments(_agent, _chat_id, [], _metadata, _reply_to_id), do: {:ok, []}
+
+  defp post_event_attachments(agent, chat_id, attachments, metadata, reply_to_id) do
+    attachments
+    |> Enum.reduce_while({:ok, []}, fn attachment, {:ok, acc} ->
+      attachment_metadata =
+        metadata
+        |> Map.put("attachment", attachment)
+        |> maybe_put("fileName", normalize_string(attachment["name"] || attachment[:name]))
+        |> maybe_put("fileSize", normalize_integer(attachment["fileSize"] || attachment[:fileSize]))
+        |> maybe_put("duration", normalize_number(attachment["duration"] || attachment[:duration]))
+        |> maybe_put("mimeType", normalize_string(attachment["mimeType"] || attachment[:mimeType]))
+        |> maybe_put("isVideoNote", normalize_boolean(attachment["isVideoNote"] || attachment[:isVideoNote]))
+        |> maybe_put("caption", normalize_string(attachment["caption"] || attachment[:caption]))
+
+      caption =
+        normalize_string(
+          attachment["caption"] || attachment[:caption] || attachment["text"] || attachment[:text]
+        ) || ""
+
+      case post_chat_message(
+             agent,
+             chat_id,
+             caption,
+             attachment_metadata,
+             reply_to_id,
+             type: attachment_message_type(attachment),
+             media_url: attachment["url"]
+           ) do
+        {:ok, message_payload} ->
+          {:cont, {:ok, acc ++ [message_payload]}}
+
+        error ->
+          {:halt, error}
+      end
+    end)
   end
 
   defp touch_integration!(%AgentIntegration{} = integration) do
@@ -866,9 +950,25 @@ defmodule Vibe.AI.AgentEventRuntime do
     items =
       Enum.map(value, fn item ->
         %{
-          "type" => normalize_string(item["type"] || item[:type]) || "file",
+          "type" => normalize_string(item["type"] || item[:type]),
           "url" => normalize_string(item["url"] || item[:url] || item["mediaUrl"] || item[:mediaUrl]),
-          "name" => normalize_string(item["name"] || item[:name])
+          "name" =>
+            normalize_string(item["name"] || item[:name] || item["fileName"] || item[:fileName]),
+          "mimeType" =>
+            normalize_string(
+              item["mimeType"] || item[:mimeType] || item["mime_type"] || item[:mime_type]
+            ),
+          "caption" => normalize_string(item["caption"] || item[:caption]),
+          "duration" => normalize_number(item["duration"] || item[:duration]),
+          "fileSize" =>
+            normalize_integer(
+              item["fileSize"] || item[:fileSize] || item["file_size"] || item[:file_size]
+            ),
+          "isVideoNote" =>
+            normalize_boolean(
+              item["isVideoNote"] || item[:isVideoNote] || item["is_video_note"] ||
+                item[:is_video_note]
+            )
         }
         |> Enum.reject(fn {_k, v} -> is_nil(v) end)
         |> Map.new()
@@ -890,6 +990,99 @@ defmodule Vibe.AI.AgentEventRuntime do
 
   defp normalize_string(value) when is_atom(value), do: value |> Atom.to_string() |> normalize_string()
   defp normalize_string(_), do: nil
+
+  defp normalize_integer(value) when is_integer(value), do: value
+
+  defp normalize_integer(value) when is_float(value) do
+    if finite_number?(value), do: round(value), else: nil
+  end
+
+  defp normalize_integer(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {parsed, _} -> parsed
+      :error -> nil
+    end
+  end
+
+  defp normalize_integer(_), do: nil
+
+  defp normalize_number(value) when is_integer(value), do: value * 1.0
+
+  defp normalize_number(value) when is_float(value) do
+    if finite_number?(value), do: value, else: nil
+  end
+
+  defp normalize_number(value) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {parsed, _} -> parsed
+      :error -> nil
+    end
+  end
+
+  defp normalize_number(_), do: nil
+
+  defp normalize_boolean(value) when value in [true, false], do: value
+  defp normalize_boolean(value) when value in ["true", "1", 1], do: true
+  defp normalize_boolean(value) when value in ["false", "0", 0], do: false
+  defp normalize_boolean(_), do: nil
+
+  defp finite_number?(value) when is_float(value), do: value == value
+
+  defp attachment_message_type(attachment) when is_map(attachment) do
+    explicit =
+      normalize_string(
+        attachment["messageType"] || attachment[:messageType] || attachment["message_type"] ||
+          attachment[:message_type] || attachment["type"] || attachment[:type]
+      )
+      |> normalize_attachment_type()
+
+    explicit || infer_attachment_message_type(attachment)
+  end
+
+  defp attachment_message_type(_attachment), do: "file"
+
+  defp normalize_attachment_type(type) do
+    case normalize_string(type) do
+      "image" -> "image"
+      "gif" -> "gif"
+      "video" -> "video"
+      "video_note" -> "video"
+      "voice" -> "voice"
+      "audio" -> "music"
+      "music" -> "music"
+      "mp3" -> "music"
+      "file" -> "file"
+      "document" -> "file"
+      _ -> nil
+    end
+  end
+
+  defp infer_attachment_message_type(attachment) do
+    mime_type = normalize_string(attachment["mimeType"] || attachment[:mimeType]) || ""
+    url = normalize_string(attachment["url"] || attachment[:url]) || ""
+    lowered_mime = String.downcase(mime_type)
+    lowered_url = String.downcase(url)
+
+    cond do
+      String.starts_with?(lowered_mime, "image/gif") or String.match?(lowered_url, ~r/\.gif(\?|$)/) ->
+        "gif"
+
+      String.starts_with?(lowered_mime, "image/") or
+          String.match?(lowered_url, ~r/\.(png|jpe?g|webp|heic|bmp)(\?|$)/) ->
+        "image"
+
+      String.starts_with?(lowered_mime, "video/") or
+          String.match?(lowered_url, ~r/\.(mp4|mov|m4v|webm|mkv)(\?|$)/) ->
+        "video"
+
+      String.starts_with?(lowered_mime, "audio/") or
+          String.match?(lowered_url, ~r/\.(mp3|m4a|aac|wav|ogg|oga|flac)(\?|$)/) ->
+        "music"
+
+      true ->
+        "file"
+    end
+  end
 
   defp build_fingerprint(source, title, text, occurred_at, payload) do
     [
@@ -947,4 +1140,7 @@ defmodule Vibe.AI.AgentEventRuntime do
   defp initial_event_status("approval_required"), do: "approval_required"
   defp initial_event_status("summarize"), do: "summarized"
   defp initial_event_status(_), do: "logged"
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end
