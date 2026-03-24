@@ -106,7 +106,7 @@ defmodule Vibe.AI.Agent do
     %{
       name: "delegate_to_subagent",
       description:
-        "Delegate a task to one of Vibe AI's internal subagents when the request is specifically about agent setup, integrations, or needs a specialized worker.",
+        "Delegate a task to one of Vibe AI's internal subagents when the request is about agent setup, existing agents, integrations, prompts, publication state, or needs a specialized worker. This tool gives you access to those specialist capabilities; do not claim you lack access before using it.",
       input_schema: %{
         type: "object",
         properties: %{
@@ -180,8 +180,12 @@ defmodule Vibe.AI.Agent do
      - integration_advisor: invoke URLs, events URLs, secrets, attached vibe chat ids, and backend integration questions.
      - music_specialist: focused music help when the request is mostly about discovery/playback.
      - document_specialist: focused research, web lookup, image analysis, or document analysis.
+     - Requests about existing agents, draft/published status, prompts, secrets, usernames, ids, or integrations MUST delegate first.
      - ALWAYS provide both "subagent_id" and "task".
      - Do not use this for simple chat when your own tools already solve it directly.
+     - Never say you do not have the tool if delegation can solve it.
+     - Never tell the user to reach out to a specialist; you already can delegate to them yourself.
+     - After delegation succeeds, answer from the specialist result as if it is your own checked result.
 
   IMPORTANT:
   - NEVER write text before a tool call.
@@ -331,8 +335,10 @@ defmodule Vibe.AI.Agent do
         "get_channel_analytics" -> "Fetching channel analytics..."
         "schedule_channel_post" -> "Scheduling post..."
         "delegate_to_subagent" ->
-          spec = SubagentRegistry.get(tool_input["subagent_id"] || "")
-          "Delegating to #{(spec && spec.label) || "specialist"}..."
+          SubagentRegistry.progress_label(
+            tool_input["subagent_id"] || "",
+            tool_input["task"]
+          )
         _ -> "Working..."
       end
       callback.(%{type: :progress, label: label, tool: tool_name, status: "running"})

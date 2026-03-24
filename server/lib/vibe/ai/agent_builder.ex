@@ -328,10 +328,22 @@ defmodule Vibe.AI.AgentBuilder do
     end
   end
 
-  defp execute_builder_tools(tool_calls, state, _callback) do
+  defp execute_builder_tools(tool_calls, state, callback) do
     tool_calls
     |> Enum.reduce({[], state}, fn tool, {results, acc_state} ->
-      {result, next_state} = execute_builder_tool(tool["name"], tool["input"] || %{}, acc_state)
+      tool_name = tool["name"]
+      tool_input = tool["input"] || %{}
+
+      if is_function(callback, 1) do
+        callback.(%{
+          type: :progress,
+          label: builder_tool_progress_label(tool_name, tool_input),
+          tool: tool_name,
+          status: "running"
+        })
+      end
+
+      {result, next_state} = execute_builder_tool(tool_name, tool_input, acc_state)
 
       tool_result = %{
         type: "tool_result",
@@ -624,6 +636,36 @@ defmodule Vibe.AI.AgentBuilder do
     """
     |> String.trim()
   end
+
+  defp builder_tool_progress_label("get_builder_context", _input),
+    do: "Reading your current agents and builder context..."
+
+  defp builder_tool_progress_label("create_agent", _input),
+    do: "Creating the agent draft..."
+
+  defp builder_tool_progress_label("select_agent", _input),
+    do: "Opening the selected agent..."
+
+  defp builder_tool_progress_label("update_agent", _input),
+    do: "Updating the agent draft..."
+
+  defp builder_tool_progress_label("publish_agent", _input),
+    do: "Publishing the agent..."
+
+  defp builder_tool_progress_label("generate_system_prompt", _input),
+    do: "Writing the system prompt..."
+
+  defp builder_tool_progress_label("set_agent_status", _input),
+    do: "Updating the agent status..."
+
+  defp builder_tool_progress_label("rotate_secret", _input),
+    do: "Rotating the agent secret..."
+
+  defp builder_tool_progress_label("get_integration_details", _input),
+    do: "Reading the agent integration details..."
+
+  defp builder_tool_progress_label(_tool_name, _input),
+    do: "Working on the agent setup..."
 
   defp build_create_attrs(input) do
     %{}

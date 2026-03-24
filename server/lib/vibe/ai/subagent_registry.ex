@@ -40,6 +40,23 @@ defmodule Vibe.AI.SubagentRegistry do
   def get(id) when is_binary(id), do: Map.get(@subagents, id)
   def get(_id), do: nil
 
+  def progress_label(id, task) do
+    request = task |> to_string() |> String.trim()
+
+    cond do
+      request == "" ->
+        fallback_progress_label(id)
+
+      true ->
+        request
+        |> summarize_task_label()
+        |> case do
+          nil -> fallback_progress_label(id)
+          label -> label
+        end
+    end
+  end
+
   def run(id, task, opts \\ []) do
     request =
       task
@@ -52,7 +69,25 @@ defmodule Vibe.AI.SubagentRegistry do
 
     with %{} = spec <- get(id),
          true <- request != "" do
-      emit(callback, %{type: :subagent, event: "started", subagent: spec.id, label: spec.label})
+      job_label = progress_label(id, request)
+
+      emit(callback, %{
+        type: :subagent,
+        event: "started",
+        subagent: spec.id,
+        label: spec.label,
+        detail: job_label,
+        status: "running"
+      })
+
+      emit(callback, %{
+        type: :subagent,
+        event: "progress",
+        subagent: spec.id,
+        label: spec.label,
+        detail: job_label,
+        status: "running"
+      })
 
       result =
         case id do
@@ -185,4 +220,66 @@ defmodule Vibe.AI.SubagentRegistry do
 
   defp emit(callback, payload) when is_function(callback, 1), do: callback.(payload)
   defp emit(_callback, _payload), do: :ok
+
+  defp summarize_task_label(task) do
+    trimmed =
+      task
+      |> String.trim()
+      |> String.replace(~r/\s+/, " ")
+      |> String.trim_trailing(".")
+
+    case Regex.run(~r/^\s*(check|find|get|read|list|review|show|look up|inspect|prepare|create|update|publish|rotate|generate|explain|analyze|search)\b\s*(.*)$/i, trimmed) do
+      [_, verb, rest] ->
+        job =
+          case String.downcase(verb) do
+            "check" -> "Checking"
+            "find" -> "Finding"
+            "get" -> "Getting"
+            "read" -> "Reading"
+            "list" -> "Listing"
+            "review" -> "Reviewing"
+            "show" -> "Reviewing"
+            "look up" -> "Looking up"
+            "inspect" -> "Inspecting"
+            "prepare" -> "Preparing"
+            "create" -> "Creating"
+            "update" -> "Updating"
+            "publish" -> "Publishing"
+            "rotate" -> "Rotating"
+            "generate" -> "Generating"
+            "explain" -> "Gathering"
+            "analyze" -> "Analyzing"
+            "search" -> "Searching"
+            _ -> nil
+          end
+
+        detail = String.trim(rest)
+
+        cond do
+          is_nil(job) -> fallback_sentence(trimmed)
+          detail == "" -> "#{job}..."
+          true -> "#{job} #{truncate_detail(detail)}..."
+        end
+
+      _ ->
+        fallback_sentence(trimmed)
+    end
+  end
+
+  defp fallback_sentence(""), do: nil
+  defp fallback_sentence(text), do: "#{truncate_detail(text)}..."
+
+  defp truncate_detail(detail) do
+    detail
+    |> String.trim_leading("whether ")
+    |> String.trim_leading("if ")
+    |> String.slice(0, 96)
+    |> String.trim()
+  end
+
+  defp fallback_progress_label("builder_assistant"), do: "Reviewing your agent setup..."
+  defp fallback_progress_label("integration_advisor"), do: "Gathering integration details..."
+  defp fallback_progress_label("music_specialist"), do: "Checking music results..."
+  defp fallback_progress_label("document_specialist"), do: "Reviewing documents and research..."
+  defp fallback_progress_label(_id), do: "Working on the request..."
 end
