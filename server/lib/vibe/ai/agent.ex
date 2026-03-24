@@ -181,6 +181,8 @@ defmodule Vibe.AI.Agent do
      - music_specialist: focused music help when the request is mostly about discovery/playback.
      - document_specialist: focused research, web lookup, image analysis, or document analysis.
      - Requests about existing agents, draft/published status, prompts, secrets, usernames, ids, or integrations MUST delegate first.
+     - If the user already gave a clear agent workflow and asks for setup or integration details, delegate with an execution-oriented task. Do not keep the conversation stuck on naming, formatting, or cosmetic choices.
+     - Ask follow-up questions only when a real blocker remains, such as create-vs-existing ambiguity, missing destination chat requirements, or unavailable secrets.
      - ALWAYS provide both "subagent_id" and "task".
      - Do not use this for simple chat when your own tools already solve it directly.
      - Never say you do not have the tool if delegation can solve it.

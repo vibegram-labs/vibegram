@@ -624,10 +624,16 @@ defmodule Vibe.AI.AgentBuilder do
     - When the user asks about prompt quality, explain that you can read, edit, or generate the prompt and then act with tools.
     - When the user asks how to integrate from code, give exact values from tools: agent_id, user_id, @username, invoke URL, events URL, X-Vibe-Agent-Secret usage, responseMode guidance, vibeChatId values, callback headers, and signature format.
     - When the user asks for the Vibe chat link or chat id, prefer attached_chat_ids, attached_chat_links, and default_destination_chat. Do not present a friendId DM link as if it were an attached chatId.
+    - For setup and integration requests, ask only for true blockers. Treat these as blockers: whether to create a new agent or use an existing one when that is ambiguous, destination chat selection when the user wants delivery inside Vibe and there is no default attached chat, and secret rotation when the current full secret is unavailable.
+    - Do NOT ask for low-value polish when the workflow is already clear. Do not ask for channel name, display name, username, event labels, tone, welcome copy, or message formatting unless the user explicitly asked to customize them or that choice changes functionality.
+    - If the user clearly asked to create a new agent and the workflow is already described, create the draft with sensible defaults immediately. Infer a practical display name from the workflow instead of blocking on naming questions.
+    - If the user asks for env vars, integration details, or Python/backend setup, always produce a clean integration pack after using tools. Prefer the env_vars and python_event_example values from tool results instead of improvising your own shape.
+    - When default_destination_chat is present, explain that destinationChatId is optional for external event calls. Only require a chat id in the payload when there is no default destination configured.
+    - When the user already provided example event types such as trade open, trade close, order created, or signal summary, treat them as sufficient defaults. Do not ask them to restate exact event names unless the user explicitly wants strict naming control.
     - Do not tell the user to use slash commands unless they explicitly ask for slash syntax. Focus on doing the work and explaining outcomes.
     - If the current secret is not available anymore, tell the user to rotate it.
     - Keep replies concise, practical, and step-by-step when integration is involved.
-    - If subagent_mode is true, you are serving another Vibe AI worker. Return direct actionable output instead of UI coaching.
+    - If subagent_mode is true, you are serving another Vibe AI worker. Return direct actionable output instead of UI coaching, and strongly prefer execution plus assumptions over extra clarification when the request is already specific.
 
     Current client-selected active_agent_id: #{state.active_agent_id || "none"}
     Builder deep link: #{@builder_deep_link}
@@ -804,6 +810,9 @@ defmodule Vibe.AI.AgentBuilder do
     payload = Agents.agent_payload(agent)
     attached_chat_links = build_attached_chat_links(payload.attachedChats || [])
     default_chat = resolve_default_chat(payload.defaultDestinationChatId, attached_chat_links)
+    base_url = public_base_url()
+    chat_id_optional = not is_nil(default_chat)
+    destination_chat_env_value = if(default_chat, do: "", else: "<optional_if_no_default_chat>")
 
     %{
       "agent_id" => payload.id,
@@ -814,6 +823,7 @@ defmodule Vibe.AI.AgentBuilder do
       "open_link" => default_chat && default_chat["open_link"],
       "agent_dm_link" => build_agent_dm_link(payload.userId),
       "builder_link" => @builder_deep_link,
+      "api_base_url" => base_url,
       "invoke_url" => build_invoke_url(agent),
       "events_url" => build_events_url(agent),
       "secret_hint" => payload.secretHint,
@@ -821,6 +831,21 @@ defmodule Vibe.AI.AgentBuilder do
       "secret_note" =>
         if(is_binary(latest_secret), do: "Use the latest_secret value below.", else: "The full secret is only shown right after creation or rotation. Rotate it if you need a new copy."),
       "auth_header" => %{"X-Vibe-Agent-Secret" => latest_secret || "<rotate_secret_to_reveal>"},
+      "env_vars" => %{
+        "VIBE_API_BASE_URL" => base_url,
+        "VIBE_AGENT_IDENTIFIER" => payload.username || payload.id,
+        "VIBE_AGENT_SECRET" => latest_secret || "<rotate_secret_to_reveal>",
+        "VIBE_DESTINATION_CHAT_ID" => destination_chat_env_value,
+        "VIBE_SOURCE" => "external_app",
+        "VIBE_TIMEOUT_SECONDS" => "10"
+      },
+      "env_var_notes" => %{
+        "VIBE_DESTINATION_CHAT_ID" =>
+          if(chat_id_optional,
+            do: "Optional because this agent already has a default destination chat in Vibe.",
+            else: "Optional only after you attach or configure a default destination chat in Vibe."
+          )
+      },
       "request_body_examples" => %{
         "reply" => %{
           "source" => "external",
@@ -838,7 +863,6 @@ defmodule Vibe.AI.AgentBuilder do
           "eventType" => "order.created",
           "threadKey" => "order_123",
           "source" => "shopify",
-          "destinationChatId" => "<attached_chat_id>",
           "title" => "New order paid",
           "text" => "Sara paid $240 for 3 items",
           "data" => %{
@@ -849,6 +873,28 @@ defmodule Vibe.AI.AgentBuilder do
           }
         }
       },
+      "python_event_example" => [
+        "import os, requests",
+        "",
+        "url = \"#{build_events_url(agent)}\"",
+        "headers = {\"X-Vibe-Agent-Secret\": os.environ[\"VIBE_AGENT_SECRET\"]}",
+        "payload = {",
+        "    \"eventId\": \"evt_123\",",
+        "    \"eventType\": \"trade.opened\",",
+        "    \"threadKey\": \"trade_123\",",
+        "    \"source\": os.getenv(\"VIBE_SOURCE\", \"external_app\"),",
+        "    \"title\": \"Trade opened\",",
+        "    \"text\": \"EURUSD buy opened at 1.0850\",",
+        "    \"data\": {\"symbol\": \"EURUSD\", \"side\": \"buy\", \"entry\": 1.0850}",
+        "}",
+        if(chat_id_optional,
+          do: "# destinationChatId is optional because the agent already has a default Vibe destination chat.",
+          else: "# Add destinationChatId only if you have not set a default destination chat in Vibe yet."
+        ),
+        "response = requests.post(url, json=payload, headers=headers, timeout=float(os.getenv(\"VIBE_TIMEOUT_SECONDS\", \"10\")))",
+        "response.raise_for_status()"
+      ],
+      "destination_chat_required" => not chat_id_optional,
       "default_destination_chat" => default_chat,
       "attached_chats" => payload.attachedChats || [],
       "attached_chat_ids" => Enum.map(attached_chat_links, & &1["chat_id"]),
@@ -863,6 +909,10 @@ defmodule Vibe.AI.AgentBuilder do
         "Use responseMode=reply for stateless replies returned directly to your backend.",
         "Use responseMode=send only when the agent is already attached to the target Vibe chat.",
         "Use the events_url when you want structured event threads like orders, trades, tickets, and alerts inside Vibe chats.",
+        if(chat_id_optional,
+          do: "This agent already has a default destination chat, so destinationChatId is optional for event ingestion.",
+          else: "If no default destination chat is configured yet, you must attach the agent to a Vibe chat or pass destinationChatId until you do."
+        ),
         "Use attached_chat_links and attached_chat_ids for real Vibe destinations. The agent_dm_link only opens a DM and is not the same as an attached chatId.",
         "To get a vibeChatId, DM the agent or invite it into a group/channel first."
       ]
