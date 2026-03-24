@@ -30,6 +30,12 @@ defmodule VibeWeb.Router do
     plug VibeWeb.Plugs.RateLimiter, type: :strict
   end
 
+  # Secret-backed public agent ingress should be rate limited, but not in the tiny strict bucket.
+  pipeline :public_agent_rate_limited do
+    plug :accepts, ["json"]
+    plug VibeWeb.Plugs.RateLimiter, type: :public_agent
+  end
+
   # Auth endpoints with rate limiting
   scope "/api", VibeWeb do
     pipe_through :auth_rate_limited
@@ -199,7 +205,7 @@ defmodule VibeWeb.Router do
   end
 
   scope "/api", VibeWeb do
-    pipe_through [:strict_rate_limited, :api]
+    pipe_through :public_agent_rate_limited
 
     post "/agents/:identifier/invoke", AgentsController, :invoke
     post "/agents/:identifier/events", AgentsController, :ingest_event
