@@ -270,48 +270,59 @@ defmodule VibeWeb.AgentsController do
         "params_keys=#{inspect(Map.keys(params) |> Enum.sort())}"
     )
 
-    with true <- is_binary(identifier),
-         %{} = agent <- Agents.get_invoke_target(identifier),
-         :ok <- ensure_agent_published(agent),
-         {:ok, result} <- AgentEventRuntime.ingest(agent, Map.drop(params, ["identifier"]), secret: secret) do
-      Logger.info(
-        "[AgentsController] ingest_event success " <>
-          "identifier=#{identifier} agent_id=#{agent.id} result=#{inspect(result)}"
-      )
+    try do
+      with true <- is_binary(identifier),
+           %{} = agent <- Agents.get_invoke_target(identifier),
+           :ok <- ensure_agent_published(agent),
+           {:ok, result} <- AgentEventRuntime.ingest(agent, Map.drop(params, ["identifier"]), secret: secret) do
+        Logger.info(
+          "[AgentsController] ingest_event success " <>
+            "identifier=#{identifier} agent_id=#{agent.id} result=#{inspect(result)}"
+        )
 
-      json(conn, result)
-    else
-      false ->
-        Logger.warning("[AgentsController] ingest_event missing identifier")
-        conn |> put_status(:bad_request) |> json(%{error: "Missing agent identifier"})
+        json(conn, result)
+      else
+        false ->
+          Logger.warning("[AgentsController] ingest_event missing identifier")
+          conn |> put_status(:bad_request) |> json(%{error: "Missing agent identifier"})
 
-      nil ->
-        Logger.warning("[AgentsController] ingest_event missing agent identifier=#{identifier}")
-        conn |> put_status(:not_found) |> json(%{error: "Agent not found"})
+        nil ->
+          Logger.warning("[AgentsController] ingest_event missing agent identifier=#{identifier}")
+          conn |> put_status(:not_found) |> json(%{error: "Agent not found"})
 
-      {:error, :agent_unavailable} ->
-        Logger.warning("[AgentsController] ingest_event unavailable identifier=#{identifier}")
-        conn |> put_status(:forbidden) |> json(%{error: "Agent unavailable"})
+        {:error, :agent_unavailable} ->
+          Logger.warning("[AgentsController] ingest_event unavailable identifier=#{identifier}")
+          conn |> put_status(:forbidden) |> json(%{error: "Agent unavailable"})
 
-      {:error, :invalid_secret} ->
-        Logger.warning("[AgentsController] ingest_event invalid secret identifier=#{identifier}")
-        conn |> put_status(:unauthorized) |> json(%{error: "Invalid secret"})
+        {:error, :invalid_secret} ->
+          Logger.warning("[AgentsController] ingest_event invalid secret identifier=#{identifier}")
+          conn |> put_status(:unauthorized) |> json(%{error: "Invalid secret"})
 
-      {:error, :chat_not_attached} ->
-        Logger.warning("[AgentsController] ingest_event chat not attached identifier=#{identifier}")
-        conn |> put_status(:forbidden) |> json(%{error: "Agent not attached to target chat"})
+        {:error, :chat_not_attached} ->
+          Logger.warning("[AgentsController] ingest_event chat not attached identifier=#{identifier}")
+          conn |> put_status(:forbidden) |> json(%{error: "Agent not attached to target chat"})
 
-      {:error, :missing_destination_chat} ->
-        Logger.warning("[AgentsController] ingest_event missing destination chat identifier=#{identifier}")
-        conn |> put_status(:unprocessable_entity) |> json(%{error: "Missing destination chat"})
+        {:error, :missing_destination_chat} ->
+          Logger.warning("[AgentsController] ingest_event missing destination chat identifier=#{identifier}")
+          conn |> put_status(:unprocessable_entity) |> json(%{error: "Missing destination chat"})
 
-      {:error, :missing_event_type} ->
-        Logger.warning("[AgentsController] ingest_event missing event type identifier=#{identifier}")
-        conn |> put_status(:unprocessable_entity) |> json(%{error: "eventType is required"})
+        {:error, :missing_event_type} ->
+          Logger.warning("[AgentsController] ingest_event missing event type identifier=#{identifier}")
+          conn |> put_status(:unprocessable_entity) |> json(%{error: "eventType is required"})
 
-      {:error, reason} ->
-        Logger.error("[AgentsController] ingest_event failed identifier=#{identifier} reason=#{inspect(reason)}")
-        conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+        {:error, reason} ->
+          Logger.error("[AgentsController] ingest_event failed identifier=#{identifier} reason=#{inspect(reason)}")
+          conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+      end
+    rescue
+      exception ->
+        Logger.error(
+          "[AgentsController] ingest_event exception " <>
+            "identifier=#{identifier || "missing"} exception=#{inspect(exception)} " <>
+            "stacktrace=#{Exception.format_stacktrace(__STACKTRACE__)}"
+        )
+
+        reraise exception, __STACKTRACE__
     end
   end
 
