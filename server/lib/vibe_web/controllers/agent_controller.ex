@@ -47,6 +47,9 @@ defmodule VibeWeb.AgentController do
            user_id: user_id,
            chat_id: chat_id
          ) do
+      {:ok, _full_response, _runtime_state} ->
+        send_sse_event(conn, "done", %{success: true})
+
       {:ok, _full_response} ->
         send_sse_event(conn, "done", %{success: true})
 
@@ -86,6 +89,12 @@ defmodule VibeWeb.AgentController do
              user_id: user_id,
              chat_id: chat_id
            ) do
+        {:ok, full_response, _runtime_state} ->
+          json(conn, %{
+            success: true,
+            response: full_response
+          })
+
         {:ok, full_response} ->
           json(conn, %{
             success: true,
