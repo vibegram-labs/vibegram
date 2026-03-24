@@ -256,20 +256,22 @@ defmodule VibeWeb.AgentsController do
     end
   end
 
-  def ingest_event(conn, %{"identifier" => identifier} = params) do
+  def ingest_event(conn, params) when is_map(params) do
+    identifier = params["identifier"] || conn.path_params["identifier"]
     secret =
       List.first(get_req_header(conn, "x-vibe-agent-secret"))
       || List.first(get_req_header(conn, "x-vibe-integration-secret"))
 
     Logger.info(
       "[AgentsController] ingest_event start " <>
-        "identifier=#{identifier} method=#{conn.method} path=#{conn.request_path} " <>
+        "identifier=#{identifier || "missing"} method=#{conn.method} path=#{conn.request_path} " <>
         "content_type=#{List.first(get_req_header(conn, "content-type")) || "unknown"} " <>
         "secret_present=#{is_binary(secret)} raw_body_bytes=#{byte_size(conn.assigns[:raw_body] || "")} " <>
         "params_keys=#{inspect(Map.keys(params) |> Enum.sort())}"
     )
 
-    with %{} = agent <- Agents.get_invoke_target(identifier),
+    with true <- is_binary(identifier),
+         %{} = agent <- Agents.get_invoke_target(identifier),
          :ok <- ensure_agent_published(agent),
          {:ok, result} <- AgentEventRuntime.ingest(agent, Map.drop(params, ["identifier"]), secret: secret) do
       Logger.info(
@@ -279,6 +281,10 @@ defmodule VibeWeb.AgentsController do
 
       json(conn, result)
     else
+      false ->
+        Logger.warning("[AgentsController] ingest_event missing identifier")
+        conn |> put_status(:bad_request) |> json(%{error: "Missing agent identifier"})
+
       nil ->
         Logger.warning("[AgentsController] ingest_event missing agent identifier=#{identifier}")
         conn |> put_status(:not_found) |> json(%{error: "Agent not found"})
