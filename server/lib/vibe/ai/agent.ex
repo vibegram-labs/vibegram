@@ -6,7 +6,9 @@ defmodule Vibe.AI.Agent do
 
   require Logger
 
+  alias Vibe.AI.AgentRuntime
   alias Vibe.AI.GroupAgent
+  alias Vibe.AI.SubagentRegistry
 
   @claude_api "https://api.anthropic.com/v1/messages"
   @claude_model "claude-haiku-4-5-20251001"
@@ -100,6 +102,26 @@ defmodule Vibe.AI.Agent do
         },
         required: ["channel_id", "content", "scheduled_at"]
       }
+    },
+    %{
+      name: "delegate_to_subagent",
+      description:
+        "Delegate a task to one of Vibe AI's internal subagents when the request is specifically about agent setup, integrations, or needs a specialized worker.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          subagent_id: %{
+            type: "string",
+            enum: ["builder_assistant", "integration_advisor", "music_specialist", "document_specialist"],
+            description: "Which internal specialist should handle the task."
+          },
+          task: %{
+            type: "string",
+            description: "The delegated task or question for that specialist."
+          }
+        },
+        required: ["subagent_id", "task"]
+      }
     }
   ]
 
@@ -153,6 +175,14 @@ defmodule Vibe.AI.Agent do
      - Convert natural language times to ISO8601 (e.g., "6pm today" → appropriate datetime).
      - Confirm the scheduled time after scheduling.
 
+  9. delegate_to_subagent: Use when the request is better handled by an internal specialist.
+     - builder_assistant: creating, editing, publishing, or configuring Vibe agents.
+     - integration_advisor: invoke URLs, events URLs, secrets, attached vibe chat ids, and backend integration questions.
+     - music_specialist: focused music help when the request is mostly about discovery/playback.
+     - document_specialist: focused research, web lookup, image analysis, or document analysis.
+     - ALWAYS provide both "subagent_id" and "task".
+     - Do not use this for simple chat when your own tools already solve it directly.
+
   IMPORTANT:
   - NEVER write text before a tool call.
   - For music results: NEVER include URLs, track names, or album names in your response text.
@@ -174,10 +204,23 @@ defmodule Vibe.AI.Agent do
 
     messages = build_messages(conversation_history, user_message, image_urls)
 
-    case call_claude_with_tools(messages, callback, 0, "", user_id, system_prompt, tools, chat_id) do
-      {:ok, final_response} -> {:ok, final_response}
-      {:error, reason} -> {:error, reason}
-    end
+    AgentRuntime.run(
+      messages,
+      %AgentRuntime.Config{
+        model: @claude_model,
+        max_tokens: 4096,
+        max_depth: 3,
+        system_prompt: system_prompt,
+        tools: tools,
+        state: %{user_id: user_id, chat_id: chat_id},
+        callback: callback,
+        stream_text?: true,
+        execute_tools: &execute_tools_runtime/3,
+        missing_api_key_error: "ANTHROPIC_API_KEY not configured",
+        depth_error: "Max tool depth reached",
+        request_label: "Agent"
+      }
+    )
   end
 
   def available_tools do
@@ -259,256 +302,13 @@ defmodule Vibe.AI.Agent do
     history_messages ++ [%{role: "user", content: current_content}]
   end
 
-  defp call_claude_with_tools(
-         messages,
-         callback,
-         depth \\ 0,
-         accumulated_text \\ "",
-         user_id \\ nil,
-         system_prompt \\ @system_prompt,
-         tools \\ nil,
-         chat_id \\ nil
-       ) do
-    tools = tools || available_tools()
-
-    if depth > 3 do
-      # Reduced max depth - no retries, just fail fast
-      {:error, "Max tool depth reached"}
-    else
-      api_key = System.get_env("ANTHROPIC_API_KEY") || System.get_env("CLAUDE_API_KEY")
-
-      unless api_key do
-        {:error, "ANTHROPIC_API_KEY not configured"}
-      else
-        body = Jason.encode!(%{
-          model: @claude_model,
-          max_tokens: 4096,
-          system: system_prompt,
-          tools: tools,
-          messages: messages,
-          stream: true
-        })
-
-        headers = [
-          {"Content-Type", "application/json"},
-          {"x-api-key", api_key},
-          {"anthropic-version", "2023-06-01"}
-        ]
-
-        # The prompt already instructs Claude to call tools without any intro text,
-        # so the chat can safely stream deltas as soon as they arrive.
-        stream_text = true
-
-        case stream_claude_response(body, headers, callback, stream_text: stream_text) do
-          {:tool_use, tool_calls, partial_response, partial_text} ->
-            # Execute tools first (this emits progress + tool_result events)
-            tool_results = execute_tools(tool_calls, callback, user_id, chat_id)
-
-            # Add assistant response and tool results to messages
-            new_messages = messages ++ [
-              %{role: "assistant", content: partial_response},
-              %{role: "user", content: tool_results}
-            ]
-
-            call_claude_with_tools(
-              new_messages,
-              callback,
-              depth + 1,
-              accumulated_text <> partial_text,
-              user_id,
-              system_prompt,
-              tools,
-              chat_id
-            )
-
-          {:ok, response} ->
-            {:ok, accumulated_text <> response}
-
-          {:error, reason} ->
-            {:error, reason}
-        end
-      end
-    end
+  defp execute_tools_runtime(tool_calls, state, callback) do
+    user_id = Map.get(state, :user_id)
+    chat_id = Map.get(state, :chat_id)
+    {execute_tools(tool_calls, callback, user_id, chat_id), state}
   end
 
-  defp get_text_from_content(blocks) when is_list(blocks) do
-    Enum.find_value(blocks, fn
-      %{type: "text", text: text} -> text
-      _ -> nil
-    end)
-  end
-  defp get_text_from_content(_), do: ""
-
-  defp stream_claude_response(body, headers, callback, opts \\ []) do
-    stream_text = Keyword.get(opts, :stream_text, true)
-    # Using Finch for streaming HTTP
-    request = Finch.build(:post, @claude_api, headers, body)
-
-    result = Finch.stream(
-      request,
-      Vibe.Finch,
-      %{text: "", tool_calls: [], current_tool_index: -1, stop_reason: nil, buffer: ""},
-      fn
-      {:status, status}, acc ->
-        Map.put(acc, :status, status)
-
-      {:headers, resp_headers}, acc ->
-        Map.put(acc, :headers, resp_headers)
-
-      {:data, data}, acc ->
-        {events, buffer} = parse_sse_events((acc.buffer || "") <> data)
-        acc = Map.put(acc, :buffer, buffer)
-
-        Enum.reduce(events, acc, fn event, inner_acc ->
-          case event do
-            %{"type" => "content_block_delta", "delta" => %{"type" => "text_delta", "text" => text}} ->
-              # Stream text to client ONLY if enabled for this turn
-              if stream_text do
-                callback.(%{type: :text, content: text})
-              end
-              Map.update(inner_acc, :text, text, &(&1 <> text))
-
-            %{"type" => "content_block_start", "content_block" => %{"type" => "tool_use"} = tool} ->
-              # Start a new tool, store it with empty input string
-              new_tool = Map.put(tool, "input_json", "")
-              new_index = length(inner_acc.tool_calls)
-              inner_acc
-              |> Map.update(:tool_calls, [new_tool], &(&1 ++ [new_tool]))
-              |> Map.put(:current_tool_index, new_index)
-
-            %{"type" => "content_block_delta", "delta" => %{"type" => "input_json_delta", "partial_json" => json}} ->
-              # Append JSON chunk to current tool's input_json
-              idx = inner_acc.current_tool_index
-              if idx >= 0 do
-                updated_tools = List.update_at(inner_acc.tool_calls, idx, fn tool ->
-                  Map.update(tool, "input_json", json, &(&1 <> json))
-                end)
-                Map.put(inner_acc, :tool_calls, updated_tools)
-              else
-                inner_acc
-              end
-
-            %{"type" => "message_delta", "delta" => %{"stop_reason" => reason}} ->
-              Map.put(inner_acc, :stop_reason, reason)
-
-            _ ->
-              inner_acc
-          end
-        end)
-      end
-    )
-
-    case result do
-      {:ok, final_acc} ->
-        case final_acc.status do
-          status when is_integer(status) and status != 200 ->
-            {:error, "API error: #{status}"}
-
-          _ ->
-            case final_acc.stop_reason do
-              "tool_use" ->
-                # Parse inputs for each tool
-                tools_with_input = Enum.map(final_acc.tool_calls, fn tool ->
-                  input = case Jason.decode(tool["input_json"] || "{}") do
-                    {:ok, parsed} -> parsed
-                    _ -> %{}
-                  end
-                  Map.put(tool, "input", input)
-                end)
-
-                {:tool_use, tools_with_input, build_content_blocks(final_acc), final_acc.text}
-
-              _ ->
-                {:ok, final_acc.text}
-            end
-        end
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp parse_sse_events(data) do
-    data =
-      data
-      |> to_string()
-      |> String.replace("\r\n", "\n")
-
-    chunks = String.split(data, "\n\n", trim: false)
-
-    {complete_chunks, remaining} =
-      if String.ends_with?(data, "\n\n") do
-        {Enum.reject(chunks, &(&1 == "")), ""}
-      else
-        case Enum.split(chunks, max(length(chunks) - 1, 0)) do
-          {complete, [tail]} -> {Enum.reject(complete, &(&1 == "")), tail}
-          {complete, []} -> {Enum.reject(complete, &(&1 == "")), ""}
-        end
-      end
-
-    events =
-      complete_chunks
-      |> Enum.map(&parse_sse_event_block/1)
-      |> Enum.reject(&is_nil/1)
-
-    {events, remaining}
-  end
-
-  defp parse_sse_event_block(chunk) do
-    payload =
-      chunk
-      |> String.split("\n", trim: false)
-      |> Enum.filter(&String.starts_with?(&1, "data:"))
-      |> Enum.map(fn line ->
-        line
-        |> String.replace_prefix("data:", "")
-        |> String.trim_leading()
-      end)
-      |> Enum.join("\n")
-
-    cond do
-      payload == "" ->
-        nil
-
-      payload == "[DONE]" ->
-        nil
-
-      true ->
-        case Jason.decode(payload) do
-          {:ok, parsed} -> parsed
-          _ -> nil
-        end
-    end
-  end
-
-  defp build_content_blocks(acc) do
-    blocks = []
-
-    blocks = if acc.text != "" do
-      [%{type: "text", text: acc.text} | blocks]
-    else
-      blocks
-    end
-
-    # Each tool now has its own input_json field
-    blocks = Enum.reduce(acc.tool_calls, blocks, fn tool, b ->
-      input = case Jason.decode(tool["input_json"] || "{}") do
-        {:ok, parsed} -> parsed
-        _ -> %{}
-      end
-
-      [%{
-        type: "tool_use",
-        id: tool["id"],
-        name: tool["name"],
-        input: input
-      } | b]
-    end)
-
-    Enum.reverse(blocks)
-  end
-
-  defp execute_tools(tool_calls, callback, user_id \\ nil, chat_id \\ nil) do
+  defp execute_tools(tool_calls, callback, user_id, chat_id) do
     Enum.map(tool_calls, fn tool ->
       tool_name = tool["name"]
       tool_input = tool["input"] || %{}
@@ -530,6 +330,9 @@ defmodule Vibe.AI.Agent do
         "post_to_channel" -> "Posting to channel..."
         "get_channel_analytics" -> "Fetching channel analytics..."
         "schedule_channel_post" -> "Scheduling post..."
+        "delegate_to_subagent" ->
+          spec = SubagentRegistry.get(tool_input["subagent_id"] || "")
+          "Delegating to #{(spec && spec.label) || "specialist"}..."
         _ -> "Working..."
       end
       callback.(%{type: :progress, label: label, tool: tool_name, status: "running"})
@@ -562,6 +365,18 @@ defmodule Vibe.AI.Agent do
 
           tool_name == "schedule_channel_post" ->
             Vibe.AI.Tools.Channel.schedule_post(tool["input"], user_id)
+
+          tool_name == "delegate_to_subagent" ->
+            case SubagentRegistry.run(
+                   tool_input["subagent_id"],
+                   tool_input["task"],
+                   user_id: user_id,
+                   chat_id: chat_id,
+                   callback: callback
+                 ) do
+              {:ok, payload} -> payload
+              {:error, reason} -> %{"ok" => false, "error" => inspect(reason)}
+            end
 
           true ->
             %{error: "Unknown tool"}

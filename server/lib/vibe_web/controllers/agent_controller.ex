@@ -15,6 +15,8 @@ defmodule VibeWeb.AgentController do
   def chat(conn, %{"message" => message} = params) do
     images = params["images"] || []
     history = params["history"] || []
+    user_id = conn.assigns.current_user.id
+    chat_id = params["chatId"] || params["chat_id"]
 
     # Set up SSE streaming
     conn = conn
@@ -32,9 +34,19 @@ defmodule VibeWeb.AgentController do
 
       %{type: :tool_result, tool: tool, result: result} ->
         send_sse_event(conn, "tool_result", %{tool: tool, result: result})
+
+      %{type: :subagent} = event ->
+        send_sse_event(conn, "subagent", Map.delete(event, :type))
     end
 
-    case AiAgent.stream_response(message, callback, history: history, images: images) do
+    case AiAgent.stream_response(
+           message,
+           callback,
+           history: history,
+           images: images,
+           user_id: user_id,
+           chat_id: chat_id
+         ) do
       {:ok, _full_response} ->
         send_sse_event(conn, "done", %{success: true})
 
@@ -52,6 +64,8 @@ defmodule VibeWeb.AgentController do
   def chat_sync(conn, %{"message" => message} = params) do
     images = params["images"] || []
     history = params["history"] || []
+    user_id = conn.assigns.current_user.id
+    chat_id = params["chatId"] || params["chat_id"]
 
     # Collect all chunks using Elixir Agent
     {:ok, collected} = Agent.start_link(fn -> "" end)
@@ -64,7 +78,14 @@ defmodule VibeWeb.AgentController do
     end
 
     try do
-      case AiAgent.stream_response(message, callback, history: history, images: images) do
+      case AiAgent.stream_response(
+             message,
+             callback,
+             history: history,
+             images: images,
+             user_id: user_id,
+             chat_id: chat_id
+           ) do
         {:ok, full_response} ->
           json(conn, %{
             success: true,
@@ -98,7 +119,13 @@ defmodule VibeWeb.AgentController do
     json(conn, %{
       status: "ok",
       agent_configured: api_key != nil,
-      tools: ["search_music", "search_google", "analyze_image", "analyze_document"]
+      tools: [
+        "search_music",
+        "search_google",
+        "analyze_image",
+        "analyze_document",
+        "delegate_to_subagent"
+      ]
     })
   end
 end

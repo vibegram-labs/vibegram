@@ -5,12 +5,13 @@ defmodule Vibe.AI.AgentBuilderSetup do
 
   alias Vibe.AgentConversation
   alias Vibe.Agents
+  alias Vibe.AI.AgentRuntime
   alias Vibe.AI.GroupAgent
   alias Vibe.AI.ToolRegistry
 
-  @claude_api "https://api.anthropic.com/v1/messages"
   @orchestrator_model "claude-sonnet-4-20250514"
   @worker_model "claude-haiku-4-5-20251001"
+  @structured_worker_tool "submit_result"
   @max_recent_messages 8
   @progress_worker_keys ~w[
     setup_orchestrator
@@ -2234,83 +2235,70 @@ defmodule Vibe.AI.AgentBuilderSetup do
   end
 
   defp call_structured_worker(model, system_prompt, user_prompt, schema) do
-    api_key = System.get_env("ANTHROPIC_API_KEY") || System.get_env("CLAUDE_API_KEY")
+    messages = [
+      %{
+        role: "user",
+        content: """
+        Return the answer by calling #{@structured_worker_tool} once.
 
-    if is_nil(api_key) do
-      {:error, :missing_api_key}
-    else
-      body =
-        Jason.encode!(%{
-          model: model,
-          max_tokens: 1600,
-          system: String.trim(system_prompt),
-          tools: [
-            %{
-              name: "submit_result",
-              description: "Return the structured result for this worker.",
-              input_schema: schema
-            }
-          ],
-          messages: [
-            %{
-              role: "user",
-              content: """
-              Return the answer by calling submit_result once.
+        #{user_prompt}
+        """
+      }
+    ]
 
-              #{user_prompt}
-              """
-            }
-          ]
-        })
+    config = %AgentRuntime.Config{
+      model: model,
+      max_tokens: 1600,
+      max_depth: 1,
+      system_prompt: String.trim(system_prompt),
+      tools: [
+        %{
+          name: @structured_worker_tool,
+          description: "Return the structured result for this worker.",
+          input_schema: schema
+        }
+      ],
+      state: %{worker_result: nil},
+      callback: nil,
+      stream_text?: false,
+      execute_tools: &execute_structured_worker_tools/3,
+      missing_api_key_error: :missing_api_key,
+      depth_error: :missing_tool_use,
+      request_label: "AgentBuilderSetupWorker"
+    }
 
-      headers = [
-        {"content-type", "application/json"},
-        {"x-api-key", api_key},
-        {"anthropic-version", "2023-06-01"}
-      ]
+    with {:ok, raw_reply, final_state} <- AgentRuntime.run(messages, config) do
+      case Map.get(final_state, :worker_result) do
+        result when is_map(result) and map_size(result) > 0 ->
+          {:ok, result}
 
-      request = Finch.build(:post, @claude_api, headers, body)
-
-      case Finch.request(request, Vibe.Finch, receive_timeout: 30_000) do
-        {:ok, %{status: 200, body: response_body}} ->
-          parse_worker_response(response_body)
-
-        {:ok, %{status: status, body: response_body}} ->
-          Logger.error("[AgentBuilderSetup] Worker request failed status=#{status} body=#{response_body}")
-          {:error, {:api_error, status}}
-
-        {:error, reason} ->
-          Logger.error("[AgentBuilderSetup] Worker request failed: #{inspect(reason)}")
-          {:error, reason}
+        _ ->
+          parse_worker_text(raw_reply)
       end
     end
   end
 
-  defp parse_worker_response(response_body) do
-    with {:ok, %{"content" => content_blocks}} <- Jason.decode(response_body) do
-      tool_use =
-        Enum.find(content_blocks, fn
-          %{"type" => "tool_use", "name" => "submit_result"} -> true
-          _ -> false
-        end)
+  defp execute_structured_worker_tools(tool_calls, state, _callback) do
+    Enum.reduce(tool_calls, {[], state}, fn tool, {results, acc_state} ->
+      tool_input = normalize_map(tool["input"])
 
-      cond do
-        is_map(tool_use) and is_map(tool_use["input"]) ->
-          {:ok, tool_use["input"]}
+      next_state =
+        case tool["name"] do
+          @structured_worker_tool when map_size(tool_input) > 0 ->
+            Map.put(acc_state, :worker_result, tool_input)
 
-        true ->
-          text =
-            content_blocks
-            |> Enum.filter(&(&1["type"] == "text"))
-            |> Enum.map(&(&1["text"] || ""))
-            |> Enum.join("\n")
+          _ ->
+            acc_state
+        end
 
-          parse_worker_text(text)
-      end
-    else
-      other ->
-        {:error, {:invalid_response, other}}
-    end
+      tool_result = %{
+        type: "tool_result",
+        tool_use_id: tool["id"],
+        content: Jason.encode!(%{"ok" => true})
+      }
+
+      {results ++ [tool_result], next_state}
+    end)
   end
 
   defp parse_worker_text(text) when is_binary(text) do

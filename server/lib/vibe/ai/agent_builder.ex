@@ -1,16 +1,14 @@
 defmodule Vibe.AI.AgentBuilder do
   @moduledoc false
 
-  require Logger
-
   alias Vibe.Agents
   alias Vibe.AgentConversation
+  alias Vibe.AI.AgentRuntime
   alias Vibe.AI.AgentBuilderSetup
   alias Vibe.AI.GroupAgent
   alias Vibe.AI.ToolRegistry
 
   @builder_deep_link "vibe://agent?mode=builder"
-  @claude_api "https://api.anthropic.com/v1/messages"
   @claude_model "claude-haiku-4-5-20251001"
   @max_tool_depth 6
 
@@ -187,6 +185,41 @@ defmodule Vibe.AI.AgentBuilder do
     process_message(user_id, message, active_agent_id, ui_response, callback)
   end
 
+  def delegate_task(user_id, message, opts \\ []) do
+    active_agent_id = Keyword.get(opts, :active_agent_id)
+    callback = Keyword.get(opts, :callback)
+
+    with true <- is_binary(message) and String.trim(message) != "" do
+      state = %{user_id: user_id, active_agent_id: active_agent_id, latest_secret: nil, subagent_mode: true}
+
+      with {:ok, raw_reply, final_state} <-
+             AgentRuntime.run(
+               build_builder_messages([], message),
+               builder_runtime_config(state, callback)
+             ) do
+        selected_agent = resolve_owned_agent(user_id, nil, final_state.active_agent_id)
+        selected_agent_payload = if selected_agent, do: Agents.agent_payload(selected_agent)
+        reply = normalize_optional_string(raw_reply) || fallback_reply(selected_agent)
+
+        {:ok,
+         %{
+           reply: reply,
+           active_agent_id: final_state.active_agent_id,
+           latest_secret: final_state.latest_secret,
+            metadata:
+             %{}
+             |> maybe_put("selected_agent_id", final_state.active_agent_id)
+             |> maybe_put(
+               "selected_agent_username",
+               (selected_agent_payload && (Map.get(selected_agent_payload, :username) || Map.get(selected_agent_payload, "username")))
+             )
+         }}
+      end
+    else
+      _ -> {:error, "message is required"}
+    end
+  end
+
   defp process_message(user_id, message, active_agent_id, ui_response, callback \\ nil) do
     with {:ok, session} <- Agents.get_or_create_builder_session(user_id) do
       input = %{message: normalize_optional_string(message), ui_response: ui_response}
@@ -277,238 +310,26 @@ defmodule Vibe.AI.AgentBuilder do
      |> Map.merge(AgentBuilderSetup.session_fields(updated_session.metadata || %{}))}
   end
 
-  defp run_builder_agent(user_id, history, message, active_agent_id, callback \\ nil) do
-    api_key = anthropic_api_key()
+  defp run_builder_agent(user_id, history, message, active_agent_id, callback) do
+    messages = build_builder_messages(history, message)
+    state = %{user_id: user_id, active_agent_id: active_agent_id, latest_secret: nil}
 
-    if is_nil(api_key) do
-      {:error, "Builder AI is unavailable because ANTHROPIC_API_KEY is not configured."}
-    else
-      messages = build_builder_messages(history, message)
-      state = %{user_id: user_id, active_agent_id: active_agent_id, latest_secret: nil}
+    with {:ok, raw_reply, final_state} <-
+           AgentRuntime.run(messages, builder_runtime_config(state, callback)) do
+      selected_agent = resolve_owned_agent(user_id, nil, final_state.active_agent_id)
+      reply = normalize_optional_string(raw_reply) || fallback_reply(selected_agent)
 
-      run_result =
-        if is_function(callback, 1) do
-          run_builder_loop_stream(messages, state, api_key, 0, callback, "")
-        else
-          run_builder_loop(messages, state, api_key, 0)
-        end
-
-      with {:ok, raw_reply, final_state} <- run_result do
-        selected_agent = resolve_owned_agent(user_id, nil, final_state.active_agent_id)
-        reply = normalize_optional_string(raw_reply) || fallback_reply(selected_agent)
-
-        {:ok,
-         %{
-           reply: reply,
-           active_agent_id: final_state.active_agent_id,
-           latest_secret: final_state.latest_secret
-         }}
-      end
+      {:ok,
+       %{
+         reply: reply,
+         active_agent_id: final_state.active_agent_id,
+         latest_secret: final_state.latest_secret
+       }}
     end
   end
 
-  defp run_builder_loop(_messages, _state, _api_key, depth) when depth > @max_tool_depth do
-    {:error, "Builder AI reached the maximum tool depth."}
-  end
-
-  defp run_builder_loop(messages, state, api_key, depth) do
-    case request_builder_completion(messages, state, api_key) do
-      {:ok, reply} ->
-        {:ok, reply, state}
-
-      {:tool_use, content_blocks} ->
-        {tool_results, next_state} = execute_builder_tools(content_blocks, state)
-
-        run_builder_loop(
-          messages ++ [
-            %{role: "assistant", content: content_blocks},
-            %{role: "user", content: tool_results}
-          ],
-          next_state,
-          api_key,
-          depth + 1
-        )
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp run_builder_loop_stream(_messages, _state, _api_key, depth, _callback, _accumulated_text)
-       when depth > @max_tool_depth do
-    {:error, "Builder AI reached the maximum tool depth."}
-  end
-
-  defp run_builder_loop_stream(messages, state, api_key, depth, callback, accumulated_text) do
-    case request_builder_completion_stream(messages, state, api_key, callback) do
-      {:ok, reply} ->
-        {:ok, accumulated_text <> reply, state}
-
-      {:tool_use, content_blocks, partial_text} ->
-        {tool_results, next_state} = execute_builder_tools(content_blocks, state)
-
-        run_builder_loop_stream(
-          messages ++ [
-            %{role: "assistant", content: content_blocks},
-            %{role: "user", content: tool_results}
-          ],
-          next_state,
-          api_key,
-          depth + 1,
-          callback,
-          accumulated_text <> partial_text
-        )
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
-  defp request_builder_completion(messages, state, api_key) do
-    body =
-      Jason.encode!(%{
-        model: @claude_model,
-        max_tokens: 1600,
-        system: builder_system_prompt(state),
-        tools: @builder_tools,
-        messages: messages
-      })
-
-    headers = [
-      {"content-type", "application/json"},
-      {"x-api-key", api_key},
-      {"anthropic-version", "2023-06-01"}
-    ]
-
-    request = Finch.build(:post, @claude_api, headers, body)
-
-    case Finch.request(request, Vibe.Finch, receive_timeout: 30_000) do
-      {:ok, %{status: 200, body: response_body}} ->
-        case Jason.decode(response_body) do
-          {:ok, %{"content" => content_blocks}} when is_list(content_blocks) ->
-            if Enum.any?(content_blocks, &(&1["type"] == "tool_use")) do
-              {:tool_use, content_blocks}
-            else
-              {:ok, extract_text_reply(content_blocks)}
-            end
-
-          {:ok, _decoded} ->
-            {:error, "Builder AI returned an invalid response."}
-
-          {:error, decode_error} ->
-            Logger.error("[AgentBuilder] Failed to decode Claude response: #{inspect(decode_error)}")
-            {:error, "Builder AI returned unreadable JSON."}
-        end
-
-      {:ok, %{status: status, body: response_body}} ->
-        Logger.error("[AgentBuilder] Claude API error status=#{status} body=#{response_body}")
-        {:error, "Builder AI request failed with status #{status}."}
-
-      {:error, reason} ->
-        Logger.error("[AgentBuilder] Claude request failed: #{inspect(reason)}")
-        {:error, "Builder AI request failed."}
-    end
-  end
-
-  defp request_builder_completion_stream(messages, state, api_key, callback) do
-    body =
-      Jason.encode!(%{
-        model: @claude_model,
-        max_tokens: 1600,
-        system: builder_system_prompt(state),
-        tools: @builder_tools,
-        messages: messages,
-        stream: true
-      })
-
-    headers = [
-      {"content-type", "application/json"},
-      {"x-api-key", api_key},
-      {"anthropic-version", "2023-06-01"}
-    ]
-
-    request = Finch.build(:post, @claude_api, headers, body)
-
-    result =
-      Finch.stream(
-        request,
-        Vibe.Finch,
-        %{text: "", tool_calls: [], current_tool_index: -1, stop_reason: nil, buffer: ""},
-        fn
-          {:status, status}, acc ->
-            Map.put(acc, :status, status)
-
-          {:headers, resp_headers}, acc ->
-            Map.put(acc, :headers, resp_headers)
-
-          {:data, data}, acc ->
-            {events, buffer} = parse_sse_events((acc.buffer || "") <> data)
-            acc = Map.put(acc, :buffer, buffer)
-
-            Enum.reduce(events, acc, fn event, inner_acc ->
-              case event do
-                %{"type" => "content_block_delta", "delta" => %{"type" => "text_delta", "text" => text}} ->
-                  callback.(%{type: :text, content: text})
-                  Map.update(inner_acc, :text, text, &(&1 <> text))
-
-                %{"type" => "content_block_start", "content_block" => %{"type" => "tool_use"} = tool} ->
-                  new_tool = Map.put(tool, "input_json", "")
-                  new_index = length(inner_acc.tool_calls)
-
-                  inner_acc
-                  |> Map.update(:tool_calls, [new_tool], &(&1 ++ [new_tool]))
-                  |> Map.put(:current_tool_index, new_index)
-
-                %{"type" => "content_block_delta", "delta" => %{"type" => "input_json_delta", "partial_json" => json}} ->
-                  idx = inner_acc.current_tool_index
-
-                  if idx >= 0 do
-                    updated_tools =
-                      List.update_at(inner_acc.tool_calls, idx, fn tool ->
-                        Map.update(tool, "input_json", json, &(&1 <> json))
-                      end)
-
-                    Map.put(inner_acc, :tool_calls, updated_tools)
-                  else
-                    inner_acc
-                  end
-
-                %{"type" => "message_delta", "delta" => %{"stop_reason" => reason}} ->
-                  Map.put(inner_acc, :stop_reason, reason)
-
-                _ ->
-                  inner_acc
-              end
-            end)
-        end
-      )
-
-    case result do
-      {:ok, final_acc} ->
-        case final_acc.status do
-          status when is_integer(status) and status != 200 ->
-            Logger.error("[AgentBuilder] Claude streaming request failed with status #{status}")
-            {:error, "Builder AI request failed with status #{status}."}
-
-          _ ->
-            case final_acc.stop_reason do
-              "tool_use" ->
-                {:tool_use, build_stream_content_blocks(final_acc), final_acc.text}
-
-              _ ->
-                {:ok, final_acc.text}
-            end
-        end
-
-      {:error, reason} ->
-        Logger.error("[AgentBuilder] Claude streaming request failed: #{inspect(reason)}")
-        {:error, "Builder AI request failed."}
-    end
-  end
-
-  defp execute_builder_tools(content_blocks, state) do
-    content_blocks
-    |> Enum.filter(&(&1["type"] == "tool_use"))
+  defp execute_builder_tools(tool_calls, state, _callback) do
+    tool_calls
     |> Enum.reduce({[], state}, fn tool, {results, acc_state} ->
       {result, next_state} = execute_builder_tool(tool["name"], tool["input"] || %{}, acc_state)
 
@@ -520,6 +341,24 @@ defmodule Vibe.AI.AgentBuilder do
 
       {results ++ [tool_result], next_state}
     end)
+  end
+
+  defp builder_runtime_config(state, callback) do
+    %AgentRuntime.Config{
+      model: @claude_model,
+      max_tokens: 1600,
+      max_depth: @max_tool_depth,
+      system_prompt: &builder_system_prompt/1,
+      tools: @builder_tools,
+      state: state,
+      callback: callback,
+      stream_text?: true,
+      execute_tools: &execute_builder_tools/3,
+      missing_api_key_error:
+        "Builder AI is unavailable because ANTHROPIC_API_KEY is not configured.",
+      depth_error: "Builder AI reached the maximum tool depth.",
+      request_label: "AgentBuilder"
+    }
   end
 
   defp execute_builder_tool("get_builder_context", input, state) do
@@ -776,10 +615,12 @@ defmodule Vibe.AI.AgentBuilder do
     - Do not tell the user to use slash commands unless they explicitly ask for slash syntax. Focus on doing the work and explaining outcomes.
     - If the current secret is not available anymore, tell the user to rotate it.
     - Keep replies concise, practical, and step-by-step when integration is involved.
+    - If subagent_mode is true, you are serving another Vibe AI worker. Return direct actionable output instead of UI coaching.
 
     Current client-selected active_agent_id: #{state.active_agent_id || "none"}
     Builder deep link: #{@builder_deep_link}
     Reserved setup handle: @vibeagent
+    subagent_mode: #{if(Map.get(state, :subagent_mode), do: "true", else: "false")}
     """
     |> String.trim()
   end
@@ -1134,100 +975,6 @@ defmodule Vibe.AI.AgentBuilder do
   end
 
   defp normalize_map(_value), do: %{}
-
-  defp extract_text_reply(content_blocks) do
-    content_blocks
-    |> Enum.map(fn
-      %{"type" => "text", "text" => text} when is_binary(text) -> text
-      _ -> nil
-    end)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("")
-    |> String.trim()
-  end
-
-  defp build_stream_content_blocks(acc) do
-    blocks =
-      if acc.text != "" do
-        [%{"type" => "text", "text" => acc.text}]
-      else
-        []
-      end
-
-    Enum.reduce(acc.tool_calls, blocks, fn tool, acc_blocks ->
-      input =
-        case Jason.decode(tool["input_json"] || "{}") do
-          {:ok, parsed} -> parsed
-          _ -> %{}
-        end
-
-      acc_blocks ++ [
-        %{
-          "type" => "tool_use",
-          "id" => tool["id"],
-          "name" => tool["name"],
-          "input" => input
-        }
-      ]
-    end)
-  end
-
-  defp parse_sse_events(data) do
-    data =
-      data
-      |> to_string()
-      |> String.replace("\r\n", "\n")
-
-    chunks = String.split(data, "\n\n", trim: false)
-
-    {complete_chunks, remaining} =
-      if String.ends_with?(data, "\n\n") do
-        {Enum.reject(chunks, &(&1 == "")), ""}
-      else
-        case Enum.split(chunks, max(length(chunks) - 1, 0)) do
-          {complete, [tail]} -> {Enum.reject(complete, &(&1 == "")), tail}
-          {complete, []} -> {Enum.reject(complete, &(&1 == "")), ""}
-        end
-      end
-
-    events =
-      complete_chunks
-      |> Enum.map(&parse_sse_event_block/1)
-      |> Enum.reject(&is_nil/1)
-
-    {events, remaining}
-  end
-
-  defp parse_sse_event_block(chunk) do
-    payload =
-      chunk
-      |> String.split("\n", trim: false)
-      |> Enum.filter(&String.starts_with?(&1, "data:"))
-      |> Enum.map(fn line ->
-        line
-        |> String.replace_prefix("data:", "")
-        |> String.trim_leading()
-      end)
-      |> Enum.join("\n")
-
-    cond do
-      payload == "" ->
-        nil
-
-      payload == "[DONE]" ->
-        nil
-
-      true ->
-        case Jason.decode(payload) do
-          {:ok, parsed} -> parsed
-          _ -> nil
-        end
-    end
-  end
-
-  defp anthropic_api_key do
-    System.get_env("ANTHROPIC_API_KEY") || System.get_env("CLAUDE_API_KEY")
-  end
 
   defp normalize_callback_input(nil), do: nil
 
