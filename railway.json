@@ -4,11 +4,7 @@
         "dockerfilePath": "Dockerfile"
     },
     "deploy": {
-        "preDeployCommand": [
-            "/app/bin/vibe",
-            "eval",
-            "Vibe.Release.migrate"
-        ],
+        "preDeployCommand": "/app/bin/vibe eval \"Vibe.Release.migrate\"",
         "startCommand": "/app/start.sh",
         "healthcheckPath": "/api/health",
         "healthcheckTimeout": 60,
