@@ -69,6 +69,148 @@ struct BubbleShape {
 }
 
 struct ChatListRow {
+  struct AgentProgressNode: Equatable {
+    let id: String
+    let label: String
+    let status: String
+    let depth: Int
+  }
+
+  struct AgentCardDestination: Codable, Equatable {
+    let chatId: String
+    let name: String?
+    let type: String?
+    let openLink: String?
+
+    static func parse(_ raw: [String: Any]) -> AgentCardDestination? {
+      guard let chatId = parseNonEmptyString(raw["chat_id"] ?? raw["chatId"]) else { return nil }
+      return AgentCardDestination(
+        chatId: chatId,
+        name: parseNonEmptyString(raw["name"]),
+        type: parseNonEmptyString(raw["type"]),
+        openLink: parseNonEmptyString(raw["open_link"] ?? raw["openLink"])
+      )
+    }
+
+    var rawValue: [String: Any] {
+      var raw: [String: Any] = ["chat_id": chatId]
+      if let name { raw["name"] = name }
+      if let type { raw["type"] = type }
+      if let openLink { raw["open_link"] = openLink }
+      return raw
+    }
+  }
+
+  struct AgentCard: Codable, Equatable {
+    let id: String
+    let style: String
+    let agentId: String
+    let displayName: String
+    let username: String?
+    let identifier: String
+    let status: String
+    let promptStatus: String?
+    let promptPreview: String?
+    let systemPrompt: String?
+    let enabledTools: [String]
+    let outputModes: [String]
+    let voiceProfile: String?
+    let callbackURL: String?
+    let apiBaseURL: String?
+    let invokeURL: String?
+    let eventsURL: String?
+    let builderLink: String?
+    let agentDMURL: String?
+    let secretHint: String?
+    let latestSecret: String?
+    let defaultDestinationChat: AgentCardDestination?
+    let attachedChats: [AgentCardDestination]
+    let canDelete: Bool
+
+    static func parse(_ raw: [String: Any]) -> AgentCard? {
+      let id = parseNonEmptyString(raw["id"]) ?? UUID().uuidString
+      let style = parseNonEmptyString(raw["style"]) ?? "summary"
+      guard
+        let agentId = parseNonEmptyString(raw["agent_id"] ?? raw["agentId"]),
+        let displayName = parseNonEmptyString(raw["display_name"] ?? raw["displayName"]),
+        let identifier = parseNonEmptyString(raw["identifier"]),
+        let status = parseNonEmptyString(raw["status"])
+      else { return nil }
+
+      let defaultDestinationChat =
+        (raw["default_destination_chat"] as? [String: Any])
+        .flatMap(AgentCardDestination.parse)
+      let attachedChats =
+        (raw["attached_chats"] as? [[String: Any]] ?? []).compactMap(AgentCardDestination.parse)
+
+      return AgentCard(
+        id: id,
+        style: style,
+        agentId: agentId,
+        displayName: displayName,
+        username: parseNonEmptyString(raw["username"]),
+        identifier: identifier,
+        status: status,
+        promptStatus: parseNonEmptyString(raw["prompt_status"] ?? raw["promptStatus"]),
+        promptPreview: parseNonEmptyString(raw["prompt_preview"] ?? raw["promptPreview"]),
+        systemPrompt: parseNonEmptyString(raw["system_prompt"] ?? raw["systemPrompt"]),
+        enabledTools: parseStringArray(raw["enabled_tools"] ?? raw["enabledTools"]),
+        outputModes: parseStringArray(raw["output_modes"] ?? raw["outputModes"]),
+        voiceProfile: parseNonEmptyString(raw["voice_profile"] ?? raw["voiceProfile"]),
+        callbackURL: parseNonEmptyString(raw["callback_url"] ?? raw["callbackUrl"]),
+        apiBaseURL: parseNonEmptyString(raw["api_base_url"] ?? raw["apiBaseUrl"]),
+        invokeURL: parseNonEmptyString(raw["invoke_url"] ?? raw["invokeUrl"]),
+        eventsURL: parseNonEmptyString(raw["events_url"] ?? raw["eventsUrl"]),
+        builderLink: parseNonEmptyString(raw["builder_link"] ?? raw["builderLink"]),
+        agentDMURL: parseNonEmptyString(raw["agent_dm_link"] ?? raw["agentDmLink"]),
+        secretHint: parseNonEmptyString(raw["secret_hint"] ?? raw["secretHint"]),
+        latestSecret: parseNonEmptyString(raw["latest_secret"] ?? raw["latestSecret"]),
+        defaultDestinationChat: defaultDestinationChat,
+        attachedChats: attachedChats,
+        canDelete:
+          (raw["can_delete"] as? Bool)
+          ?? ((raw["canDelete"] as? Bool) ?? true)
+      )
+    }
+
+    var rawValue: [String: Any] {
+      var raw: [String: Any] = [
+        "id": id,
+        "style": style,
+        "agent_id": agentId,
+        "display_name": displayName,
+        "identifier": identifier,
+        "status": status,
+        "enabled_tools": enabledTools,
+        "output_modes": outputModes,
+        "attached_chats": attachedChats.map(\.rawValue),
+        "can_delete": canDelete,
+      ]
+      if let username { raw["username"] = username }
+      if let promptStatus { raw["prompt_status"] = promptStatus }
+      if let promptPreview { raw["prompt_preview"] = promptPreview }
+      if let systemPrompt { raw["system_prompt"] = systemPrompt }
+      if let voiceProfile { raw["voice_profile"] = voiceProfile }
+      if let callbackURL { raw["callback_url"] = callbackURL }
+      if let apiBaseURL { raw["api_base_url"] = apiBaseURL }
+      if let invokeURL { raw["invoke_url"] = invokeURL }
+      if let eventsURL { raw["events_url"] = eventsURL }
+      if let builderLink { raw["builder_link"] = builderLink }
+      if let agentDMURL { raw["agent_dm_link"] = agentDMURL }
+      if let secretHint { raw["secret_hint"] = secretHint }
+      if let latestSecret { raw["latest_secret"] = latestSecret }
+      if let defaultDestinationChat { raw["default_destination_chat"] = defaultDestinationChat.rawValue }
+      return raw
+    }
+
+    var subtitleText: String {
+      if let username, !username.isEmpty {
+        return "@\(username)"
+      }
+      return identifier
+    }
+  }
+
   enum Kind {
     case day
     case message
@@ -120,6 +262,11 @@ struct ChatListRow {
   let agentName: String?
   let plainContent: String?
   let isStreamingText: Bool
+  let agentProgressNodes: [AgentProgressNode]
+  let agentActionSourceId: String?
+  let agentActionSourceText: String?
+  let agentRegeneratePrompt: String?
+  let agentCard: AgentCard?
 
   var isAgentMention: Bool {
     return isMe && text.lowercased().contains("@vibe")
@@ -144,7 +291,7 @@ struct ChatListRow {
     let inferredImage = isImageMediaReference(mediaUrl: mediaUrl, fileName: fileName)
     let inferredAudio = isAudioMediaReference(mediaUrl: mediaUrl, fileName: fileName)
     switch messageType {
-    case "voice", "music":
+    case "voice", "music", "mp3", "audio":
       return .voice
     case "video":
       return .video
@@ -316,6 +463,11 @@ struct ChatListRow {
       agentName = nil
       plainContent = nil
       isStreamingText = false
+      agentProgressNodes = []
+      agentActionSourceId = nil
+      agentActionSourceText = nil
+      agentRegeneratePrompt = nil
+      agentCard = nil
       return
     }
 
@@ -467,10 +619,28 @@ struct ChatListRow {
     isAgentMessage = (message["isAgentMessage"] as? Bool) ?? false
     agentName = message["agentName"] as? String
     plainContent = message["plainContent"] as? String
+    agentProgressNodes = parseAgentProgressNodes(metadata?["progressNodes"])
     isStreamingText =
       (message["isStreaming"] as? Bool)
       ?? (metadata?["isStreaming"] as? Bool)
       ?? false
+    agentActionSourceId =
+      parseNonEmptyString(metadata?["sourceMessageId"])
+      ?? parseNonEmptyString(metadata?["actionSourceId"])
+      ?? parseNonEmptyString(message["sourceMessageId"])
+      ?? parseNonEmptyString(message["actionSourceId"])
+    agentActionSourceText =
+      parseNonEmptyString(metadata?["sourceText"])
+      ?? parseNonEmptyString(metadata?["actionSourceText"])
+      ?? parseNonEmptyString(message["sourceText"])
+      ?? parseNonEmptyString(message["actionSourceText"])
+      ?? plainContent
+    agentRegeneratePrompt =
+      parseNonEmptyString(metadata?["regeneratePrompt"])
+      ?? parseNonEmptyString(message["regeneratePrompt"])
+    agentCard =
+      AgentCard.parse(message["agentCard"] as? [String: Any] ?? [:])
+      ?? AgentCard.parse(metadata?["agentCard"] as? [String: Any] ?? [:])
   }
 }
 
@@ -752,6 +922,48 @@ func chatListRowContentEqual(_ lhs: ChatListRow, _ rhs: ChatListRow) -> Bool {
     && lhs.agentName == rhs.agentName
     && lhs.plainContent == rhs.plainContent
     && lhs.isStreamingText == rhs.isStreamingText
+    && lhs.agentProgressNodes == rhs.agentProgressNodes
+    && lhs.agentActionSourceId == rhs.agentActionSourceId
+    && lhs.agentActionSourceText == rhs.agentActionSourceText
+    && lhs.agentRegeneratePrompt == rhs.agentRegeneratePrompt
+    && lhs.agentCard == rhs.agentCard
+}
+
+private func parseAgentProgressNodes(_ raw: Any?) -> [ChatListRow.AgentProgressNode] {
+  guard let items = raw as? [[String: Any]] else { return [] }
+
+  return items.compactMap { item in
+    guard let label = parseNonEmptyString(item["label"]) else { return nil }
+    let id = parseNonEmptyString(item["id"]) ?? UUID().uuidString
+    let status = parseNonEmptyString(item["status"]) ?? "running"
+    let depth = Int(parseLong(item["depth"]) ?? 0)
+
+    return ChatListRow.AgentProgressNode(
+      id: id,
+      label: label,
+      status: status,
+      depth: max(0, depth)
+    )
+  }
+}
+
+private func parseStringArray(_ raw: Any?) -> [String] {
+  if let values = raw as? [String] {
+    return values.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+  }
+
+  if let values = raw as? [Any] {
+    return values.compactMap(parseNonEmptyString)
+  }
+
+  if let value = raw as? String {
+    return value
+      .split(separator: ",")
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .filter { !$0.isEmpty }
+  }
+
+  return []
 }
 
 struct SendTransitionPayload {

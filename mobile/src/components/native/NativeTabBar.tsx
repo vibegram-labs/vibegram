@@ -283,7 +283,7 @@ export default function NativeTabBar({
         console.log('[NativeTabBar] native view key', nativeViewKey);
 
         const nativeDockStyle = React.useMemo(
-            () => [styles.nativeTabsDock, isVibeExpanded && styles.nativeTabsDockExpanded],
+            () => [styles.nativeTabsDock],
             [isVibeExpanded],
         );
         const nativeBarStyle = React.useMemo(
@@ -841,15 +841,12 @@ function FallbackTabBar({
 const styles = StyleSheet.create({
     nativeTabsDock: {
         width: '100%',
-        paddingBottom: Platform.OS === 'ios' ? 10 : 8,
+        paddingBottom: Platform.OS === 'ios' ? 16 : 14,
         paddingTop: 2,
         paddingHorizontal: 22,
         alignItems: 'stretch',
         justifyContent: 'flex-end',
         backgroundColor: 'transparent',
-    },
-    nativeTabsDockExpanded: {
-        paddingBottom: 0,
     },
     nativeTabsBar: {
         width: '100%',

@@ -94,6 +94,7 @@ export default function VibeChatMainScreen({
   const sendBuilderMessage = useVibeAgentBuilderStore((state) => state.sendMessage);
   const submitBuilderUiResponse = useVibeAgentBuilderStore((state) => state.submitUiResponse);
   const createBuilderDraft = useVibeAgentBuilderStore((state) => state.createDraftFromReview);
+  const toggleBuilderAgentDisabled = useVibeAgentBuilderStore((state) => state.toggleDisableActive);
 
   const nativeMainModule = useMemo(() => getNativeChatMainModule(), []);
   const nativeAvailable = !!nativeMainModule && (nativeMainModule.isSupported?.() ?? true);
@@ -246,8 +247,10 @@ export default function VibeChatMainScreen({
       pendingUiRequest: builderPendingUiRequest,
       reviewSections: builderReviewSections,
       activity: builderActivity,
+      agentEnabled: builderAgent?.status !== 'disabled',
     };
   }, [
+    builderAgent?.status,
     builderActivity,
     builderPendingUiRequest,
     builderReviewSections,
@@ -316,7 +319,16 @@ export default function VibeChatMainScreen({
     }
 
     if (type === 'builderReviewCreateDraft' && isBuilderMode) {
-      void createBuilderDraft();
+      const desiredEnabled =
+        typeof payload.agentEnabled === 'boolean' ? payload.agentEnabled : undefined;
+      const currentEnabled = builderAgent?.status !== 'disabled';
+
+      void (async () => {
+        if (typeof desiredEnabled === 'boolean' && desiredEnabled !== currentEnabled) {
+          await toggleBuilderAgentDisabled();
+        }
+        await createBuilderDraft();
+      })();
       return;
     }
 
@@ -336,12 +348,14 @@ export default function VibeChatMainScreen({
     });
   }, [
     createBuilderDraft,
+    builderAgent?.status,
     handleSubmit,
     isBuilderMode,
     onBack,
     onOpenBuilder,
     onOpenSettings,
     submitBuilderUiResponse,
+    toggleBuilderAgentDisabled,
   ]);
 
   if (!nativeAvailable) {

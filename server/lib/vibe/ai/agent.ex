@@ -106,7 +106,7 @@ defmodule Vibe.AI.Agent do
     %{
       name: "delegate_to_subagent",
       description:
-        "Delegate a task to one of Vibe AI's internal subagents when the request is about agent setup, existing agents, integrations, prompts, publication state, or needs a specialized worker. This tool gives you access to those specialist capabilities; do not claim you lack access before using it.",
+        "Delegate a task to one of Vibe AI's internal subagents when the request is about agent setup, existing agents, integrations, prompts, publication state, agent deletion, or needs a specialized worker. This tool gives you access to those specialist capabilities; do not claim you lack access before using it.",
       input_schema: %{
         type: "object",
         properties: %{
@@ -176,11 +176,11 @@ defmodule Vibe.AI.Agent do
      - Confirm the scheduled time after scheduling.
 
   9. delegate_to_subagent: Use when the request is better handled by an internal specialist.
-     - builder_assistant: creating, editing, publishing, or configuring Vibe agents.
+     - builder_assistant: creating, editing, deleting, publishing, or configuring Vibe agents.
      - integration_advisor: invoke URLs, events URLs, secrets, attached vibe chat ids, and backend integration questions.
      - music_specialist: focused music help when the request is mostly about discovery/playback.
      - document_specialist: focused research, web lookup, image analysis, or document analysis.
-     - Requests about existing agents, draft/published status, prompts, secrets, usernames, ids, or integrations MUST delegate first.
+     - Requests about existing agents, draft/published status, prompts, secrets, usernames, ids, integrations, or deletion MUST delegate first.
      - If the user already gave a clear agent workflow and asks for setup or integration details, delegate with an execution-oriented task. Do not keep the conversation stuck on naming, formatting, or cosmetic choices.
      - Ask follow-up questions only when a real blocker remains, such as create-vs-existing ambiguity, missing destination chat requirements, or unavailable secrets.
      - ALWAYS provide both "subagent_id" and "task".

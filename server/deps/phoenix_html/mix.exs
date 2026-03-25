@@ -3,7 +3,7 @@ defmodule PhoenixHTML.Mixfile do
 
   # Also change package.json version
   @source_url "https://github.com/phoenixframework/phoenix_html"
-  @version "4.3.0"
+  @version "3.3.4"
 
   def project do
     [
@@ -26,15 +26,15 @@ defmodule PhoenixHTML.Mixfile do
 
   def application do
     [
-      extra_applications: [:eex, :logger]
+      extra_applications: [:eex, :logger],
+      env: [csrf_token_reader: {Plug.CSRFProtection, :get_csrf_token_for, []}]
     ]
   end
 
   defp deps do
     [
-      {:ex_doc, ">= 0.0.0", only: :docs},
-      {:makeup_eex, ">= 0.1.1", only: :docs},
-      {:makeup_syntect, "~> 0.1.0", only: :docs}
+      {:plug, "~> 1.5", optional: true},
+      {:ex_doc, ">= 0.0.0", only: :docs}
     ]
   end
 

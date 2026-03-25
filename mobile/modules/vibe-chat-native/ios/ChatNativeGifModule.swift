@@ -21,7 +21,7 @@ public class ChatNativeGifModule: Module {
 
     Function("getApiKey") {
       print("[NativeGif][iOS] getApiKey length=\(ChatGifPanelConfig.shared.apiKey.count)")
-      ChatGifPanelConfig.shared.apiKey
+      return ChatGifPanelConfig.shared.apiKey
     }
   }
 }

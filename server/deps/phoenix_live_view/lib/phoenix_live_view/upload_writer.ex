@@ -29,8 +29,6 @@ defmodule Phoenix.LiveView.UploadWriter do
       defmodule EchoWriter do
         @behaviour Phoenix.LiveView.UploadWriter
 
-        require Logger
-
         @impl true
         def init(opts) do
           {:ok, %{total: 0, level: Keyword.fetch!(opts, :level)}}
@@ -43,12 +41,12 @@ defmodule Phoenix.LiveView.UploadWriter do
         def write_chunk(data, state) do
           size = byte_size(data)
           Logger.log(state.level, "received chunk of #{size} bytes")
-          {:ok, %{state | total: state.total + size}}
+          {:ok, %{state | state.total + size}}
         end
 
         @impl true
         def close(state, reason) do
-          Logger.log(state.level, "closing upload after #{state.total} bytes, #{inspect(reason)}")
+          Logger.log(state.level, "closing upload after #{state.total} bytes}, #{inspect(reason)}")
           {:ok, state}
         end
       end
@@ -65,7 +63,7 @@ defmodule Phoenix.LiveView.UploadWriter do
     * `:done` - The client sent all expected chunks and the upload is awaiting consumption
     * `:cancel` - The upload was canceled, either by the server or the client navigating away.
     * `{:error, reason}` - The upload was canceled due to an error returned from `write_chunk/2`.
-      For example, if `write_chunk/2` returns `{:error, :enoent, state}`, the upload will be cancelled
+      For example, if If `write_chunk/2` returns `{:error, :enoent, state}`, the upload will be cancelled
       and `close/2` will be called with the reason `{:error, :enoent}`.
   """
 

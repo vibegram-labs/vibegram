@@ -3,6 +3,8 @@ defmodule Phoenix.LiveView.UploadChannel do
   use Phoenix.Channel, log_handle_in: false
   @timeout :infinity
 
+  require Logger
+
   alias Phoenix.LiveView.{Static, Channel}
 
   def cancel(pid) do
@@ -108,9 +110,7 @@ defmodule Phoenix.LiveView.UploadChannel do
               {:error, _reason, new_socket} -> new_socket
             end
 
-          Channel.report_writer_error(socket.assigns.live_view_pid, reason)
-
-          {:reply, {:error, %{reason: :writer_error}}, new_socket}
+          {:reply, {:error, %{reason: :io_error}}, new_socket}
       end
     else
       reply = %{reason: :file_size_limit_exceeded, limit: max_file_size}
@@ -119,10 +119,6 @@ defmodule Phoenix.LiveView.UploadChannel do
   end
 
   @impl true
-  def handle_info({:EXIT, _pid, reason}, socket) do
-    {:stop, reason, socket}
-  end
-
   def handle_info(
         {:DOWN, _, _, live_view_pid, reason},
         %{assigns: %{live_view_pid: live_view_pid}} = socket
@@ -218,18 +214,14 @@ defmodule Phoenix.LiveView.UploadChannel do
     end
   end
 
-  # we need to handle the case where socket assigns aren't set yet because
-  # we are trapping exits and may enter terminate before joining is complete
   defp maybe_cancel_writer(socket) do
-    case socket.assigns do
-      %{writer_closed?: false} ->
-        case close_writer(socket, :cancel) do
-          {:ok, new_socket} -> new_socket
-          {:error, _reason, new_socket} -> new_socket
-        end
-
-      %{} ->
-        socket
+    if socket.assigns.writer_closed? do
+      socket
+    else
+      case close_writer(socket, :cancel) do
+        {:ok, new_socket} -> new_socket
+        {:error, _reason, new_socket} -> new_socket
+      end
     end
   end
 

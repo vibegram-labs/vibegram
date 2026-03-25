@@ -1,11 +1,31 @@
 defmodule Phoenix.LiveView do
   @moduledoc ~S'''
   A LiveView is a process that receives events, updates
-  its state, and renders updates to a page as diffs.
+  its state, and render updates to a page as diffs.
 
-  To get started, see [the Welcome guide](welcome.md).
-  This module provides advanced documentation and features
-  about using LiveView.
+  The LiveView programming model is declarative: instead of
+  saying "once event X happens, change Y on the page",
+  events in LiveView are regular messages which may cause
+  changes to its state. Once the state changes, LiveView will
+  re-render the relevant parts of its HTML template and push it
+  to the browser, which updates itself in the most efficient
+  manner. This means developers write LiveView templates as
+  any other server-rendered HTML and LiveView does the hard
+  work of tracking changes and sending the relevant diffs to
+  the browser.
+
+  LiveView state is nothing more than functional and immutable
+  Elixir data structures. The events are either internal application messages
+  (usually emitted by `Phoenix.PubSub`) or sent by the client/browser.
+
+  LiveView is first rendered statically as part of regular
+  HTTP requests, which provides quick times for "First Meaningful
+  Paint", in addition to helping search and indexing engines.
+  Then a persistent connection is established between client and
+  server. This allows LiveView applications to react faster to user
+  events as there is less work to be done and less data to be sent
+  compared to stateless requests that have to authenticate, decode, load,
+  and encode data on every request.
 
   ## Life-cycle
 
@@ -46,131 +66,207 @@ defmodule Phoenix.LiveView do
   LiveView also allows attaching hooks to specific life-cycle stages with
   `attach_hook/4`.
 
-  ## Template collocation
+  ## Example
 
-  There are two possible ways of rendering content in a LiveView. The first
-  one is by explicitly defining a render function, which receives `assigns`
-  and returns a `HEEx` template defined with [the `~H` sigil](`Phoenix.Component.sigil_H/2`).
+  A LiveView is a module that requires two callbacks: `c:mount/3` and
+  `c:render/1`:
 
-      defmodule MyAppWeb.DemoLive do
-        # In a typical Phoenix app, the following line would usually be `use MyAppWeb, :live_view`
+      defmodule MyAppWeb.ThermostatLive do
+        # In Phoenix v1.6+ apps, the line is typically: use MyAppWeb, :live_view
         use Phoenix.LiveView
 
         def render(assigns) do
           ~H"""
-          Hello world!
+          Current temperature: <%= @temperature %>
           """
+        end
+
+        def mount(_params, %{"current_user_id" => user_id}, socket) do
+          temperature = Thermostat.get_user_reading(user_id)
+          {:ok, assign(socket, :temperature, temperature)}
         end
       end
 
+  The `c:render/1` callback receives the `socket.assigns` and is responsible
+  for returning rendered content. We use the `~H` sigil to define a HEEx
+  template, which stands for HTML+EEx. They are an extension of Elixir's
+  builtin EEx templates, with support for HTML validation, syntax-based
+  components, smart change tracking, and more. You can learn more about
+  the template syntax in `Phoenix.Component.sigil_H/2` (note
+  `Phoenix.Component` is automatically imported when you use `Phoenix.LiveView`).
+
+  Next, decide where you want to use your LiveView.
+
+  You can serve the LiveView directly from your router (recommended):
+
+      defmodule MyAppWeb.Router do
+        use Phoenix.Router
+        import Phoenix.LiveView.Router
+
+        scope "/", MyAppWeb do
+          live "/thermostat", ThermostatLive
+        end
+      end
+
+  *Note:* the above assumes there is `plug :put_root_layout` call
+  in your router that configures the LiveView layout. This call is
+  automatically included in Phoenix v1.6 apps and described in
+  [the installation guide](installation.md#layouts).
+
+  Alternatively, you can `live_render` from any template. In your view:
+
+      import Phoenix.Component
+
+  Then in your template:
+
+      <h1>Temperature Control</h1>
+      <%= live_render(@conn, MyAppWeb.ThermostatLive) %>
+
+  Once the LiveView is rendered, a regular HTML response is sent. In your
+  app.js file, you should find the following:
+
+      import {Socket} from "phoenix"
+      import {LiveSocket} from "phoenix_live_view"
+
+      let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content")
+      let liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrfToken}})
+      liveSocket.connect()
+
+  After the client connects, `c:mount/3` will be invoked inside a spawned
+  LiveView process. At this point, you can use `connected?/1` to
+  conditionally perform stateful work, such as subscribing to pubsub topics,
+  sending messages, etc. For example, you can periodically update a LiveView
+  with a timer:
+
+      defmodule DemoWeb.ThermostatLive do
+        use Phoenix.LiveView
+        ...
+
+        def mount(_params, %{"current_user_id" => user_id}, socket) do
+          if connected?(socket), do: Process.send_after(self(), :update, 30000)
+
+          case Thermostat.get_user_reading(user_id) do
+            {:ok, temperature} ->
+              {:ok, assign(socket, temperature: temperature, user_id: user_id)}
+
+            {:error, _reason} ->
+              {:ok, redirect(socket, to: "/error")}
+          end
+        end
+
+        def handle_info(:update, socket) do
+          Process.send_after(self(), :update, 30000)
+          {:ok, temperature} = Thermostat.get_reading(socket.assigns.user_id)
+          {:noreply, assign(socket, :temperature, temperature)}
+        end
+      end
+
+  We used `connected?(socket)` on mount to send our view a message every 30s if
+  the socket is in a connected state. We receive the `:update` message in the
+  `c:handle_info/2` callback, just like in an Elixir `GenServer`, and update our
+  socket assigns. Whenever a socket's assigns change, `c:render/1` is automatically
+  invoked, and the updates are sent to the client.
+
+  ## Colocating templates
+
+  In the examples above, we have placed the template directly inside the
+  LiveView:
+
+      defmodule MyAppWeb.ThermostatLive do
+        use Phoenix.LiveView
+
+        def render(assigns) do
+          ~H"""
+          Current temperature: <%= @temperature %>
+          """
+        end
+
   For larger templates, you can place them in a file in the same directory
   and same name as the LiveView. For example, if the file above is placed
-  at `lib/my_app_web/live/demo_live.ex`, you can also remove the
-  `render/1` function altogether and put the template code at
-  `lib/my_app_web/live/demo_live.html.heex`.
+  at `lib/my_app_web/live/thermostat_live.ex`, you can also remove the
+  `c:render/1` definition above and instead put the template code at
+  `lib/my_app_web/live/thermostat_live.html.heex`.
 
-  ## Async Operations
+  In all cases, each assign in the template will be accessible as `@assign`.
+  You can learn more about [assigns and HEEx templates in their own guide](assigns-eex.md).
 
-  Performing asynchronous work is common in LiveViews and LiveComponents.
-  It allows the user to get a working UI quickly while the system fetches some
-  data in the background or talks to an external service, without blocking the
-  render or event handling. For async work, you also typically need to handle
-  the different states of the async operation, such as loading, error, and the
-  successful result. You also want to catch any errors or exits and translate it
-  to a meaningful update in the UI rather than crashing the user experience.
+  ## Bindings
 
-  ### Async assigns
+  Phoenix supports DOM element bindings for client-server interaction. For
+  example, to react to a click on a button, you would render the element:
 
-  The `assign_async/3` function takes the socket, a key or list of keys which will be assigned
-  asynchronously, and a function. This function will be wrapped in a `task` by
-  `assign_async`, making it easy for you to return the result. This function must
-  return an `{:ok, assigns}` or `{:error, reason}` tuple, where `assigns` is a map
-  of the keys passed to `assign_async`.
-  If the function returns anything else, an error is raised.
+      <button phx-click="inc_temperature">+</button>
 
-  The task is only started when the socket is connected.
+  Then on the server, all LiveView bindings are handled with the `c:handle_event/3`
+  callback, for example:
 
-  For example, let's say we want to async fetch a user's organization from the database,
-  as well as their profile and rank:
-
-      def mount(%{"slug" => slug}, _, socket) do
-        {:ok,
-         socket
-         |> assign(:foo, "bar")
-         |> assign_async(:org, fn -> {:ok, %{org: fetch_org!(slug)}} end)
-         |> assign_async([:profile, :rank], fn -> {:ok, %{profile: ..., rank: ...}} end)}
+      def handle_event("inc_temperature", _value, socket) do
+        {:ok, new_temp} = Thermostat.inc_temperature(socket.assigns.id)
+        {:noreply, assign(socket, :temperature, new_temp)}
       end
 
-  > ### Warning {: .warning}
-  >
-  > When using async operations it is important to not pass the socket into the function
-  > as it will copy the whole socket struct to the Task process, which can be very expensive.
-  >
-  > Instead of:
-  >
-  > ```elixir
-  > assign_async(:org, fn -> {:ok, %{org: fetch_org(socket.assigns.slug)}} end)
-  > ```
-  >
-  > We should do:
-  >
-  > ```elixir
-  > slug = socket.assigns.slug
-  > assign_async(:org, fn -> {:ok, %{org: fetch_org(slug)}} end)
-  > ```
-  >
-  > See: https://hexdocs.pm/elixir/process-anti-patterns.html#sending-unnecessary-data
+  To update UI state, for example, to open and close dropdowns, switch tabs,
+  etc, LiveView also supports JS commands (`Phoenix.LiveView.JS`), which
+  execute directly on the client without reaching the server. To learn more,
+  see [our bindings page](bindings.md) for a complete list of all LiveView
+  bindings as well as our [JavaScript interoperability guide](js-interop.md).
 
-  The state of the async operation is stored as a `Phoenix.LiveView.AsyncResult`
-  in the socket assigns. It carries the loading and failed states, as
-  well as the result. For example, if we wanted to show the loading states in
-  the UI for the `:org`, our template could conditionally render the states:
+  ## Compartmentalize state, markup, and events in LiveView
 
-  ```heex
-  <div :if={@org.loading}>Loading organization...</div>
-  <div :if={org = @org.ok? && @org.result}>{org.name} loaded!</div>
-  ```
+  LiveView supports two extension mechanisms: function components, provided by
+  `HEEx` templates, and stateful components.
 
-  The `Phoenix.Component.async_result/1` function component can also be used to
-  declaratively render the different states using slots:
+  Function components are any function that receives an assigns map, similar
+  to `render(assigns)` in our LiveView, and returns a `~H` template. For example:
 
-  ```heex
-  <.async_result :let={org} assign={@org}>
-    <:loading>Loading organization...</:loading>
-    <:failed :let={_failure}>there was an error loading the organization</:failed>
-    {org.name}
-  </.async_result>
-  ```
-
-  ### Arbitrary async operations
-
-  Sometimes you need lower level control of asynchronous operations, while
-  still receiving process isolation and error handling. For this, you can use
-  `start_async/3` and the `Phoenix.LiveView.AsyncResult` module directly:
-
-      def mount(%{"id" => id}, _, socket) do
-        {:ok,
-         socket
-         |> assign(:org, AsyncResult.loading())
-         |> start_async(:my_task, fn -> fetch_org!(id) end)}
+      def weather_greeting(assigns) do
+        ~H"""
+        <div title="My div" class={@class}>
+          <p>Hello <%= @name %></p>
+          <MyApp.Weather.city name="Kraków"/>
+        </div>
+        """
       end
 
-      def handle_async(:my_task, {:ok, fetched_org}, socket) do
-        %{org: org} = socket.assigns
-        {:noreply, assign(socket, :org, AsyncResult.ok(org, fetched_org))}
-      end
+  You can learn more about function components in the `Phoenix.Component`
+  module. At the end of the day, they are a useful mechanism to reuse markup
+  in your LiveViews.
 
-      def handle_async(:my_task, {:exit, reason}, socket) do
-        %{org: org} = socket.assigns
-        {:noreply, assign(socket, :org, AsyncResult.failed(org, {:exit, reason}))}
-      end
+  However, sometimes you need to compartmentalize or reuse more than markup.
+  Perhaps you want to move part of the state or part of the events in your
+  LiveView to a separate module. For these cases, LiveView provides
+  `Phoenix.LiveComponent`, which are rendered using
+  [`live_component/1`](`Phoenix.Component.live_component/1`):
 
-  `start_async/3` is used to fetch the organization asynchronously. The
-  `c:handle_async/3` callback is called when the task completes or exits,
-  with the results wrapped in either `{:ok, result}` or `{:exit, reason}`.
-  The `AsyncResult` module provides functions to update the state of the
-  async operation, but you can also assign any value directly to the socket
-  if you want to handle the state yourself.
+      <.live_component module={UserComponent} id={user.id} user={user} />
+
+  Components have their own `c:mount/3` and `c:handle_event/3` callbacks, as
+  well as their own state with change tracking support. Components are also
+  lightweight as they "run" in the same process as the parent `LiveView`.
+  However, this means an error in a component would cause the whole view to
+  fail to render. See `Phoenix.LiveComponent` for a complete rundown on components.
+
+  Finally, if you want complete isolation between parts of a LiveView, you can
+  always render a LiveView inside another LiveView by calling
+  [`live_render/3`](`Phoenix.Component.live_render/3`). This child LiveView
+  runs in a separate process than the parent, with its own callbacks. If a child
+  LiveView crashes, it won't affect the parent. If the parent crashes, all children
+  are terminated.
+
+  When rendering a child LiveView, the `:id` option is required to uniquely
+  identify the child. A child LiveView will only ever be rendered and mounted
+  a single time, provided its ID remains unchanged. To force a child to re-mount
+  with new session data, a new ID must be provided.
+
+  Given that a LiveView runs on its own process, it is an excellent tool for creating
+  completely isolated UI elements, but it is a slightly expensive abstraction if
+  all you want is to compartmentalize markup or events (or both).
+
+  To sum it up:
+
+    * use `Phoenix.Component` to compartmentalize/reuse markup
+    * use `Phoenix.LiveComponent` to compartmentalize state, markup, and events
+    * use nested `Phoenix.LiveView` to compartmentalize state, markup, events, and error isolation
 
   ## Endpoint configuration
 
@@ -184,9 +280,35 @@ defmodule Phoenix.LiveView do
     the LiveView before compressing its own memory and state.
     Defaults to 15000ms (15 seconds)
 
+  ## Guides
+
+  LiveView has many guides to help you on your journey.
+
+  ### Server-side
+
+  These guides focus on server-side functionality:
+
+    * [Assigns and HEEx templates](assigns-eex.md)
+    * [Error and exception handling](error-handling.md)
+    * [Live Layouts](live-layouts.md)
+    * [Live Navigation](live-navigation.md)
+    * [Security considerations of the LiveView model](security-model.md)
+    * [Telemetry](telemetry.md)
+    * [Uploads](uploads.md)
+    * [Using Gettext for internationalization](using-gettext.md)
+
+  ### Client-side
+
+  These guides focus on LiveView bindings and client-side integration:
+
+    * [Bindings](bindings.md)
+    * [Form bindings](form-bindings.md)
+    * [DOM patching and temporary assigns](dom-patching.md)
+    * [JavaScript interoperability](js-interop.md)
+    * [Uploads (External)](uploads-external.md)
   '''
 
-  alias Phoenix.LiveView.{Socket, LiveStream, Async}
+  alias Phoenix.LiveView.{Socket, LiveStream}
 
   @type unsigned_params :: map
 
@@ -261,11 +383,6 @@ defmodule Phoenix.LiveView do
 
   It must always return `{:noreply, socket}`, where `:noreply`
   means no additional information is sent to the client.
-
-  > #### Note {: .warning}
-  >
-  > `handle_params` is only allowed on LiveViews mounted at the router,
-  > as it takes the current url of the page as the second parameter.
   """
   @callback handle_params(unsigned_params(), uri :: String.t(), socket :: Socket.t()) ::
               {:noreply, Socket.t()}
@@ -315,55 +432,39 @@ defmodule Phoenix.LiveView do
   @callback handle_info(msg :: term, socket :: Socket.t()) ::
               {:noreply, Socket.t()}
 
-  @doc """
-  Invoked when the result of an `start_async/3` operation is available.
-
-  For a deeper understanding of using this callback,
-  refer to the ["Arbitrary async operations"](#module-arbitrary-async-operations) section.
-  """
-  @callback handle_async(
-              name :: term,
-              async_fun_result :: {:ok, term} | {:exit, term},
-              socket :: Socket.t()
-            ) ::
-              {:noreply, Socket.t()}
-
   @optional_callbacks mount: 3,
-                      render: 1,
                       terminate: 2,
                       handle_params: 3,
                       handle_event: 3,
                       handle_call: 3,
                       handle_info: 2,
-                      handle_cast: 2,
-                      handle_async: 3
+                      handle_cast: 2
 
   @doc """
   Uses LiveView in the current module to mark it a LiveView.
 
       use Phoenix.LiveView,
+        namespace: MyAppWeb,
         container: {:tr, class: "colorized"},
-        layout: {MyAppWeb.Layouts, :app},
+        layout: {MyAppWeb.LayoutView, :app},
         log: :info
 
   ## Options
 
-    * `:container` - an optional tuple for the HTML tag and DOM attributes to
-      be used for the LiveView container. For example: `{:li, style: "color: blue;"}`.
-      See `Phoenix.Component.live_render/3` for more information and examples.
+    * `:container` - configures the container the `LiveView` will be wrapped in
 
     * `:global_prefixes` - the global prefixes to use for components. See
       `Global Attributes` in `Phoenix.Component` for more information.
 
-    * `:layout` - configures the layout the LiveView will be rendered in.
+    * `:layout` - configures the layout the `LiveView` will be rendered in.
       This layout can be overridden by on `c:mount/3` or via the `:layout`
       option in `Phoenix.LiveView.Router.live_session/2`
 
-    * `:log` - configures the log level for the LiveView, either `false`
-      or a log level
+    * `:log` - configures the log level for the `LiveView`
+
+    * `:namespace` - configures the namespace the `LiveView` is in
 
   """
-
   defmacro __using__(opts) do
     # Expand layout if possible to avoid compile-time dependencies
     opts =
@@ -392,47 +493,8 @@ defmodule Phoenix.LiveView do
   defmacro __before_compile__(env) do
     opts = Module.get_attribute(env.module, :phoenix_live_opts)
 
-    on_mount =
-      env.module
-      |> Module.get_attribute(:phoenix_live_mount)
-      |> Enum.reverse()
-
-    live = Phoenix.LiveView.__live__([on_mount: on_mount] ++ opts)
-
-    quote do
-      @doc false
-      def __live__ do
-        unquote(Macro.escape(live))
-      end
-    end
-  end
-
-  @doc """
-  Defines metadata for a LiveView.
-
-  This must be returned from the `__live__` callback.
-
-  It accepts:
-
-    * `:container` - an optional tuple for the HTML tag and DOM attributes to
-      be used for the LiveView container. For example: `{:li, style: "color: blue;"}`.
-
-    * `:layout` - configures the layout the LiveView will be rendered in.
-      This layout can be overridden by on `c:mount/3` or via the `:layout`
-      option in `Phoenix.LiveView.Router.live_session/2`
-
-    * `:log` - configures the log level for the LiveView, either `false`
-      or a log level
-
-    * `:on_mount` - a list of tuples with module names and argument to be invoked
-      as `on_mount` hooks
-
-  """
-  def __live__(opts \\ []) do
-    on_mount = opts[:on_mount] || []
-
     layout =
-      Phoenix.LiveView.Utils.normalize_layout(Keyword.get(opts, :layout, false))
+      Phoenix.LiveView.Utils.normalize_layout(Keyword.get(opts, :layout, false), "use options")
 
     log =
       case Keyword.fetch(opts, :log) do
@@ -442,15 +504,31 @@ defmodule Phoenix.LiveView do
         _ -> raise ArgumentError, ":log expects an atom or false, got: #{inspect(opts[:log])}"
       end
 
+    phoenix_live_mount = Module.get_attribute(env.module, :phoenix_live_mount)
+    lifecycle = Phoenix.LiveView.Lifecycle.mount(env.module, phoenix_live_mount)
+
+    namespace =
+      opts[:namespace] || env.module |> Module.split() |> Enum.take(1) |> Module.concat()
+
+    name = env.module |> Atom.to_string() |> String.replace_prefix("#{namespace}.", "")
     container = opts[:container] || {:div, []}
 
-    %{
+    live = %{
       container: container,
+      name: name,
       kind: :view,
+      module: env.module,
       layout: layout,
-      lifecycle: Phoenix.LiveView.Lifecycle.build(on_mount),
+      lifecycle: lifecycle,
       log: log
     }
+
+    quote do
+      @doc false
+      def __live__ do
+        unquote(Macro.escape(live))
+      end
+    end
   end
 
   @doc """
@@ -482,10 +560,6 @@ defmodule Phoenix.LiveView do
   Registering `on_mount` hooks can be useful to perform authentication
   as well as add custom behaviour to other callbacks via `attach_hook/4`.
 
-  The `on_mount` callback can return a keyword list of options as a third
-  element in the return tuple. These options are identical to what can
-  optionally be returned in `c:mount/3`.
-
   ## Examples
 
   The following is an example of attaching a hook via
@@ -507,8 +581,8 @@ defmodule Phoenix.LiveView do
           # code
         end
 
-        def on_mount(:admin, _params, _session, socket) do
-          {:cont, socket, layout: {DemoWeb.Layouts, :admin}}
+        def on_mount(:admin, params, session, socket) do
+          # code
         end
       end
 
@@ -542,28 +616,26 @@ defmodule Phoenix.LiveView do
 
   """
   defmacro on_mount(mod_or_mod_arg) do
-    caller = %{__CALLER__ | function: {:on_mount, 1}}
-
-    # While we could pass `mod_or_mod_arg` as a whole to
-    # expand_literals, we want to also be able to expand only
-    # the first element, even if the second element is not a literal.
     mod_or_mod_arg =
-      case mod_or_mod_arg do
-        {mod, arg} ->
-          {Macro.expand_literals(mod, caller), Macro.expand_literals(arg, caller)}
-
-        mod_or_mod_arg ->
-          Macro.expand_literals(mod_or_mod_arg, caller)
+      if Macro.quoted_literal?(mod_or_mod_arg) do
+        Macro.prewalk(mod_or_mod_arg, &expand_alias(&1, __CALLER__))
+      else
+        mod_or_mod_arg
       end
 
     quote do
       Module.put_attribute(
         __MODULE__,
         :phoenix_live_mount,
-        Phoenix.LiveView.Lifecycle.validate_on_mount!(__MODULE__, unquote(mod_or_mod_arg))
+        Phoenix.LiveView.Lifecycle.on_mount(__MODULE__, unquote(mod_or_mod_arg))
       )
     end
   end
+
+  defp expand_alias({:__aliases__, _, _} = alias, env),
+    do: Macro.expand(alias, %{env | function: {:on_mount, 4}})
+
+  defp expand_alias(other, _env), do: other
 
   @doc """
   Returns true if the socket is connected.
@@ -594,104 +666,13 @@ defmodule Phoenix.LiveView do
   """
   def connected?(%Socket{transport_pid: transport_pid}), do: transport_pid != nil
 
-  @doc ~S'''
-  Configures which function to use to render a LiveView/LiveComponent.
-
-  By default, LiveView invokes the `render/1` function in the same module
-  the LiveView/LiveComponent is defined, passing `assigns` as its sole
-  argument. This function allows you to set a different rendering function.
-
-  One possible use case for this function is to set a different template
-  on disconnected render. When the user first accesses a LiveView, we will
-  perform a disconnected render to send to the browser. This is useful for
-  several reasons, such as reducing the time to first paint and for search
-  engine indexing.
-
-  However, when LiveView is gated behind an authentication page, it may be
-  useful to render a placeholder on disconnected render and perform the
-  full render once the WebSocket connects. This can be achieved with
-  `render_with/2` and is particularly useful on complex pages (such as
-  dashboards and reports).
-
-  To do so, you must simply invoke `render_with(socket, &some_function_component/1)`,
-  configuring your socket with a new rendering function.
-
-  ## Examples
-
-      @impl true
-      def mount(_params, _session, socket) do
-        if connected?(socket) do
-          {:ok,
-           socket
-           |> assign(:foos, Context.list_foos())
-           |> assign(:bars, Context.list_bars())}
-        else
-          {:ok, render_with(socket, &loading/1)}
-        end
-      end
-
-      defp loading(assigns) do
-        ~H"""
-        <div class="...">
-          Loading...
-        </div>
-        """
-      end
-
-  '''
-  def render_with(%Socket{} = socket, component) when is_function(component, 1) do
-    put_in(socket.private[:render_with], component)
-  end
-
-  @doc """
-  Puts a new private key and value in the socket.
-
-  Privates are *not change tracked*. This storage is meant to be used by
-  users and libraries to hold state that doesn't require
-  change tracking. The keys should be prefixed with the app/library name.
-
-  ## Examples
-
-  Key values can be placed in private:
-
-      put_private(socket, :myapp_meta, %{foo: "bar"})
-
-  And then retrieved:
-
-      socket.private[:myapp_meta]
-  """
-  @reserved_privates ~w(
-    connect_params
-    connect_info
-    assign_new
-    live_async
-    live_layout
-    live_temp
-    lifecycle
-    render_with
-    root_view
-  )a
-  def put_private(%Socket{} = socket, key, value) when key not in @reserved_privates do
-    %{socket | private: Map.put(socket.private, key, value)}
-  end
-
-  def put_private(%Socket{}, bad_key, _value) do
-    raise ArgumentError, "cannot set reserved private key #{inspect(bad_key)}"
-  end
-
   @doc """
   Adds a flash message to the socket to be displayed.
 
-  The flash message will stick around until it is read.
-  If you perform a redirect or a navigation event, the message will be
-  signed and temporarily stored in the client. Therefore it is important
-  to use flash messages only for user-facing notifications. Do not store
-  sensitive information in flash messages.
-
-  In a typical LiveView application, the message will be rendered by the
-  CoreComponents’ `flash/1` component. It is up to this function to determine
-  what kind of messages it supports. By default, the `:info` and `:error`
-  kinds are handled.
+  *Note*: While you can use `put_flash/3` inside a `Phoenix.LiveComponent`,
+  components have their own `@flash` assigns. The `@flash` assign
+  in a component is only copied to its parent LiveView if the component
+  calls `push_navigate/2` or `push_patch/2`.
 
   *Note*: You must also place the `Phoenix.LiveView.Router.fetch_live_flash/2`
   plug in your browser's pipeline in place of `fetch_flash` for LiveView flash
@@ -708,13 +689,6 @@ defmodule Phoenix.LiveView do
 
       iex> put_flash(socket, :info, "It worked!")
       iex> put_flash(socket, :error, "You can't access that page")
-
-  ## Inside components
-
-  You can use `put_flash/3` inside a `Phoenix.LiveComponent` and
-  components have their own `@flash` assigns. The `@flash` assign
-  in a component is only copied to its parent LiveView if the component
-  calls `push_navigate/2` or `push_patch/2`.
   """
   defdelegate put_flash(socket, kind, msg), to: Phoenix.LiveView.Utils
 
@@ -724,16 +698,6 @@ defmodule Phoenix.LiveView do
   ## Examples
 
       iex> clear_flash(socket)
-
-  Clearing the flash can also be triggered on the client and natively handled by LiveView using the `lv:clear-flash` event.
-
-  For example:
-
-  ```heex
-  <p class="alert" phx-click="lv:clear-flash">
-    {Phoenix.Flash.get(@flash, :info)}
-  </p>
-  ```
   """
   defdelegate clear_flash(socket), to: Phoenix.LiveView.Utils
 
@@ -743,16 +707,6 @@ defmodule Phoenix.LiveView do
   ## Examples
 
       iex> clear_flash(socket, :info)
-
-  Clearing the flash can also be triggered on the client and natively handled by LiveView using the `lv:clear-flash` event.
-
-  For example:
-
-  ```heex
-  <p class="alert" phx-click="lv:clear-flash" phx-value-key="info">
-    {Phoenix.Flash.get(@flash, :info)}
-  </p>
-  ```
   """
   defdelegate clear_flash(socket, key), to: Phoenix.LiveView.Utils
 
@@ -766,12 +720,9 @@ defmodule Phoenix.LiveView do
 
     2. They can be handled inside a hook via `handleEvent`.
 
-  Events are dispatched to all active hooks on the client who are
-  handling the given `event`. If you need to scope events, then
-  this must be done by namespacing them.
-
-  Events pushed during `push_navigate` are currently discarded,
-  as the LiveView is immediately dismounted.
+  Note that events are dispatched to all active hooks on the client who are
+  handling the given `event`. If you need to scope events, then this must
+  be done by namespacing them.
 
   ## Hook example
 
@@ -781,9 +732,7 @@ defmodule Phoenix.LiveView do
 
   A hook declared via `phx-hook` can handle it via `handleEvent`:
 
-  ```javascript
-  this.handleEvent("scores", data => ...)
-  ```
+      this.handleEvent("scores", data => ...)
 
   ## `window` example
 
@@ -795,34 +744,21 @@ defmodule Phoenix.LiveView do
 
   And now in your app.js you can register and handle it:
 
-  ```javascript
-  window.addEventListener(
-    "phx:remove-el",
-    e => document.getElementById(e.detail.id).remove()
-  )
-  ```
-
-  ## Specifying the dispatch phase
-
-  By default, events pushed with `push_event/3` are only dispatched after
-  the LiveView is patched. In some cases, handling an event before the LiveView
-  is patched can be useful though. To do this, the `dispatch` option can be passed
-  as fourth argument:
-
-      {:noreply, push_event(socket, "scores", %{points: 100, user: "josé"}, dispatch: :before)}
+      window.addEventListener(
+        "phx:remove-el",
+        e => document.getElementById(e.detail.id).remove()
+      )
 
   """
-  defdelegate push_event(socket, event, payload, opts \\ []), to: Phoenix.LiveView.Utils
+  defdelegate push_event(socket, event, payload), to: Phoenix.LiveView.Utils
 
   @doc ~S"""
   Allows an upload for the provided name.
 
   ## Options
 
-    * `:accept` - Required. A list of unique file extensions (such as ".jpeg") or
-      mime type (such as "image/jpeg" or "image/*"). You may also pass the atom
-      `:any` instead of a list to support to allow any kind of file.
-      For example, `[".jpeg"]`, `:any`, etc.
+    * `:accept` - Required. A list of unique file type specifiers or the
+      atom :any to allow any kind of file. For example, `[".jpeg"]`, `:any`, etc.
 
     * `:max_entries` - The maximum number of selected files to allow per
       file input. Defaults to 1.
@@ -834,22 +770,19 @@ defmodule Phoenix.LiveView do
       Defaults `64_000`.
 
     * `:chunk_timeout` - The time in milliseconds to wait before closing the
-      upload channel when a new chunk has not been received. Defaults to `10_000`.
+      upload channel when a new chunk has not been received. Defaults `10_000`.
 
-    * `:external` - A 2-arity function for generating metadata for external
-      client uploaders. This function must return either `{:ok, meta, socket}`
-      or `{:error, meta, socket}` where meta is a map. See the Uploads section
-      for example usage.
+    * `:external` - The 2-arity function for generating metadata for external
+      client uploaders. See the Uploads section for example usage.
 
-    * `:progress` - An optional 3-arity function for receiving progress events.
+    * `:progress` - The optional 3-arity function for receiving progress events
 
     * `:auto_upload` - Instructs the client to upload the file automatically
-      on file selection instead of waiting for form submits. Defaults to `false`.
+      on file selection instead of waiting for form submits. Default false.
 
-    * `:writer` - A module implementing the `Phoenix.LiveView.UploadWriter`
-      behaviour to use for writing the uploaded chunks. Defaults to writing to a
-      temporary file for consumption. See the `Phoenix.LiveView.UploadWriter` docs
-      for custom usage.
+    * `:writer` - The `Phoenix.LiveView.UploadWriter` module to use for writing
+      the uploaded chunks. Defaults to writing to a temporary file for consumption.
+      See the `Phoenix.LiveView.UploadWriter` docs for custom usage.
 
   Raises when a previously allowed upload under the same name is still active.
 
@@ -892,12 +825,10 @@ defmodule Phoenix.LiveView do
 
   ## Examples
 
-  ```heex
-  <%= for entry <- @uploads.avatar.entries do %>
-    ...
-    <button phx-click="cancel-upload" phx-value-ref={entry.ref}>cancel</button>
-  <% end %>
-  ```
+      <%= for entry <- @uploads.avatar.entries do %>
+        ...
+        <button phx-click="cancel-upload" phx-value-ref="<%= entry.ref %>">cancel</button>
+      <% end %>
 
       def handle_event("cancel-upload", %{"ref" => ref}, socket) do
         {:noreply, cancel_upload(socket, :avatar, ref)}
@@ -934,9 +865,6 @@ defmodule Phoenix.LiveView do
   `{:postpone, my_result}` to collect results, but postpone the file
   consumption to be performed later.
 
-  A list of all `my_result` values produced by the passed function is
-  returned, regardless of whether they were consumed or postponed.
-
   ## Examples
 
       def handle_event("save", _params, socket) do
@@ -944,7 +872,7 @@ defmodule Phoenix.LiveView do
           consume_uploaded_entries(socket, :avatar, fn %{path: path}, _entry ->
             dest = Path.join("priv/static/uploads", Path.basename(path))
             File.cp!(path, dest)
-            {:ok, ~p"/uploads/#{Path.basename(dest)}"}
+            {:ok, Routes.static_path(socket, "/uploads/#{Path.basename(dest)}")}
           end)
         {:noreply, update(socket, :uploaded_files, &(&1 ++ uploaded_files))}
       end
@@ -976,7 +904,7 @@ defmodule Phoenix.LiveView do
               consume_uploaded_entry(socket, entry, fn %{path: path} ->
                 dest = Path.join("priv/static/uploads", Path.basename(path))
                 File.cp!(path, dest)
-                {:ok, ~p"/uploads/#{Path.basename(dest)}"}
+                {:ok, Routes.static_path(socket, "/uploads/#{Path.basename(dest)}")}
               end)
             end
             {:noreply, update(socket, :uploaded_files, &(&1 ++ uploaded_files))}
@@ -996,67 +924,36 @@ defmodule Phoenix.LiveView do
   redirect location. The whole page will be reloaded and
   all state will be discarded.
 
-  Calling redirect shuts down the LiveView channel. If you need
-  to programatically open an external link without causing the
-  LiveView to shut down, for example because of `mailto:` or `tel:`
-  URL schemes, consider using `push_event/3` with a custom client-side
-  handler instead.
-
   ## Options
 
     * `:to` - the path to redirect to. It must always be a local path
-    * `:status` - the HTTP status code to use for the redirect. Defaults to 302.
     * `:external` - an external path to redirect to. Either a string
       or `{scheme, url}` to redirect to a custom scheme
-
-  ## Examples
-
-      {:noreply, redirect(socket, to: "/")}
-      {:noreply, redirect(socket, to: "/", status: 301)}
-      {:noreply, redirect(socket, external: "https://example.com")}
-
   """
-  def redirect(socket, opts \\ []) do
-    status = Keyword.get(opts, :status, 302)
+  def redirect(socket, opts \\ [])
 
-    cond do
-      Keyword.has_key?(opts, :to) ->
-        do_internal_redirect(socket, Keyword.fetch!(opts, :to), status)
-
-      Keyword.has_key?(opts, :external) ->
-        do_external_redirect(socket, Keyword.fetch!(opts, :external), status)
-
-      true ->
-        raise ArgumentError, "expected :to or :external option in redirect/2"
-    end
-  end
-
-  defp do_internal_redirect(%Socket{} = socket, url, redirect_status) do
+  def redirect(%Socket{} = socket, to: url) do
     validate_local_url!(url, "redirect/2")
-
-    put_redirect(socket, {:redirect, %{to: url, status: redirect_status}})
+    put_redirect(socket, {:redirect, %{to: url}})
   end
 
-  defp do_external_redirect(%Socket{} = socket, url, redirect_status) do
+  def redirect(%Socket{} = socket, external: url) do
     case url do
       {scheme, rest} ->
-        put_redirect(
-          socket,
-          {:redirect, %{external: "#{scheme}:#{rest}", status: redirect_status}}
-        )
+        put_redirect(socket, {:redirect, %{external: "#{scheme}:#{rest}"}})
 
       url when is_binary(url) ->
         external_url = Phoenix.LiveView.Utils.valid_string_destination!(url, "redirect/2")
-
-        put_redirect(
-          socket,
-          {:redirect, %{external: external_url, status: redirect_status}}
-        )
+        put_redirect(socket, {:redirect, %{external: external_url}})
 
       other ->
         raise ArgumentError,
               "expected :external option in redirect/2 to be valid URL, got: #{inspect(other)}"
     end
+  end
+
+  def redirect(%Socket{}, _) do
+    raise ArgumentError, "expected :to or :external option in redirect/2"
   end
 
   @doc """
@@ -1066,8 +963,7 @@ defmodule Phoenix.LiveView do
   immediately invoked to handle the change of params and URL state.
   Then the new state is pushed to the client, without reloading the
   whole page while also maintaining the current scroll position.
-  For live navigation to another LiveView in the same `live_session`,
-  use `push_navigate/2`. Otherwise, use `redirect/2`.
+  For live navigation to another LiveView, use `push_navigate/2`.
 
   ## Options
 
@@ -1087,7 +983,7 @@ defmodule Phoenix.LiveView do
   end
 
   @doc """
-  Annotates the socket for navigation to another LiveView in the same `live_session`.
+  Annotates the socket for navigation to another LiveView.
 
   The current LiveView will be shutdown and a new one will be mounted
   in its place, without reloading the whole page. This can
@@ -1112,8 +1008,29 @@ defmodule Phoenix.LiveView do
     put_redirect(socket, {:live, :redirect, opts})
   end
 
-  @doc false
-  @deprecated "Use push_navigate/2 instead"
+  @doc """
+  Annotates the socket for navigation to another LiveView.
+
+  The current LiveView will be shutdown and a new one will be mounted
+  in its place, without reloading the whole page. This can
+  also be used to remount the same LiveView, in case you want to start
+  fresh. If you want to navigate to the same LiveView without remounting
+  it, use `push_patch/2` instead.
+
+  ## Options
+
+    * `:to` - the required path to link to. It must always be a local path
+    * `:replace` - the flag to replace the current history or push a new state.
+      Defaults `false`.
+
+  ## Examples
+
+      {:noreply, push_redirect(socket, to: "/")}
+      {:noreply, push_redirect(socket, to: "/", replace: true)}
+
+  """
+  @doc deprecated: "Use push_navigate/2 instead"
+  # Deprecate in 0.19
   def push_redirect(%Socket{} = socket, opts) do
     opts = push_opts!(opts, "push_redirect/2")
     put_redirect(socket, {:live, :redirect, opts})
@@ -1127,7 +1044,7 @@ defmodule Phoenix.LiveView do
   end
 
   defp put_redirect(%Socket{redirected: nil} = socket, command) do
-    %{socket | redirected: command}
+    %Socket{socket | redirected: command}
   end
 
   defp put_redirect(%Socket{redirected: to} = _socket, _command) do
@@ -1159,30 +1076,9 @@ defmodule Phoenix.LiveView do
   @doc """
   Accesses the connect params sent by the client for use on connected mount.
 
-  Connect params are sent from the client on every connection and reconnection.
-  The parameters in the client can be computed dynamically, allowing you to pass
-  client state to the server. For example, you could use it to compute and pass
-  the user time zone from a JavaScript client:
-
-  ```javascript
-  let liveSocket = new LiveSocket("/live", Socket, {
-    longPollFallbackMs: 2500,
-    params: (_liveViewName) => {
-      return {
-        _csrf_token: csrfToken,
-        time_zone: Intl.DateTimeFormat().resolvedOptions().timeZone
-      }
-    }
-  })
-  ```
-
-  By computing the parameters with a function, reconnections will reevalute
-  the code, allowing you to fetch the latest data.
-
-  On the LiveView, you will use `get_connect_params/1` to read the data,
-  which only remains available during mount. `nil` is returned when called
-  in a disconnected state and a `RuntimeError` is raised if called after
-  mount.
+  Connect params are only sent when the client connects to the server and
+  only remain available during mount. `nil` is returned when called in a
+  disconnected state and a `RuntimeError` is raised if called after mount.
 
   ## Reserved params
 
@@ -1210,6 +1106,15 @@ defmodule Phoenix.LiveView do
       if connected?(socket), do: connect_params, else: nil
     else
       raise_root_and_mount_only!(socket, "connect_params")
+    end
+  end
+
+  @deprecated "use get_connect_info/2 instead"
+  def get_connect_info(%Socket{private: private} = socket) do
+    if connect_info = private[:connect_info] do
+      if connected?(socket), do: connect_info, else: nil
+    else
+      raise_root_and_mount_only!(socket, "connect_info")
     end
   end
 
@@ -1299,10 +1204,8 @@ defmodule Phoenix.LiveView do
   To use this functionality, the first step is to annotate which static files
   you want to be tracked by LiveView, with the `phx-track-static`. For example:
 
-  ```heex
-  <link phx-track-static rel="stylesheet" href={~p"/assets/app.css"} />
-  <script defer phx-track-static type="text/javascript" src={~p"/assets/app.js"}></script>
-  ```
+      <link phx-track-static rel="stylesheet" href="<%= Routes.static_path(@conn, "/css/app.css") %>"/>
+      <script defer phx-track-static type="text/javascript" src="<%= Routes.static_path(@conn, "/js/app.js") %>"></script>
 
   Now, whenever LiveView connects to the server, it will send a copy `src`
   or `href` attributes of all tracked statics and compare those values with
@@ -1320,30 +1223,19 @@ defmodule Phoenix.LiveView do
 
   And then in your views:
 
-  ```heex
-  <div :if={@static_changed?} id="reload-static">
-    The app has been updated. Click here to <a href="#" onclick="window.location.reload()">reload</a>.
-  </div>
-  ```
+      <%= if @static_changed? do %>
+        <div id="reload-static">
+          The app has been updated. Click here to <a href="#" onclick="window.location.reload()">reload</a>.
+        </div>
+      <% end %>
 
-  For larger projects, you can extract this into [a hook](https://hexdocs.pm/phoenix_live_view/Phoenix.LiveView.html#on_mount/1):
-
-      # MyAppWeb.CheckStaticChanged
-      def on_mount(:default, _params, _session, socket) do
-        {:cont, assign(socket, static_changed?: static_changed?(socket))}
-      end
-
-  And then add it to the existing `live_view` macro in your `my_app_web.ex` file or add it as part
-  of your `live_session` hooks.
   If you prefer, you can also send a JavaScript script that immediately
-  reloads the page, but this will cause the client-side to lose all work in progress.
+  reloads the page.
 
   **Note:** only set `phx-track-static` on your own assets. For example, do
   not set it in external JavaScript files:
 
-  ```heex
-  <script defer phx-track-static type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
-  ```
+      <script defer phx-track-static type="text/javascript" src="https://ajax.googleapis.com/ajax/libs/jquery/3.4.1/jquery.min.js"></script>
 
   Because you don't actually serve the file above, LiveView will interpret
   the static above as missing, and this function will return true.
@@ -1391,8 +1283,11 @@ defmodule Phoenix.LiveView do
     end
   end
 
-  @doc ~S'''
+  @doc """
   Asynchronously updates a `Phoenix.LiveComponent` with new assigns.
+
+  The `:id` that identifies the component must be passed as part of the
+  assigns and it will be used to identify the live components to be updated.
 
   The `pid` argument is optional and it defaults to the current process,
   which means the update instruction will be sent to a component running
@@ -1400,19 +1295,11 @@ defmodule Phoenix.LiveView do
   want to send updates to a live component running on another LiveView,
   you should explicitly pass the LiveView's pid instead.
 
-  The second argument can be either the value of the `@myself` or the module of
-  the live component. If you pass the module, then the `:id` that identifies
-  the component must be passed as part of the assigns.
-
-  When the component receives the update,
-  [`update_many/1`](`c:Phoenix.LiveComponent.update_many/1`) will be invoked if
-  it is defined, otherwise [`update/2`](`c:Phoenix.LiveComponent.update/2`) is
-  invoked with the new assigns.  If
-  [`update/2`](`c:Phoenix.LiveComponent.update/2`) is not defined all assigns
-  are simply merged into the socket. The assigns received as the first argument
-  of the [`update/2`](`c:Phoenix.LiveComponent.update/2`) callback will only
-  include the _new_ assigns passed from this function.  Pre-existing assigns may
-  be found in `socket.assigns`.
+  When the component receives the update, first the optional
+  [`preload/1`](`c:Phoenix.LiveComponent.preload/1`) then
+  [`update/2`](`c:Phoenix.LiveComponent.update/2`) is invoked with the new assigns.
+  If [`update/2`](`c:Phoenix.LiveComponent.update/2`) is not defined
+  all assigns are simply merged into the socket. The assigns received as the first argument of the [`update/2`](`c:Phoenix.LiveComponent.update/2`) callback will only include the _new_ assigns passed from this function. Pre-existing assigns may be found in `socket.assigns`.
 
   While a component may always be updated from the parent by updating some
   parent assigns which will re-render the child, thus invoking
@@ -1433,42 +1320,26 @@ defmodule Phoenix.LiveView do
         ...
         pid = self()
 
-        Task.Supervisor.start_child(MyTaskSup, fn ->
+        Task.start(fn ->
           # Do something asynchronously
           send_update(pid, Cart, id: "cart", status: "cancelled")
         end)
 
         {:noreply, socket}
       end
-
-      def render(assigns) do
-        ~H"""
-        <.some_component on_complete={&send_update(@myself, completed: &1)} />
-        """
-      end
-  '''
-  def send_update(pid \\ self(), module_or_cid, assigns)
-
-  def send_update(pid, module, assigns) when is_atom(module) and is_pid(pid) do
+  """
+  def send_update(pid \\ self(), module, assigns) when is_atom(module) and is_pid(pid) do
     assigns = Enum.into(assigns, %{})
 
     id =
       assigns[:id] ||
         raise ArgumentError, "missing required :id in send_update. Got: #{inspect(assigns)}"
 
-    Phoenix.LiveView.Channel.send_update(pid, {module, id}, assigns)
-  end
-
-  def send_update(pid, %Phoenix.LiveComponent.CID{} = cid, assigns) when is_pid(pid) do
-    assigns = Enum.into(assigns, %{})
-
-    Phoenix.LiveView.Channel.send_update(pid, cid, assigns)
+    Phoenix.LiveView.Channel.send_update(pid, module, id, assigns)
   end
 
   @doc """
   Similar to `send_update/3` but the update will be delayed according to the given `time_in_milliseconds`.
-
-  It returns a reference which can be cancelled with `Process.cancel_timer/1`.
 
   ## Examples
 
@@ -1490,16 +1361,7 @@ defmodule Phoenix.LiveView do
         {:noreply, socket}
       end
   """
-  def send_update_after(pid \\ self(), module_or_cid, assigns, time_in_milliseconds)
-
-  def send_update_after(pid, %Phoenix.LiveComponent.CID{} = cid, assigns, time_in_milliseconds)
-      when is_integer(time_in_milliseconds) and is_pid(pid) do
-    assigns = Enum.into(assigns, %{})
-
-    Phoenix.LiveView.Channel.send_update_after(pid, cid, assigns, time_in_milliseconds)
-  end
-
-  def send_update_after(pid, module, assigns, time_in_milliseconds)
+  def send_update_after(pid \\ self(), module, assigns, time_in_milliseconds)
       when is_atom(module) and is_integer(time_in_milliseconds) and is_pid(pid) do
     assigns = Enum.into(assigns, %{})
 
@@ -1507,7 +1369,7 @@ defmodule Phoenix.LiveView do
       assigns[:id] ||
         raise ArgumentError, "missing required :id in send_update_after. Got: #{inspect(assigns)}"
 
-    Phoenix.LiveView.Channel.send_update_after(pid, {module, id}, assigns, time_in_milliseconds)
+    Phoenix.LiveView.Channel.send_update_after(pid, module, id, assigns, time_in_milliseconds)
   end
 
   @doc """
@@ -1534,17 +1396,16 @@ defmodule Phoenix.LiveView do
 
   > Note: This function is for server-side lifecycle callbacks.
   > For client-side hooks, see the
-  > [JS Interop guide](js-interop.html#client-hooks-via-phx-hook).
+  > [JS Interop guide](js-interop.html#client-hooks).
 
   Hooks provide a mechanism to tap into key stages of the LiveView
   lifecycle in order to bind/update assigns, intercept events,
   patches, and regular messages when necessary, and to inject
-  common functionality. Use `attach_hook/4` on any of the following
-  lifecycle stages: `:handle_params`, `:handle_event`, `:handle_info`, `:handle_async`, and
+  common functionality. Use `attach_hook/1` on any of the following
+  lifecycle stages: `:handle_params`, `:handle_event`, `:handle_info`, and
   `:after_render`. To attach a hook to the `:mount` stage, use `on_mount/1`.
 
-  > Note: only `:after_render`, `:handle_event` and `:handle_async` hooks are currently supported in
-  > LiveComponents.
+  > Note: only `:after_render` hooks are currently supported in LiveComponents.
 
   ## Return Values
 
@@ -1569,7 +1430,7 @@ defmodule Phoenix.LiveView do
 
   When defining a plugin that matches on specific callbacks, you **must**
   define a catch-all clause, as your hook will be invoked even for events
-  you may not be interested in.
+  you may not be interested on.
 
   ### Implications for end-users
 
@@ -1584,77 +1445,7 @@ defmodule Phoenix.LiveView do
   interoperability](js-interop.html#client-hooks-via-phx-hook) because a client hook
   can push an event and receive a reply.
 
-  ## Sharing event handling logic
-
-  Lifecycle hooks are an excellent way to extract related events out of the parent LiveView and
-  into separate modules without resorting unnecessarily to LiveComponents for organization.
-
-      defmodule DemoLive do
-        use Phoenix.LiveView
-
-        def render(assigns) do
-          ~H\"""
-          <div>
-            <div>
-              Counter: {@counter}
-              <button phx-click="inc">+</button>
-            </div>
-
-            <MySortComponent.display lists={[first_list: @first_list, second_list: @second_list]} />
-          </div>
-          \"""
-        end
-
-        def mount(_params, _session, socket) do
-          first_list = for(i <- 1..9, do: "First List \#{i}") |> Enum.shuffle()
-          second_list = for(i <- 1..9, do: "Second List \#{i}") |> Enum.shuffle()
-
-          socket =
-            socket
-            |> assign(:counter, 0)
-            |> assign(first_list: first_list)
-            |> assign(second_list: second_list)
-            |> attach_hook(:sort, :handle_event, &MySortComponent.hooked_event/3)  # 2) Delegated events
-          {:ok, socket}
-        end
-
-        # 1) Normal event
-        def handle_event("inc", _params, socket) do
-          {:noreply, update(socket, :counter, &(&1 + 1))}
-        end
-      end
-
-      defmodule MySortComponent do
-        use Phoenix.Component
-
-        def display(assigns) do
-          ~H\"""
-          <div :for={{key, list} <- @lists}>
-            <ul><li :for={item <- list}>{item}</li></ul>
-            <button phx-click="shuffle" phx-value-list={key}>Shuffle</button>
-            <button phx-click="sort" phx-value-list={key}>Sort</button>
-          </div>
-          \"""
-        end
-
-        def hooked_event("shuffle", %{"list" => key}, socket) do
-          key = String.to_existing_atom(key)
-          shuffled = Enum.shuffle(socket.assigns[key])
-
-          {:halt, assign(socket, key, shuffled)}
-        end
-
-        def hooked_event("sort", %{"list" => key}, socket) do
-          key = String.to_existing_atom(key)
-          sorted = Enum.sort(socket.assigns[key])
-
-          {:halt, assign(socket, key, sorted)}
-        end
-
-        def hooked_event(_event, _params, socket), do: {:cont, socket}
-      end
-
-  ## Other examples
+  ## Examples
 
   Attaching and detaching a hook:
 
@@ -1674,20 +1465,16 @@ defmodule Phoenix.LiveView do
 
   Replying to a client event:
 
-  ```javascript
-  /**
-   * @type {import("phoenix_live_view").HooksOption}
-   */
-  let Hooks = {}
-  Hooks.ClientHook = {
-    mounted() {
-      this.pushEvent("ClientHook:mounted", {hello: "world"}, (reply) => {
-        console.log("received reply:", reply)
-      })
-    }
-  }
-  let liveSocket = new LiveSocket("/live", Socket, {hooks: Hooks, ...})
-  ```
+      # JavaScript:
+      # let Hooks = {}
+      # Hooks.ClientHook = {
+      #   mounted() {
+      #     this.pushEvent("ClientHook:mounted", {hello: "world"}, (reply) => {
+      #       console.log("received reply:", reply)
+      #     })
+      #   }
+      # }
+      # let liveSocket = new LiveSocket("/live", Socket, {hooks: Hooks, ...})
 
       def render(assigns) do
         ~H"\""
@@ -1715,7 +1502,7 @@ defmodule Phoenix.LiveView do
 
   > Note: This function is for server-side lifecycle callbacks.
   > For client-side hooks, see the
-  > [JS Interop guide](js-interop.html#client-hooks-via-phx-hook).
+  > [JS Interop guide](js-interop.html#client-hooks).
 
   If no hook is found, this function is a no-op.
 
@@ -1729,54 +1516,39 @@ defmodule Phoenix.LiveView do
 
   @doc ~S"""
   Assigns a new stream to the socket or inserts items into an existing stream.
-  Returns an updated `socket`.
 
   Streams are a mechanism for managing large collections on the client without
   keeping the resources on the server.
 
-    * `name` - A string or atom name of the key to place under the
+    * `name` - The string or atom name of the key to place under the
       `@streams` assign.
-    * `items` - An enumerable of items to insert.
+    * `items` - The enumerable of items to insert.
 
   The following options are supported:
 
-    * `:at` - The index to insert or update the items in the
+    * `:at` - the index to insert or update the items in the
       collection on the client. By default `-1` is used, which appends the items
       to the parent DOM container. A value of `0` prepends the items.
 
-      Note that this operation is equal to inserting the items one by one, each at
-      the given index. Therefore, when inserting multiple items at an index other than `-1`,
-      the UI will display the items in reverse order:
-
-          stream(socket, :songs, [song1, song2, song3], at: 0)
-
-      In this case the UI will prepend `song1`, then `song2` and then `song3`, so it will show
-      `song3`, `song2`, `song1` and then any previously inserted items.
-
-      To insert in the order of the list, use `Enum.reverse/1`:
-
-          stream(socket, :songs, Enum.reverse([song1, song2, song3]), at: 0)
-
-    * `:reset` - A boolean to reset the stream on the client or not. Defaults
+    * `:reset` - the boolean to reset the stream on the client or not. Defaults
       to `false`.
 
-    * `:limit` - An optional positive or negative number of results to limit
+    * `:limit` - the optional positive or negative number of results to limit
       on the UI on the client. As new items are streamed, the UI will remove existing
       items to maintain the limit. For example, to limit the stream to the last 10 items
       in the UI while appending new items, pass a negative value:
 
-          stream(socket, :songs, songs, at: -1, limit: -10)
+          stream(socket, :posts, posts, at: -1, limit: -10)
 
       Likewise, to limit the stream to the first 10 items, while prepending new items,
       pass a positive value:
 
-          stream(socket, :songs, songs, at: 0, limit: 10)
+          stream(socket, :posts, posts, at: 0, limit: 10)
 
   Once a stream is defined, a new `@streams` assign is available containing
   the name of the defined streams. For example, in the above definition, the
   stream may be referenced as `@streams.songs` in your template. Stream items
-  are temporary and freed from socket state immediately after the `render/1`
-  function is invoked (or a template is rendered from disk).
+  are temporary and freed from socket state as soon as they are rendered.
 
   By default, calling `stream/4` on an existing stream will bulk insert the new items
   on the client while leaving the existing items in place. Streams may also be reset
@@ -1786,11 +1558,11 @@ defmodule Phoenix.LiveView do
 
   To empty a stream container on the client, you can pass `:reset` with an empty list:
 
-      stream(socket, :songs, [], reset: true)
+          stream(socket, :songs, [], reset: true)
 
   Or you can replace the entire stream on the client with a new collection:
 
-      stream(socket, :songs, new_songs, reset: true)
+          stream(socket, :songs, new_songs, reset: true)
 
   ## Limiting a stream
 
@@ -1799,22 +1571,12 @@ defmodule Phoenix.LiveView do
   the server from overwhelming the client with new results while also opening up
   powerful features like virtualized infinite scrolling. See a complete
   bidirectional infinite scrolling example with stream limits in the
-  [scroll events guide](bindings.md#scroll-events-and-infinite-pagination)
+  [scroll events guide](bindings.md#scroll-events-and-infinite-stream-pagination)
 
   When a stream exceeds the limit on the client, the existing items will be pruned
   based on the number of items in the stream container and the limit direction. A
   positive limit will prune items from the end of the container, while a negative
   limit will prune items from the beginning of the container.
-
-  Note that the limit is not enforced on the first `c:mount/3` render (when no websocket
-  connection was established yet), as it means more data than necessary has been
-  loaded. In such cases, you should only load and pass the desired amount of items
-  to the stream.
-
-  When inserting single items using `stream_insert/4`, the limit needs to be passed
-  as an option for it to be enforced on the client:
-
-      stream_insert(socket, :songs, song, limit: -10)
 
   ## Required DOM attributes
 
@@ -1825,13 +1587,8 @@ defmodule Phoenix.LiveView do
        along with a unique DOM id.
     2. Each stream item must include its DOM id on the item's element.
 
-  > #### Note {: .warning}
-  >
-  > Failing to place `phx-update="stream"` on the **immediate parent** for
+  > **Note**: Failing to place `phx-update="stream"` on the **immediate parent** for
   > **each stream** will result in broken behavior.
-  >
-  > Also, do not alter the generated DOM ids, e.g., by prefixing them. Doing so will
-  > result in broken behavior.
 
   When consuming a stream in a template, the DOM id and item is passed as a tuple,
   allowing convenient inclusion of the DOM id for each item. For example:
@@ -1843,76 +1600,26 @@ defmodule Phoenix.LiveView do
         :for={{dom_id, song} <- @streams.songs}
         id={dom_id}
       >
-        <td>{song.title}</td>
-        <td>{song.duration}</td>
+        <td><%= song.title %></td>
+        <td><%= song.duration %></td>
       </tr>
     </tbody>
   </table>
   ```
-
   We consume the stream in a for comprehension by referencing the
   `@streams.songs` assign. We used the computed DOM id to populate
   the `<tr>` id, then we render the table row as usual.
 
   Now `stream_insert/3` and `stream_delete/3` may be issued and new rows will
   be inserted or deleted from the client.
-
-  ## Handling the empty case
-
-  When rendering a list of items, it is common to show a message for the empty case.
-  But when using streams, we cannot rely on `Enum.empty?/1` or similar approaches to
-  check if the list is empty. Instead we can use the CSS `:only-child` selector
-  and show the message client side:
-
-  ```heex
-  <table>
-    <tbody id="songs" phx-update="stream">
-      <tr id="songs-empty" class="only:table-row hidden">
-        <td colspan="2">No songs found</td>
-      </tr>
-      <tr
-        :for={{dom_id, song} <- @streams.songs}
-        id={dom_id}
-      >
-        <td>{song.title}</td>
-        <td>{song.duration}</td>
-      </tr>
-    </tbody>
-  </table>
-  ```
-
-  It is important to set a unique ID on the empty row, otherwise it cannot be tracked
-  in the stream container and subsequent patches will duplicate the node.
-
-  ## Non-stream items in stream containers
-
-  In the section on handling the empty case, we showed how to render a message when
-  the stream is empty by rendering a non-stream item inside the stream container.
-
-  Note that for non-stream items inside a `phx-update="stream"` container, the following
-  needs to be considered:
-
-    1. Non-stream items must have a unique DOM id.
-
-    2. Items can be added and updated, but not removed, even if the stream is reset.
-
-       This means that if you try to conditionally render a non-stream item inside a stream container,
-       it won't be removed if it was rendered once.
-
-    3. Items are affected by the `:at` option.
-
-       For example, when you render a non-stream item at the beginning of the stream container and then
-       prepend items (with `at: 0`) to the stream, the non-stream item will be pushed down.
-
   """
-  @spec stream(
-          socket :: Socket.t(),
-          name :: atom | String.t(),
-          items :: Enumerable.t(),
-          opts :: Keyword.t()
-        ) ::
-          Socket.t()
   def stream(%Socket{} = socket, name, items, opts \\ []) do
+    if Keyword.has_key?(opts, :dom_id) do
+      IO.warn(
+        "passing a :dom_id to stream/4 is deprecated. Use stream_configure/3 beforehand instead."
+      )
+    end
+
     socket
     |> ensure_streams()
     |> assign_stream(name, items, opts)
@@ -1923,7 +1630,7 @@ defmodule Phoenix.LiveView do
 
   The following options are supported:
 
-    * `:dom_id` - An optional function to generate each stream item's DOM id.
+    * `:dom_id` - The optional function to generate each stream item's DOM id.
       The function accepts each stream item and converts the item to a string id.
       By default, the `:id` field of a map or struct will be used if the item has
       such a field, and will be prefixed by the `name` hyphenated with the id.
@@ -1946,11 +1653,7 @@ defmodule Phoenix.LiveView do
       def update(assigns, socket) do
         {:ok, stream(socket, :songs, ...)}
       end
-
-  Returns an updated `socket`.
   """
-  @spec stream_configure(socket :: Socket.t(), name :: atom | String.t(), opts :: Keyword.t()) ::
-          Socket.t()
   def stream_configure(%Socket{} = socket, name, opts) when is_list(opts) do
     new_socket = ensure_streams(socket)
 
@@ -1969,43 +1672,19 @@ defmodule Phoenix.LiveView do
   end
 
   defp ensure_streams(%Socket{} = socket) do
-    # don't use assign_new here because we DON'T want to copy parent streams
-    # during the dead render of nested or sticky LiveViews
-    case socket.assigns do
-      %{streams: _} ->
-        socket
-
-      _ ->
-        Phoenix.LiveView.Utils.assign(socket, :streams, %{
-          __ref__: 0,
-          __changed__: MapSet.new(),
-          __configured__: %{}
-        })
-    end
+    Phoenix.LiveView.Utils.assign_new(socket, :streams, fn ->
+      %{__ref__: 0, __changed__: MapSet.new(), __configured__: %{}}
+    end)
   end
 
   @doc """
   Inserts a new item or updates an existing item in the stream.
 
-  Returns an updated `socket`.
+  By default, the item is appended to the parent DOM container.
+  The `:at` option may be provided to insert or update an item
+  to a particular index in the collection on the client.
 
   See `stream/4` for inserting multiple items at once.
-
-  The following options are supported:
-
-    * `:at` - The index to insert or update the item in the collection on the client.
-      By default, the item is appended to the parent DOM container. This is the same as
-      passing a value of `-1`.
-      If the item already exists in the parent DOM container then it will be
-      updated in place.
-
-    * `:limit` - A limit of items to maintain in the UI. A limit passed to `stream/4` does
-      not affect subsequent calls to `stream_insert/4`, therefore the limit must be passed
-      here as well in order to be enforced. See `stream/4` for more information on
-      limiting streams.
-
-    * `:update_only` - A boolean to only update the item in the stream. If the item does not
-      exist on the client, it will not be inserted. Defaults to `false`.
 
   ## Examples
 
@@ -2022,21 +1701,18 @@ defmodule Phoenix.LiveView do
 
       stream_insert(socket, :songs, %Song{id: 2, title: "Song 2"}, at: 0)
 
-  Or update an existing song (in this case the `:at` option has no effect):
+  Or updating an existing song, while also moving it to the top of the collection:
 
       stream_insert(socket, :songs, %Song{id: 1, title: "Song 1 updated"}, at: 0)
 
-  Or append a new song while limiting the stream to the last 10 items:
-
-      stream_insert(socket, :songs, %Song{id: 2, title: "Song 2"}, limit: -10)
-
   ## Updating Items
 
-  As shown, an existing item on the client can be updated by issuing a `stream_insert`
-  for the existing item. When the client updates an existing item, the item will remain
-  in the same location as it was previously, and will not be moved to the end of the
-  parent children. To both update an existing item and move it to another position,
-  issue a `stream_delete`, followed by a `stream_insert`. For example:
+  As shown, an existing item on the client can be updated by issuing a `stream_insert` for
+  the existing item. When the client updates an existing item with an "append" operation
+  (passing the `at: -1` option), the item will remain in the same location as it was
+  previously, and will not be moved to the end of the parent children. To both update an
+  existing item and move it to the end of a collection, issue a `stream_delete`, followed
+  by a `stream_insert`. For example:
 
       song = get_song!(id)
 
@@ -2046,19 +1722,10 @@ defmodule Phoenix.LiveView do
 
   See `stream_delete/3` for more information on deleting items.
   """
-  @spec stream_insert(
-          socket :: Socket.t(),
-          name :: atom | String.t(),
-          item :: any,
-          opts :: Keyword.t()
-        ) ::
-          Socket.t()
   def stream_insert(%Socket{} = socket, name, item, opts \\ []) do
     at = Keyword.get(opts, :at, -1)
     limit = Keyword.get(opts, :limit)
-    update_only = Keyword.get(opts, :update_only, false)
-
-    update_stream(socket, name, &LiveStream.insert_item(&1, item, at, limit, update_only))
+    update_stream(socket, name, &LiveStream.insert_item(&1, item, at, limit))
   end
 
   @doc """
@@ -2077,11 +1744,8 @@ defmodule Phoenix.LiveView do
       end
 
   See `stream_delete_by_dom_id/3` to remove an item without requiring the
-  original data structure.
-
-  Returns an updated `socket`.
+  original datastructure.
   """
-  @spec stream_delete(socket :: Socket.t(), name :: atom | String.t(), item :: any) :: Socket.t()
   def stream_delete(%Socket{} = socket, name, item) do
     update_stream(socket, name, &LiveStream.delete_item(&1, item))
   end
@@ -2089,11 +1753,9 @@ defmodule Phoenix.LiveView do
   @doc ~S'''
   Deletes an item from the stream given its computed DOM id.
 
-  Returns an updated `socket`.
-
   Behaves just like `stream_delete/3`, but accept the precomputed DOM id,
   which allows deleting from a stream without fetching or building the original
-  stream data structure.
+  stream datastructure.
 
   ## Examples
 
@@ -2105,7 +1767,7 @@ defmodule Phoenix.LiveView do
               :for={{dom_id, song} <- @streams.songs}
               id={dom_id}
             >
-              <td>{song.title}</td>
+              <td><%= song.title %></td>
               <td><button phx-click={JS.push("delete", value: %{id: dom_id})}>delete</button></td>
             </tr>
           </tbody>
@@ -2117,8 +1779,6 @@ defmodule Phoenix.LiveView do
         {:noreply, stream_delete_by_dom_id(socket, :songs, dom_id)}
       end
   '''
-  @spec stream_delete_by_dom_id(socket :: Socket.t(), name :: atom | String.t(), id :: String.t()) ::
-          Socket.t()
   def stream_delete_by_dom_id(%Socket{} = socket, name, id) do
     update_stream(socket, name, &LiveStream.delete_item_by_dom_id(&1, id))
   end
@@ -2139,7 +1799,6 @@ defmodule Phoenix.LiveView do
 
       %{} ->
         config = get_in(streams, [:__configured__, name]) || []
-        opts = Keyword.merge(opts, config)
 
         ref =
           if cid = socket.assigns[:myself] do
@@ -2148,7 +1807,7 @@ defmodule Phoenix.LiveView do
             to_string(streams.__ref__)
           end
 
-        stream = LiveStream.new(name, ref, items, opts)
+        stream = LiveStream.new(name, ref, items, config)
 
         socket
         |> Phoenix.Component.update(:streams, fn streams ->
@@ -2182,198 +1841,5 @@ defmodule Phoenix.LiveView do
       |> Map.put(name, func.(stream))
       |> Map.update!(:__changed__, &MapSet.put(&1, name))
     end)
-  end
-
-  @doc """
-  Assigns keys asynchronously.
-
-  Wraps your function in a task linked to the caller, errors are wrapped.
-  Each key passed to `assign_async/3` will be assigned to
-  an `Phoenix.LiveView.AsyncResult` struct holding the status of the operation
-  and the result when the function completes.
-
-  The function must return either a map or a keyword list with the assigns
-  to merge into the socket.
-
-  The task is only started when the socket is connected.
-
-  ## Options
-
-    * `:supervisor` - allows you to specify a `Task.Supervisor` to supervise the task.
-    * `:reset` - remove previous results during async operation when true. Possible values are
-      `true`, `false`, or a list of keys to reset. Defaults to `false`.
-
-  ## Examples
-
-  ```elixir
-  def mount(%{"slug" => slug}, _, socket) do
-    {:ok,
-      socket
-      |> assign(:foo, "bar")
-      |> assign_async(:org, fn -> {:ok, %{org: fetch_org!(slug)}} end)
-      |> assign_async([:profile, :rank], fn -> {:ok, %{profile: ..., rank: ...}} end)}
-  end
-  ```
-
-  See [Async Operations](#module-async-operations) for more information.
-
-  ## `assign_async/3` and `send_update/3`
-
-  Since the code inside `assign_async/3` runs in a separate process,
-  `send_update(Component, data)` does not work inside `assign_async/3`,
-  since `send_update/2` assumes it is running inside the LiveView process.
-  The solution is to explicitly send the update to the LiveView:
-
-  ```elixir
-  parent = self()
-  assign_async(socket, :org, fn ->
-    # ...
-    send_update(parent, Component, data)
-  end)
-  ```
-
-  ## Testing async operations
-
-  When testing LiveViews and LiveComponents with async assigns, use
-  `Phoenix.LiveViewTest.render_async/2` to ensure the test waits until the async operations
-  are complete before proceeding with assertions or before ending the test. For example:
-
-  ```elixir
-  {:ok, view, _html} = live(conn, "/my_live_view")
-  html = render_async(view)
-  assert html =~ "My assertion"
-  ```
-
-  Not calling `render_async/2` to ensure all async assigns have finished might result in errors in
-  cases where your process has side effects:
-
-  ```
-  [error] MyXQL.Connection (#PID<0.308.0>) disconnected: ** (DBConnection.ConnectionError) client #PID<0.794.0>
-  ```
-
-  """
-  defmacro assign_async(socket, key_or_keys, func, opts \\ []) do
-    Async.assign_async(socket, key_or_keys, func, opts, __CALLER__)
-  end
-
-  @doc """
-  Wraps your function in an asynchronous task and invokes a callback `name` to
-  handle the result.
-
-  The task is linked to the caller and errors/exits are wrapped.
-  The result of the task is sent to the `c:handle_async/3` callback
-  of the caller LiveView or LiveComponent.
-
-  If there is an in-flight task with the same `name`, the later `start_async` wins and the previous task’s result is ignored.
-  If you wish to replace an existing task, you can use `cancel_async/3` before `start_async/3`.
-  You are not restricted to just atoms for `name`, it can be any term such as a tuple.
-
-  The task is only started when the socket is connected.
-
-  ## Options
-
-    * `:supervisor` - allows you to specify a `Task.Supervisor` to supervise the task.
-
-  ## Examples
-
-      def mount(%{"id" => id}, _, socket) do
-        {:ok,
-         socket
-         |> assign(:org, AsyncResult.loading())
-         |> start_async(:my_task, fn -> fetch_org!(id) end)}
-      end
-
-      def handle_async(:my_task, {:ok, fetched_org}, socket) do
-        %{org: org} = socket.assigns
-        {:noreply, assign(socket, :org, AsyncResult.ok(org, fetched_org))}
-      end
-
-      def handle_async(:my_task, {:exit, reason}, socket) do
-        %{org: org} = socket.assigns
-        {:noreply, assign(socket, :org, AsyncResult.failed(org, {:exit, reason}))}
-      end
-
-  See the moduledoc for more information.
-  """
-  defmacro start_async(socket, name, func, opts \\ []) do
-    Async.start_async(socket, name, func, opts, __CALLER__)
-  end
-
-  @doc """
-  Inserts data into a stream asynchronously.
-
-  Wraps your function in a task linked to the caller, errors are wrapped.
-  The key passed to `stream_async/3` will be used as the stream name. Furthermore,
-  a regular assign with the same name gets assigned a `Phoenix.LiveView.AsyncResult`
-  struct holding the status of the operation. The stream is initialized to an empty list
-  before starting the asynchronous function, so accessing `@streams.name` is always possible.
-
-  The function must return `{:ok, Enumerable.t()}` or `{:ok, Enumerable.t(), opts}`
-  where the opts are the same as in `stream/4`. The enumerable contains the values to be streamed.
-
-  If the function returns `{:error, any()}`, the `AsyncResult` is assigned as failed and
-  the stream is not updated.
-
-  The task is only started when the socket is connected.
-
-  ## Options
-
-    * `:supervisor` - allows you to specify a `Task.Supervisor` to supervise the task.
-    * `:reset` - remove previous results during async operation when true. Possible values are
-      `true`, `false`, or a list of keys to reset. Defaults to `false`.
-
-  ## Examples
-
-      def mount(%{"slug" => slug}, _, socket) do
-        current_scope = socket.assigns.current_scope
-
-        {:ok,
-          socket
-          |> assign(:foo, "bar")
-          |> assign_async(:org, fn -> {:ok, %{org: fetch_org!(current_scope)}} end)
-          |> stream_async(:posts, fn -> {:ok, list_posts!(current_scope), limit: 10} end)
-      end
-
-  Note the `reset` option controls the async assign, not the stream:
-
-      def mount(_, _, socket) do
-        {:ok,
-          socket
-          # IMPORTANT: reset here does NOT reset the stream, but only the loading state
-          |> stream_async(:my_stream, fn -> {:ok, list_items!()} end, reset: true)
-          # This resets the stream
-          |> stream_async(:my_reset_stream, fn -> {:ok, list_items!(), reset: true} end)
-      end
-
-  Any stream options need to be returned as optional third argument in the return value
-  of the asynchronous function.
-
-  """
-  defmacro stream_async(socket, name, func, opts \\ []) do
-    Async.stream_async(socket, name, func, opts, __CALLER__)
-  end
-
-  @doc """
-  Cancels an async operation if one exists.
-
-  Accepts either the `%AsyncResult{}` when using `assign_async/3` or
-  the key passed to `start_async/3`.
-
-  The underlying process will be killed with the provided reason, or
-  with `{:shutdown, :cancel}` if no reason is passed. For `assign_async/3`
-  operations, the `:failed` field will be set to `{:exit, reason}`.
-  For `start_async/3`, the `c:handle_async/3` callback will receive
-  `{:exit, reason}` as the result.
-
-  Returns the `%Phoenix.LiveView.Socket{}`.
-
-  ## Examples
-
-      cancel_async(socket, :preview)
-      cancel_async(socket, :preview, :my_reason)
-      cancel_async(socket, socket.assigns.preview)
-  """
-  def cancel_async(socket, async_or_keys, reason \\ {:shutdown, :cancel}) do
-    Async.cancel_async(socket, async_or_keys, reason)
   end
 end

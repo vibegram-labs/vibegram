@@ -18,8 +18,7 @@ defmodule Phoenix.LiveView.UploadEntry do
             client_relative_path: nil,
             client_size: nil,
             client_type: nil,
-            client_last_modified: nil,
-            client_meta: nil
+            client_last_modified: nil
 
   @type t :: %__MODULE__{
           progress: integer(),
@@ -34,17 +33,16 @@ defmodule Phoenix.LiveView.UploadEntry do
           client_relative_path: String.t() | nil,
           client_size: integer() | nil,
           client_type: String.t() | nil,
-          client_last_modified: integer() | nil,
-          client_meta: map() | nil
+          client_last_modified: integer() | nil
         }
 
   @doc false
   def put_progress(%UploadEntry{} = entry, 100) do
-    %{entry | progress: 100, done?: true}
+    %UploadEntry{entry | progress: 100, done?: true}
   end
 
   def put_progress(%UploadEntry{} = entry, progress) do
-    %{entry | progress: progress}
+    %UploadEntry{entry | progress: progress}
   end
 end
 
@@ -122,8 +120,8 @@ defmodule Phoenix.LiveView.UploadConfig do
           errors: list(),
           ref: String.t(),
           auto_upload?: boolean(),
-          writer: (name :: atom() | String.t(), UploadEntry.t(), Phoenix.LiveView.Socket.t() ->
-                     {module(), term()}),
+          writer:
+            (name :: atom() | String.t(), UploadEntry.t(), Socket.t() -> {Module.t(), term()}),
           progress_event:
             (name :: atom() | String.t(), UploadEntry.t(), Phoenix.LiveView.Socket.t() ->
                {:noreply, Phoenix.LiveView.Socket.t()})
@@ -153,7 +151,7 @@ defmodule Phoenix.LiveView.UploadConfig do
             * A valid case-insensitive filename extension, starting with a period (".") character.
               For example: .jpg, .pdf, or .doc.
 
-            * A valid MIME type string, such as "image/jpeg" or "image/*"
+            * A valid MIME type string, with no extensions.
 
           Alternately, you can provide the atom :any to allow any kind of file. Got:
 
@@ -356,14 +354,19 @@ defmodule Phoenix.LiveView.UploadConfig do
   end
 
   @doc false
-  def mark_preflighted(%UploadConfig{} = conf, refs) do
-    new_entries =
-      for %UploadEntry{} = entry <- conf.entries do
-        %{entry | preflighted?: entry.preflighted? || entry.ref in refs}
-      end
+  def mark_preflighted(%UploadConfig{} = conf) do
+    refs_awaiting = refs_awaiting_preflight(conf)
 
-    new_conf = %{conf | entries: new_entries}
-    {new_conf, for(ref <- refs, do: get_entry_by_ref(new_conf, ref))}
+    new_conf = %UploadConfig{
+      conf
+      | entries: for(entry <- conf.entries, do: %UploadEntry{entry | preflighted?: true})
+    }
+
+    {new_conf, for(ref <- refs_awaiting, do: get_entry_by_ref(new_conf, ref))}
+  end
+
+  defp refs_awaiting_preflight(%UploadConfig{} = conf) do
+    for entry <- conf.entries, not entry.preflighted?, do: entry.ref
   end
 
   @doc false
@@ -372,7 +375,7 @@ defmodule Phoenix.LiveView.UploadConfig do
     case Map.fetch(conf.entry_refs_to_pids, entry_ref) do
       {:ok, @unregistered} ->
         {:ok,
-         %{
+         %UploadConfig{
            conf
            | entry_refs_to_pids: Map.put(conf.entry_refs_to_pids, entry_ref, channel_pid)
          }}
@@ -447,7 +450,7 @@ defmodule Phoenix.LiveView.UploadConfig do
   end
 
   @doc false
-  def disallow(%UploadConfig{} = conf), do: %{conf | allowed?: false}
+  def disallow(%UploadConfig{} = conf), do: %UploadConfig{conf | allowed?: false}
 
   @doc false
   def uploaded_entries(%UploadConfig{} = conf) do
@@ -462,7 +465,7 @@ defmodule Phoenix.LiveView.UploadConfig do
         %UploadEntry{ref: _ef} = entry -> entry
       end)
 
-    recalculate_computed_fields(%{conf | entries: new_entries})
+    recalculate_computed_fields(%UploadConfig{conf | entries: new_entries})
   end
 
   @doc false
@@ -483,49 +486,40 @@ defmodule Phoenix.LiveView.UploadConfig do
     end
 
     new_metas = Map.put(conf.entry_refs_to_metas, entry_ref, meta)
-    %{conf | entry_refs_to_metas: new_metas}
+    %UploadConfig{conf | entry_refs_to_metas: new_metas}
   end
 
   @doc false
   def put_entries(%UploadConfig{} = conf, entries) do
-    pruned_conf = maybe_replace_sole_entry(conf, entries)
+    new_entries =
+      for entry <- entries, !get_entry_by_ref(conf, Map.fetch!(entry, "ref")), do: entry
+
+    pruned_conf = maybe_replace_sole_entry(conf, new_entries)
 
     new_conf =
-      Enum.reduce(entries, pruned_conf, fn client_entry, acc ->
-        if get_entry_by_ref(acc, Map.fetch!(client_entry, "ref")) do
-          acc
-        else
-          case cast_and_validate_entry(acc, client_entry) do
-            {:ok, new_conf} -> new_conf
-            {:error, new_conf} -> new_conf
-          end
+      Enum.reduce(new_entries, pruned_conf, fn client_entry, acc ->
+        case cast_and_validate_entry(acc, client_entry) do
+          {:ok, new_conf} -> new_conf
+          {:error, new_conf} -> new_conf
         end
       end)
 
-    too_many? = too_many_files?(new_conf)
+    if too_many_files?(new_conf) do
+      {:error, put_error(new_conf, new_conf.ref, @too_many_files)}
+    else
+      case new_conf do
+        %UploadConfig{errors: []} = new_conf ->
+          {:ok, new_conf}
 
-    cond do
-      too_many? && new_conf.auto_upload? ->
-        {:ok, put_error(new_conf, new_conf.ref, @too_many_files)}
-
-      too_many? ->
-        {:error, put_error(new_conf, new_conf.ref, @too_many_files)}
-
-      new_conf.auto_upload? ->
-        {:ok, new_conf}
-
-      new_conf.errors != [] ->
-        {:error, new_conf}
-
-      true ->
-        {:ok, new_conf}
+        %UploadConfig{errors: [_ | _]} = new_conf ->
+          {:error, new_conf}
+      end
     end
   end
 
   defp maybe_replace_sole_entry(%UploadConfig{max_entries: 1} = conf, new_entries) do
     with [entry] <- conf.entries,
-         [new_entry] <- new_entries,
-         true <- entry.ref != Map.fetch!(new_entry, "ref") do
+         [_new_entry] <- new_entries do
       cancel_entry(conf, entry)
     else
       _ -> conf
@@ -551,8 +545,7 @@ defmodule Phoenix.LiveView.UploadConfig do
       client_relative_path: Map.get(client_entry, "relative_path"),
       client_size: Map.fetch!(client_entry, "size"),
       client_type: Map.fetch!(client_entry, "type"),
-      client_last_modified: Map.get(client_entry, "last_modified"),
-      client_meta: Map.get(client_entry, "meta")
+      client_last_modified: Map.get(client_entry, "last_modified")
     }
 
     {:ok, entry}
@@ -567,12 +560,12 @@ defmodule Phoenix.LiveView.UploadConfig do
     end
   end
 
-  defp put_valid_entry(%UploadConfig{} = conf, %UploadEntry{} = entry) do
-    entry = %{entry | valid?: true, uuid: generate_uuid()}
+  defp put_valid_entry(conf, entry) do
+    entry = %UploadEntry{entry | valid?: true, uuid: generate_uuid()}
     new_pids = Map.put(conf.entry_refs_to_pids, entry.ref, @unregistered)
     new_metas = Map.put(conf.entry_refs_to_metas, entry.ref, %{})
 
-    %{
+    %UploadConfig{
       conf
       | entries: conf.entries ++ [entry],
         entry_refs_to_pids: new_pids,
@@ -580,12 +573,12 @@ defmodule Phoenix.LiveView.UploadConfig do
     }
   end
 
-  defp put_invalid_entry(%UploadConfig{} = conf, %UploadEntry{} = entry, reason) do
-    entry = %{entry | valid?: false}
+  defp put_invalid_entry(conf, entry, reason) do
+    entry = %UploadEntry{entry | valid?: false}
     new_pids = Map.put(conf.entry_refs_to_pids, entry.ref, @invalid)
     new_metas = Map.put(conf.entry_refs_to_metas, entry.ref, %{})
 
-    new_conf = %{
+    new_conf = %UploadConfig{
       conf
       | entries: conf.entries ++ [entry],
         entry_refs_to_pids: new_pids,
@@ -595,10 +588,9 @@ defmodule Phoenix.LiveView.UploadConfig do
     put_error(new_conf, entry.ref, reason)
   end
 
-  defp validate_max_file_size(
-         {:ok, %UploadEntry{client_size: size}},
-         %UploadConfig{max_file_size: max}
-       )
+  defp validate_max_file_size({:ok, %UploadEntry{client_size: size}}, %UploadConfig{
+         max_file_size: max
+       })
        when size > max or not is_integer(size),
        do: {:error, :too_large}
 
@@ -646,18 +638,18 @@ defmodule Phoenix.LiveView.UploadConfig do
           _ -> true
         end)
 
-      %{conf | errors: new_errors}
+      %UploadConfig{conf | errors: new_errors}
     end
   end
 
   @doc false
   def put_error(%UploadConfig{} = conf, _entry_ref, @too_many_files = reason) do
     pair = {conf.ref, reason}
-    %{conf | errors: List.delete(conf.errors, pair) ++ [pair]}
+    %UploadConfig{conf | errors: List.delete(conf.errors, pair) ++ [pair]}
   end
 
   def put_error(%UploadConfig{} = conf, entry_ref, reason) do
-    %{conf | errors: conf.errors ++ [{entry_ref, reason}]}
+    %UploadConfig{conf | errors: conf.errors ++ [{entry_ref, reason}]}
   end
 
   @doc false
@@ -665,7 +657,7 @@ defmodule Phoenix.LiveView.UploadConfig do
     case entry_pid(conf, entry) do
       channel_pid when is_pid(channel_pid) ->
         Phoenix.LiveView.UploadChannel.cancel(channel_pid)
-        update_entry(conf, entry.ref, fn entry -> %{entry | cancelled?: true} end)
+        update_entry(conf, entry.ref, fn entry -> %UploadEntry{entry | cancelled?: true} end)
 
       _ ->
         drop_entry(conf, entry)
@@ -679,7 +671,7 @@ defmodule Phoenix.LiveView.UploadConfig do
     new_refs = Map.delete(conf.entry_refs_to_pids, ref)
     new_metas = Map.delete(conf.entry_refs_to_metas, ref)
 
-    new_conf = %{
+    new_conf = %UploadConfig{
       conf
       | entries: new_entries,
         errors: new_errors,
@@ -692,7 +684,7 @@ defmodule Phoenix.LiveView.UploadConfig do
 
   @doc false
   def register_cid(%UploadConfig{} = conf, cid) do
-    %{conf | cid: cid}
+    %UploadConfig{conf | cid: cid}
   end
 
   # UUID generation

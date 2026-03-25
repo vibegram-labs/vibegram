@@ -5,7 +5,7 @@ defmodule Phoenix.LiveView.Router do
 
   @cookie_key "__phoenix_flash__"
 
-  @doc ~S"""
+  @doc """
   Defines a LiveView route.
 
   A LiveView can be routed to by using the `live` macro with a path and
@@ -13,15 +13,9 @@ defmodule Phoenix.LiveView.Router do
 
       live "/thermostat", ThermostatLive
 
-  To navigate to this route within your app, you can use `Phoenix.VerifiedRoutes`:
+  By default, you can generate a route to this LiveView by using the `live_path` helper:
 
-      push_navigate(socket, to: ~p"/thermostat")
-      push_patch(socket, to: ~p"/thermostat?page=#{page}")
-
-  > #### HTTP requests {: .info}
-  >
-  > The HTTP request method that a route defined by the `live/4` macro
-  > responds to is `GET`.
+      live_path(@socket, ThermostatLive)
 
   ## Actions and live navigation
 
@@ -43,18 +37,26 @@ defmodule Phoenix.LiveView.Router do
       live "/articles/new", ArticleLive.Index, :new
       live "/articles/:id/edit", ArticleLive.Index, :edit
 
+  When an action is given, the generated route helpers are named after
+  the LiveView itself (in the same way as for a controller). For the example
+  above, we will have:
+
+      article_index_path(@socket, :index)
+      article_index_path(@socket, :new)
+      article_index_path(@socket, :edit, 123)
+
   The current action will always be available inside the LiveView as
   the `@live_action` assign, that can be used to render a LiveComponent:
 
-  ```heex
-  <.live_component :if={@live_action == :new} module={MyAppWeb.ArticleLive.FormComponent} id="form" />
-  ```
+      <%= if @live_action == :new do %>
+        <.live_component module={MyAppWeb.ArticleLive.FormComponent} id="form" />
+      <% end %>
 
   Or can be used to show or hide parts of the template:
 
-  ```heex
-  {if @live_action == :edit, do: render("form.html", user: @user)}
-  ```
+      <%= if @live_action == :edit do %>
+        <%= render("form.html", user: @user) %>
+      <% end %>
 
   Note that `@live_action` will be `nil` if no action is given on the route definition.
 
@@ -74,9 +76,8 @@ defmodule Phoenix.LiveView.Router do
       callback. This can be used to customize a LiveView which may be invoked from
       different routes.
 
-    * `:private` - an optional map of private data to put in the *plug connection*,
-      for example: `%{route_name: :foo, access: :user}`. The data will be available
-      inside `conn.private` in plug functions.
+    * `:private` - an optional map of private data to put in the plug connection,
+      for example: `%{route_name: :foo, access: :user}`.
 
   ## Examples
 
@@ -98,9 +99,13 @@ defmodule Phoenix.LiveView.Router do
 
   """
   defmacro live(path, live_view, action \\ nil, opts \\ []) do
-    live_view = Macro.expand_literals(live_view, %{__CALLER__ | function: {:live, 4}})
-    action = Macro.expand_literals(action, %{__CALLER__ | function: {:live, 4}})
-    opts = Macro.expand_literals(opts, %{__CALLER__ | function: {:live, 4}})
+    # TODO: Use Macro.expand_literals on Elixir v1.14.1+
+    live_view =
+      if Macro.quoted_literal?(live_view) do
+        Macro.prewalk(live_view, &expand_alias(&1, __CALLER__))
+      else
+        live_view
+      end
 
     quote bind_quoted: binding() do
       {action, router_options} =
@@ -114,23 +119,16 @@ defmodule Phoenix.LiveView.Router do
   Defines a live session for live redirects within a group of live routes.
 
   `live_session/3` allow routes defined with `live/4` to support
-  `navigate` redirects from the client with navigation purely over the existing
+  `live_redirect` from the client with navigation purely over the existing
   websocket connection. This allows live routes defined in the router to
   mount a new root LiveView without additional HTTP requests to the server.
-  For backwards compatibility reasons, all live routes defined outside
-  of any live session are considered part of a single unnamed live session.
 
   ## Security Considerations
 
-  In a regular web application, we perform authentication and authorization
-  checks on every request. Given LiveViews start as a regular HTTP request,
-  they share the authentication logic with regular requests through plugs.
-  Once the user is authenticated, we typically validate the sessions on
-  the `mount` callback. Authorization rules generally happen on `mount`
-  (for instance, is the user allowed to see this page?) and also on
-  `handle_event` (is the user allowed to delete this item?). Performing
-  authorization on mount is important because `navigate`s *do not go
-  through the plug pipeline*.
+  You must always perform authentication and authorization in your LiveViews.
+  If your application handle both regular HTTP requests and LiveViews, then
+  you must perform authentication and authorization on both. This is important
+  because `live_redirect`s *do not go through the plug pipeline*.
 
   `live_session` can be used to draw boundaries between groups of LiveViews.
   Redirecting between `live_session`s will always force a full page reload
@@ -142,32 +140,21 @@ defmodule Phoenix.LiveView.Router do
   detailed description and general tips on authentication, authorization,
   and more.
 
-  > #### `live_session` and `forward` {: .warning}
-  >
-  > `live_session` does not currently work with `forward`. LiveView expects
-  > your `live` routes to always be directly defined within the main router
-  > of your application.
-
-  > #### `live_session` and `scope` {: .warning}
-  >
-  > Aliases set with `Phoenix.Router.scope/2` are not expanded in `live_session` arguments.
-  > You must use the full module name instead.
-
   ## Options
 
-    * `:session` - An optional extra session map or MFA tuple to be merged with
-      the LiveView session. For example, `%{"admin" => true}` or `{MyMod, :session, []}`.
-      For MFA, the function is invoked and the `Plug.Conn` struct is prepended
+    * `:session` - The optional extra session map or MFA tuple to be merged with
+      the LiveView session. For example, `%{"admin" => true}`, `{MyMod, :session, []}`.
+      For MFA, the function is invoked, passing the `Plug.Conn` struct is prepended
       to the arguments list.
 
-    * `:root_layout` - An optional root layout tuple for the initial HTTP render to
+    * `:root_layout` - The optional root layout tuple for the initial HTTP render to
       override any existing root layout set in the router.
 
-    * `:on_mount` - An optional list of hooks to attach to the mount lifecycle _of
+    * `:on_mount` - The optional list of hooks to attach to the mount lifecycle _of
       each LiveView in the session_. See `Phoenix.LiveView.on_mount/1`. Passing a
       single value is also accepted.
 
-    * `:layout` - An optional layout the LiveView will be rendered in. Setting
+    * `:layout` - The optional layout the LiveView will be rendered in. Setting
       this option overrides the layout via `use Phoenix.LiveView`. This option
       may be overridden inside a LiveView by returning `{:ok, socket, layout: ...}`
       from the mount callback
@@ -197,25 +184,35 @@ defmodule Phoenix.LiveView.Router do
 
   If you have both regular HTTP routes (via get, post, etc) and `live` routes, then
   you need to perform the same authentication and authorization rules in both.
-  For example, if you were to add a `get "/admin/health"` route, then you must create
-  your own plug that performs the same authentication and authorization rules as
-  `MyAppWeb.AdminLiveAuth`, and then pipe through it:
+  For example, if you were to add a `get "/admin/health"` entry point inside the
+  `:admin` live session above, then you must create your own plug that performs the
+  same authentication and authorization rules as `MyAppWeb.AdminLiveAuth`, and then
+  pipe through it:
 
-      scope "/" do
-        # Regular routes
-        pipe_through [MyAppWeb.AdminPlugAuth]
-        get "/admin/health", AdminHealthController, :index
+      live_session :admin, on_mount: MyAppWeb.AdminLiveAuth do
+        scope "/" do
+          # Regular routes
+          pipe_through [MyAppWeb.AdminPlugAuth]
+          get "/admin/health", AdminHealthController, :index
 
-        # Live routes
-        live_session :admin, on_mount: MyAppWeb.AdminLiveAuth do
+          # Live routes
           live "/admin", AdminDashboardLive, :index
           live "/admin/posts", AdminPostLive, :index
         end
       end
 
+  The opposite is also true, if you have regular http routes and you want to
+  add your own `live` routes, the same authentication and authorization checks
+  executed by the plugs listed in `pipe_through` must be ported to LiveViews
+  and be executed via `on_mount` hooks.
   """
   defmacro live_session(name, opts \\ [], do: block) do
-    opts = Macro.expand_literals(opts, %{__CALLER__ | function: {:live_session, 3}})
+    opts =
+      if Macro.quoted_literal?(opts) do
+        Macro.prewalk(opts, &expand_alias(&1, __CALLER__))
+      else
+        opts
+      end
 
     quote do
       unquote(__MODULE__).__live_session__(__MODULE__, unquote(opts), unquote(name))
@@ -224,11 +221,17 @@ defmodule Phoenix.LiveView.Router do
     end
   end
 
+  defp expand_alias({:__aliases__, _, _} = alias, env),
+    do: Macro.expand(alias, %{env | function: {:mount, 3}})
+
+  defp expand_alias(other, _env), do: other
+
   @doc false
   def __live_session__(module, opts, name) do
     Module.register_attribute(module, :phoenix_live_sessions, accumulate: true)
+    vsn = session_vsn(module)
 
-    if not is_atom(name) do
+    unless is_atom(name) do
       raise ArgumentError, """
       expected live_session name to be an atom, got: #{inspect(name)}
       """
@@ -250,7 +253,7 @@ defmodule Phoenix.LiveView.Router do
       """
     end
 
-    current = %{name: name, extra: extra}
+    current = %{name: name, extra: extra, vsn: vsn}
     Module.put_attribute(module, :phoenix_live_session_current, current)
 
     Module.put_attribute(module, :phoenix_live_sessions, name)
@@ -269,6 +272,10 @@ defmodule Phoenix.LiveView.Router do
         expected a map with string keys or an MFA tuple, got #{inspect(bad_session)}
         """
 
+      {:root_layout, {mod, template}}, acc when is_atom(mod) and is_binary(template) ->
+        template = Phoenix.LiveView.Utils.normalize_layout(template, "live_session :root_layout")
+        Map.put(acc, :root_layout, {mod, String.to_atom(template)})
+
       {:root_layout, {mod, template}}, acc when is_atom(mod) and is_atom(template) ->
         Map.put(acc, :root_layout, {mod, template})
 
@@ -279,8 +286,12 @@ defmodule Phoenix.LiveView.Router do
         raise ArgumentError, """
         invalid live_session :root_layout
 
-        expected a tuple with the view module and template atom name, got #{inspect(bad_layout)}
+        expected a tuple with the view module and template string or atom name, got #{inspect(bad_layout)}
         """
+
+      {:layout, {mod, template}}, acc when is_atom(mod) and is_binary(template) ->
+        template = Phoenix.LiveView.Utils.normalize_layout(template, "live_session :layout")
+        Map.put(acc, :layout, {mod, template})
 
       {:layout, {mod, template}}, acc when is_atom(mod) and is_atom(template) ->
         Map.put(acc, :layout, {mod, template})
@@ -296,12 +307,7 @@ defmodule Phoenix.LiveView.Router do
         """
 
       {:on_mount, on_mount}, acc ->
-        hooks =
-          on_mount
-          |> List.wrap()
-          |> Enum.map(&Phoenix.LiveView.Lifecycle.validate_on_mount!(module, &1))
-          |> Phoenix.LiveView.Lifecycle.prepare_on_mount!()
-
+        hooks = Enum.map(List.wrap(on_mount), &Phoenix.LiveView.Lifecycle.on_mount(module, &1))
         Map.put(acc, :on_mount, hooks)
 
       {key, _val}, _acc ->
@@ -339,7 +345,7 @@ defmodule Phoenix.LiveView.Router do
         ...
       end
   """
-  def fetch_live_flash(%Plug.Conn{} = conn, _opts \\ []) do
+  def fetch_live_flash(%Plug.Conn{} = conn, _) do
     case cookie_flash(conn) do
       {conn, nil} ->
         Phoenix.Controller.fetch_flash(conn, [])
@@ -361,9 +367,7 @@ defmodule Phoenix.LiveView.Router do
       when is_atom(action) and is_list(opts) do
     live_session =
       Module.get_attribute(router, :phoenix_live_session_current) ||
-        %{name: :default, extra: %{}}
-
-    helpers = Module.get_attribute(router, :phoenix_helpers)
+        %{name: :default, extra: %{}, vsn: session_vsn(router)}
 
     live_view = Phoenix.Router.scoped_alias(router, live_view)
     {private, metadata, warn_on_verify, opts} = validate_live_opts!(opts)
@@ -373,19 +377,13 @@ defmodule Phoenix.LiveView.Router do
       |> Keyword.put(:router, router)
       |> Keyword.put(:action, action)
 
-    {as_helper, as_action} =
-      if helpers do
-        inferred_as(live_view, opts[:as], action)
-      else
-        {nil, action}
-      end
+    {as_helper, as_action} = inferred_as(live_view, opts[:as], action)
 
-    # TODO: Remove :log_module when we require Phoenix v1.8+
     metadata =
       metadata
       |> Map.put(:phoenix_live_view, {live_view, action, opts, live_session})
-      |> Map.put(:mfa, {live_view, :__live__, 0})
-      |> Map.put(:log_module, live_view)
+      |> Map.put_new(:log_module, live_view)
+      |> Map.put_new(:log_function, :mount)
 
     {as_action,
      alias: false,
@@ -474,4 +472,14 @@ defmodule Phoenix.LiveView.Router do
   end
 
   defp cookie_flash(%Plug.Conn{} = conn), do: {conn, nil}
+
+  defp session_vsn(module) do
+    if vsn = Module.get_attribute(module, :phoenix_session_vsn) do
+      vsn
+    else
+      vsn = System.system_time()
+      Module.put_attribute(module, :phoenix_session_vsn, vsn)
+      vsn
+    end
+  end
 end

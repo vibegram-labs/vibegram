@@ -11,15 +11,12 @@ https://user-images.githubusercontent.com/576796/162234098-31b580fe-e424-47e6-b0
 
 <br />
 
-LiveView ships by default in new Phoenix applications. After you
-[install Elixir](https://elixir-lang.org/install.html) on your machine,
-you can create your first LiveView app in two steps:
+After you [install Elixir](https://elixir-lang.org/install.html)
+on your machine, you can create your first LiveView app in two
+steps:
 
     $ mix archive.install hex phx_new
     $ mix phx.new demo
-
-> If you have an older existing Phoenix app and you wish to add LiveView,
-> see [the previous installation guide](https://github.com/phoenixframework/phoenix_live_view/blob/v0.20.1/guides/introduction/installation.md).
 
 ## Feature highlights
 
@@ -32,10 +29,10 @@ model while keeping your code closer to your data (and ultimately your source of
 
   * **Rich templating language:** Enjoy HEEx: a templating language that supports function components, slots, HTML validation, verified routes, and more.
 
-  * **Diffs over the wire:** Instead of sending "HTML over the wire", LiveView knows exactly which parts of your templates change, sending minimal diffs over the wire after the initial render, reducing latency and bandwidth usage. The client leverages this information and optimizes the browser with 5-10x faster updates, compared to solutions that replace whole HTML fragments.
+  * **Small payloads:** LiveView is smart enough to track changes so it only sends what the client needs, making LiveView payloads much smaller than server-rendered HTML.
 
   * **Live form validation:** LiveView supports real-time form validation out of the box. Create rich user interfaces with features like uploads, nested inputs, and [specialized recovery](https://hexdocs.pm/phoenix_live_view/form-bindings.html#recovery-following-crashes-or-disconnects).
-
+  
   * **File uploads:** Real-time file uploads with progress indicators and image previews. Process your uploads on the fly or submit them to your desired cloud service.
 
   * **Rich integration API:** Use the rich integration API to interact with the client, with `phx-click`, `phx-focus`, `phx-blur`, `phx-submit`, and `phx-hook` included for cases where you have to write JavaScript.
@@ -50,47 +47,25 @@ model while keeping your code closer to your data (and ultimately your source of
 
   * **Robust test suite:** Write tests with confidence alongside Phoenix LiveView built-in testing tools. No more running a whole browser alongside your tests.
 
-## Learning
+## Official announcements
 
-Check our [comprehensive docs](https://hexdocs.pm/phoenix_live_view) to get started.
-
-The Phoenix framework documentation also keeps a list of [community resources](https://hexdocs.pm/phoenix/community.html), including books, videos, and other materials, and some include LiveView too.
-
-Also follow these announcements from the Phoenix team on LiveView for more examples and rationale:
+News from the Phoenix team on LiveView:
 
   * [LiveBeats: Building a Social Music App With Phoenix LiveView](https://fly.io/blog/livebeats/)
 
   * [Build a real-time Twitter clone with LiveView](https://www.phoenixframework.org/blog/build-a-real-time-twitter-clone-in-15-minutes-with-live-view-and-phoenix-1-5)
 
-  * [Build a real-time Twitch clone with LiveView and Elixir WebRTC](https://www.youtube.com/watch?v=jziOb2Edfzk)
-
   * [Initial announcement](https://dockyard.com/blog/2018/12/12/phoenix-liveview-interactive-real-time-apps-no-need-to-write-javascript)
 
-## Component systems
+## Learning
 
-When you create a new Phoenix project, it comes with a minimal component system to power Phoenix generators.
-In case you want to enrich your developer experience, there are several component systems provided by the
-community at different stages of development:
+See our existing comprehensive [docs](https://hexdocs.pm/phoenix_live_view) and [guides](https://hexdocs.pm/phoenix_live_view/api-reference.html) for more information.
 
-* [Bloom](https://github.com/chrisgreg/bloom): The opinionated, open-source extension to Phoenix Core Components
+## Installation
 
-* [Doggo](https://github.com/woylie/doggo): Headless UI components for Phoenix
-
-* [Petal Components](https://github.com/petalframework/petal_components): Phoenix + Live View HEEX Components
-
-* [PrimerLive](https://github.com/ArthurClemens/primer_live): An implementation of GitHub's Primer Design System using Phoenix LiveView
-
-* [SaladUI](https://github.com/bluzky/salad_ui): Phoenix Liveview component library inspired by shadcn UI
-
-* [Mishka Chelekom](https://github.com/mishka-group/mishka_chelekom): Phoenix + LiveView UI kit and HEEx components
-
-* [Fluxon UI](https://fluxonui.com): Elegant and accessible UI components for Phoenix LiveView
-
-## LiveDebugger
-
-[LiveDebugger](https://github.com/software-mansion/live-debugger) is a debugging tool built specifically for Phoenix LiveView applications. It provides a real-time view into your LiveView processes, making it easier to understand the component hierarchy, inspect assigns, trace lifecycle callbacks, and troubleshoot issues more efficiently.
-
-To get started, follow the setup instructions in the [LiveDebugger repository](https://github.com/software-mansion/live-debugger?tab=readme-ov-file#getting-started).
+LiveView is included by default in all new Phoenix v1.6+ applications and
+later. If you have an older existing Phoenix app and you wish to add
+LiveView, see [the installation guide on HexDocs](https://hexdocs.pm/phoenix_live_view/installation.html).
 
 ## What makes LiveView unique?
 
@@ -150,7 +125,7 @@ Note: The `shim-keyboard-event-key` polyfill is also required for [MS Edge 12-18
 
 Note: The `event-submitter-polyfill` package is also required for [MS Edge 12-80 &amp; Safari &lt; 15.4](https://caniuse.com/mdn-api_submitevent_submitter).
 
-```javascript
+```
 // assets/js/app.js
 import "mdn-polyfills/Object.assign"
 import "mdn-polyfills/CustomEvent"
@@ -191,41 +166,12 @@ $ mix deps.get
 $ mix test
 ```
 
-Running all JavaScript tests:
+Running the Javascript tests:
 ```bash
-$ npm install
-$ npm run setup
+$ cd assets
 $ npm run test
-```
-
-Running the JavaScript unit tests:
-
-```bash
-$ npm run setup
-$ npm run js:test
 # to automatically run tests for files that have been changed
-$ npm run js:test.watch
-```
-
-Running the JavaScript end-to-end tests:
-
-```bash
-$ npm run setup
-$ npm run e2e:test
-```
-
-Checking test coverage:
-
-```bash
-$ npm run cover
-$ npm run cover:report
-```
-
-Format the files:
-
-```bash
-$ mix format
-$ npm run js:format
+$ npm run test.watch
 ```
 
 JS contributions are very welcome, but please do not include an updated `priv/static/phoenix_live_view.js` in pull requests. The maintainers will update it as part of the release process.

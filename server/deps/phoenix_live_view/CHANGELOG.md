@@ -1,552 +1,1370 @@
-# Changelog for v1.1
+# Changelog
 
-## Quick update guide
+## 0.19.5 (2023-07-19)
 
-When updating from LiveView 1.0, you can also use [igniter](https://hexdocs.pm/igniter) to perform the following changes for you:
+### Backwards incompatible changes
+  * The `close/1` callback of `Phoenix.LiveView.UploadWriter` is now `close/2` with the close reason passed as the second argument.
+  * The `write_chunk` callback of `Phoenix.LiveView.UploadWriter` must now return the updated
+    writer state when an error occurs. Instead of `{:error, reason}`, return `{:error, reason, new_state}`.
 
-```bash
-# Prior to / without running `mix deps.update`
-mix igniter.upgrade phoenix_live_view
+### Enhancements
+  * Pass close reason to `Phoenix.LiveView.UploadWriter` close.
+  * Dispatch `phx:navigate` window events when LiveView changes the history state
 
-# Or if you have previously run `mix deps.update phoenix_live_view` or are upgrading from a release candidate.
-mix igniter.apply_upgrades phoenix_live_view:1.0.0:1.1.0
-```
+### Bug fixes
+  * Call `Phoenix.LiveView.UploadWriter` close callback when LiveView goes down or connection is lost
+  * Fix JS.patch to a Phoenix router scope with `:host` causing errors
+  * Fix immediate navigation after patch not updating URL
 
-Here is a quick summary of the changes necessary to upgrade to LiveView v1.1:
+## 0.19.4 (2023-07-10)
 
-1. In your `mix.exs`, update `phoenix_live_view` to latest and add `lazy_html` as a dependency:
+### Enhancements
+  * Introduce `Phoenix.LiveView.UploadWriter`
 
-    ```elixir
-    {:phoenix_live_view, "~> 1.1"},
-    {:lazy_html, ">= 0.0.0", only: :test},
-    ```
+## 0.19.3 (2023-06-21)
 
-   Note you may remove `floki` as a dependency if you don't use it anywhere.
+### Bug fixes
+  * Fix `push_event` inside component update not being sent in some cases
+  * Bring back accidentally deprecated `upload_errors/1`
 
-2. Still in your `mix.exs`, prepend `:phoenix_live_view` to your list of compilers inside `def project`, such as:
+## 0.19.2 (2023-06-12)
 
-    ```elixir
-    compilers: [:phoenix_live_view] ++ Mix.compilers(),
-    ```
+### Bug fixes
+  * Fix issue when `<input name="value" />` is used
 
-3. (optional) In your `config/dev.exs`, find `debug_heex_annotations`, and also add `debug_attributes` for improved annotations:
+## 0.19.1 (2023-06-06)
 
-    ```elixir
-    config :phoenix_live_view,
-      debug_heex_annotations: true,
-      debug_attributes: true,
-      enable_expensive_runtime_checks: true
-    ```
+### Enhancements
+  * Allow `accept` attribute on `<.live_file_input>` to override default values
 
-4. (optional) To enable colocated hooks, you must update `esbuild` with `mix deps.update esbuild` and then update your `config/config.exs` accordingly. In particular, append `--alias:@=.` to the `args` list and pass a list of paths to the `"NODE_PATH"` env var, as shown below:
+### Bug fixes
+  * Fix issue causing anchor clicks to disconnect LV when they were already handled via `preventDefault()` by other scripts
 
-    ```elixir
-    your_app_name: [
-      args:
-        ~w(js/app.js --bundle --target=es2022 --outdir=../priv/static/assets/js --external:/fonts/* --external:/images/* --alias:@=.),
-      env: %{"NODE_PATH" => [Path.expand("../deps", __DIR__), Mix.Project.build_path()]},
-    ```
+## 0.19.0 (2023-05-29)
 
-## Colocated hooks
+### Backwards incompatible changes
+  * Drop support for passing an id to the `phx-feedback-for` attribute. An input name must be passed instead.
+  * Remove previously deprecated `let` attribute. Use `:let` instead
+  * Remove previously deprecated `<%= live_img_preview(entry) %>`. Use `<.live_img_preview entry={entry} />` instead
+  * Remove previously deprecated `<%= live_file_input(upload) %>`. Use `<.live_file_input upload={upload} />` instead
+  * Remove previously deprecated `<%= live_component(Component) %>`. Use `<.live_component module={Component} id=\"hello\" />` instead
 
-LiveView v1.1 introduces colocated hooks to allow writing the hook's JavaScript code in the same file as your regular component code.
+### Enhancements
+  * Support stream resets with bulk insert operations
+  * Support ordered inputs within `inputs_for`, to pair with Ecto's new `sort_param` and `drop_param` casting
+  * Send form phx-value's on form events
 
-A colocated hook is defined by placing the special `:type` attribute on a `<script>` tag:
+### Deprecations
+  * Deprecate passing `:dom_id` to `stream/4` in favor of `stream_configure/3`
+  * Deprecate `render_block/2` in favor of `render_slot/2`
+  * Deprecate `<%= live_img_preview(entry, opts) %>`. Use `<.live_img_preview entry={entry} {opts} />`
+  * Deprecate `<%= live_file_input(upload, opts) %>`. Use `<.live_file_input upload={upload} {opts} />`
+  * Deprecate stateless LiveComponent in favor of function components or in favor of `<.live_component id={...} />` (note the `id` is required)
+
+### Bug fixes
+  * Fix LiveView disconnects when clicking a `download` link
+  * Fix stream deletes not being sent on nested for comprehensions
+  * Fix `phx-disconnected` bindings not firing on mount failures
+  * Support form recovery on forms with only hidden inputs
+
+## 0.18.18 (2023-03-16)
+
+### Bug fixes
+  * Allow `:live_action` to be assigned in a component
+  * Only filter internal function component attributes in `assigns_to_attributes`
+  * Only include submitter with name
+
+### Enhancements
+  * Add `JS.exec` command for executing commands defined on other element attributes
+
+## 0.18.17 (2023-03-09)
+
+### Bug Fixes
+  * Fix callbacks like `handle_info` failing to be invoked in development after a code change with the Phoenix code reloader
+
+### Enhancements
+  * Support [`submitter`](https://developer.mozilla.org/en-US/docs/Web/API/SubmitEvent/submitter) on form submit events.
+  * Avoid compile-time dependency for `attr` when referencing structs
+  * Validate reserved assigns. Attempting to assign `:uploads`, `:streams`, `:live_action`, `:socket`, `:myself` will now raise in `LiveView` and `LiveComponent`
+
+## 0.18.16 (2023-02-23)
+
+### Enhancements
+  * Support streams in Live Components
+  * Optimize plug error translation when a Plug.Exception is raised over connected LiveView
+
+### Bug Fixes
+  * Fix formatter issues when there are multiple HTML comments
+
+## 0.18.15 (2023-02-16)
+
+### Bug Fixes
+  * Fix `JS.transition` applying incorrect classes
+
+### Enhancements
+  * Reset phx-feedback-for errors on `type="reset"` inputs and buttons
+
+## 0.18.14 (2023-02-14)
+
+### Bug Fixes
+  * Fix LiveViewTest failing to find main live view
+
+## 0.18.13 (2023-02-10)
+
+### Enhancements
+  * Improve error message when failing to use Phoenix.Component
+
+## 0.18.12 (2023-02-10)
+
+### Enhancements
+  * Introduce streams for efficiently handling large collections
+  * Allow replies from `:handle_event` lifecycle hooks
+  * Add `<.inputs_for>` component to `Phoenix.Component`
+  * Support replies on lifecycle `:handle_event` hooks
+
+### Bug Fixes
+  * Fix change tracking when re-assigning a defaulted attribute to same default value
+  * Fix upload drag and drop failing to worka after using file select dialog
+  * Fix form recovery when form's first input is phx-change
+
+## 0.18.11 (2023-01-19)
+
+### Bug Fixes
+  * Fix socket unloading connection for forms that have defaulted prevented
+
+## 0.18.10 (2023-01-18)
+
+### Bug Fixes
+  * Fix svg tags with href incorrectly unloading socket on click
+  * Fix form submits with `target="_blank"` incorrectly unloading socket on submit
+
+## 0.18.9 (2023-01-17)
+
+### Bug Fixes
+  * Fix regular form submits failing to be dispatched
+
+## 0.18.8 (2023-01-16)
+
+### Enhancements
+  * Restore scroll position on back when previous navigation was live patch
+
+### Bug Fixes
+  * Fix live layout not being applied until connected render
+
+## 0.18.7 (2023-01-13)
+
+### Bug Fixes
+  * Fix live layout not being applied when passed to `:live_session` during disconnect render
+  * Fix external anchor clicks and links with hashes incorrectly unloading socket
+
+## 0.18.6 (2023-01-09)
+
+### Bug Fixes
+  * Fix external anchor click unloading on external click
+
+## 0.18.5 (2023-01-09)
+
+### Bug Fixes
+  * Fix external anchor click unloading socket
+
+## 0.18.4 (2023-01-05)
+
+### Enhancements
+  * Support string upload name to support dynamically generated `allow_upload`'s
+
+### Bug Fixes
+  * Fix nested LiveView race condition on live patch causing nested child to skip updates in some cases
+  * Fix browser history showing incorrect title when using live navigation with `@page_title`
+  * Fix undefined _target param when using `JS.push` for form changes
+  * Fix `phx-no-feedback` missing from inputs added after a form submit
+  * Fix `phx-disconnected` events firing when navigating away or submitting external forms
+
+## 0.18.3 (2022-10-26)
+
+### Enhancements
+  * Add `embed_templates` to `Phoenix.Component` for embedding template files as function components
+  * Raise on global slot attributes
+
+### Bug Fixes
+  * Fix bug on slots when passing multiple slot entries with mix if/for syntax
+
+## 0.18.2 (2022-10-04)
+
+### Bug Fixes
+  * Fix match error when defining `:values` before `:default`
+  * Allow tuples in external redirects
+  * Fix race condition on dispatching click away when enter is pressed
+  * Fix formatter breaking inline blocks when surrounded by text without whitespace
+
+### Enhancements
+  * Add `intersperse` component for rendering a separator between an enumerable
+
+## 0.18.1 (2022-09-28)
+
+### Bug Fixes
+  * Fix phx-loading class being applied to dead views
+  * Fix `<.live_img_preview />` causing invalid attribute errors on uploads
+  * Do not fire phx events when element is disabled
+
+### Enhancements
+  * Support `:include` option to extend global attributes on a case-by-case basis
+  * Warn when accessing a variable binding defined outside of `~H`
+
+## 0.18.0 (2022-09-20)
+
+LiveView v0.18 includes a major new feature in the form of declarative assigns with new `attr`
+and `slot` APIs for specifying which attributes a function component supports, the type,
+and default values. Attributes and slots are compile-time verified and emit warnings (requires Elixir v1.14.0+).
+
+v0.18 includes a number of new function components which replace their EEx expression
+counterparts `<%= ... %>`. For example, `live_redirect`, `live_patch`, and Phoenix.HTML's
+`link` have been replaced by a unified `Phoenix.Component.link/1` function component:
+
+    <.link href="https://myapp.com">my app</.link>
+    <.link navigate={@path}>remount</.link>
+    <.link patch={@path}>patch</.link>
+
+Those new components live in the `Phoenix.Component` module. `Phoenix.LiveView.Helpers`
+itself has been soft deprecated and all relevant functionality has been migrated.
+You must `import Phoenix.Component` where you previously imported `Phoenix.LiveView.Helpers`
+when upgrading. You may also need to `import Phoenix.Component` where you also imported `Phoenix.LiveView` and some of its functions have been moved to `Phoenix.Component`.
+
+Additionally, the special `let` attribute on function components have been deprecated by
+a `:let` usage.
+
+### Deprecations
+  - `live_redirect` - deprecate in favor of new `<.link navigate={..}>` component of `Phoenix.Component`
+  - `live_patch` - deprecate in favor of new `<.link patch={..}>` component of `Phoenix.Component`
+  - `push_redirect` - deprecate in favor of new `push_navigate` function on `Phoenix.LiveView`
+
+### Enhancements
+  - [Component] Add declarative assigns with compile-time verifications and warnings via `attr`/`slot`
+  - [Component] Add new attrs `:let` and `:for`, and `:if` with HTML tag, function component, and slot support. We still support `let` but the formatter will convert it to `:let` and soon it will be deprecated.
+  - [Component] Add `dynamic_tag` function component
+  - [Component] Add `link` function component
+  - [Component] Add `focus_wrap` function component to wrap focus around content like modals and dialogs for accessibility
+  - [Logger] Add new LiveView logger with telemetry instrumentation for lifecycle events
+  - [JS] Add new JS commands for `focus`, `focus_first`, `push_focus`, and `pop_focus` for accessibility
+  - [Socket] Support sharing `Phoenix.LiveView.Socket` with regular channels via `use Phoenix.LiveView.Socket`
+  - Add `_live_referer` connect param for handling `push_navigate` referal URL
+  - Add new `phx-connected` and `phx-disconnected` bindings for reacting to lifecycle changes
+  - Add dead view support for JS commands
+  - Add dead view support for hooks
+
+### Bug fixes
+  - Fix external upload issue where listeners are not cleaned up when an external failure happens on the client
+  - Do not debounce `phx-blur`
+
+## 0.17.12 (2022-09-20)
+
+### Enhancements
+  - Add support for upcoming Phoenix 1.7 flash interface
+
+## 0.17.11 (2022-07-11)
+
+### Enhancements
+  - Add `replaceTransport` to LiveSocket
+
+### Bug fixes
+  - Cancel debounced events from firing after a live navigation event
+  - Fix hash anchor failing to scroll to anchor element on live navigation
+  - Do not debounce `phx-blur` events
+
+## 0.17.10 (2022-05-25)
+
+### Bug fixes
+  - [Formatter] Preserve single quote delimiter on attrs
+  - [Formatter] Do not format inline elements surrounded by texts without whitespaces
+  - [Formatter] Keep text and eex along when there isn't a whitespace
+  - [Formatter] Fix intentional line breaks after eex expressions
+  - [Formatter] Handle self close tags as inline
+  - [Formatter] Do not format inline elements without whitespaces among them
+  - [Formatter] Do not format when attr contenteditable is present
+
+### Enhancements
+  - [Formatter] Introduce special attr phx-no-format to skip formatting
+
+## 0.17.9 (2022-04-07)
+
+### Bug fixes
+  - Fix sticky LiveViews failing to be patched during live navigation
+  - Do not raise on dynamic `phx-update` value
+
+## 0.17.8 (2022-04-06)
+
+### Enhancements
+  - Add HEEx formatter
+  - Support `phx-change` on individual inputs
+  - Dispatch `MouseEvent` on client
+  - Add `:bubbles` option to `JS.dispatch` to control event bubbling
+  - Expose underlying `liveSocket` instance on hooks
+  - Enable client debug by default on localhost
+
+### Bug fixes
+  - Fix hook and sticky LiveView issues caused by back-to-back live redirects from mount
+  - Fix hook destroyed callback failing to be invoked for children of phx-remove in some cases
+  - Do not failsafe reload the page on push timeout if disconnected
+  - Do not bubble navigation click events to regular phx-click's
+  - No longer generate `csrf_token` for forms without action, reducing the payload during phx-change/phx-submit events
+
+## 0.17.7 (2022-02-07)
+
+### Enhancements
+  - Optimize nested for comprehension diffs
+
+### Bug fixes
+  - Fix error when `live_redirect` links are clicked when not connected in certain cases
+
+## 0.17.6 (2022-01-18)
+
+### Enhancements
+  - Add `JS.set_attribute` and `JS.remove_attribute`
+  - Add `sticky: true` option to `live_render` to maintain a nested child on across live redirects
+  - Dispatch `phx:show-start`, `phx:show-end`, `phx:hide-start` and `phx:hide-end` on `JS.show|hide|toggle`
+  - Add `get_connect_info/2` that also works on disconnected render
+  - Add `LiveSocket` constructor options for configuration failsafe behavior via new `maxReloads`, `reloadJitterMin`, `reloadJitterMax`, `failsafeJitter` options
+
+### Bug fixes
+  - Show form errors after submit even when no changes occur on server
+  - Fix `phx-disable-with` failing to disable elements outside of forms
+  - Fix phx ref tracking leaving elements in awaiting state when targeting an external LiveView
+  - Fix diff on response failing to await for active transitions in certain cases
+  - Fix `phx-click-away` not respecting `phx-target`
+  - Fix "disconnect" broadcast failing to failsafe refresh the page
+  - Fix `JS.push` with `:target` failing to send to correct component in certain cases
+
+### Deprecations
+   - Deprecate `Phoenix.LiveView.get_connect_info/1` in favor of `get_connect_info/2`
+   - Deprecate `Phoenix.LiveViewTest.put_connect_info/2` in favor of calling the relevant functions in `Plug.Conn`
+   - Deprecate returning "raw" values from upload callbacks on `Phoenix.LiveView.consume_uploaded_entry/3` and `Phoenix.LiveView.consume_uploaded_entries/3`. The callback must return either `{:ok, value}` or `{:postpone, value}`. Returning any other value will emit a warning.
+
+## 0.17.5 (2021-11-02)
+
+### Bug fixes
+  - Do not trigger `phx-click-away` if element is not visible
+  - Fix `phx-remove` failing to tear down nested live children
+
+## 0.17.4 (2021-11-01)
+
+### Bug fixes
+  - Fix variable scoping issues causing various content block or duplication rendering bugs
+
+## 0.17.3 (2021-10-28)
+
+### Enhancements
+  - Support 3-tuple for JS class transitions to support staged animations where a transition class is applied with a starting and ending class
+  - Allow JS commands to be executed on DOM nodes outside of the LiveView container
+
+### Optimization
+  - Avoid duplicate statics inside comprehension. In previous versions, comprehensions were able to avoid duplication only in the content of their root. Now we recursively traverse all comprehension nodes and send the static only once for the whole comprehension. This should massively reduce the cost of sending comprehensions over the wire
+
+### Bug fixes
+  - Fix HTML engine bug causing expressions to be duplicated or not rendered correctly
+  - Fix HTML engine bug causing slots to not be re-rendered when they should have
+  - Fix form recovery being sent to wrong target
+
+## 0.17.2 (2021-10-22)
+
+### Bug fixes
+  - Fix HTML engine bug causing attribute expressions to be incorrectly evaluated in certain cases
+  - Fix show/hide/toggle custom display not being restored
+  - Fix default `to` target for `JS.show|hide|dispatch`
+  - Fix form input targeting
+
+## 0.17.1 (2021-10-21)
+
+### Bug fixes
+  - Fix SVG element support for `phx` binding interactions
+
+## 0.17.0 (2021-10-21)
+
+### Breaking Changes
+
+#### `on_mount` changes
+
+The hook API introduced in LiveView 0.16 has been improved based on feedback.
+LiveView 0.17 removes the custom module-function callbacks for the
+`Phoenix.LiveView.on_mount/1` macro and the `:on_mount` option for
+`Phoenix.LiveView.Router.live_session/3` in favor of supporting a custom
+argument. For clarity, the module function to be invoked during the mount
+lifecycle stage will always be named `on_mount/4`.
+
+For example, if you had invoked `on_mount/1` like so:
 
 ```elixir
-alias Phoenix.LiveView.ColocatedHook
+on_mount MyAppWeb.MyHook
+on_mount {MyAppWeb.MyHook, :assign_current_user}
+```
 
-def input(%{type: "phone-number"} = assigns) do
-  ~H"""
-  <input type="text" name={@name} id={@id} value={@value} phx-hook=".PhoneNumber" />
-  <script :type={ColocatedHook} name=".PhoneNumber">
-    export default {
-      mounted() {
-        this.el.addEventListener("input", e => {
-          let match = this.el.value.replace(/\D/g, "").match(/^(\d{3})(\d{3})(\d{4})$/)
-          if(match) {
-            this.el.value = `${match[1]}-${match[2]}-${match[3]}`
-          }
-        })
-      }
-    }
-  </script>
-  """
+and defined your callbacks as:
+
+```elixir
+# my_hook.ex
+
+def mount(_params, _session, _socket) do
+end
+
+def assign_current_user(_params, _session, _socket) do
 end
 ```
 
-Important: LiveView now supports the `phx-hook` attribute to start with a dot (`.PhoneNumber` above) for namespacing. Any hook name starting with a dot is prefixed at compile time with the module name of the component. If you named your hooks with a leading dot in the past, you'll need to adjust this for your hooks to work properly on LiveView v1.1.
+Change the callback to:
 
-Colocated hooks are extracted to a `phoenix-colocated` folder inside your `_build/$MIX_ENV` directory (`Mix.Project.build_path()`). See the quick update section at the top of the changelog on how to adjust your `esbuild` configuration to handle this. With everything configured, you can import your colocated hooks inside of your `app.js` like this:
+```elixir
+# my_hook.ex
 
-```diff
-...
-  import {LiveSocket} from "phoenix_live_view"
-+ import {hooks as colocatedHooks} from "phoenix-colocated/my_app"
-  import topbar from "../vendor/topbar"
-...
-  const liveSocket = new LiveSocket("/live", Socket, {
-    longPollFallbackMs: 2500,
-    params: {_csrf_token: csrfToken},
-+   hooks: {...colocatedHooks}
-  })
+def on_mount(:default, _params, _session, _socket) do
+end
+
+def on_mount(:assign_current_user, _params, _session, _socket) do
+end
 ```
 
-The `phoenix-colocated` folder has subfolders for each application that uses colocated hooks, therefore you'll need to adjust the `my_app` part of the import depending on the name of your project (defined in your `mix.exs`). You can read more about colocated hooks in the module documentation of `Phoenix.LiveView.ColocatedHook`. There's also a more generalized version for colocated JavaScript, see the documentation for `Phoenix.LiveView.ColocatedJS`.
+When given only a module name, the first argument to `on_mount/4` will be the
+atom `:default`.
 
-We're planning to make the private `Phoenix.Component.MacroComponent` API that we use for those features public in a future release.
+#### LEEx templates in stateful LiveComponents
 
-Note: Colocated hooks require Phoenix 1.8+.
+Stateful LiveComponents (where an `:id` is given) must now return HEEx templates
+(`~H` sigil or `.heex` extension). LEEx templates (`~L` sigil or `.leex` extension)
+are no longer supported. This addresses bugs and allows stateful components
+to be rendered more efficiently client-side.
 
-> #### Compilation order {: .info}
->
-> Colocated hooks are only written when the corresponding component is compiled.
-> Therefore, whenever you need to access a colocated hook, you need to ensure
-> `mix compile` runs first. This automatically happens in development.
->
-> If you have a custom mix alias, instead of
->
-> ```
-> release: ["assets.deploy", "release"]
-> ```
->
-> do
->
-> ```
-> release: ["compile", "assets.deploy", "release"]
-> ```
->
-> to ensure that all colocated hooks are extracted before esbuild or any other bundler runs.
->
-> If you have a `Dockerfile` based on `mix phx.gen.release --docker`, ensure that `mix compile` runs before `mix assets.deploy`.
+#### `phx-disconnected` class has been replaced with `phx-loading`
 
-## Change tracking in comprehensions
+Due to a bug in the newly released Safari 15, the previously used `.phx-disconnected` class has been replaced by a new `.phx-loading` class. The reason for the change is `phx.new` included a `.phx-disconnected` rule in the generated `app.css` which triggers the Safari bug. Renaming the class avoids applying the erroneous rule for existing applications. Folks can upgrade by simply renaming their `.phx-disconnected` rules to `.phx-loading`.
 
-One pitfall when rendering collections in LiveView was that they were not change tracked. If you had code like this:
+#### `phx-capture-click` has been deprecated in favor of `phx-click-away`
 
-```heex
-<ul>
-  <li :for={item <- @items}>{item.name}</li>
-</ul>
+The new `phx-click-away` binding replaces `phx-capture-click` and is much more versatile because it can detect "click focus" being lost on containers.
+
+#### Removal of previously deprecated functionality
+
+Some functionality that was previously deprecated has been removed:
+
+  - Implicit assigns in `live_component` do-blocks is no longer supported
+  - Passing a `@socket` to `live_component` will now raise if possible
+
+### Enhancements
+  - Allow slots in function components: they are marked as `<:slot_name>` and can be rendered with `<%= render_slot @slot_name %>`
+  - Add `JS` command for executing JavaScript utility operations on the client with an extended push API
+  - Optimize string attributes:
+    - If the attribute is a string interpolation, such as `<div class={"foo bar #{@baz}"}>`, only the interpolation part is marked as dynamic
+    - If the attribute can be empty, such as "class" and "style", keep the attribute name as static
+  - Add a function component for rendering `Phoenix.LiveComponent`. Instead of `<%= live_component FormComponent, id: "form" %>`, you must now do: `<.live_component module={FormComponent} id="form" />`
+
+### Bug fixes
+  - Fix LiveViews with form recovery failing to properly mount following a reconnect when preceded by a live redirect
+  - Fix stale session causing full redirect fallback when issuing a `push_redirect` from mount
+  - Add workaround for Safari bug causing `<img>` tags with srcset and video with autoplay to fail to render
+  - Support EEx interpolation inside HTML comments in HEEx templates
+  - Support HTML tags inside script tags (as in regular HTML)
+  - Raise if using quotes in attribute names
+  - Include the filename in error messages when it is not possible to parse interpolated attributes
+  - Make sure the test client always sends the full URL on `live_patch`/`live_redirect`. This mirrors the behaviour of the JavaScript client
+  - Do not reload flash from session on `live_redirect`s
+  - Fix select drop-down flashes in Chrome when the DOM is patched during focus
+
+### Deprecations
+  - `<%= live_component MyModule, id: @user.id, user: @user %>` is deprecated in favor of `<.live_component module={MyModule} id={@user.id} user={@user} />`. Notice the new API requires using HEEx templates. This change allows us to further improve LiveComponent and bring new features such as slots to them.
+  - `render_block/2` in deprecated in favor of `render_slot/2`
+
+## 0.16.4 (2021-09-22)
+
+### Enhancements
+  - Improve HEEx error messages
+  - Relax HTML tag validation to support mixed case tags
+  - Support self closing HTML tags
+  - Remove requirement for `handle_params` to be defined for lifecycle hooks
+
+### Bug fixes
+  - Fix pushes failing to include channel `join_ref` on messages
+
+## 0.16.3 (2021-09-03)
+
+### Bug fixes
+  - Fix `on_mount` hooks calling view mount before redirecting when the hook issues a halt redirect.
+
+## 0.16.2 (2021-09-03)
+
+### Enhancements
+  - Improve error messages on tokenization
+  - Improve error message if `@inner_block` is missing
+
+### Bug fixes
+  - Fix `phx-change` form recovery event being sent to wrong component on reconnect when component order changes
+
+## 0.16.1 (2021-08-26)
+
+### Enhancements
+  - Relax `phoenix_html` dependency requirement
+  - Allow testing functional components by passing a function reference
+    to `Phoenix.LiveViewTest.render_component/3`
+
+### Bug fixes
+  - Do not generate CSRF tokens for non-POST forms
+  - Do not add compile-time dependencies on `on_mount` declarations
+
+## 0.16.0 (2021-08-10)
+
+### Security Considerations Upgrading from 0.15
+
+LiveView v0.16 optimizes live redirects by supporting navigation purely
+over the existing WebSocket connection. This is accomplished by the new
+`live_session/3` feature of `Phoenix.LiveView.Router`. The
+[security guide](/guides/server/security-model.md) has always stressed
+the following:
+
+> ... As we have seen, LiveView begins its life-cycle as a regular HTTP
+> request. Then a stateful connection is established. Both the HTTP
+> request and the stateful connection receives the client data via
+> parameters and session. This means that any session validation must
+> happen both in the HTTP request (plug pipeline) and the stateful
+> connection (LiveView mount) ...
+
+These guidelines continue to be valid, but it is now essential that the
+stateful connection enforces authentication and session validation within
+the LiveView mount lifecycle because **a `live_redirect` from the client
+will not go through the plug pipeline** as a hard-refresh or initial HTTP
+render would. This means authentication, authorization, etc that may be
+done in the `Plug.Conn` pipeline must also be performed within the
+LiveView mount lifecycle.
+
+Live sessions allow you to support a shared security model by allowing
+`live_redirect`s to only be issued between routes defined under the same
+live session name. If a client attempts to live redirect to a different
+live session, it will be refused and a graceful client-side redirect will
+trigger a regular HTTP request to the attempted URL.
+
+See the `Phoenix.LiveView.Router.live_session/3` docs for more information
+and example usage.
+
+### New HTML Engine
+
+LiveView v0.16 introduces HEEx (HTML + EEx) templates and the concept of function
+components via `Phoenix.Component`. The new HEEx templates validate the markup in
+the template while also providing smarter change tracking as well as syntax
+conveniences to make it easier to build composable components.
+
+A function component is any function that receives a map of assigns and returns
+a `~H` template:
+
+```elixir
+defmodule MyComponent do
+  use Phoenix.Component
+
+  def btn(assigns) do
+    ~H"""
+    <button class="btn"><%= @text %></button>
+    """
+  end
+end
 ```
 
-When changing `@items`, all elements were re-sent over the wire. LiveView still optimized the static and dynamic parts of the template, but if you had 100 items in your list and only changed a single one (also applies to append, prepend, etc.), LiveView still sent the dynamic parts of all items.
+This component can now be used as in your HEEx templates as:
 
-To improve this, LiveView prior to v1.1 had two solutions:
+    <MyComponent.btn text="Save">
 
-1. Use streams. Streams are not kept in memory on the server and if you `stream_insert` a single item, only that item is sent over the wire. But because the server does not keep any state for streams, this also means that if you update an item in a stream, all the dynamic parts of the updated item are sent again.
-2. Use a LiveComponent for each entry. LiveComponents perform change tracking on their own assigns. So when you update a single item, LiveView only sends a list of component IDs and the changed parts for that item.
+The introduction of HEEx and function components brings a series of deprecation
+warnings, some introduced in this release and others which will be added in the
+future. Note HEEx templates require Elixir v1.12+.
 
-So LiveComponents allow for more granular diffs and also a more declarative approach than streams, but require more memory on the server. Thus, when memory usage is a concern, especially for very large collections, streams should be your first choice. Another downside of LiveComponents is that they require you to write a whole separate module just to get an optimized diff.
+### Upgrading and deprecations
 
-LiveView v1.1 changes how comprehensions are handled to enable change tracking by default. If you only change a single item in a list, only its changes are sent. To do this, LiveView uses an element's index to track changes. This means that if you prepend an entry in a list, all items after the new one will be sent again. To improve this even further, LiveView v1.1 introduces a new `:key` attribute that can be used with `:for`:
+The main deprecation in this release is that the `~L` sigil and the `.leex` extension
+are now soft-deprecated. The docs have been updated to discourage them and using them
+will emit warnings in future releases. We recommend using the `~H` sigil and the `.heex`
+extension for all future templates in your application. You should also plan to migrate
+the old templates accordingly using the recommendations below.
 
-```heex
-<ul>
-  <li :for={item <- @items} :key={item.id}>{item.name}</li>
-</ul>
-```
+Migrating from `LEEx` to `HEEx` is relatively straightforward. There are two main differences.
+First of all, HEEx does not allow interpolation inside tags. So instead of:
 
-LiveView uses the key to efficiently calculate a diff that only contains the new indexes of moved items. Change tracking in comprehensions comes with a slightly increased memory footprint. If memory is a concern, you should think about using streams.
-
-## Types for public interfaces
-
-LiveView v1.1 adds official types to the JavaScript client. This allows IntelliSense to work in editors that support it and is a massive improvement to the user experience when writing JavaScript hooks. If you're not using TypeScript, you can also add the necessary JSDoc hints to your hook definitions, assuming your editor supports them.
-
-Example when defining a hook object that is meant to be passed to the `LiveSocket` constructor:
-
-```javascript
-/**
- * @type {import("phoenix_live_view").HooksOptions}
- */
-let Hooks = {}
-Hooks.PhoneNumber = {
-  mounted() {
-    this.el.addEventListener("input", e => {
-      let match = this.el.value.replace(/\D/g, "").match(/^(\d{3})(\d{3})(\d{4})$/)
-      if(match) {
-        this.el.value = `${match[1]}-${match[2]}-${match[3]}`
-      }
-    })
-  }
-}
-
-let liveSocket = new LiveSocket("/live", Socket, {hooks: Hooks, ...})
-...
-```
-
-Example when defining a hook on its own:
-
-```javascript
-/**
- * @type {import("phoenix_live_view").Hook}
- */
-Hooks.InfiniteScroll = {
-  page() { return this.el.dataset.page },
-  mounted(){
-    this.pending = this.page()
-    window.addEventListener("scroll", e => {
-      if(this.pending == this.page() && scrollAt() > 90){
-        this.pending = this.page() + 1
-        this.pushEvent("load-more", {})
-      }
-    })
-  },
-  updated(){ this.pending = this.page() }
-}
-```
-
-Also, hooks can now be defined as a subclass of `ViewHook`, if you prefer [native classes](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/class):
-
-```javascript
-import { LiveSocket, ViewHook } from "phoenix_live_view"
-
-class MyHook extends ViewHook {
-  mounted() {
-    ...
-  }
-}
-
-let liveSocket = new LiveSocket(..., {
-  hooks: {
-    MyHook
-  }
-})
-```
-
-Using [`@types/phoenix_live_view`](https://www.npmjs.com/package/@types/phoenix_live_view) (not maintained by the Phoenix team) is no longer necessary.
-
-## `<.portal>` component
-
-When designing reusable HTML components for UI elements like tooltips or dialogs, it is sometimes necessary to render a part of a component's template outside of the regular DOM hierarchy of that component, for example to prevent clipping due to CSS rules like `overflow: hidden` that are not controlled by the component itself. Modern browser APIs for rendering elements in [the top layer](https://developer.mozilla.org/en-US/docs/Glossary/Top_layer) can help in many cases, but if you cannot use those for whatever reasons, LiveView previously did not have a solution to solve that problem. In LiveView v1.1, we introduce a new `Phoenix.Component.portal/1` component:
-
-```heex
-<%!-- in some nested LiveView or component --%>
-<.portal id="my-element" target="body">
-  <%!-- any content here will be teleported into the body tag --%>
-</.portal>
-```
-
-Any element can be teleported, even LiveComponents and nested LiveViews, and any `phx-*` events from inside a portal will still be handled by the correct LiveView. This is similar to [`<Teleport>` in Vue.js](https://vuejs.org/guide/built-ins/teleport) or [`createPortal` in React](https://react.dev/reference/react-dom/createPortal).
-
-As a demo, we created [an example for implementing tooltips using `Phoenix.Component.portal`](https://gist.github.com/SteffenDE/f599405c7c2eddbb14723ed4f3b7213f) as a single-file Elixir script. When saved as `portal.exs`, you can execute it as `elixir portal.exs` and visit `http://localhost:5001` in your browser.
-
-## `JS.ignore_attributes`
-
-Sometimes it is useful to prevent some attributes from being patched by LiveView. One example where this frequently came up is when using a native `<dialog>` or `<details>` element that is controlled by the `open` attribute, which is special in that it is actually set (and removed) by the browser. Previously, LiveView would remove those attributes on update and required additional patching, now you can simply call `JS.ignore_attributes` in the `phx-mounted` attribute:
-
-```heex
-<details phx-mounted={JS.ignore_attributes(["open"])}>
-  <summary>...</summary>
+```elixir
+<div id="<%= @id %>">
   ...
-</details>
+</div>
 ```
 
-## Moving from Floki to LazyHTML
+One should use the HEEx syntax:
 
-LiveView v1.1 moves to [LazyHTML](https://hexdocs.pm/lazy_html/) as the HTML engine used by `LiveViewTest`. LazyHTML is based on [lexbor](https://github.com/lexbor/lexbor) and allows the use of modern CSS selector features, like `:is()`, `:has()`, etc. to target elements. Lexbor's stated goal is to create output that "should match that of modern browsers, meeting industry specifications".
-
-This is a mostly backwards compatible change. The only way in which this affects LiveView projects is when using Floki specific selectors (`fl-contains`, `fl-icontains`), which will not work any more in selectors passed to LiveViewTest's [`element/3`](https://hexdocs.pm/phoenix_live_view/Phoenix.LiveViewTest.html#element/3) function. In most cases, the `text_filter` option of [`element/3`](https://hexdocs.pm/phoenix_live_view/Phoenix.LiveViewTest.html#element/3) should be a sufficient replacement, which has been available since LiveView v0.12.
-
-Note that in Phoenix versions prior to v1.8, the `phx.gen.auth` generator used the Floki specific `fl-contains` selector in its generated tests in two instances, so if you used the `phx.gen.auth` generator to scaffold your authentication solution, those tests will need to be adjusted when updating to LiveView v1.1. In both cases, changing to use the `text_filter` option is enough to get you going again:
-
-```diff
- {:ok, _login_live, login_html} =
-   lv
--  |> element(~s|main a:fl-contains("Sign up")|)
-+  |> element("main a", "Sign up")
-   |> render_click()
-   |> follow_redirect(conn, ~p"<%= schema.route_prefix %>/register")
+```elixir
+<div id={@id}>
+  ...
+</div>
 ```
 
-If you're using Floki itself in your tests through its API (`Floki.parse_document`, `Floki.find`, etc.), you are not required to rewrite them when you update to LiveView v1.1.
+The other difference is in regards to `form_for`. Some templates may do the following:
 
-## Slot and line annotations
+```elixir
+~L"""
+<%= f = form_for @changeset, "#" %>
+  <%= input f, :foo %>
+</form>
+"""
+```
 
-When `:debug_heex_annotations` is enabled, LiveView will now annotate the beginning and end of each slot. A new `:debug_attributes` option has also been added, which adds the starting line of each tag as a `data-phx-loc` attribute. It also adds the LiveView PID to the root element of each LiveView. The goal is to provide more precise information to tools.
+However, when converted to `~H`, it is not valid HTML: there is a `</form>` tag but
+its opening is hidden inside the Elixir code. On LiveView v0.16, there is a function
+component named `form`:
 
-To enable this, a new callback called `annotate_slot/4` was added. Custom implementations of `Phoenix.LiveView.TagEngine` must implement it accordingly.
+```elixir
+~H"""
+<.form :let={f} for={@changeset}>
+  <%= input f, :foo %>
+</.form>
+"""
+```
 
-## v1.1.22 (2026-01-28)
+We understand migrating all templates from `~L` to `~H` can be a daunting task.
+Therefore we plan to support `~L` in LiveViews for a long time. However, we can't
+do the same for stateful LiveComponents, as some important client-side features and
+optimizations will depend on the `~H` sigil. Therefore **our recommendation is to
+replace `~L` by `~H` first in live components**, particularly stateful live components.
+
+Furthermore, stateless `live_component` (i.e. live components without an `:id`)
+will be deprecated in favor of the new function components. Our plan is to support
+them for a reasonable period of time, but you should avoid creating new ones in
+your application.
+
+### Breaking Changes
+
+LiveView 0.16 removes the `:layout` and `:container` options from
+`Phoenix.LiveView.Routing.live/4` in favor of the `:root_layout`
+and `:container` options on `Phoenix.Router.live_session/3`.
+
+For instance, if you have the following in LiveView 0.15 and prior:
+
+```elixir
+live "/path", MyAppWeb.PageLive, layout: {MyAppWeb.LayoutView, "custom_layout.html"}
+```
+
+Change it to:
+
+```elixir
+live_session :session_name, root_layout: {MyAppWeb.LayoutView, "custom_layout.html"} do
+  live "/path", MyAppWeb.PageLive
+end
+```
+
+On the client, the `phoenix_live_view` package no longer provides a default export for `LiveSocket`.
+
+If you have the following in your JavaScript entrypoint (typically located at `assets/js/app.js`):
+
+```js
+import LiveSocket from "phoenix_live_view"
+```
+
+Change it to:
+
+```js
+import { LiveSocket } from "phoenix_live_view"
+```
+
+Additionally on the client, the root LiveView element no longer exposes the
+LiveView module name, therefore the `phx-view` attribute is never set.
+Similarly, the `viewName` property of client hooks has been removed.
+
+Codebases calling a custom function `component/3` should rename it or specify its module to avoid a conflict,
+as LiveView introduces a macro with that name and it is special cased by the underlying engine.
+
+### Enhancements
+  - Introduce HEEx templates
+  - Introduce `Phoenix.Component`
+  - Introduce `Phoenix.Router.live_session/3` for optimized live redirects
+  - Introduce `on_mount` and `attach_hook` hooks which provide a mechanism to tap into key stages of the LiveView lifecycle
+  - Add upload methods to client-side hooks
+  - [Helpers] Optimize `live_img_preview` rendering
+  - [Helpers] Introduce `form` function component which wraps `Phoenix.HTML.form_for`
+  - [LiveViewTest] Add `with_target` for scoping components directly
+  - [LiveViewTest] Add `refute_redirected`
+  - [LiveViewTest] Support multiple `phx-target` values to mirror JS client
+  - [LiveViewTest] Add `follow_trigger_action`
+  - [JavaScript Client] Add `sessionStorage` option `LiveSocket` constructor to support client storage overrides
+  - [JavaScript Client] Do not failsafe reload the page in the background when a tab is unable to connect if the page is not visible
+
 
 ### Bug fixes
+  - Make sure components are loaded on `render_component` to ensure all relevant callbacks are invoked
+  - Fix `Phoenix.LiveViewTest.page_title` returning `nil` in some cases
+  - Fix buttons being re-enabled when explicitly set to disabled on server
+  - Fix live patch failing to update URL when live patch link is patched again via `handle_params` within the same callback lifecycle
+  - Fix `phx-no-feedback` class not applied when page is live-patched
+  - Fix `DOMException, querySelector, not a valid selector` when performing DOM lookups on non-standard IDs
+  - Fix select dropdown flashing close/opened when assigns are updated on Chrome/macOS
+  - Fix error with multiple `live_file_input` in one form
+  - Fix race condition in `showError` causing null `querySelector`
+  - Fix statics not resolving correctly across recursive diffs
+  - Fix no function clause matching in `Phoenix.LiveView.Diff.many_to_iodata`
+  - Fix upload input not being cleared after files are uploaded via a component
+  - Fix channel crash when uploading during reconnect
+  - Fix duplicate progress events being sent for large uploads
 
-* Fix live component container patch throwing a JavaScript error when container is locked ([#4088](https://github.com/phoenixframework/phoenix_live_view/issues/4088))
+### Deprecations
+  - Implicit assigns when passing a `do-end` block to `live_component` is deprecated
+  - The `~L` sigil and the `.leex` extension are now soft-deprecated in favor of `~H` and `.heex`
+  - Stateless live components (a `live_component` call without an `:id`) are deprecated in favor of the new function component feature
 
-## v1.1.21 (2026-01-27)
+## 0.15.7 (2021-05-24)
 
 ### Bug fixes
+  - Fix broken webpack build throwing missing morphdom dependency
 
-* Fix stream reset and deletes not working if stream is teleported using `Phoenix.Component.portal/1` ([#4121](https://github.com/phoenixframework/phoenix_live_view/issues/4121))
+## 0.15.6 (2021-05-24)
+
+### Bug fixes
+  - Fix live patch failing to update URL when live patch link is patched again from `handle_params`
+  - Fix regression in `LiveViewTest.render_upload/3` when using channel uploads and progress callback
+  - Fix component uploads not being cleaned up on remove
+  - Fix `KeyError` on LiveView reconnect when an active upload was previously in progress
+
+### Enhancements
+  - Support function components via `component/3`
+  - Optimize progress events to send less messages for larger file sizes
+  - Allow session and local storage client overrides
+
+### Deprecations
+  - Deprecate `@socket/socket` argument on `live_component/3` call
+
+## 0.15.5 (2021-04-20)
+
+### Enhancements
+  - Add `upload_errors/1` for returning top-level upload errors
+
+### Bug fixes
+  - Fix `consume_uploaded_entry/3` with external uploads causing inconsistent entries state
+  - Fix `push_event` losing events when a single diff produces multiple events from different components
+  - Fix deep merging of component tree sharing
+
+## 0.15.4 (2021-01-26)
+
+### Bug fixes
+  - Fix nested `live_render`'s causing remound of child LiveView even when ID does not change
+  - Do not attempt push hook events unless connected
+  - Fix preflighted refs causing `auto_upload: true` to fail to submit form
+  - Replace single upload entry when `max_entries` is 1 instead of accumulating multiple file selections
+  - Fix `static_path` in `open_browser` failing to load stylesheets
+
+## 0.15.3 (2021-01-02)
+
+### Bug fixes
+  - Fix `push_redirect` back causing timeout on the client
+
+## 0.15.2 (2021-01-01)
+
+### Backwards incompatible changes
+  - Remove `beforeDestroy` from `phx-hook` callbacks
+
+### Bug fixes
+  - Fix form recovery failing to send input on first connection failure
+  - Fix hooks not getting remounted after LiveView reconnect
+  - Fix hooks `reconnected` callback being fired with no prior disconnect
+
+## 0.15.1 (2020-12-20)
+
+### Enhancements
+  - Ensure all click events bubble for mobile Safari
+  - Run `consume_uploaded_entries` in LiveView caller process
+
+### Bug fixes
+  - Fix hooks not getting remounted after LiveView recovery
+  - Fix bug causing reload with jitter on timeout from previously closed channel
+  - Fix component child nodes being lost when component patch goes from single root node to multiple child siblings
+  - Fix `phx-capture-click` triggering on mouseup during text selection
+  - Fix LiveView `push_event`'s not clearing up in components
+  - Fix `<textarea>` being patched by LiveView while focused
+
+## 0.15.0 (2020-11-20)
+
+### Enhancements
+  - Add live uploads support for file progress, interactive file selection, and direct to cloud support
+  - Implement `Phoenix.LiveViewTest.open_browser/2` that opens up a browser with the LiveView page
+
+### Backwards incompatible changes
+  - Remove `@inner_content` in components and introduce `render_block` for rendering component `@inner_block`
+  - Remove `@live_module` in socket templates in favor of `@socket.view`
+
+### Bug fixes
+  - Make sure URLs are decoded after they are split
+  - Do not recover forms without inputs
+  - Fix race condition when components are removed and then immediately re-added before the client can notify their CIDs have been destroyed
+  - Do not render LiveView if only events/replies have been added to the socket
+  - Properly merge different components when sharing component subtrees on initial render
+  - Allow variables inside do-blocks to be tainted
+  - Fix `push_redirect` from mount hanging on the client and causing a fallback to full page reload when following a clicked `live_redirect` on the client
+
+## 0.14.8 (2020-10-30)
+
+### Bug fixes
+  - Fix compatibility with latest Plug
+
+## 0.14.7 (2020-09-25)
+
+### Bug fixes
+  - Fix `redirect(socket, external: ...)` when returned from an event
+  - Properly follow location hashes on live patch/redirect
+  - Fix failure in `Phoenix.LiveViewTest` when `phx-update` has non-HTML nodes as children
+  - Fix `phx_trigger_action` submitting the form before the DOM updates are complete
+
+## 0.14.6 (2020-09-21)
+
+### Bug fixes
+  - Fix race condition on `phx-trigger-action` causing reconnects before server form submit
+
+## 0.14.5 (2020-09-20)
 
 ### Enhancements
 
-* Mark LiveView template code as generated to prevent warnings on Elixir 1.20
-* Allow unused function warnings for function components to be emitted
-* Add `Phoenix.LiveView.TagEngine.compile/2` as an official entrypoint for compiling templates in favor of relying on the `EEx.Engine` behaviour
-
-## v1.1.20 (2026-01-14)
+  - Optimize DOM prepend and append operations
+  - Add `Phoenix.LiveView.send_update_after/3`
 
 ### Bug fixes
+  - Fix scroll position when using back/forward with `live_redirect`'s
+  - Handle recursive components when generating diffs
+  - Support hard redirects on mount
+  - Properly track nested components on deletion on `Phoenix.LiveViewTest`
 
-* Fix `redirect` in `handle_params` for client-initiated patches causing a JS exception ([#4094](https://github.com/phoenixframework/phoenix_live_view/pull/4094))
-* Fix events initiated from elements teleported outside of a LiveComponent being sent to the LiveView instead of the LiveComponent ([#4101](https://github.com/phoenixframework/phoenix_live_view/issues/4101))
-* Ensure `HooksOptions` accepts non-default typed hooks ([#4099](https://github.com/phoenixframework/phoenix_live_view/pull/4099))
-* Prevent portal content from disappearing in rare cases ([#4095](https://github.com/phoenixframework/phoenix_live_view/pull/4095))
-* Fix `<form>` submission to a controller from inside a portal not working ([#4107](https://github.com/phoenixframework/phoenix_live_view/issues/4107))
-* Prevent JS crash when debouncing inputs attached to a form with the `form="..."` attribute ([#4102](https://github.com/phoenixframework/phoenix_live_view/issues/4102))
-* Fix `UploadClient` (from LiveViewTest) crashing when receiving a `:socket_close` message ([#4079](https://github.com/phoenixframework/phoenix_live_view/issues/4079))
-* Allow `live_file_input` to update attributes ([#4078](https://github.com/phoenixframework/phoenix_live_view/issues/4078))
-* Fix invalid HTML when setting LiveView `:container` option to `:body` ([#3932](https://github.com/phoenixframework/phoenix_live_view/issues/3932))
-
-## v1.1.19 (2025-12-12)
+## 0.14.4 (2020-07-30)
 
 ### Bug fixes
+  - Fix hidden inputs throwing selection range error
 
-* Ensure stale token redirect uses the correct URL ([#4068](https://github.com/phoenixframework/phoenix_live_view/issues/4068))
-* Ignore events from elements that are not connected to the DOM ([#4066](https://github.com/phoenixframework/phoenix_live_view/issues/4066))
-* Skip `phx-click-away` if clicked element is hidden ([#4070](https://github.com/phoenixframework/phoenix_live_view/issues/4070))
+## 0.14.3 (2020-07-24)
 
 ### Enhancements
-
-* Allow disabling symlink warning for colocated js ([#4057](https://github.com/phoenixframework/phoenix_live_view/pull/4057))
-
-## v1.1.18 (2025-11-25)
+  - Support `render_layout` with LiveEEx
 
 ### Bug fixes
+  - Fix focused inputs being overwritten by latent patch
+  - Fix LiveView error when `"_target"` input name contains array
+  - Fix change tracking when passing a do-block to components
 
-* Fix boolean attributes not being properly ignored when using `JS.ignore_attributes` ([#4049](https://github.com/phoenixframework/phoenix_live_view/pull/4049))
+## 0.14.2 (2020-07-21)
+
+### Bug fixes
+  - Fix Map of assigns together with `@inner_content` causing `no function clause matching in Keyword.put/3` error
+  - Fix `LiveViewTest` failing to patch children properly for append/prepend based phx-update's
+  - Fix argument error when providing `:as` option to a `live` route
+  - Fix page becoming unresponsive when the server crashes while handling a live patch
+  - Fix empty diff causing pending data-ref based updates, such as classes and `phx-disable-with` content to not be updated
+  - Fix bug where throttling keydown events would eat key presses
+  - Fix `<textarea>`'s failing to be disabled on form submit
+  - Fix text node DOM memory leak when using `phx-update` append/prepend
 
 ### Enhancements
+  - Allow `:router` to be given to `render_component`
+  - Display file on compile warning for `~L`
+  - Log error on client when using a hook without a DOM ID
+  - Optimize `phx-update` append/prepend based DOM updates
 
-* [Phoenix.Component.assign/2] allow passing a function as second argument assign(socket, fn _existing_assigns -> %{this_gets: "merged"} end) ([#4051](https://github.com/phoenixframework/phoenix_live_view/pull/4051))
-* Annotate `phx-drop-target` elements with the `phx-drop-target-active` class when items are being dropped ([#4012](https://github.com/phoenixframework/phoenix_live_view/pull/4012))
-* Add `onDocumentPatch` dom callback and allow specifying the event dispatch phase ([#4043](https://github.com/phoenixframework/phoenix_live_view/pull/4043))
-  This allows users to use view transitions, see [the linked gist in the PR](https://gist.github.com/SteffenDE/cf7cdb91ba037b08cdc583763e4ffc69).
-* Warn in `createHook` if passed element has no ID ([#4010](
-  https://github.com/phoenixframework/phoenix_live_view/pull/4010))
-* Allow `Phoenix.Component.portal/1` to be nested ([#4048](https://github.com/phoenixframework/phoenix_live_view/pull/4048))
-* Add `phx-viewport-overrun-target` to make infinitely scrolled tables easier to implement ([#4053](https://github.com/phoenixframework/phoenix_live_view/pull/4053)) ([Example](https://gist.github.com/SteffenDE/613125993362e30443e58558aa3c8ba0))
-* Allow to disable the symlink warning for colocated js ([#4057](https://github.com/phoenixframework/phoenix_live_view/pull/4057))
-
-## v1.1.17 (2025-11-04)
+## 0.14.1 (2020-07-09)
 
 ### Bug fixes
-* noop in empty live reloader config
+  - Fix nested `live_render`'s failing to be torn down when removed from the DOM in certain cases
+  - Fix LEEx issue for nested conditions failing to be re-evaluated
 
-## v1.1.16 (2025-10-22)
-
-### Bug fixes
-
-* Fix `phx-disable-with` restoring whitespace improperly (regression in 1.1.15)
-
-## v1.1.15 (2025-10-21)
+## 0.14.0 (2020-07-07)
 
 ### Bug fixes
-
-* Fix form recovery not sending elements with `form="..."` attribute when using Firefox ([#4021](https://github.com/phoenixframework/phoenix_live_view/issues/4021))
-* Fix keyed comprehension merging in LiveComponents ([#4027](https://github.com/phoenixframework/phoenix_live_view/issues/4027))
-* Use `textContent` instead of `innerText` when restoring `phx-disable-with` text to avoid issues with CSS transforms ([#4015](https://github.com/phoenixframework/phoenix_live_view/issues/4015))
+  - Fix IE11 issue where `document.activeElement` creates a null reference
+  - Fix setup and teardown of root views when explicitly calling `liveSocket.disconnect()` followed by `liveSocket.connect()`
+  - Fix `error_tag` failing to be displayed for non-text based inputs such as selects and checkboxes as the `phx-no-feedback` class was always applied
+  - Fix `phx-error` class being applied on `live_redirect`
+  - Properly handle Elixir's special variables, such as `__MODULE__`
+  - No longer set disconnected class during patch
+  - Track flash keys to fix back-to-back flashes from being discarded
+  - Properly handle empty component diffs in the client for cases where the component has already been removed on the server
+  - Make sure components in nested live views do not conflict
+  - Fix `phx-static` not being sent from the client for child views
+  - Do not fail when trying to delete a view that was already deleted
+  - Ensure `beforeDestroy` is called on hooks in children of a removed element
 
 ### Enhancements
+  - Allow the whole component static subtree to be shared when the component already exists on the client
+  - Add telemetry events to `mount`, `handle_params`, and `handle_event`
+  - Add `push_event` for pushing events and data from the server to the client
+  - Add client `handleEvent` hook method for receiving events pushed from the server
+  - Add ability to receive a reply to a `pushEvent` from the server via `{:reply, map, socket}`
+  - Use event listener for popstate to avoid conflicting with user-defined popstate handlers
+  - Log error on client when rendering a component with no direct DOM children
+  - Make `assigns.myself` a struct to catch mistakes
+  - Log if component doesn't exist on `send_update`, raise if module is unavailable
 
-* Allow attaching `handle_async` hooks on LiveComponents ([#4018](https://github.com/phoenixframework/phoenix_live_view/pull/4018))
-
-## v1.1.14 (2025-10-07)
+## 0.13.3 (2020-06-04)
 
 ### Bug fixes
-
-* Fix form recovery not working when form is teleported ([#4009](https://github.com/phoenixframework/phoenix_live_view/pull/4009))
-* Fix `handle_event` hook not being able to return `{:halt, reply, socket}` in LiveComponents ([#4006](https://github.com/phoenixframework/phoenix_live_view/pull/4006))
-* Only set title to default when it is set to empty by the main view, not by nested or sticky views ([#4003](https://github.com/phoenixframework/phoenix_live_view/issues/4003))
+  - Fix duplicate debounced events from being triggered on blur with timed debounce
+  - Fix client error when `live_redirect`ed route results in a redirect to a non-live route on the server
+  - Fix DOM siblings being removed when a rootless component is updated
+  - Fix debounced input failing to send last change when blurred via Tab, Meta, or other non-printable keys
 
 ### Enhancements
+  - Add `dom` option to `LiveSocket` with `onBeforeElUpdated` callback for external client library support of broad DOM operations
 
-* Automatically update esbuild version when using Igniter upgrader from 1.0 to 1.1 ([#4011](https://github.com/phoenixframework/phoenix_live_view/pull/4011))
-* Fix unused require warnings on Elixir 1.19
-
-## v1.1.13 (2025-09-18)
+## 0.13.2 (2020-05-27)
 
 ### Bug fixes
+  - Fix a bug where swapping a root template with components would cause the LiveView to crash
 
-* Fix invalid stream merging in LiveViewTest ([#3993](https://github.com/phoenixframework/phoenix_live_view/issues/3993))
-* Fix extra spaces when formatting nested inline tags ([#3995](https://github.com/phoenixframework/phoenix_live_view/pull/3995))
-* Ensure error reasons are serialized into message on the client ([#3984](https://github.com/phoenixframework/phoenix_live_view/pull/3984))
-* Prevent JavaScript exception when passing `"*"` to `JS.ignore_attributes/3` ([#3996](https://github.com/phoenixframework/phoenix_live_view/issues/3996))
-
-## v1.1.12 (2025-09-14)
+## 0.13.1 (2020-05-26)
 
 ### Bug fixes
-
-* Prevent HEEx line from being reported as uncovered when using a pattern in `:let={}` ([#3989](https://github.com/phoenixframework/phoenix_live_view/pull/3989))
+  - Fix forced page refresh when `push_redirect` from a `live_redirect`
 
 ### Enhancements
+  - Optimize component diffs to avoid sending empty diffs
+  - Optimize components to share static values
+  - [LiveViewTest] Automatically synchronize before render events
 
-* Automatically symlink `assets/node_modules` folder for colocated hooks (see the documentation for `Phoenix.LiveView.ColocatedJS`, [#3988](https://github.com/phoenixframework/phoenix_live_view/pull/3988))
+## 0.13.0 (2020-05-21)
 
-## v1.1.11 (2025-09-04)
+### Backwards incompatible changes
+  - No longer send event metadata by default. Metadata is now opt-in and user defined at the `LiveSocket` level.
+  To maintain backwards compatibility with pre-0.13 behaviour, you can provide the following metadata option:
+
+  ```
+  let liveSocket = new LiveSocket("/live", Socket, {
+    params: {_csrf_token: csrfToken},
+    metadata: {
+      click: (e, el) => {
+        return {
+          altKey: e.altKey,
+          shiftKey: e.shiftKey,
+          ctrlKey: e.ctrlKey,
+          metaKey: e.metaKey,
+          x: e.x || e.clientX,
+          y: e.y || e.clientY,
+          pageX: e.pageX,
+          pageY: e.pageY,
+          screenX: e.screenX,
+          screenY: e.screenY,
+          offsetX: e.offsetX,
+          offsetY: e.offsetY,
+          detail: e.detail || 1,
+        }
+      },
+      keydown: (e, el) => {
+        return {
+          altGraphKey: e.altGraphKey,
+          altKey: e.altKey,
+          code: e.code,
+          ctrlKey: e.ctrlKey,
+          key: e.key,
+          keyIdentifier: e.keyIdentifier,
+          keyLocation: e.keyLocation,
+          location: e.location,
+          metaKey: e.metaKey,
+          repeat: e.repeat,
+          shiftKey: e.shiftKey
+        }
+      }
+    }
+  })
+  ```
 
 ### Bug fixes
-
-* Fix LiveComponents being destroyed when their DOM ID changes, even though they are still rendered ([#3981](https://github.com/phoenixframework/phoenix_live_view/pull/3981))
-* Fix warning when an empty comprehension is rendered in LiveViewTest
+  - Fix error caused by Chrome sending a keydown event on native UI autocomplete without a `key`
+  - Fix server error when a live navigation request issues a redirect
+  - Fix double window bindings when explicit calls to LiveSocket connect/disconnect/connect
 
 ### Enhancements
+  - Add `Phoenix.LiveView.get_connect_info/1`
+  - Add `Phoenix.LiveViewTest.put_connect_info/2` and `Phoenix.LiveViewTest.put_connect_params/2`
+  - Add support for tracking static asset changes on the page across cold server deploys
+  - Add support for passing a `@myself` target to a hook's `pushEventTo` target
+  - Add configurable metadata for events with new `metadata` LiveSocket option
+  - Add `"_mounts"` key in connect params which specifies the number of times a LiveView has mounted
 
-* Speed up duplicate ID check in LiveViewTest ([#3962](https://github.com/phoenixframework/phoenix_live_view/pull/3962))
-
-## v1.1.10 (2025-09-03)
-
-### Bug fixxes
-
-* Regression in v1.1.9 - fix `Phoenix.LiveViewTest.submit_form/2` and `Phoenix.LiveViewTest.follow_trigger_action/2` crashing when using keywords lists and not properly handling atom keys ([#3975](https://github.com/phoenixframework/phoenix_live_view/issues/3975))
-
-## v1.1.9 (2025-09-02)
+## 0.12.1 (2020-04-19)
 
 ### Bug fixes
+  - Fix component `innerHTML` being discarded when a sibling DOM element appears above it, in cases where the component lacks a DOM ID
+  - Fix Firefox reconnecting briefly during hard redirects
+  - Fix `phx-disable-with` and other pending attributes failing to be restored when an empty patch is returned by server
+  - Ensure LiveView module is loaded before mount to prevent first application request logging errors if the very first request is to a connected LiveView
 
-* Fix moved comprehension diff crashing LiveViewTest ([#3963](https://github.com/phoenixframework/phoenix_live_view/pull/3963))
-* Ensure `push_patch` works during form recovery ([#3964](https://github.com/phoenixframework/phoenix_live_view/issues/3964))
-* Fix diff crash in LiveViewTest when rendering structs ([#3970](https://github.com/phoenixframework/phoenix_live_view/pull/3970))
+## 0.12.0 (2020-04-16)
+
+This version of LiveView comes with an overhaul of the testing module, more closely integrating your LiveView template with your LiveView events. For example, in previous versions, you could write this test:
+
+  ```elixir
+  render_click(live_view, "increment_by", %{by: 1})
+  ```
+
+However, there is no guarantee that there is any element on the page with a `phx-click="increment"` attribute and `phx-value-by` set to 1. With LiveView 0.12.0, you can now write:
+
+  ```elixir
+  live_view
+  |> element("#term .buttons a", "Increment")
+  |> render_click()
+  ```
+
+The new implementation will check there is a button at `#term .buttons a`, with "Increment" as text, validate that it has a `phx-click` attribute and automatically submit to it with all relevant `phx-value` entries. This brings us closer to integration/acceptance test frameworks without any of the overhead and complexities of running a headless browser.
 
 ### Enhancements
-
-* Include form values from DOM in `Phoenix.LiveViewTest.submit_form/2` and `Phoenix.LiveViewTest.follow_trigger_action/2` to mimic browser behavior ([#3885](https://github.com/phoenixframework/phoenix_live_view/issues/3885))
-* Allow assigning generic hooks to type `Hook` ([#3955](https://github.com/phoenixframework/phoenix_live_view/issues/3955))
-* Allow typing hook element when using TypeScript ([#3956](https://github.com/phoenixframework/phoenix_live_view/issues/3956))
-* Add more metadata to `phx:page-loading-start` event in case of errors ([#3910](https://github.com/phoenixframework/phoenix_live_view/issues/3910))
-
-## v1.1.8 (2025-08-20)
+  - Add `assert_patch/3` and `assert_patched/2` for asserting on patches
+  - Add `follow_redirect/3` to automatically follow redirects from `render_*` events
+  - Add `phx-trigger-action` form annotation to trigger an HTTP form submit on next DOM patch
 
 ### Bug fixes
+  - Fix `phx-target` `@myself` targeting a sibling LiveView component with the same component ID
+  - Fix `phx:page-loading-stop` firing before the DOM patch has been performed
+  - Fix `phx-update="prepend"` failing to properly patch the DOM when the same ID is updated back to back
+  - Fix redirects on mount failing to copy flash
 
-* Fix race condition where patches were discarded when a join was still pending ([#3957](https://github.com/phoenixframework/phoenix_live_view/issues/3957), big thank you to [@DaTrader](https://github.com/DaTrader))
+### Backwards incompatible changes
+  - `phx-error-for` has been removed in favor of `phx-feedback-for`. `phx-feedback-for` will set a `phx-no-feedback` class whenever feedback has to be hidden
+  - `Phoenix.LiveViewTest.children/1` has been renamed to `Phoenix.LiveViewTest.live_children/1`
+  - `Phoenix.LiveViewTest.find_child/2` has been renamed to `Phoenix.LiveViewTest.find_live_child/2`
+  - `Phoenix.LiveViewTest.assert_redirect/3` no longer matches on the flash, instead it returns the flash
+  - `Phoenix.LiveViewTest.assert_redirect/3` no longer matches on the patch redirects, use `assert_patch/3` instead
+  - `Phoenix.LiveViewTest.assert_remove/3` has been removed. If the LiveView crashes, it will cause the test to crash too
+  - Passing a path with DOM IDs to `render_*` test functions is deprecated. Furthermore, they now require a `phx-target="<%= @id %>"` on the given DOM ID:
 
-## v1.1.7 (2025-08-18)
+    ```heex
+    <div id="component-id" phx-target="component-id">
+      ...
+    </div>
+    ```
+
+    ```elixir
+    html = render_submit([view, "#component-id"], event, value)
+    ```
+
+    In any case, this API is deprecated and you should migrate to the new element based API.
+
+## 0.11.1 (2020-04-08)
 
 ### Bug fixes
+  - Fix readonly states failing to be undone after an empty diff
+  - Fix dynamically added child failing to be joined by the client
+  - Fix teardown bug causing stale client sessions to attempt a rejoin on reconnect
+  - Fix orphaned prepend/append content across joins
+  - Track `unless` in LiveEEx engine
 
-* Fix regression introduced in v1.1.6
-
-## v1.1.6 (2025-08-18)
-
-### Bug fixes
-
-* Fix live components in nested views accidentally destroying live components in parent views ([#3953](https://github.com/phoenixframework/phoenix_live_view/issues/3953))
-
-## v1.1.5 (2025-08-18)
-
-### Bug fixes
-
-* Fix hooks not working when used inside of `Phoenix.Component.portal/1` ([#3950](https://github.com/phoenixframework/phoenix_live_view/issues/3950))
-* Fix form participating custom elements not being reset to empty in some cases ([#3946](https://github.com/phoenixframework/phoenix_live_view/pull/3946))
+### Backwards incompatible changes
+  - `render_event`/`render_click` and friends now expect a DOM ID selector to be given when working with components. For example, instead of `render_click([live, "user-13"])`, you should write `render_click([live, "#user-13"])`, mirroring the `phx-target` API.
+  - Accessing the socket assigns directly `@socket.assigns[...]` in a template will now raise the exception `Phoenix.LiveView.Socket.AssignsNotInSocket`. The socket assigns are available directly inside the template as LiveEEx `assigns`, such as `@foo` and `@bar`. Any assign access should be done using the assigns in the template where proper change tracking takes place.
 
 ### Enhancements
+  - Trigger debounced events immediately on input blur
+  - Support `defaults` option on `LiveSocket` constructor to configure default `phx-debounce` and `phx-throttle` values, allowing `<input ... phx-debounce>`
+  - Add `detail` key to click event metadata for detecting double/triple clicks
 
-* Allow `assign_async` to return a keyword list
-* Add `Phoenix.LiveView.stream_async/4` to asynchronously insert items into a stream
+## 0.11.0 (2020-04-06)
 
-## v1.1.4 (2025-08-13)
+### Backwards incompatible changes
+  - Remove `socket.assigns` during render to avoid change tracking bugs. If you were previously relying on passing `@socket` to functions then referencing socket assigns, pass the explicit assign instead to your functions from the template.
+  - Removed `assets/css/live_view.css`. If you want to show a progress bar then in `app.css`, replace
+
+
+    ```diff
+    - @import "../../../../deps/phoenix_live_view/assets/css/live_view.css";
+    + @import "../node_modules/nprogress/nprogress.css";
+    ```
+
+    and add `nprogress` to `assets/package.json`. Full details in the [Progress animation guide](https://hexdocs.pm/phoenix_live_view/0.11.0/installation.html#progress-animation)
 
 ### Bug fixes
-
-* Fix LiveComponent updates being inadvertently discarded in rare circumstances when locked DOM trees are restored ([#3941](https://github.com/phoenixframework/phoenix_live_view/issues/3941))
-
-## v1.1.3 (2025-08-05)
-
-### Bug fixes
-
-* Fix warning when importing LiveView JS ([#3926](https://github.com/phoenixframework/phoenix_live_view/pull/3926))
-* Ensure form recovery respects fieldsets ([#3921](https://github.com/phoenixframework/phoenix_live_view/pull/3921))
-* LiveViewTest: Fix crash when submitting a form with custom submitter, but without ID ([#3927](https://github.com/phoenixframework/phoenix_live_view/issues/3927))
-* LiveViewTest: Ensure whitespace in textarea content is preserved when submitting a form ([#3928](https://github.com/phoenixframework/phoenix_live_view/pull/3928))
-* Make hook types less strict ([#3913](https://github.com/phoenixframework/phoenix_live_view/issues/3913))
+  - Fix client issue with greater than two levels of LiveView nesting
+  - Fix bug causing entire LiveView to be re-rendering with only a component changed
+  - Fix issue where rejoins would not trigger `phx:page-loading-stop`
 
 ### Enhancements
+  - Support deep change tracking so `@foo.bar` only executes and diffs when bar changes
+  - Add `@myself` assign, to allow components to target themselves instead of relying on a DOM ID, for example: `phx-target="<%= @myself %>"`
+  - Optimize various client rendering scenarios for faster DOM patching
+  of components and append/prepended content
+  - Add `enableProfiling()` and `disableProfiling()` to `LiveSocket` for client performance profiling to aid the development process
+  - Allow LiveViews to be rendered inside LiveComponents
+  - Add support for clearing flash inside components
 
-* HTMLFormatter: do not try to format attributes into a single line when they are spread over multiple lines.
-  This follows the behavior of the Elixir formatter that also respects newlines.
-* Re-enable component change tracking in case the dynamic expression does not have any dependencies, for example:
-  `<.my_component some="key" {%{static: "map"}}>` ([#3936](https://github.com/phoenixframework/phoenix_live_view/pull/3936))
+## 0.10.0 (2020-03-18)
 
-## v1.1.2 (2025-07-31)
-
-### Bug fixes
-
-* Fix invalid component rendering when using dynamic assigns (`<.my_component {...}>`) in rare circumstances by
-  disabling change tracking. LiveView cannot properly track changes in those cases and this could lead to weird bugs ([#3919](https://github.com/phoenixframework/phoenix_live_view/issues/3919))
-  that were now more likely to surface with change tracked comprehensions.
-* Fix `LiveViewTest` not considering some LiveViews as main when using `live_render` ([#3917](https://github.com/phoenixframework/phoenix_live_view/issues/3917))
-* Fix JavaScript type definitions not being considered when using TypeScript in `bundler` resolution mode ([#3915](https://github.com/phoenixframework/phoenix_live_view/pull/3915))
-
-## v1.1.1 (2025-07-30)
+### Backwards incompatible changes
+  - Rename socket assign `@live_view_module` to `@live_module`
+  - Rename socket assign `@live_view_action` to `@live_action`
+  - LiveView no longer uses the default app layout and `put_live_layout` is no longer supported. Instead, use `put_root_layout`. Note, however, that the layout given to `put_root_layout` must use `@inner_content` instead of `<%= render(@view_module, @view_template, assigns) %>` and that the root layout will also be used by regular views. Check the [Live Layouts](https://hexdocs.pm/phoenix_live_view/0.10.0/Phoenix.LiveView.html#module-live-layouts) section of the docs.
 
 ### Bug fixes
-
-* Fix `key will be overridden in map` warning ([#3912](https://github.com/phoenixframework/phoenix_live_view/issues/3912))
-
-## v1.1.0 (2025-07-30) 🚀
-
-### Bug fixes
-
-* Ensure nested variable access is properly change tracked in components ([#3908](https://github.com/phoenixframework/phoenix_live_view/pull/3908))
-
-## v1.1.0-rc.4 (2025-07-22)
+  - Fix loading states causing nested LiveViews to be removed during live navigation
+  - Only trigger `phx-update="ignore"` hook if data attributes have changed
+  - Fix LiveEEx fingerprint bug causing no diff to be sent in certain cases
 
 ### Enhancements
+  - Support collocated templates where an `.html.leex` template of the same basename of the LiveView will be automatically used for `render/1`
+  - Add `live_title_tag/2` helper for automatic prefix/suffix on `@page_title` updates
 
-* Rename `debug_tags_location` to `debug_attributes` and add `data-phx-pid` ([#3898](https://github.com/phoenixframework/phoenix_live_view/pull/3898))
-* Simplify code generated for slots in HEEx when the slot does not contain any dynamic code ([#3902](https://github.com/phoenixframework/phoenix_live_view/pull/3902))
-
-### Bug fixes
-
-* Prevent `focus_wrap` from focusing the last element instead of the first on Firefox in rare cases ([#3895](https://github.com/phoenixframework/phoenix_live_view/pull/3895))
-* Ensure comprehension entries perform a full render when change tracking is disabled ([#3904](https://github.com/phoenixframework/phoenix_live_view/pull/3904))
-
-## v1.1.0-rc.3 (2025-07-15)
-
-### Enhancements
-
-* Add [igniter](https://hexdocs.pm/igniter) upgrader for LiveView 1.0 to 1.1: `mix igniter.upgrade phoenix_live_view@1.1.0-rc.3` ([#3889](https://github.com/phoenixframework/phoenix_live_view/pull/3889))
-  * Note: before the final release, the actual upgrade requires a separate `mix igniter.apply_upgrades phoenix_live_view:1.0.0:1.1.0` after updating the dependency
-* Allow `ColocatedHook`s to work at the root of a LiveComponent ([#3882](https://github.com/phoenixframework/phoenix_live_view/pull/3882))
-* Use `"on"` as default value for checkboxes in LiveViewTest ([#3886](https://github.com/phoenixframework/phoenix_live_view/pull/3886))
-* Raise when using `ColocatedHook` / `ColocatedJS` on an unsupported Phoenix version
-
-## v1.1.0-rc.2 (2025-07-05)
-
-### Enhancements
-
-* Allow omitting the `name` attribute when using `Phoenix.LiveView.ColocatedJS` ([#3860](https://github.com/phoenixframework/phoenix_live_view/pull/3860))
-* Add change tracking in comprehensions by default; `:key` does not use LiveComponents anymore which allows it to be used on components and improves payload sizes ([#3865](https://github.com/phoenixframework/phoenix_live_view/pull/3865))
+## 0.9.0 (2020-03-08)
 
 ### Bug fixes
-
-* Fix `Phoenix.LiveView.Debug.live_components/1` raising instead of returning an error tuple ([#3861](https://github.com/phoenixframework/phoenix_live_view/pull/3861))
-
-## v1.1.0-rc.1 (2025-06-20)
-
-### Bug fixes
-
-* Fix variable tainting which could cause some template parts to not be re-rendered ([#3856](https://github.com/phoenixframework/phoenix_live_view/pull/3856)).
-
-## v1.1.0-rc.0 (2025-06-17)
+  - Do not set ignored inputs and buttons as readonly
+  - Only decode paths in URIs
+  - Only destroy main descendents when replacing main
+  - Fix sibling component patches when siblings at same root DOM tree
+  - Do not pick the layout from `:use` on child LiveViews
+  - Respect when the layout is set to `false` in the router and on mount
+  - Fix sibling component patch when component siblings lack a container
+  - Make flash optional (i.e. LiveView will still work if you don't `fetch_flash` before)
 
 ### Enhancements
+  - Raise if `:flash` is given as an assign
+  - Support user-defined metadata in router
+  - Allow the router to be accessed as `socket.router`
+  - Allow `MFArgs` as the `:session` option in the `live` router macro
+  - Trigger page loading event when main LV errors
+  - Automatically clear the flash on live navigation examples - only the newly assigned flash is persisted
 
-* Add type annotations to all public JavaScript APIs ([#3789](https://github.com/phoenixframework/phoenix_live_view/pull/3789))
-* Add `Phoenix.LiveView.JS.ignore_attributes/1` to allow marking specific attributes to be ignored when LiveView patches an element ([#3765](https://github.com/phoenixframework/phoenix_live_view/pull/3765))
-* Add `Phoenix.LiveView.Debug` module with functions for inspecting LiveViews at runtime ([#3776](https://github.com/phoenixframework/phoenix_live_view/pull/3776))
-* Add `Phoenix.LiveView.ColocatedHook` and `Phoenix.LiveView.ColocatedJS` ([#3810](https://github.com/phoenixframework/phoenix_live_view/pull/3810))
-* Add `:update_only` option to `Phoenix.LiveView.stream_insert/4` ([#3573](https://github.com/phoenixframework/phoenix_live_view/pull/3573))
-* Use [`LazyHTML`](https://hexdocs.pm/lazy_html/) instead of `Floki` internally for LiveViewTest
-* Normalize whitespace in LiveViewTest's text filters ([#3621](https://github.com/phoenixframework/phoenix_live_view/pull/3621))
-* Raise by default when LiveViewTest detects duplicate DOM or LiveComponent IDs. This can be changed by passing `on_error` to `Phoenix.LiveViewTest.live/3` / `Phoenix.LiveViewTest.live_isolated/3`
-* Raise an exception when trying to bind a single DOM element to multiple views (this could happen when accidentally loading your app.js twice) ([#3805](https://github.com/phoenixframework/phoenix_live_view/pull/3805))
-* Ensure promise rejections include stack traces ([#3738](https://github.com/phoenixframework/phoenix_live_view/pull/3738))
-* Treat form associated custom elements as form inputs ([3823](https://github.com/phoenixframework/phoenix_live_view/pull/3823))
-* Add `:inline_matcher` option to `Phoenix.LiveView.HTMLFormatter` which can be configured as a list of strings and regular expressions to match against tag names to treat them as inline ([#3795](https://github.com/phoenixframework/phoenix_live_view/pull/3795))
+## 0.8.1 (2020-02-27)
 
-## v1.0
+### Enhancements
+  - Support `phx-disable-with` on live redirect and live patch links
 
-The CHANGELOG for v1.0 and earlier releases can be found in the [v1.0 branch](https://github.com/phoenixframework/phoenix_live_view/blob/v1.0/CHANGELOG.md).
+### Bug Fixes
+  - Fix focus issue on date and time inputs
+  - Fix LiveViews failing to mount when page restored from back/forward cache following a `redirect` on the server
+  - Fix IE coercing `undefined` to string when issuing pushState
+  - Fix IE error when focused element is null
+  - Fix client error when using components and live navigation where a dynamic template is rendered
+  - Fix latent component diff causing error when component removed from DOM before patch arrives
+  - Fix race condition where a component event received on the server for a component already removed by the server raised a match error
+
+## 0.8.0 (2020-02-22)
+
+### Backwards incompatible changes
+  - Remove `Phoenix.LiveView.Flash` in favor of `:fetch_live_flash` imported by `Phoenix.LiveView.Router`
+  - Live layout must now access the child contents with `@inner_content` instead of invoking the LiveView directly
+  - Returning `:stop` tuples from LiveView `mount` or `handle_[params|call|cast|info|event]` is no longer supported. LiveViews are stopped when issuing a `redirect` or `push_redirect`
+
+### Enhancements
+  - Add `put_live_layout` plug to put the root layout used for live routes
+  - Allow `redirect` and `push_redirect` from mount
+  - Use acknowledgement tracking to avoid patching inputs until the server has processed the form event
+  - Add css loading states to all phx bound elements with event specific css classes
+  - Dispatch `phx:page-loading-start` and `phx:page-loading-stop` on window for live navigation, initial page loads, and form submits, for user controlled page loading integration
+  - Allow any phx bound element to specify `phx-page-loading` to dispatch loading events above when the event is pushed
+  - Add client side latency simulator with new `enableLatencySim(milliseconds)` and `disableLatencySim()`
+  - Add `enableDebug()` and `disableDebug()` to `LiveSocket` for ondemand browser debugging from the web console
+  - Do not connect LiveSocket WebSocket or bind client events unless a LiveView is found on the page
+  - Add `transport_pid/1` to return the websocket transport pid when the socket is connected
+
+### Bug Fixes
+  - Fix issue where a failed mount from a `live_redirect` would reload the current URL instead of the attempted new URL
+
+## 0.7.1 (2020-02-13)
+
+### Bug Fixes
+  - Fix checkbox bug failing to send `phx-change` event to the server in certain cases
+  - Fix checkbox bug failing to maintain checked state when a checkbox is programmatically updated by the server
+  - Fix select bug in Firefox causing the highlighted index to jump when a patch is applied during hover state
+
+## 0.7.0 (2020-02-12)
+
+### Backwards incompatible changes
+  - `live_redirect` was removed in favor of `push_patch` (for updating the URL and params of the current LiveView) and `push_redirect` (for updating the URL to another LiveView)
+  - `live_link` was removed in favor of  `live_patch` (for updating the URL and params of the current LiveView) and `live_redirect` (for updating the URL to another LiveView)
+  - `Phoenix.LiveViewTest.assert_redirect` no longer accepts an anonymous function in favor of executing the code
+  prior to asserting the redirects, just like `assert_receive`.
+
+### Enhancements
+  - Support `@live_view_action` in LiveViews to simplify tracking of URL state
+  - Recovery form input data automatically on disconnects or crash recovery
+  - Add `phx-auto-recover` form binding for specialized recovery
+  - Scroll to top of page while respecting anchor hash targets on `live_patch` and `live_redirect`
+  - Add `phx-capture-click` to use event capturing to bind a click event as it propagates inwards from the target
+  - Revamp flash support so it works between static views, live views, and components
+  - Add `phx-key` binding to scope `phx-window-keydown` and `phx-window-keyup` events
+
+### Bug Fixes
+  - Send `phx-value-*` on key events
+  - Trigger `updated` hook callbacks on `phx-update="ignore"` container when the container's attributes have changed
+  - Fix nested `phx-update="append"` raising ArgumentError in LiveViewTest
+  - Fix updates not being applied in rare cases where an leex template is wrapped in an if expression
+
+## 0.6.0 (2020-01-22)
+
+### Deprecations
+  - LiveView `mount/2` has been deprecated in favor of `mount/3`. The params are now passed as the first argument to `mount/3`, followed by the session and socket.
+
+### Backwards incompatible changes
+  - The socket session now accepts only string keys
+
+### Enhancements
+  - Allow window beforeunload to be cancelled without losing websocket connection
+
+### Bug Fixes
+  - Fix handle_params not decoding URL path parameters properly
+  - Fix LiveViewTest error when routing at root path
+  - Fix URI encoded params failing to be decoded in `handle_params`
+  - Fix component target failing to locate correct component when the target is on an input tag
+
+
+## 0.5.2 (2020-01-17)
+
+### Bug Fixes
+  - Fix optimization bug causing some DOM nodes to be removed on updates
+
+## 0.5.1 (2020-01-15)
+
+### Bug Fixes
+  - Fix phx-change bug causing phx-target to not be used
+
+## 0.5.0 (2020-01-15)
+
+LiveView now makes the connection session automatically available in LiveViews. However, to do so, you need to configure your endpoint accordingly, **otherwise LiveView will fail to connect**.
+
+The steps are:
+
+  1) Find `plug Plug.Session, ...` in your endpoint.ex and move the options `...` to a module attribute:
+
+      ```elixir
+      @session_options [
+        ...
+      ]
+      ```
+
+  2) Change the `plug Plug.Session` to use said attribute:
+
+      ```elixir
+      plug Plug.Session, @session_options
+      ```
+
+  3) Also pass the `@session_options` to your LiveView socket:
+
+      ```elixir
+      socket "/live", Phoenix.LiveView.Socket,
+        websocket: [connect_info: [session: @session_options]]
+      ```
+
+  4) You should define the CSRF meta tag inside <head> in your layout, before `app.js` is included:
+
+      ```heex
+      <meta name="csrf-token" content={Plug.CSRFProtection.get_csrf_token()} />
+      <script type="text/javascript" src="<%= Routes.static_path(@conn, "/js/app.js") %>"></script>
+      ```
+
+  5) Then in your app.js:
+
+      ```
+      let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content");
+      let liveSocket = new LiveSocket("/live", Socket, {params: {_csrf_token: csrfToken}});
+      ```
+
+Also note that **the session from now on will have string keys**. LiveView will warn if atom keys are used.
+
+### Enhancements
+  - Respect new tab behavior in `live_link`
+  - Add `beforeUpdate` and `beforeDestroy` JS hooks
+  - Make all assigns defined on the socket mount available on the layout on first render
+  - Provide support for live layouts with new `:layout` option
+  - Detect duplicate IDs on the front-end when DEBUG mode is enabled
+  - Automatically forward the session to LiveView
+  - Support "live_socket_id" session key for identifying (and disconnecting) LiveView sockets
+  - Add support for `hibernate_after` on LiveView processes
+  - Support redirecting to full URLs on `live_redirect` and `redirect`
+  - Add `offsetX` and `offsetY` to click event metadata
+  - Allow `live_link` and `live_redirect` to exist anywhere in the page and it will always target the main LiveView (the one defined at the router)
+
+### Backwards incompatible changes
+  - `phx-target="window"` has been removed in favor of `phx-window-keydown`, `phx-window-focus`, etc, and the `phx-target` binding has been repurposed for targeting LiveView and LiveComponent events from the client
+  - `Phoenix.LiveView` no longer defined `live_render` and `live_link`. These functions have been moved to `Phoenix.LiveView.Helpers` which can now be fully imported in your views. In other words, replace `import Phoenix.LiveView, only: [live_render: ..., live_link: ...]` by `import Phoenix.LiveView.Helpers`
+
+## 0.4.1 (2019-11-07)
+
+### Bug Fixes
+  - Fix bug causing blurred inputs
+
+## 0.4.0 (2019-11-07)
+
+### Enhancements
+  - Add `Phoenix.LiveComponent` to compartmentalize state, markup, and events in LiveView
+  - Handle outdated clients by refreshing the page with jitter when a valid, but outdated session is detected
+  - Only dispatch live link clicks to router LiveView
+  - Refresh the page for graceful error recovery on failed mount when the socket is in a connected state
+
+### Bug Fixes
+  - Fix `phx-hook` destroyed callback failing to be called in certain cases
+  - Fix back/forward bug causing LiveView to fail to remount
+
+## 0.3.1 (2019-09-23)
+
+### Backwards incompatible changes
+  - `live_isolated` in tests no longer requires a router and a pipeline (it now expects only 3 arguments)
+  - Raise if `handle_params` is used on a non-router LiveView
+
+### Bug Fixes
+  - [LiveViewTest] Fix function clause errors caused by HTML comments
+
+## 0.3.0 (2019-09-19)
+
+### Enhancements
+  - Add `phx-debounce` and `phx-throttle` bindings to rate limit events
+
+### Backwards incompatible changes
+  - IE11 support now requires two additional polyfills, `mdn-polyfills/CustomEvent` and `mdn-polyfills/String.prototype.startsWith`
+
+### Bug Fixes
+  - Fix IE11 support caused by unsupported `getAttributeNames` lookup
+  - Fix Floki dependency compilation warnings
+
+## 0.2.1 (2019-09-17)
+
+### Bug Fixes
+  - [LiveView.Router] Fix module concat failing to build correct layout module when using custom namespace
+  - [LiveViewTest] Fix `phx-update` append/prepend containers not building proper DOM content
+  - [LiveViewTest] Fix `phx-update` append/prepend containers not updating existing child containers with matching IDs
+
+## 0.2.0 (2019-09-12)
+
+### Enhancements
+  - [LiveView] Add new `:container` option to `use Phoenix.LiveView`
+  - [LiveViewTest] Add `live_isolated` test helper for testing LiveViews which are not routable
+
+### Backwards incompatible changes
+  - Replace `configure_temporary_assigns/2` with 3-tuple mount return, supporting a `:temporary_assigns` key
+  - Do not allow `redirect`/`live_redirect` on mount nor in child live views
+  - All `phx-update` containers now require a unique ID
+  - `LiveSocket` JavaScript constructor now requires explicit dependency injection of Phoenix Socket constructor. For example:
+
+```
+import {Socket} from "phoenix"
+import LiveSocket from "phoenix_live_view"
+
+let liveSocket = new LiveSocket("/live", Socket, {...})
+```
+
+### Bug Fixes
+  - Fix `phx-update=append/prepend` failing to join new nested live views or wire up new phx-hooks
+  - Fix number input handling causing some browsers to reset form fields on invalid inputs
+  - Fix multi-select decoding causing server error
+  - Fix multi-select change tracking failing to submit an event when a value is deselected
+  - Fix live redirect loop triggered under certain scenarios
+  - Fix params failing to update on re-mounts after live_redirect
+  - Fix blur event metadata being sent with type of `"focus"`
+
+## 0.1.2 (2019-08-28)
+
+### Backwards incompatible changes
+  - `phx-value` has no effect, use `phx-value-*` instead
+  - The `:path_params` key in session has no effect (use `handle_params` in `LiveView` instead)
+
+## 0.1.1 (2019-08-27)
+
+### Enhancements
+  - Use optimized `insertAdjacentHTML` for faster append/prepend and proper css animation handling
+  - Allow for replacing previously appended/prepended elements by replacing duplicate IDs during append/prepend instead of adding new DOM nodes
+
+### Bug Fixes
+  - Fix duplicate append/prepend updates when parent content is updated
+  - Fix JS hooks not being applied for appending and prepended content
+
+## 0.1.0 (2019-08-25)
+
+### Enhancements
+  - The LiveView `handle_in/3` callback now receives a map of metadata about the client event
+  - For `phx-change` events, `handle_in/3` now receives a `"_target"` param representing the keyspace of the form input name which triggered the change
+  - Multiple values may be provided for any phx binding by using the `phx-value-` prefix, such as `phx-value-myval1`, `phx-value-myval2`, etc
+  - Add control over the DOM patching via `phx-update`, which can be set to `"replace"`, `"append"`, `"prepend"` or `"ignore"`
+
+### Backwards incompatible changes
+  - `phx-ignore` was renamed to `phx-update="ignore"`

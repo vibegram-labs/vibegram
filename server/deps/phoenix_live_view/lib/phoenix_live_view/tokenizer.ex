@@ -1,8 +1,8 @@
 defmodule Phoenix.LiveView.Tokenizer do
   @moduledoc false
-  @space_chars ~c"\s\t\f"
-  @quote_chars ~c"\"'"
-  @stop_chars ~c">/=\r\n" ++ @quote_chars ++ @space_chars
+  @space_chars '\s\t\f'
+  @quote_chars '"\''
+  @stop_chars '>/=\r\n' ++ @quote_chars ++ @space_chars
 
   defmodule ParseError do
     @moduledoc false
@@ -69,14 +69,14 @@ defmodule Phoenix.LiveView.Tokenizer do
   * `indentation` - An integer that indicates the current indentation.
   * `file` - Can be either a file or a string "nofile".
   * `source` - The contents of the file as binary used to be tokenized.
-  * `tag_handler` - Tag handler to classify the tags. See `Phoenix.LiveView.TagEngine`
-    behaviour.
+  * `tag_handler` - Tag handler to classify the tags. See `Phoenex.LiveView.TagHandler`
+    behavivour.
   """
   def init(indentation, file, source, tag_handler) do
     %{
       file: file,
       column_offset: indentation + 1,
-      braces: :enabled,
+      braces: [],
       context: [],
       source: source,
       indentation: indentation,
@@ -94,28 +94,25 @@ defmodule Phoenix.LiveView.Tokenizer do
   * `tokens` - A list of tokens.
   * `cont` - An atom that is `:text`, `:style`, or `:script`, or a tuple
     {:comment, line, column}.
-  * `state` - The tokenizer state that must be initiated by `Tokenizer.init/4`
+  * `state` - The tokenizer state that must be initiated by `Tokenizer.init/3`
 
   ### Examples
 
       iex> alias Phoenix.LiveView.Tokenizer
-
-      iex> state =
-        Tokenizer.init(indent, file, [text: "<section><div/></section>"], HTMLEngine)
-
+      iex> state = Tokenizer.init(text: "<section><div/></section>", cont: :text)
       iex> Tokenizer.tokenize(state)
       {[
          {:close, :tag, "section", %{column: 16, line: 1}},
-         {:tag, "div", [], %{column: 10, line: 1, closing: :self}},
+         {:tag, "div", [], %{column: 10, line: 1, self_close: true}},
          {:tag, "section", [], %{column: 1, line: 1}}
-       ], {:text, :enabled}}
+       ], :text}
   """
   def tokenize(text, meta, tokens, cont, state) do
     line = Keyword.get(meta, :line, 1)
     column = Keyword.get(meta, :column, 1)
 
     case cont do
-      {:text, braces} -> handle_text(text, line, column, [], tokens, %{state | braces: braces})
+      :text -> handle_text(text, line, column, [], tokens, state)
       :style -> handle_style(text, line, column, [], tokens, state)
       :script -> handle_script(text, line, column, [], tokens, state)
       {:comment, _, _} -> handle_comment(text, line, column, [], tokens, state)
@@ -155,27 +152,12 @@ defmodule Phoenix.LiveView.Tokenizer do
     handle_tag_open(rest, line, column + 1, text_to_acc, %{state | context: []})
   end
 
-  defp handle_text("{" <> rest, line, column, buffer, acc, %{braces: :enabled} = state) do
-    text_to_acc = text_to_acc(buffer, acc, line, column, state.context)
-    state = put_in(state.context, [])
-
-    case handle_interpolation(rest, line, column + 1, [], 0, state) do
-      {:ok, value, new_line, new_column, rest} ->
-        acc = [{:body_expr, value, %{line: line, column: column}} | text_to_acc]
-        handle_text(rest, new_line, new_column, [], acc, state)
-
-      {:error, message} ->
-        meta = %{line: line, column: column}
-        raise_syntax_error!(message, meta, state)
-    end
-  end
-
   defp handle_text(<<c::utf8, rest::binary>>, line, column, buffer, acc, state) do
     handle_text(rest, line, column + 1, [char_or_bin(c) | buffer], acc, state)
   end
 
   defp handle_text(<<>>, line, column, buffer, acc, state) do
-    ok(text_to_acc(buffer, acc, line, column, state.context), {:text, state.braces})
+    ok(text_to_acc(buffer, acc, line, column, state.context), :text)
   end
 
   ## handle_doctype
@@ -194,14 +176,6 @@ defmodule Phoenix.LiveView.Tokenizer do
 
   defp handle_doctype(<<c::utf8, rest::binary>>, line, column, buffer, acc, state) do
     handle_doctype(rest, line, column + 1, [char_or_bin(c) | buffer], acc, state)
-  end
-
-  defp handle_doctype(<<>>, line, column, _buffer, _acc, state) do
-    raise_syntax_error!(
-      "unexpected end of string inside tag",
-      %{line: line, column: column},
-      state
-    )
   end
 
   ## handle_script
@@ -302,7 +276,7 @@ defmodule Phoenix.LiveView.Tokenizer do
 
         case state.tag_handler.classify_type(name) do
           {:error, message} ->
-            raise_syntax_error!(message, %{line: line, column: column}, state)
+            raise_syntax_error!(message, meta, state)
 
           {type, name} ->
             acc = [{type, name, [], meta} | acc]
@@ -337,7 +311,7 @@ defmodule Phoenix.LiveView.Tokenizer do
 
           {type, name} ->
             acc = [{:close, type, name, meta} | acc]
-            handle_text(rest, line, new_column + 1, [], acc, pop_braces(state))
+            handle_text(rest, line, new_column + 1, [], acc, state)
         end
 
       {:ok, _, new_column, _} ->
@@ -391,12 +365,12 @@ defmodule Phoenix.LiveView.Tokenizer do
   end
 
   defp handle_maybe_tag_open_end("/>" <> rest, line, column, acc, state) do
-    acc = normalize_tag(acc, line, column + 2, true, state)
-    handle_text(rest, line, column + 2, [], acc, state)
+    acc = reverse_attrs(acc, line, column + 2)
+    handle_text(rest, line, column + 2, [], put_self_close(acc), state)
   end
 
   defp handle_maybe_tag_open_end(">" <> rest, line, column, acc, state) do
-    case normalize_tag(acc, line, column + 1, false, state) do
+    case reverse_attrs(acc, line, column + 1) do
       [{:tag, "script", _, _} | _] = acc ->
         handle_script(rest, line, column + 1, [], acc, state)
 
@@ -404,7 +378,7 @@ defmodule Phoenix.LiveView.Tokenizer do
         handle_style(rest, line, column + 1, [], acc, state)
 
       acc ->
-        handle_text(rest, line, column + 1, [], acc, push_braces(state))
+        handle_text(rest, line, column + 1, [], acc, state)
     end
   end
 
@@ -438,7 +412,7 @@ defmodule Phoenix.LiveView.Tokenizer do
         <a class={"foo bar #{@class}"}>Text</a>
     """
 
-    raise_syntax_error!(message, %{line: line, column: column}, state)
+    raise ParseError, file: state.file, line: line, column: column, description: message
   end
 
   defp handle_maybe_tag_open_end(text, line, column, acc, state) do
@@ -450,19 +424,8 @@ defmodule Phoenix.LiveView.Tokenizer do
   defp handle_attribute(text, line, column, acc, state) do
     case handle_attr_name(text, column, []) do
       {:ok, name, new_column, rest} ->
-        attr_meta = %{line: line, column: column}
-        {text, line, column, value} = handle_maybe_attr_value(rest, line, new_column, state)
-        acc = put_attr(acc, name, attr_meta, value)
-
-        state =
-          if name == "phx-no-curly-interpolation" and state.braces == :enabled and
-               not script_or_style?(acc) do
-            %{state | braces: 0}
-          else
-            state
-          end
-
-        handle_maybe_tag_open_end(text, line, column, acc, state)
+        acc = put_attr(acc, name, %{line: line, column: column})
+        handle_maybe_attr_value(rest, line, new_column, acc, state)
 
       {:error, message, column} ->
         meta = %{line: line, column: column}
@@ -470,14 +433,11 @@ defmodule Phoenix.LiveView.Tokenizer do
     end
   end
 
-  defp script_or_style?([{:tag, name, _, _} | _]) when name in ~w(script style), do: true
-  defp script_or_style?(_), do: false
-
   ## handle_root_attribute
 
   defp handle_root_attribute(text, line, column, acc, state) do
-    case handle_interpolation(text, line, column, [], 0, state) do
-      {:ok, value, new_line, new_column, rest} ->
+    case handle_interpolation(text, line, column, [], state) do
+      {:ok, value, new_line, new_column, rest, state} ->
         meta = %{line: line, column: column}
         acc = put_attr(acc, :root, meta, {:expr, value, meta})
         handle_maybe_tag_open_end(rest, new_line, new_column, acc, state)
@@ -510,64 +470,60 @@ defmodule Phoenix.LiveView.Tokenizer do
     handle_attr_name(rest, column + 1, [char_or_bin(c) | buffer])
   end
 
-  defp handle_attr_name(<<>>, column, _buffer) do
-    {:error, "unexpected end of string inside tag", column}
-  end
-
   ## handle_maybe_attr_value
 
-  defp handle_maybe_attr_value("\r\n" <> rest, line, _column, state) do
-    handle_maybe_attr_value(rest, line + 1, state.column_offset, state)
+  defp handle_maybe_attr_value("\r\n" <> rest, line, _column, acc, state) do
+    handle_maybe_attr_value(rest, line + 1, state.column_offset, acc, state)
   end
 
-  defp handle_maybe_attr_value("\n" <> rest, line, _column, state) do
-    handle_maybe_attr_value(rest, line + 1, state.column_offset, state)
+  defp handle_maybe_attr_value("\n" <> rest, line, _column, acc, state) do
+    handle_maybe_attr_value(rest, line + 1, state.column_offset, acc, state)
   end
 
-  defp handle_maybe_attr_value(<<c::utf8, rest::binary>>, line, column, state)
+  defp handle_maybe_attr_value(<<c::utf8, rest::binary>>, line, column, acc, state)
        when c in @space_chars do
-    handle_maybe_attr_value(rest, line, column + 1, state)
+    handle_maybe_attr_value(rest, line, column + 1, acc, state)
   end
 
-  defp handle_maybe_attr_value("=" <> rest, line, column, state) do
-    handle_attr_value_begin(rest, line, column + 1, state)
+  defp handle_maybe_attr_value("=" <> rest, line, column, acc, state) do
+    handle_attr_value_begin(rest, line, column + 1, acc, state)
   end
 
-  defp handle_maybe_attr_value(text, line, column, _state) do
-    {text, line, column, nil}
+  defp handle_maybe_attr_value(text, line, column, acc, state) do
+    handle_maybe_tag_open_end(text, line, column, acc, state)
   end
 
   ## handle_attr_value_begin
 
-  defp handle_attr_value_begin("\r\n" <> rest, line, _column, state) do
-    handle_attr_value_begin(rest, line + 1, state.column_offset, state)
+  defp handle_attr_value_begin("\r\n" <> rest, line, _column, acc, state) do
+    handle_attr_value_begin(rest, line + 1, state.column_offset, acc, state)
   end
 
-  defp handle_attr_value_begin("\n" <> rest, line, _column, state) do
-    handle_attr_value_begin(rest, line + 1, state.column_offset, state)
+  defp handle_attr_value_begin("\n" <> rest, line, _column, acc, state) do
+    handle_attr_value_begin(rest, line + 1, state.column_offset, acc, state)
   end
 
-  defp handle_attr_value_begin(<<c::utf8, rest::binary>>, line, column, state)
+  defp handle_attr_value_begin(<<c::utf8, rest::binary>>, line, column, acc, state)
        when c in @space_chars do
-    handle_attr_value_begin(rest, line, column + 1, state)
+    handle_attr_value_begin(rest, line, column + 1, acc, state)
   end
 
-  defp handle_attr_value_begin("\"" <> rest, line, column, state) do
-    handle_attr_value_quote(rest, ?", line, column + 1, [], state)
+  defp handle_attr_value_begin("\"" <> rest, line, column, acc, state) do
+    handle_attr_value_quote(rest, ?", line, column + 1, [], acc, state)
   end
 
-  defp handle_attr_value_begin("'" <> rest, line, column, state) do
-    handle_attr_value_quote(rest, ?', line, column + 1, [], state)
+  defp handle_attr_value_begin("'" <> rest, line, column, acc, state) do
+    handle_attr_value_quote(rest, ?', line, column + 1, [], acc, state)
   end
 
-  defp handle_attr_value_begin("{" <> rest, line, column, state) do
-    handle_attr_value_as_expr(rest, line, column + 1, state)
+  defp handle_attr_value_begin("{" <> rest, line, column, acc, state) do
+    handle_attr_value_as_expr(rest, line, column + 1, acc, state)
   end
 
-  defp handle_attr_value_begin(_text, line, column, state) do
+  defp handle_attr_value_begin(_text, line, column, _acc, state) do
     message =
       "invalid attribute value after `=`. Expected either a value between quotes " <>
-        "(such as \"value\" or \'value\') or an Elixir expression between curly braces (such as `{expr}`)"
+        "(such as \"value\" or \'value\') or an Elixir expression between curly brackets (such as `{expr}`)"
 
     meta = %{line: line, column: column}
     raise_syntax_error!(message, meta, state)
@@ -575,26 +531,27 @@ defmodule Phoenix.LiveView.Tokenizer do
 
   ## handle_attr_value_quote
 
-  defp handle_attr_value_quote("\r\n" <> rest, delim, line, _column, buffer, state) do
+  defp handle_attr_value_quote("\r\n" <> rest, delim, line, _column, buffer, acc, state) do
     column = state.column_offset
-    handle_attr_value_quote(rest, delim, line + 1, column, ["\r\n" | buffer], state)
+    handle_attr_value_quote(rest, delim, line + 1, column, ["\r\n" | buffer], acc, state)
   end
 
-  defp handle_attr_value_quote("\n" <> rest, delim, line, _column, buffer, state) do
+  defp handle_attr_value_quote("\n" <> rest, delim, line, _column, buffer, acc, state) do
     column = state.column_offset
-    handle_attr_value_quote(rest, delim, line + 1, column, ["\n" | buffer], state)
+    handle_attr_value_quote(rest, delim, line + 1, column, ["\n" | buffer], acc, state)
   end
 
-  defp handle_attr_value_quote(<<delim, rest::binary>>, delim, line, column, buffer, _state) do
+  defp handle_attr_value_quote(<<delim, rest::binary>>, delim, line, column, buffer, acc, state) do
     value = buffer_to_string(buffer)
-    {rest, line, column + 1, {:string, value, %{delimiter: delim}}}
+    acc = put_attr_value(acc, {:string, value, %{delimiter: delim}})
+    handle_maybe_tag_open_end(rest, line, column + 1, acc, state)
   end
 
-  defp handle_attr_value_quote(<<c::utf8, rest::binary>>, delim, line, column, buffer, state) do
-    handle_attr_value_quote(rest, delim, line, column + 1, [char_or_bin(c) | buffer], state)
+  defp handle_attr_value_quote(<<c::utf8, rest::binary>>, delim, line, column, buffer, acc, state) do
+    handle_attr_value_quote(rest, delim, line, column + 1, [char_or_bin(c) | buffer], acc, state)
   end
 
-  defp handle_attr_value_quote(<<>>, delim, line, column, _buffer, state) do
+  defp handle_attr_value_quote(<<>>, delim, line, column, _buffer, _acc, state) do
     message = """
     expected closing `#{<<delim>>}` for attribute value
 
@@ -619,10 +576,11 @@ defmodule Phoenix.LiveView.Tokenizer do
 
   ## handle_attr_value_as_expr
 
-  defp handle_attr_value_as_expr(text, line, column, state) do
-    case handle_interpolation(text, line, column, [], 0, state) do
-      {:ok, value, new_line, new_column, rest} ->
-        {rest, new_line, new_column, {:expr, value, %{line: line, column: column}}}
+  defp handle_attr_value_as_expr(text, line, column, acc, %{braces: []} = state) do
+    case handle_interpolation(text, line, column, [], state) do
+      {:ok, value, new_line, new_column, rest, state} ->
+        acc = put_attr_value(acc, {:expr, value, %{line: line, column: column}})
+        handle_maybe_tag_open_end(rest, new_line, new_column, acc, state)
 
       {:error, message} ->
         # We do column - 1 to point to the opening {
@@ -633,47 +591,43 @@ defmodule Phoenix.LiveView.Tokenizer do
 
   ## handle_interpolation
 
-  defp handle_interpolation("\r\n" <> rest, line, _column, buffer, braces, state) do
-    handle_interpolation(rest, line + 1, state.column_offset, ["\r\n" | buffer], braces, state)
+  defp handle_interpolation("\r\n" <> rest, line, _column, buffer, state) do
+    handle_interpolation(rest, line + 1, state.column_offset, ["\r\n" | buffer], state)
   end
 
-  defp handle_interpolation("\n" <> rest, line, _column, buffer, braces, state) do
-    handle_interpolation(rest, line + 1, state.column_offset, ["\n" | buffer], braces, state)
+  defp handle_interpolation("\n" <> rest, line, _column, buffer, state) do
+    handle_interpolation(rest, line + 1, state.column_offset, ["\n" | buffer], state)
   end
 
-  defp handle_interpolation("}" <> rest, line, column, buffer, 0, _state) do
+  defp handle_interpolation("}" <> rest, line, column, buffer, %{braces: []} = state) do
     value = buffer_to_string(buffer)
-    {:ok, value, line, column + 1, rest}
+    {:ok, value, line, column + 1, rest, state}
   end
 
-  defp handle_interpolation(~S(\}) <> rest, line, column, buffer, braces, state) do
-    handle_interpolation(rest, line, column + 2, [~S(\}) | buffer], braces, state)
+  defp handle_interpolation(~S(\}) <> rest, line, column, buffer, state) do
+    handle_interpolation(rest, line, column + 2, [~S(\}) | buffer], state)
   end
 
-  defp handle_interpolation(~S(\{) <> rest, line, column, buffer, braces, state) do
-    handle_interpolation(rest, line, column + 2, [~S(\{) | buffer], braces, state)
+  defp handle_interpolation(~S(\{) <> rest, line, column, buffer, state) do
+    handle_interpolation(rest, line, column + 2, [~S(\{) | buffer], state)
   end
 
-  defp handle_interpolation("}" <> rest, line, column, buffer, braces, state) do
-    handle_interpolation(rest, line, column + 1, ["}" | buffer], braces - 1, state)
+  defp handle_interpolation("}" <> rest, line, column, buffer, state) do
+    {_pos, state} = pop_brace(state)
+    handle_interpolation(rest, line, column + 1, ["}" | buffer], state)
   end
 
-  defp handle_interpolation("{" <> rest, line, column, buffer, braces, state) do
-    handle_interpolation(rest, line, column + 1, ["{" | buffer], braces + 1, state)
+  defp handle_interpolation("{" <> rest, line, column, buffer, state) do
+    state = push_brace(state, {line, column})
+    handle_interpolation(rest, line, column + 1, ["{" | buffer], state)
   end
 
-  defp handle_interpolation(<<c::utf8, rest::binary>>, line, column, buffer, braces, state) do
-    handle_interpolation(rest, line, column + 1, [char_or_bin(c) | buffer], braces, state)
+  defp handle_interpolation(<<c::utf8, rest::binary>>, line, column, buffer, state) do
+    handle_interpolation(rest, line, column + 1, [char_or_bin(c) | buffer], state)
   end
 
-  defp handle_interpolation(<<>>, _line, _column, _buffer, _braces, _state) do
-    {:error,
-     """
-     expected closing `}` for expression
-
-     In case you don't want `{` to begin a new interpolation, \
-     you may write it using `&lbrace;` or using `<%= "{" %>`\
-     """}
+  defp handle_interpolation(<<>>, _line, _column, _buffer, _state) do
+    {:error, "expected closing `}` for expression"}
   end
 
   ## helpers
@@ -697,42 +651,48 @@ defmodule Phoenix.LiveView.Tokenizer do
     meta = %{line_end: line, column_end: column}
 
     meta =
-      if context == [] do
-        meta
-      else
+      if context = get_context(context) do
         Map.put(meta, :context, trim_context(context))
+      else
+        meta
       end
 
     [{:text, buffer_to_string(buffer), meta} | acc]
   end
 
-  defp trim_context([:comment_end, :comment_start | [_ | _] = rest]), do: trim_context(rest)
-  defp trim_context(rest), do: Enum.reverse(rest)
+  defp trim_context([:comment_start, :comment_end | [_ | _] = rest]), do: trim_context(rest)
+  defp trim_context(rest), do: rest
 
-  defp push_braces(%{braces: :enabled} = state), do: state
-  defp push_braces(%{braces: braces} = state), do: %{state | braces: braces + 1}
+  defp get_context([]), do: nil
+  defp get_context(context), do: Enum.reverse(context)
 
-  defp pop_braces(%{braces: :enabled} = state), do: state
-  defp pop_braces(%{braces: 1} = state), do: %{state | braces: :enabled}
-  defp pop_braces(%{braces: braces} = state), do: %{state | braces: braces - 1}
-
-  defp put_attr([{type, name, attrs, meta} | acc], attr, attr_meta, value) do
+  defp put_attr([{type, name, attrs, meta} | acc], attr, attr_meta, value \\ nil) do
     attrs = [{attr, value, attr_meta} | attrs]
     [{type, name, attrs, meta} | acc]
   end
 
-  defp normalize_tag([{type, name, attrs, meta} | acc], line, column, self_close?, state) do
+  defp put_attr_value([{type, name, [{attr, _value, attr_meta} | attrs], meta} | acc], value) do
+    attrs = [{attr, value, attr_meta} | attrs]
+    [{type, name, attrs, meta} | acc]
+  end
+
+  defp reverse_attrs([{type, name, attrs, meta} | acc], line, column) do
     attrs = Enum.reverse(attrs)
     meta = %{meta | inner_location: {line, column}}
-
-    meta =
-      cond do
-        type == :tag and state.tag_handler.void?(name) -> Map.put(meta, :closing, :void)
-        self_close? -> Map.put(meta, :closing, :self)
-        true -> meta
-      end
-
     [{type, name, attrs, meta} | acc]
+  end
+
+  defp put_self_close([{type, name, attrs, meta} | acc]) do
+    meta = Map.put(meta, :self_close, true)
+    [{type, name, attrs, meta} | acc]
+  end
+
+  defp push_brace(state, pos) do
+    %{state | braces: [pos | state.braces]}
+  end
+
+  defp pop_brace(%{braces: [pos | braces]} = state) do
+    {pos, %{state | braces: braces}}
   end
 
   defp strip_text_token_fully(tokens) do

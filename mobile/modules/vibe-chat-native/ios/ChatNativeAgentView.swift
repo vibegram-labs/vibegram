@@ -43,12 +43,55 @@ private enum ChatNativeAgentRole: String, Codable {
   case assistant
 }
 
+private enum ChatNativeAgentStreamSegment: Codable, Equatable {
+  case text(String)
+  case progress(id: String, label: String, tool: String?, status: String)
+  case cards(groupId: String, cards: [ChatListRow.AgentCard])
+
+  var isRunningProgress: Bool {
+    if case .progress(_, _, _, let status) = self { return status == "running" }
+    return false
+  }
+
+  var progressTool: String? {
+    if case .progress(_, _, let tool, _) = self { return tool }
+    return nil
+  }
+
+  var progressId: String? {
+    if case .progress(let id, _, _, _) = self { return id }
+    return nil
+  }
+
+  var cardGroupId: String? {
+    if case .cards(let groupId, _) = self { return groupId }
+    return nil
+  }
+}
+
 private struct ChatNativeAgentMessage: Codable, Equatable {
   let id: String
   let role: ChatNativeAgentRole
   var content: String
   var timestampMs: Int64
   var isStreaming: Bool
+  var streamSegments: [ChatNativeAgentStreamSegment]
+
+  init(
+    id: String,
+    role: ChatNativeAgentRole,
+    content: String,
+    timestampMs: Int64,
+    isStreaming: Bool,
+    streamSegments: [ChatNativeAgentStreamSegment] = []
+  ) {
+    self.id = id
+    self.role = role
+    self.content = content
+    self.timestampMs = timestampMs
+    self.isStreaming = isStreaming
+    self.streamSegments = streamSegments
+  }
 }
 
 private struct ChatNativeAgentConversation: Codable, Equatable {
@@ -64,10 +107,35 @@ private struct ChatNativeAgentPersistedState: Codable {
   let conversations: [ChatNativeAgentConversation]
 }
 
-private struct ChatNativeAgentPendingSend {
-  let conversationId: String
-  let text: String
-  let truncateAtId: String?
+private enum ChatNativeAgentPendingSend {
+  case message(conversationId: String, text: String, truncateAtId: String?)
+  case builderUiResponse(conversationId: String, uiResponse: [String: Any], summary: String?)
+
+  var conversationId: String {
+    switch self {
+    case .message(let conversationId, _, _):
+      return conversationId
+    case .builderUiResponse(let conversationId, _, _):
+      return conversationId
+    }
+  }
+
+  func withConversationId(_ updatedConversationId: String) -> ChatNativeAgentPendingSend {
+    switch self {
+    case .message(_, let text, let truncateAtId):
+      return .message(
+        conversationId: updatedConversationId,
+        text: text,
+        truncateAtId: truncateAtId
+      )
+    case .builderUiResponse(_, let uiResponse, let summary):
+      return .builderUiResponse(
+        conversationId: updatedConversationId,
+        uiResponse: uiResponse,
+        summary: summary
+      )
+    }
+  }
 }
 
 private struct ChatNativeAgentRenderEntry {
@@ -79,6 +147,10 @@ private struct ChatNativeAgentRenderEntry {
   let isStreaming: Bool
   let isAgentMessage: Bool
   let showTail: Bool
+  let progressNodes: [[String: Any]]?
+  let agentCard: ChatListRow.AgentCard?
+  let actionSourceMessageId: String?
+  let actionSourceText: String?
 }
 
 private final class ChatNativeAgentHistoryCell: UITableViewCell {
@@ -207,6 +279,11 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private let headerMaskOverlayView = UIView()
   private let headerMaskGradientLayer = CAGradientLayer()
   private let headerContentView = UIView()
+
+  private let footerMaskView = UIView()
+  private let footerMaskBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .regular))
+  private let footerMaskOverlayView = UIView()
+  private let footerMaskGradientLayer = CAGradientLayer()
   private let backGlassView = UIVisualEffectView(effect: nil)
   private let titleGlassView = UIVisualEffectView(effect: nil)
   private let actionGlassView = UIVisualEffectView(effect: nil)
@@ -227,7 +304,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private var conversations: [ChatNativeAgentConversation] = []
   private var activeConversationId: String?
   private var streamingConversationId: String?
-  private var currentToolLabel: String?
+
   private var currentSpacerHeight: CGFloat = 0
 
   private var topic: String = ""
@@ -238,6 +315,10 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private var reconnectWorkItem: DispatchWorkItem?
   private var streamingTimeoutWorkItem: DispatchWorkItem?
   private var pendingSends: [ChatNativeAgentPendingSend] = []
+  private var builderQuestionNavigationController: UINavigationController?
+  private var queuedBuilderQuestionRequest: ChatBuilderUiRequest?
+  private var builderSetupState: ChatBuilderSetupState?
+  private var builderActivity: [ChatBuilderActivityItem] = []
   private var registeredSurfaceId: String = ""
 
   private static let fallbackApiBaseURL = "https://api.vibegram.io"
@@ -291,7 +372,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
 
     let safeTop = safeAreaInsets.top
     let bounds = self.bounds
-    let headerHeight = safeTop + 60.0
+    let headerHeight = safeTop + 72.0
 
     headerContainer.frame = CGRect(x: 0.0, y: 0.0, width: bounds.width, height: headerHeight)
     headerMaskView.frame = headerContainer.bounds
@@ -363,6 +444,18 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       animated: false
     )
 
+    // Footer fade mask at bottom of chat page
+    let footerMaskHeight: CGFloat = 100.0
+    footerMaskView.frame = CGRect(
+      x: 0.0,
+      y: bounds.height - footerMaskHeight,
+      width: bounds.width,
+      height: footerMaskHeight
+    )
+    footerMaskBlurView.frame = footerMaskView.bounds
+    footerMaskOverlayView.frame = footerMaskBlurView.bounds
+    footerMaskGradientLayer.frame = footerMaskView.bounds
+
     historyTableView.frame = historyPage.bounds
     historyTableView.contentInset = UIEdgeInsets(
       top: safeTop + 80.0,
@@ -393,55 +486,127 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     guard !text.isEmpty else { return }
 
     connectIfNeeded()
+    guard let conversationId = beginStreamingTurn(
+      userText: text,
+      fallbackTitle: String(text.prefix(20))
+    ) else { return }
+
+    if joinedTopic {
+      pushMessage(text: text, conversationId: conversationId, truncateAtId: nil)
+    } else {
+      pendingSends.append(
+        .message(
+          conversationId: conversationId,
+          text: text,
+          truncateAtId: nil
+        ))
+    }
+  }
+
+  private func beginStreamingTurn(userText: String, fallbackTitle: String) -> String? {
+    let trimmedText = userText.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedText.isEmpty else { return nil }
 
     var conversationId = activeConversationId
     if conversationId == nil {
-      conversationId = createConversation(title: String(text.prefix(20)))
+      conversationId = createConversation(title: fallbackTitle)
     }
-    guard let conversationId else { return }
+    guard let conversationId else { return nil }
 
+    let timestampMs = Self.nowMs()
     let userMessage = ChatNativeAgentMessage(
       id: UUID().uuidString,
       role: .user,
-      content: text,
-      timestampMs: Self.nowMs(),
-      isStreaming: false
+      content: trimmedText,
+      timestampMs: timestampMs,
+      isStreaming: false,
+      streamSegments: []
     )
     let assistantMessage = ChatNativeAgentMessage(
       id: UUID().uuidString,
       role: .assistant,
       content: "",
-      timestampMs: Self.nowMs(),
-      isStreaming: true
+      timestampMs: timestampMs,
+      isStreaming: true,
+      streamSegments: []
     )
 
     updateConversation(conversationId) { conversation in
       conversation.messages.append(userMessage)
       conversation.messages.append(assistantMessage)
-      conversation.updatedAt = Self.nowMs()
+      conversation.updatedAt = timestampMs
       if conversation.title.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        conversation.title = String(text.prefix(20))
+        conversation.title = fallbackTitle
       }
     }
 
     streamingConversationId = conversationId
-    currentToolLabel = nil
     currentSpacerHeight = 0.0
     persistState()
     refreshHistoryList()
     rebuildChatRows(scrollToBottom: true, animated: true)
     scheduleStreamingTimeout()
 
+    return conversationId
+  }
+
+  private func submitBuilderUiResponse(
+    requestId: String,
+    answers: [String: Any],
+    summary: String?
+  ) {
+    let trimmedRequestId = requestId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedRequestId.isEmpty else { return }
+
+    let normalizedSummary: String
+    if let summary, !summary.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+      normalizedSummary = summary.trimmingCharacters(in: .whitespacesAndNewlines)
+    } else {
+      normalizedSummary = "Updated the setup"
+    }
+
+    connectIfNeeded()
+    guard
+      let conversationId = beginStreamingTurn(
+        userText: normalizedSummary,
+        fallbackTitle: "Agent setup"
+      )
+    else { return }
+
+    let uiResponse: [String: Any] = [
+      "requestId": trimmedRequestId,
+      "answers": answers,
+    ]
+
     if joinedTopic {
-      pushMessage(text: text, conversationId: conversationId, truncateAtId: nil)
+      pushBuilderUiResponse(
+        conversationId: conversationId,
+        uiResponse: uiResponse,
+        summary: normalizedSummary
+      )
     } else {
       pendingSends.append(
-        ChatNativeAgentPendingSend(
+        .builderUiResponse(
           conversationId: conversationId,
-          text: text,
-          truncateAtId: nil
+          uiResponse: uiResponse,
+          summary: normalizedSummary
         ))
     }
+  }
+
+  private func pushBuilderUiResponse(
+    conversationId: String,
+    uiResponse: [String: Any],
+    summary: String?
+  ) {
+    var payload: [String: Any] = [
+      "conversation_id": conversationId,
+      "ui_response": uiResponse,
+    ]
+    if let summary, !summary.isEmpty {
+      payload["summary"] = summary
+    }
+    sendChannelEvent(event: "builder_ui_response", payload: payload) { _, _ in }
   }
 
   private func setupHeader() {
@@ -455,11 +620,12 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     headerMaskView.addSubview(headerMaskBlurView)
     headerMaskBlurView.contentView.addSubview(headerMaskOverlayView)
     headerMaskGradientLayer.colors = [
-      UIColor.black.withAlphaComponent(0.95).cgColor,
-      UIColor.black.withAlphaComponent(0.72).cgColor,
+      UIColor.black.cgColor,
+      UIColor.black.withAlphaComponent(0.85).cgColor,
+      UIColor.black.withAlphaComponent(0.45).cgColor,
       UIColor.clear.cgColor,
     ]
-    headerMaskGradientLayer.locations = [0.0, 0.58, 1.0]
+    headerMaskGradientLayer.locations = [0.0, 0.42, 0.72, 1.0]
     headerMaskView.layer.mask = headerMaskGradientLayer
 
     headerContainer.addSubview(headerContentView)
@@ -527,6 +693,9 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     messagesView.onTap = { [weak self] in
       self?.window?.endEditing(true)
     }
+    messagesView.onNativeEvent = { [weak self] event in
+      self?.handleMessagesEvent(event)
+    }
 
     let historyTap = UITapGestureRecognizer(target: self, action: #selector(handlePageTap))
     historyTap.cancelsTouchesInView = false
@@ -550,6 +719,20 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     historyEmptyLabel.numberOfLines = 0
     historyEmptyLabel.textAlignment = .center
     historyPage.addSubview(historyEmptyLabel)
+
+    // Footer fade mask
+    footerMaskView.isUserInteractionEnabled = false
+    footerMaskView.clipsToBounds = true
+    chatPage.addSubview(footerMaskView)
+    footerMaskView.addSubview(footerMaskBlurView)
+    footerMaskBlurView.contentView.addSubview(footerMaskOverlayView)
+    footerMaskGradientLayer.colors = [
+      UIColor.clear.cgColor,
+      UIColor.black.withAlphaComponent(0.55).cgColor,
+      UIColor.black.cgColor,
+    ]
+    footerMaskGradientLayer.locations = [0.0, 0.38, 1.0]
+    footerMaskView.layer.mask = footerMaskGradientLayer
 
     bringSubviewToFront(headerContainer)
   }
@@ -577,15 +760,52 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     } else {
       headerMaskBlurView.effect = UIBlurEffect(style: .regular)
     }
-    headerMaskOverlayView.backgroundColor = baseBackground.withAlphaComponent(0.88)
+    headerMaskOverlayView.backgroundColor = baseBackground.withAlphaComponent(0.72)
     backGlassView.contentView.backgroundColor = baseBackground.withAlphaComponent(0.10)
     titleGlassView.contentView.backgroundColor = baseBackground.withAlphaComponent(0.10)
     actionGlassView.contentView.backgroundColor = baseBackground.withAlphaComponent(0.10)
     refreshHeaderGlass(isDarkTheme: isDarkTheme)
 
+    // Footer mask theme
+    var footerWhite: CGFloat = 0.0
+    if appearance.textColorThem.getWhite(&footerWhite, alpha: nil) {
+      footerMaskBlurView.effect = UIBlurEffect(style: footerWhite > 0.5 ? .dark : .light)
+    } else {
+      footerMaskBlurView.effect = UIBlurEffect(style: .regular)
+    }
+    footerMaskOverlayView.backgroundColor = baseBackground.withAlphaComponent(0.72)
+
     refreshHeader(animated: false)
     refreshHistoryList()
     setNeedsLayout()
+  }
+
+  private func currentBuilderPanelTheme() -> ChatBuilderPanelTheme {
+    let isDarkTheme = appearance.isDark
+    return ChatBuilderPanelTheme(
+      isDark: isDarkTheme,
+      backgroundColor: builderThemeColor(isDarkTheme ? "#121212" : "#F5F4F1"),
+      cardColor: builderThemeColor(isDarkTheme ? "#242424" : "#FFFFFF"),
+      inputColor: builderThemeColor(isDarkTheme ? "#222222" : "#F2F2F2"),
+      textColor: builderThemeColor(isDarkTheme ? "#E8E6F0" : "#1A1A1F"),
+      secondaryTextColor: builderThemeColor(isDarkTheme ? "#9896A8" : "#5A5A66"),
+      accentColor: builderThemeColor(isDarkTheme ? "#7CB8B8" : "#4A8D8E")
+    )
+  }
+
+  private func builderThemeColor(_ hex: String) -> UIColor {
+    let sanitized =
+      hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
+        of: "#", with: "")
+    guard sanitized.count == 6, let value = Int(sanitized, radix: 16) else {
+      return .systemBackground
+    }
+    return UIColor(
+      red: CGFloat((value >> 16) & 0xff) / 255.0,
+      green: CGFloat((value >> 8) & 0xff) / 255.0,
+      blue: CGFloat(value & 0xff) / 255.0,
+      alpha: 1.0
+    )
   }
 
   @objc private func handleBackPressed() {
@@ -608,6 +828,79 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
 
   @objc private func handlePageTap() {
     window?.endEditing(true)
+  }
+
+  private func handleMessagesEvent(_ event: [String: Any]) {
+    let type = Self.normalizedString(event["type"]) ?? ""
+
+    if type == "agentCardPressed",
+      let rawCard = event["card"] as? [String: Any],
+      let card = ChatListRow.AgentCard.parse(rawCard)
+    {
+      presentAgentCardPanel(card)
+      return
+    }
+
+    guard type == "agentMessageAction" else {
+      onNativeEvent(event)
+      return
+    }
+
+    let action = Self.normalizedString(event["action"]) ?? ""
+    let sourceMessageId = Self.normalizedString(event["sourceMessageId"]) ?? ""
+    let sourceText = (event["sourceText"] as? String) ?? ""
+
+    switch action {
+    case "copy":
+      guard !sourceText.isEmpty else { return }
+      UIPasteboard.general.string = sourceText
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+      onNativeEvent(["type": "agentToast", "message": "Copied to clipboard"])
+
+    case "thumbUp":
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+      onNativeEvent([
+        "type": "agentFeedback",
+        "messageId": sourceMessageId,
+        "value": "up",
+      ])
+      onNativeEvent(["type": "agentToast", "message": "Thanks for the feedback"])
+
+    case "thumbDown":
+      UIImpactFeedbackGenerator(style: .light).impactOccurred()
+      onNativeEvent([
+        "type": "agentFeedback",
+        "messageId": sourceMessageId,
+        "value": "down",
+      ])
+      onNativeEvent(["type": "agentToast", "message": "Feedback noted"])
+
+    case "regenerate":
+      regenerateAssistantResponse(sourceMessageId: sourceMessageId)
+
+    default:
+      onNativeEvent(event)
+    }
+  }
+
+  private func presentAgentCardPanel(_ card: ChatListRow.AgentCard) {
+    guard let presenter = topMostViewController() else { return }
+    let controller = ChatNativeAgentConfigPanelController(card: card, appearance: appearance)
+    controller.onToast = { [weak self] message in
+      self?.onNativeEvent(["type": "agentToast", "message": message])
+    }
+    controller.onDeleteAgent = { [weak self] card, dismiss in
+      self?.deleteAgent(card, dismiss: dismiss)
+    }
+
+    let navigation = UINavigationController(rootViewController: controller)
+    navigation.modalPresentationStyle = .pageSheet
+    if let sheet = navigation.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.prefersGrabberVisible = true
+      sheet.preferredCornerRadius = 28.0
+    }
+    presenter.present(navigation, animated: true)
   }
 
   private func refreshHeaderGlass(isDarkTheme: Bool) {
@@ -775,6 +1068,27 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     return (socketURL, token, userId)
   }
 
+  private func resolveAPIConfig() -> (apiBaseURL: URL, token: String, userId: String)? {
+    let nativeCallConfig = VibeNativeCallStore.shared.getNativeEngineConfig()
+    let session = Self.loadNativeAuthSessionFromKeychain()
+
+    guard
+      let userId = Self.normalizedString(nativeCallConfig["userId"] ?? session?["userId"])
+    else {
+      return nil
+    }
+
+    let apiBase =
+      Self.normalizedString(nativeCallConfig["baseUrl"] ?? nativeCallConfig["apiBaseUrl"])
+      ?? Self.fallbackApiBaseURL
+    let token =
+      Self.normalizedString(nativeCallConfig["authToken"] ?? session?["loginToken"])
+      ?? userId
+
+    guard let apiBaseURL = URL(string: apiBase) else { return nil }
+    return (apiBaseURL, token, userId)
+  }
+
   private func handlePhoenixFrame(_ frame: ChatPhoenixClient.EventFrame) {
     if frame.event == "phx_reply", let ref = frame.ref {
       let status = (frame.payload["status"] as? String) ?? "error"
@@ -793,10 +1107,46 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     case "progress":
       let label =
         (frame.payload["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-      currentToolLabel = label.isEmpty ? "Thinking..." : label
+      let tool = frame.payload["tool"] as? String
+      let status = (frame.payload["status"] as? String) ?? "running"
+
+      guard let conversationId = streamingConversationId ?? activeConversationId else { break }
+      updateConversation(conversationId) { conversation in
+        guard !conversation.messages.isEmpty else { return }
+        let lastIndex = conversation.messages.count - 1
+        guard conversation.messages[lastIndex].role == .assistant else { return }
+
+        if status == "complete" || status == "error" {
+          // Remove the running progress for this tool
+          conversation.messages[lastIndex].streamSegments.removeAll {
+            $0.isRunningProgress && $0.progressTool == tool
+          }
+        } else {
+          // Remove any existing running progress for same tool, then append new one
+          conversation.messages[lastIndex].streamSegments.removeAll {
+            $0.isRunningProgress && $0.progressTool == tool
+          }
+          conversation.messages[lastIndex].streamSegments.append(
+            .progress(
+              id: UUID().uuidString,
+              label: label.isEmpty ? "Working..." : label,
+              tool: tool,
+              status: status
+            )
+          )
+        }
+      }
       rebuildChatRows(scrollToBottom: false, animated: false)
     case "subagent":
       handleSubagentEvent(frame.payload)
+    case "agent_cards":
+      handleAgentCardsEvent(frame.payload)
+    case "builder_state":
+      handleBuilderStateEvent(frame.payload)
+    case "ui_request":
+      handleBuilderUiRequestEvent(frame.payload)
+    case "review_ready":
+      handleBuilderReviewReadyEvent(frame.payload)
     case "ack":
       if let conversationId = frame.payload["conversation_id"] as? String {
         applyAcknowledgedConversationId(conversationId)
@@ -833,20 +1183,152 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     let detail = Self.normalizedString(payload["detail"])
     let status = Self.normalizedString(payload["status"]) ?? ""
 
-    let nextLabel: String?
+    let nextLabel: String
+    let segmentStatus: String
     switch event {
     case "started":
       nextLabel = "Starting \(label)..."
+      segmentStatus = "running"
     case "progress":
       nextLabel = detail ?? "\(label) is working..."
+      segmentStatus = "running"
     case "finished":
       nextLabel = status == "error" ? "\(label) failed." : "\(label) completed."
+      segmentStatus = status == "error" ? "error" : "complete"
     default:
-      nextLabel = detail ?? currentToolLabel
+      nextLabel = detail ?? "Working..."
+      segmentStatus = "running"
     }
 
-    currentToolLabel = nextLabel
+    guard let conversationId = streamingConversationId ?? activeConversationId else { return }
+    updateConversation(conversationId) { conversation in
+      guard !conversation.messages.isEmpty else { return }
+      let lastIndex = conversation.messages.count - 1
+      guard conversation.messages[lastIndex].role == .assistant else { return }
+
+      let toolKey = "subagent_\(label)"
+      if segmentStatus == "complete" || segmentStatus == "error" {
+        conversation.messages[lastIndex].streamSegments.removeAll {
+          $0.isRunningProgress && $0.progressTool == toolKey
+        }
+      } else {
+        conversation.messages[lastIndex].streamSegments.removeAll {
+          $0.isRunningProgress && $0.progressTool == toolKey
+        }
+        conversation.messages[lastIndex].streamSegments.append(
+          .progress(
+            id: UUID().uuidString,
+            label: nextLabel,
+            tool: toolKey,
+            status: segmentStatus
+          )
+        )
+      }
+    }
     rebuildChatRows(scrollToBottom: false, animated: false)
+  }
+
+  private func handleAgentCardsEvent(_ payload: [String: Any]) {
+    let groupId =
+      Self.normalizedString(payload["group_id"])
+      ?? Self.normalizedString(payload["groupId"])
+      ?? "builder:cards"
+    let rawCards = (payload["cards"] as? [[String: Any]]) ?? []
+    let cards = rawCards.compactMap(ChatListRow.AgentCard.parse)
+    guard !cards.isEmpty else { return }
+    guard let conversationId = streamingConversationId ?? activeConversationId else { return }
+
+    updateConversation(conversationId) { conversation in
+      guard !conversation.messages.isEmpty else { return }
+      let lastIndex = conversation.messages.count - 1
+      guard conversation.messages[lastIndex].role == .assistant else { return }
+
+      conversation.messages[lastIndex].streamSegments.removeAll {
+        if case .cards(let existingGroupId, _) = $0 {
+          return existingGroupId == groupId
+        }
+        return false
+      }
+      conversation.messages[lastIndex].streamSegments.append(
+        .cards(groupId: groupId, cards: cards)
+      )
+      conversation.updatedAt = Self.nowMs()
+    }
+    persistState()
+    rebuildChatRows(scrollToBottom: false, animated: false)
+  }
+
+  private func handleBuilderStateEvent(_ payload: [String: Any]) {
+    if let setupState = ChatBuilderSetupState(raw: payload["setupState"] as? [String: Any]) {
+      builderSetupState = setupState
+    }
+    builderActivity =
+      ((payload["activity"] as? [[String: Any]]) ?? [])
+      .compactMap(ChatBuilderActivityItem.init(raw:))
+  }
+
+  private func handleBuilderUiRequestEvent(_ payload: [String: Any]) {
+    handleBuilderStateEvent(payload)
+
+    guard let request = ChatBuilderUiRequest(raw: payload["pendingUiRequest"] as? [String: Any])
+    else { return }
+
+    if let navigationController = builderQuestionNavigationController,
+      navigationController.presentingViewController != nil
+    {
+      queuedBuilderQuestionRequest = request
+      return
+    }
+    presentBuilderQuestionPanel(request)
+  }
+
+  private func handleBuilderReviewReadyEvent(_ payload: [String: Any]) {
+    handleBuilderStateEvent(payload)
+  }
+
+  private func presentBuilderQuestionPanel(_ request: ChatBuilderUiRequest) {
+    if let navigationController = builderQuestionNavigationController,
+      navigationController.presentingViewController != nil
+    {
+      return
+    }
+
+    guard let presenter = topMostViewController() else { return }
+
+    let controller = ChatBuilderPanelController(
+      mode: .request(request),
+      theme: currentBuilderPanelTheme(),
+      setupState: builderSetupState,
+      activity: builderActivity,
+      agentEnabled: nil
+    )
+    controller.onSubmitRequest = { [weak self] requestId, answers, summary in
+      self?.submitBuilderUiResponse(requestId: requestId, answers: answers, summary: summary)
+    }
+    controller.onControllerDismissed = { [weak self] in
+      guard let self else { return }
+      self.builderQuestionNavigationController = nil
+      guard let queuedRequest = self.queuedBuilderQuestionRequest else { return }
+      self.queuedBuilderQuestionRequest = nil
+      DispatchQueue.main.async { [weak self] in
+        self?.presentBuilderQuestionPanel(queuedRequest)
+      }
+    }
+
+    let navigationController = UINavigationController(rootViewController: controller)
+    navigationController.modalPresentationStyle = .pageSheet
+    if let sheet = navigationController.sheetPresentationController {
+      sheet.detents = [.medium(), .large()]
+      sheet.selectedDetentIdentifier = .medium
+      sheet.prefersGrabberVisible = false
+      sheet.prefersScrollingExpandsWhenScrolledToEdge = true
+      sheet.prefersEdgeAttachedInCompactHeight = true
+      sheet.widthFollowsPreferredContentSizeWhenEdgeAttached = true
+      sheet.preferredCornerRadius = 28.0
+    }
+
+    builderQuestionNavigationController = navigationController
+    presenter.present(navigationController, animated: true)
   }
 
   private func syncConversations() {
@@ -893,6 +1375,66 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     }
   }
 
+  private func regenerateAssistantResponse(sourceMessageId: String) {
+    let assistantMessageId = sourceMessageId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !assistantMessageId.isEmpty else { return }
+
+    connectIfNeeded()
+
+    guard let conversationId = activeConversationId else { return }
+    guard let conversation = conversation(for: conversationId) else { return }
+    guard let assistantIndex = conversation.messages.firstIndex(where: { $0.id == assistantMessageId })
+    else { return }
+    guard conversation.messages[assistantIndex].role == .assistant else { return }
+    guard assistantIndex > 0 else { return }
+
+    var userText = ""
+    for index in stride(from: assistantIndex - 1, through: 0, by: -1) {
+      let candidate = conversation.messages[index]
+      guard candidate.role == .user else { continue }
+      userText = candidate.content.trimmingCharacters(in: .whitespacesAndNewlines)
+      if !userText.isEmpty {
+        break
+      }
+    }
+    guard !userText.isEmpty else { return }
+
+    let timestampMs = Self.nowMs()
+    let assistantMessage = ChatNativeAgentMessage(
+      id: UUID().uuidString,
+      role: .assistant,
+      content: "",
+      timestampMs: timestampMs,
+      isStreaming: true,
+      streamSegments: []
+    )
+
+    updateConversation(conversationId) { conversation in
+      conversation.messages = Array(conversation.messages.prefix(assistantIndex))
+      conversation.messages.append(assistantMessage)
+      conversation.updatedAt = timestampMs
+    }
+
+    streamingConversationId = conversationId
+    currentSpacerHeight = 0.0
+    persistState()
+    refreshHistoryList()
+    rebuildChatRows(scrollToBottom: true, animated: true)
+    scheduleStreamingTimeout()
+    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+    if joinedTopic {
+      pushMessage(text: userText, conversationId: conversationId, truncateAtId: assistantMessageId)
+    } else {
+      pendingSends.append(
+        .message(
+          conversationId: conversationId,
+          text: userText,
+          truncateAtId: assistantMessageId
+        ))
+    }
+  }
+
   private func loadConversation(id: String) {
     guard !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
     sendChannelEvent(event: "get_conversation", payload: ["id": id]) {
@@ -936,11 +1478,21 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     let queued = pendingSends
     pendingSends.removeAll()
     for pending in queued {
-      pushMessage(
-        text: pending.text,
-        conversationId: pending.conversationId,
-        truncateAtId: pending.truncateAtId
-      )
+      switch pending {
+      case .message(let conversationId, let text, let truncateAtId):
+        pushMessage(
+          text: text,
+          conversationId: conversationId,
+          truncateAtId: truncateAtId
+        )
+
+      case .builderUiResponse(let conversationId, let uiResponse, let summary):
+        pushBuilderUiResponse(
+          conversationId: conversationId,
+          uiResponse: uiResponse,
+          summary: summary
+        )
+      }
     }
   }
 
@@ -963,6 +1515,16 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       conversation.messages[lastIndex].content += chunk
       conversation.messages[lastIndex].isStreaming = true
       conversation.updatedAt = Self.nowMs()
+
+      // Append to the last .text segment, or create a new one
+      // This preserves ordering: if the last segment was a progress,
+      // a new text block starts AFTER it — achieving mid-response progress
+      if case .text(let existing) = conversation.messages[lastIndex].streamSegments.last {
+        let updatedIndex = conversation.messages[lastIndex].streamSegments.count - 1
+        conversation.messages[lastIndex].streamSegments[updatedIndex] = .text(existing + chunk)
+      } else {
+        conversation.messages[lastIndex].streamSegments.append(.text(chunk))
+      }
     }
     rebuildChatRows(scrollToBottom: false, animated: false)
   }
@@ -985,11 +1547,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     activeConversationId = serverConversationId
     streamingConversationId = serverConversationId
     pendingSends = pendingSends.map {
-      ChatNativeAgentPendingSend(
-        conversationId: $0.conversationId == currentId ? serverConversationId : $0.conversationId,
-        text: $0.text,
-        truncateAtId: $0.truncateAtId
-      )
+      $0.conversationId == currentId ? $0.withConversationId(serverConversationId) : $0
     }
     persistState()
     refreshHistoryList()
@@ -1000,7 +1558,6 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     streamingTimeoutWorkItem?.cancel()
 
     guard let conversationId = streamingConversationId ?? activeConversationId else {
-      currentToolLabel = nil
       return
     }
 
@@ -1015,11 +1572,97 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
         conversation.messages[lastIndex].content = fallbackText
       }
       conversation.messages[lastIndex].isStreaming = false
+      conversation.messages[lastIndex].streamSegments.removeAll { $0.isRunningProgress }
       conversation.updatedAt = Self.nowMs()
     }
 
-    currentToolLabel = nil
     streamingConversationId = nil
+    persistState()
+    refreshHistoryList()
+    rebuildChatRows(scrollToBottom: false, animated: false)
+  }
+
+  private func deleteAgent(_ card: ChatListRow.AgentCard, dismiss: @escaping () -> Void) {
+    guard let config = resolveAPIConfig() else {
+      onNativeEvent(["type": "agentToast", "message": "Missing API session"])
+      return
+    }
+
+    let trimmedId = card.agentId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedId.isEmpty else { return }
+
+    let path = "/api/agents/\(trimmedId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? trimmedId)"
+    let url = URL(string: path, relativeTo: config.apiBaseURL) ?? config.apiBaseURL.appendingPathComponent(path)
+    var request = URLRequest(url: url)
+    request.httpMethod = "DELETE"
+    request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
+    request.setValue("application/json", forHTTPHeaderField: "Accept")
+
+    let cardTitle = card.displayName
+
+    URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+      DispatchQueue.main.async {
+        guard let self else { return }
+
+        if let error {
+          NSLog("[ChatNativeAgent] delete agent failed %@", error.localizedDescription)
+          self.onNativeEvent(["type": "agentToast", "message": "Could not delete agent"])
+          return
+        }
+
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(statusCode) else {
+          let body =
+            data.flatMap { String(data: $0, encoding: .utf8) }?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+          NSLog(
+            "[ChatNativeAgent] delete agent rejected status=%d body=%@",
+            statusCode,
+            body ?? "-"
+          )
+          self.onNativeEvent(["type": "agentToast", "message": "Delete failed"])
+          return
+        }
+
+        self.removeAgentCards(agentId: trimmedId)
+        dismiss()
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        self.onNativeEvent(["type": "agentToast", "message": "Deleted \(cardTitle)"])
+      }
+    }.resume()
+  }
+
+  private func removeAgentCards(agentId: String) {
+    let trimmedId = agentId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedId.isEmpty else { return }
+
+    for index in conversations.indices {
+      var conversation = conversations[index]
+      for messageIndex in conversation.messages.indices {
+        var segments = conversation.messages[messageIndex].streamSegments
+        var changed = false
+
+        segments = segments.compactMap { segment in
+          switch segment {
+          case .cards(let groupId, let cards):
+            let filtered = cards.filter { $0.agentId != trimmedId }
+            if filtered.count != cards.count {
+              changed = true
+            }
+            return filtered.isEmpty ? nil : .cards(groupId: groupId, cards: filtered)
+
+          default:
+            return segment
+          }
+        }
+
+        if changed {
+          conversation.messages[messageIndex].streamSegments = segments
+        }
+      }
+      conversations[index] = conversation
+    }
+
     persistState()
     refreshHistoryList()
     rebuildChatRows(scrollToBottom: false, animated: false)
@@ -1046,7 +1689,6 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     conversations.insert(conversation, at: 0)
     activeConversationId = conversation.id
     currentSpacerHeight = 0
-    currentToolLabel = nil
     persistState()
     refreshHistoryList()
     rebuildChatRows(scrollToBottom: false, animated: false)
@@ -1072,11 +1714,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       streamingConversationId = serverId
     }
     pendingSends = pendingSends.map {
-      ChatNativeAgentPendingSend(
-        conversationId: $0.conversationId == localId ? serverId : $0.conversationId,
-        text: $0.text,
-        truncateAtId: $0.truncateAtId
-      )
+      $0.conversationId == localId ? $0.withConversationId(serverId) : $0
     }
     persistState()
     refreshHistoryList()
@@ -1088,7 +1726,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     if activeConversationId == id {
       activeConversationId = conversations.sorted { $0.createdAt > $1.createdAt }.first?.id
       currentSpacerHeight = 0
-      currentToolLabel = nil
+
       if let activeConversationId,
         conversation(for: activeConversationId)?.messages.isEmpty == true
       {
@@ -1110,7 +1748,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     }
     activeConversationId = id
     currentSpacerHeight = 0
-    currentToolLabel = nil
+
     persistState()
     refreshHistoryList()
     rebuildChatRows(scrollToBottom: false, animated: false)
@@ -1159,6 +1797,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
 
   private func makeRawRows(for conversation: ChatNativeAgentConversation) -> [[String: Any]] {
     let renderEntries = makeRenderEntries(for: conversation)
+    let regeneratePromptByAssistantId = regeneratePromptMap(for: conversation)
     var rows: [[String: Any]] = []
     var lastDayKey: String?
 
@@ -1199,6 +1838,22 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
         message["isAgentMessage"] = true
         message["agentName"] = "Vibe AI"
         message["plainContent"] = entry.text
+        var metadata: [String: Any] = [:]
+        if let progressNodes = entry.progressNodes, !progressNodes.isEmpty {
+          metadata["progressNodes"] = progressNodes
+        }
+        if let agentCard = entry.agentCard {
+          metadata["agentCard"] = agentCard.rawValue
+        }
+        if let actionSourceMessageId = entry.actionSourceMessageId {
+          metadata["sourceMessageId"] = actionSourceMessageId
+        }
+        if let actionSourceText = entry.actionSourceText {
+          metadata["sourceText"] = actionSourceText
+        }
+        if !metadata.isEmpty {
+          message["metadata"] = metadata
+        }
         if entry.isStreaming {
           message["isStreaming"] = true
         }
@@ -1209,6 +1864,46 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
         "key": "m-\(entry.id)",
         "message": message,
       ])
+
+      let trimmedText = entry.text.trimmingCharacters(in: .whitespacesAndNewlines)
+      if entry.isAgentMessage,
+        entry.messageType == "text",
+        !entry.isStreaming,
+        !trimmedText.isEmpty,
+        let actionSourceMessageId = entry.actionSourceMessageId
+      {
+        var actionMetadata: [String: Any] = [
+          "sourceMessageId": actionSourceMessageId,
+          "sourceText": entry.actionSourceText ?? entry.text,
+        ]
+        if let regeneratePrompt = regeneratePromptByAssistantId[actionSourceMessageId],
+          !regeneratePrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        {
+          actionMetadata["regeneratePrompt"] = regeneratePrompt
+        }
+
+        rows.append([
+          "kind": "message",
+          "key": "a-\(actionSourceMessageId)",
+          "message": [
+            "id": "actions-\(actionSourceMessageId)",
+            "text": "",
+            "timestamp": "",
+            "isMe": false,
+            "type": "agent_actions",
+            "isAgentMessage": true,
+            "agentName": "Vibe AI",
+            "bubbleShape": [
+              "showTail": false,
+              "borderTopLeftRadius": 18,
+              "borderTopRightRadius": 18,
+              "borderBottomLeftRadius": 18,
+              "borderBottomRightRadius": 18,
+            ],
+            "metadata": actionMetadata,
+          ],
+        ])
+      }
     }
 
     return rows
@@ -1225,26 +1920,49 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
         message.isStreaming
         && conversation.id == (streamingConversationId ?? activeConversationId)
 
-      if isActiveStreaming {
-        let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
-        let progressLabel = currentToolLabel ?? (trimmed.isEmpty ? "Thinking..." : "")
-        if !progressLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-          entries.append(
-            ChatNativeAgentRenderEntry(
-              id: "\(message.id)-progress",
-              role: .assistant,
-              text: progressLabel,
-              timestampMs: max(message.timestampMs, Self.nowMs()),
-              messageType: "agent_progress",
-              isStreaming: false,
-              isAgentMessage: true,
-              showTail: false
-            ))
-        }
-        if trimmed.isEmpty {
-          continue
+      let trimmedContent = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+      let hasRenderableSegments = message.streamSegments.contains { segment in
+        switch segment {
+        case .text(let text):
+          return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        case .progress(_, _, _, let status):
+          return status == "running"
+        case .cards(_, let cards):
+          return !cards.isEmpty
         }
       }
+
+      if message.role == .assistant && hasRenderableSegments {
+        appendSegmentedEntries(
+          from: message,
+          isStreaming: isActiveStreaming,
+          into: &entries
+        )
+        continue
+      }
+
+      if isActiveStreaming && trimmedContent.isEmpty {
+        entries.append(
+          ChatNativeAgentRenderEntry(
+            id: "\(message.id)-thinking",
+            role: .assistant,
+            text: "Thinking...",
+            timestampMs: max(message.timestampMs, Self.nowMs()),
+            messageType: "agent_progress_tree",
+            isStreaming: false,
+            isAgentMessage: true,
+            showTail: false,
+            progressNodes: [
+              ["id": "\(message.id)-thinking", "label": "Thinking...", "status": "running", "depth": 0]
+            ],
+            agentCard: nil,
+            actionSourceMessageId: nil,
+            actionSourceText: nil
+          ))
+        continue
+      }
+
+      guard !trimmedContent.isEmpty || message.role == .user else { continue }
 
       entries.append(
         ChatNativeAgentRenderEntry(
@@ -1253,13 +1971,183 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
           text: message.content,
           timestampMs: message.timestampMs,
           messageType: "text",
-          isStreaming: message.isStreaming,
+          isStreaming: false,
           isAgentMessage: message.role == .assistant,
-          showTail: true
+          showTail: true,
+          progressNodes: nil,
+          agentCard: nil,
+          actionSourceMessageId: message.role == .assistant ? message.id : nil,
+          actionSourceText: message.role == .assistant ? message.content : nil
         ))
     }
 
     return entries
+  }
+
+  private func appendSegmentedEntries(
+    from message: ChatNativeAgentMessage,
+    isStreaming: Bool,
+    into entries: inout [ChatNativeAgentRenderEntry]
+  ) {
+    var pendingProgressSegments: [ChatNativeAgentStreamSegment] = []
+    let lastTextSegmentIndex = message.streamSegments.lastIndex(where: {
+      if case .text(let text) = $0 {
+        return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+      }
+      return false
+    })
+
+    func flushProgressSegments(position: Int) {
+      guard !pendingProgressSegments.isEmpty else { return }
+      let progressNodes = buildProgressNodes(from: pendingProgressSegments)
+      pendingProgressSegments.removeAll()
+      guard !progressNodes.isEmpty else { return }
+
+      entries.append(
+        ChatNativeAgentRenderEntry(
+          id: "\(message.id)-progress-\(position)",
+          role: .assistant,
+          text: (progressNodes.first?["label"] as? String) ?? "Working...",
+          timestampMs: max(message.timestampMs, Self.nowMs()),
+          messageType: "agent_progress_tree",
+          isStreaming: false,
+          isAgentMessage: true,
+          showTail: false,
+          progressNodes: progressNodes,
+          agentCard: nil,
+          actionSourceMessageId: nil,
+          actionSourceText: nil
+        ))
+    }
+
+    for (index, segment) in message.streamSegments.enumerated() {
+      switch segment {
+      case .progress(_, _, _, let status):
+        guard status == "running" else { continue }
+        pendingProgressSegments.append(segment)
+
+      case .text(let text):
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { continue }
+        // Drop any accumulated progress segments — the arrival of text means the tool
+        // already completed.  Showing a running-progress tree above the response text
+        // would be misleading and visually incorrect.
+        pendingProgressSegments.removeAll()
+
+        let isLastTextSegment = index == lastTextSegmentIndex
+        entries.append(
+          ChatNativeAgentRenderEntry(
+            id: "\(message.id)-text-\(index)",
+            role: .assistant,
+            text: text,
+            timestampMs: message.timestampMs,
+            messageType: "text",
+            isStreaming: isStreaming && isLastTextSegment,
+            isAgentMessage: true,
+            showTail: isLastTextSegment,
+            progressNodes: nil,
+            agentCard: nil,
+            actionSourceMessageId: isStreaming ? nil : (isLastTextSegment ? message.id : nil),
+            actionSourceText: isStreaming ? nil : (isLastTextSegment ? message.content : nil)
+          ))
+
+      case .cards(let groupId, let cards):
+        // Same as for text: drop progress accumulated before a card group.
+        pendingProgressSegments.removeAll()
+        for (cardIndex, card) in cards.enumerated() {
+          entries.append(
+            ChatNativeAgentRenderEntry(
+              id: "\(message.id)-card-\(groupId)-\(cardIndex)",
+              role: .assistant,
+              text: card.displayName,
+              timestampMs: message.timestampMs,
+              messageType: "agent_card",
+              isStreaming: false,
+              isAgentMessage: true,
+              showTail: false,
+              progressNodes: nil,
+              agentCard: card,
+              actionSourceMessageId: nil,
+              actionSourceText: nil
+            ))
+        }
+      }
+    }
+
+    flushProgressSegments(position: message.streamSegments.count)
+
+    if entries.last(where: { $0.id.hasPrefix(message.id) }) == nil,
+      let lastTextSegmentIndex,
+      case .text(let text) = message.streamSegments[lastTextSegmentIndex]
+    {
+      entries.append(
+        ChatNativeAgentRenderEntry(
+          id: message.id,
+          role: .assistant,
+          text: text,
+          timestampMs: message.timestampMs,
+          messageType: "text",
+          isStreaming: isStreaming,
+          isAgentMessage: true,
+          showTail: true,
+          progressNodes: nil,
+          agentCard: nil,
+          actionSourceMessageId: isStreaming ? nil : message.id,
+          actionSourceText: isStreaming ? nil : message.content
+        ))
+    }
+  }
+
+  private func buildProgressNodes(from segments: [ChatNativeAgentStreamSegment]) -> [[String: Any]] {
+    var nodes: [[String: Any]] = []
+    var hasSubagentNode = false
+
+    for segment in segments {
+      guard case .progress(let id, let label, let tool, let status) = segment, status == "running" else {
+        continue
+      }
+
+      let depth: Int
+      if tool == "delegate_to_subagent" || tool == nil {
+        depth = 0
+      } else if let tool, tool.hasPrefix("subagent_") {
+        depth = 1
+        hasSubagentNode = true
+      } else {
+        depth = hasSubagentNode ? 2 : 1
+      }
+
+      nodes.append([
+        "id": id,
+        "label": label,
+        "status": status,
+        "depth": depth,
+      ])
+    }
+
+    return nodes
+  }
+
+  private func regeneratePromptMap(for conversation: ChatNativeAgentConversation) -> [String: String]
+  {
+    let messages = conversation.messages.sorted { $0.timestampMs < $1.timestampMs }
+    var prompts: [String: String] = [:]
+    var lastUserText: String?
+
+    for message in messages {
+      let trimmed = message.content.trimmingCharacters(in: .whitespacesAndNewlines)
+      switch message.role {
+      case .user:
+        lastUserText = trimmed.isEmpty ? nil : message.content
+
+      case .assistant:
+        if let lastUserText, !trimmed.isEmpty {
+          prompts[message.id] = lastUserText
+        }
+      }
+    }
+
+    return prompts
   }
 
   private func conversation(for id: String) -> ChatNativeAgentConversation? {
@@ -1298,6 +2186,25 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     UserDefaults.standard.set(data, forKey: Self.persistenceKey)
   }
 
+  private func topMostViewController() -> UIViewController? {
+    guard
+      let root =
+        window?.rootViewController
+        ?? UIApplication.shared.connectedScenes
+        .compactMap({ scene -> UIViewController? in
+          guard let windowScene = scene as? UIWindowScene else { return nil }
+          return windowScene.windows.first(where: { $0.isKeyWindow })?.rootViewController
+        })
+        .first
+    else { return nil }
+
+    var top = root
+    while let presented = top.presentedViewController {
+      top = presented
+    }
+    return top
+  }
+
   private static func parseServerMessage(_ raw: [String: Any]) -> ChatNativeAgentMessage? {
     let id = normalizedString(raw["id"]) ?? UUID().uuidString
     let role = ChatNativeAgentRole(rawValue: (raw["role"] as? String) ?? "assistant") ?? .assistant
@@ -1308,9 +2215,14 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       role: role,
       content: content,
       timestampMs: timestampMs,
-      isStreaming: false
+      isStreaming: false,
+      streamSegments: []
     )
   }
+
+  // MARK: - Legacy decode helper
+  // When loading persisted messages that don't have streamSegments,
+  // the Codable default will give an empty array which is correct.
 
   private static func parseTimestampMs(_ raw: Any?) -> Int64? {
     if let value = raw as? NSNumber {

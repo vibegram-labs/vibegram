@@ -163,6 +163,7 @@ export interface NativeChatBuilderSetupPanel {
   pendingUiRequest?: BuilderUiRequest | null;
   reviewSections?: BuilderReviewSection[];
   activity?: BuilderActivityItem[];
+  agentEnabled?: boolean;
 }
 
 export interface NativeChatGroupMember {

@@ -44,43 +44,40 @@ defimpl Phoenix.HTML.Safe, for: DateTime do
   end
 end
 
-if Code.ensure_loaded?(Duration) do
-  defimpl Phoenix.HTML.Safe, for: Duration do
-    defdelegate to_iodata(data), to: Duration, as: :to_iso8601
-  end
-end
-
 defimpl Phoenix.HTML.Safe, for: List do
-  def to_iodata(list), do: recur(list)
+  def to_iodata([h | t]) do
+    [to_iodata(h) | to_iodata(t)]
+  end
 
-  defp recur([h | t]), do: [recur(h) | recur(t)]
-  defp recur([]), do: []
+  def to_iodata([]) do
+    []
+  end
 
-  defp recur(?<), do: "&lt;"
-  defp recur(?>), do: "&gt;"
-  defp recur(?&), do: "&amp;"
-  defp recur(?"), do: "&quot;"
-  defp recur(?'), do: "&#39;"
+  def to_iodata(?<), do: "&lt;"
+  def to_iodata(?>), do: "&gt;"
+  def to_iodata(?&), do: "&amp;"
+  def to_iodata(?"), do: "&quot;"
+  def to_iodata(?'), do: "&#39;"
 
-  defp recur(h) when is_integer(h) and h <= 255 do
+  def to_iodata(h) when is_integer(h) and h <= 255 do
     h
   end
 
-  defp recur(h) when is_integer(h) do
+  def to_iodata(h) when is_integer(h) do
     raise ArgumentError,
           "lists in Phoenix.HTML templates only support iodata, and not chardata. Integers may only represent bytes. " <>
             "It's likely you meant to pass a string with double quotes instead of a char list with single quotes."
   end
 
-  defp recur(h) when is_binary(h) do
+  def to_iodata(h) when is_binary(h) do
     Phoenix.HTML.Engine.html_escape(h)
   end
 
-  defp recur({:safe, data}) do
+  def to_iodata({:safe, data}) do
     data
   end
 
-  defp recur(other) do
+  def to_iodata(other) do
     raise ArgumentError,
           "lists in Phoenix.HTML and templates may only contain integers representing bytes, binaries or other lists, " <>
             "got invalid entry: #{inspect(other)}"

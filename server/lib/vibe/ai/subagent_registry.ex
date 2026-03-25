@@ -208,6 +208,18 @@ defmodule Vibe.AI.SubagentRegistry do
           tool: tool_name
         })
 
+      %{type: :agent_cards} = event ->
+        callback.(event)
+
+      %{type: :state} = event ->
+        callback.(event)
+
+      %{type: :ui_request} = event ->
+        callback.(event)
+
+      %{type: :review_ready} = event ->
+        callback.(event)
+
       %{type: :text} ->
         :ok
 

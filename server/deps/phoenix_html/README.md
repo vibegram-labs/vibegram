@@ -2,13 +2,11 @@
 
 [![Build Status](https://github.com/phoenixframework/phoenix_html/workflows/Tests/badge.svg)](https://github.com/phoenixframework/phoenix_html/actions?query=workflow%3ATests)
 
-Building blocks for working with HTML in Phoenix.
+Collection of helpers to generate and manipulate HTML contents.
 
-This library provides three main functionalities:
-
-  * HTML safety
-  * Form abstractions
-  * A tiny JavaScript library to enhance applications
+Although this project was originally extracted from Phoenix,
+it does not depend on Phoenix and can be used with any Plug
+application (or even without Plug).
 
 See the [docs](https://hexdocs.pm/phoenix_html/) for more information.
 

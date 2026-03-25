@@ -12,24 +12,25 @@ defmodule Phoenix.LiveView.Session do
             router: nil,
             flash: nil,
             live_session_name: nil,
+            live_session_vsn: nil,
             assign_new: []
 
-  def main?(%Session{} = session), do: session.router != nil and session.parent_pid == nil
+  def main?(%Session{} = session), do: !is_nil(session.router) and !session.parent_pid
 
   def authorize_root_redirect(%Session{} = session, %Route{} = route) do
-    %Session{live_session_name: session_name} = session
+    %Session{live_session_name: session_name, live_session_vsn: session_vsn} = session
 
-    case route.live_session do
-      %{name: ^session_name} ->
+    cond do
+      route.live_session.name == session_name and route.live_session.vsn == session_vsn ->
         {:ok, replace_root(session, route.view, self())}
 
-      %{} ->
-        :error
+      true ->
+        {:error, :unauthorized}
     end
   end
 
   defp replace_root(%Session{} = session, new_root_view, root_pid) when is_pid(root_pid) do
-    %{
+    %Session{
       session
       | view: new_root_view,
         root_view: new_root_view,
@@ -60,7 +61,7 @@ defmodule Phoenix.LiveView.Session do
          :ok <- verify_topic(topic, id),
          {:ok, static} <- verify_static_token(endpoint, id, static_token) do
       merged_session = Map.merge(session, static)
-      live_session_name = merged_session[:live_session_name]
+      {live_session_name, vsn} = merged_session[:live_session] || {nil, nil}
 
       session = %Session{
         id: id,
@@ -71,6 +72,7 @@ defmodule Phoenix.LiveView.Session do
         session: merged_session.session,
         assign_new: merged_session.assign_new,
         live_session_name: live_session_name,
+        live_session_vsn: vsn,
         # optional keys
         router: merged_session[:router],
         flash: merged_session[:flash]

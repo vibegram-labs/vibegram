@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.24.0
+
+### ✨ Features
+
+- Add Azure Communication Services adapter @jamilbk (#1116)
+
+## 1.23.1
+
+### ✨ Features
+
+- Add tracking options to the mailjet adapter @wkirschbaum (#1114)
+
+### 🧰 Maintenance
+
+- Remove unused require Logger compilation warning @wkirschbaum (#1115)
+
+## 1.23.0
+
+### ✨ Features
+
+- Make `deliver/1` and `deliver/2` overridable in `Swoosh.Mailer` @copilot-swe-agent (#1109)
+
+## 1.22.1
+
+### 🐛 Bug Fixes
+
+- Fix mailbox preview text-body clipping by removing negative top offset @copilot-swe-agent (#1108)
+
+## 1.22.0
+
+### ✨ Features
+
+- Adapter/mailersend @cpursley (#1104)
+
 ## 1.21.0
 
 - Bump Elixir requirement to 1.16, Erlang OTP to 26

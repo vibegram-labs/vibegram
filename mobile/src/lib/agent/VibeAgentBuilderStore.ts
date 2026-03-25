@@ -570,8 +570,9 @@ const updateFromPayload = (
 
 const shouldSuppressAssistantBubble = (
     payload: BuilderSessionPayload | BuilderStreamDonePayload | null | undefined,
+    state?: Pick<VibeAgentBuilderState, 'pendingUiRequest'> | null,
 ) => {
-    return Boolean(payload?.pendingUiRequest);
+    return Boolean(payload?.pendingUiRequest) || Boolean(state?.pendingUiRequest);
 };
 
 export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get) => ({
@@ -690,7 +691,17 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                         }));
                     },
                     onState: (payload) => {
-                        set((state) => updateFromPayload(state, payload));
+                        set((state) => {
+                            const nextState = updateFromPayload(state, payload);
+                            if (!payload?.pendingUiRequest) {
+                                return nextState;
+                            }
+
+                            return {
+                                ...nextState,
+                                messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
+                            };
+                        });
                     },
                     onUiRequest: (payload) => {
                         set((state) => ({
@@ -717,15 +728,19 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                     ? completionPayload.reply.trim()
                     : (streamedReply.trim().length > 0 ? streamedReply : 'Configured.');
 
-                if (shouldSuppressAssistantBubble(completionPayload)) {
-                    set((state) => ({
-                        ...updateFromPayload(state, completionPayload),
-                        isSending: false,
-                        messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
-                    }));
-                } else {
-                    set((state) => ({
-                        ...updateFromPayload(state, completionPayload),
+                set((state) => {
+                    const nextState = updateFromPayload(state, completionPayload);
+
+                    if (shouldSuppressAssistantBubble(completionPayload, nextState)) {
+                        return {
+                            ...nextState,
+                            isSending: false,
+                            messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
+                        };
+                    }
+
+                    return {
+                        ...nextState,
                         isSending: false,
                         messages: state.messages.map((entry) => (
                             entry.id === assistantMessageId
@@ -737,8 +752,8 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                                 }
                                 : entry
                         )),
-                    }));
-                }
+                    };
+                });
             } catch (error: any) {
                 set((state) => ({
                     isSending: false,
@@ -811,7 +826,17 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                     }));
                 },
                 onState: (payload) => {
-                    set((state) => updateFromPayload(state, payload));
+                    set((state) => {
+                        const nextState = updateFromPayload(state, payload);
+                        if (!payload?.pendingUiRequest) {
+                            return nextState;
+                        }
+
+                        return {
+                            ...nextState,
+                            messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
+                        };
+                    });
                 },
                 onUiRequest: (payload) => {
                     set((state) => ({
@@ -834,15 +859,19 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                 ? completionPayload.reply.trim()
                 : (streamedReply.trim().length > 0 ? streamedReply : 'Updated the setup.');
 
-            if (shouldSuppressAssistantBubble(completionPayload)) {
-                set((state) => ({
-                    ...updateFromPayload(state, completionPayload),
-                    isSending: false,
-                    messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
-                }));
-            } else {
-                set((state) => ({
-                    ...updateFromPayload(state, completionPayload),
+            set((state) => {
+                const nextState = updateFromPayload(state, completionPayload);
+
+                if (shouldSuppressAssistantBubble(completionPayload, nextState)) {
+                    return {
+                        ...nextState,
+                        isSending: false,
+                        messages: state.messages.filter((entry) => entry.id !== assistantMessageId),
+                    };
+                }
+
+                return {
+                    ...nextState,
                     isSending: false,
                     messages: state.messages.map((entry) => (
                         entry.id === assistantMessageId
@@ -854,8 +883,8 @@ export const useVibeAgentBuilderStore = create<VibeAgentBuilderState>((set, get)
                             }
                             : entry
                     )),
-                }));
-            }
+                };
+            });
         } catch (error: any) {
             set((state) => ({
                 isSending: false,

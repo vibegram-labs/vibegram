@@ -292,6 +292,8 @@ function NativeBackedAgentChatScreen({
     const nativeSurfaceRef = useRef<NativeAgentChatSurfaceRef | null>(null)
     const surfaceIdRef = useRef(createNativeAgentSurfaceId())
     const [inputText, setInputText] = useState('')
+    const [toastVisible, setToastVisible] = useState(false)
+    const [toastMessage, setToastMessage] = useState('Copied to clipboard')
 
     const resolvedTheme = useMemo(() => {
         return resolveThemeVariant(activeTheme, effectiveTheme === 'dark')
@@ -299,9 +301,7 @@ function NativeBackedAgentChatScreen({
 
     const appearance = useMemo(() => ({
         nativeThemeIsDark: effectiveTheme === 'dark',
-        wallpaperGradient: resolvedTheme.backgroundGradient?.length
-            ? resolvedTheme.backgroundGradient
-            : [colors.background, colors.background],
+        wallpaperGradient: [(colors as any).bg?.secondary || colors.background, (colors as any).bg?.secondary || colors.background],
         bubbleMeGradient: resolvedTheme.bubbleMeGradient?.length
             ? resolvedTheme.bubbleMeGradient
             : [resolvedTheme.bubbleMe, resolvedTheme.bubbleMe],
@@ -364,6 +364,22 @@ function NativeBackedAgentChatScreen({
         }
     }
 
+    const showNativeToast = (message: string) => {
+        setToastVisible(false)
+        setToastMessage(message)
+        requestAnimationFrame(() => setToastVisible(true))
+    }
+
+    useEffect(() => {
+        const sub = DeviceEventEmitter.addListener('onVibeSubmit', (payload: any) => {
+            const text = typeof payload === 'string' ? payload : payload?.text;
+            if (text && text.trim()) {
+                nativeSurfaceRef.current?.submitText(text.trim())
+            }
+        })
+        return () => sub.remove()
+    }, [])
+
     return (
         <View style={{ flex: 1, backgroundColor: appearance.wallpaperGradient[0] || colors.background }}>
             <NativeAgentChatSurface
@@ -378,28 +394,42 @@ function NativeBackedAgentChatScreen({
 
                     if (type === 'headerBack') {
                         onBack?.()
+                    } else if (type === 'agentToast') {
+                        const message = typeof event?.nativeEvent?.message === 'string'
+                            ? event.nativeEvent.message
+                            : 'Copied to clipboard'
+                        showNativeToast(message)
                     }
                 }}
             />
 
-            <KeyboardStickyView
-                style={{
-                    position: 'absolute',
-                    left: 0,
-                    right: 0,
-                    bottom: 0,
-                    paddingBottom: Math.max(insets.bottom, 8),
-                }}
-            >
-                <ChatInput
-                    value={inputText}
-                    onChangeText={setInputText}
-                    onSend={handleSend}
-                    placeholder="Message Vibe..."
-                    keyboardProgress={keyboardProgress}
-                    onAttachPress={() => { }}
-                />
-            </KeyboardStickyView>
+            {!isNativeTabBarAvailable() && (
+                <KeyboardStickyView
+                    style={{
+                        position: 'absolute',
+                        left: 0,
+                        right: 0,
+                        bottom: 0,
+                        paddingBottom: Math.max(insets.bottom, 8),
+                    }}
+                >
+                    <ChatInput
+                        value={inputText}
+                        onChangeText={setInputText}
+                        onSend={handleSend}
+                        placeholder="Message Vibe..."
+                        keyboardProgress={keyboardProgress}
+                        onAttachPress={() => { }}
+                    />
+                </KeyboardStickyView>
+            )}
+
+            <GlassToast
+                visible={toastVisible}
+                message={toastMessage}
+                onClose={() => setToastVisible(false)}
+                topInset={insets.top}
+            />
         </View>
     )
 }

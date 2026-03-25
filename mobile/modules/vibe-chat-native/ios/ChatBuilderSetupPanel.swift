@@ -270,11 +270,84 @@ struct ChatBuilderReviewSection {
   }
 }
 
+private func chatBuilderOptionLabel(for value: String, field: ChatBuilderField) -> String {
+  field.options.first(where: { $0.id == value })?.label ?? value
+}
+
+private func chatBuilderFieldDisplayValue(_ field: ChatBuilderField?) -> String? {
+  guard let field else { return nil }
+
+  if let text = chatBuilderTrimmedString(field.value) {
+    return chatBuilderOptionLabel(for: text, field: field)
+  }
+
+  let values = chatBuilderStringArray(field.value)
+  guard !values.isEmpty else { return nil }
+  return values.map { chatBuilderOptionLabel(for: $0, field: field) }.joined(separator: ", ")
+}
+
+private func chatBuilderCondensedText(_ value: String?, maxLength: Int = 96) -> String? {
+  guard let value = value?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
+    return nil
+  }
+
+  let singleLine = value.replacingOccurrences(of: "\n", with: " ")
+  guard singleLine.count > maxLength else { return singleLine }
+  let endIndex = singleLine.index(singleLine.startIndex, offsetBy: maxLength)
+  return "\(singleLine[..<endIndex]).trimmingCharacters(in: .whitespacesAndNewlines)…"
+}
+
+private func chatBuilderResolvedHeaderInset(in controller: UIViewController) -> CGFloat {
+  guard let navigationController = controller.navigationController else {
+    return controller.view.safeAreaInsets.top
+  }
+  let navBarFrame = navigationController.view.convert(navigationController.navigationBar.frame, to: controller.view)
+  return max(0.0, max(controller.view.safeAreaInsets.top, navBarFrame.maxY))
+}
+
+private func chatBuilderDerivedAgentName(fromPrompt value: String?) -> String? {
+  guard let prompt = value?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty else {
+    return nil
+  }
+
+  let patterns = [
+    #"(?i)\byou are\s+([A-Z][A-Za-z0-9'_\-]*(?:\s+[A-Z][A-Za-z0-9'_\-]*){0,2})"#,
+    #"(?i)\byour name is\s+([A-Z][A-Za-z0-9'_\-]*(?:\s+[A-Z][A-Za-z0-9'_\-]*){0,2})"#,
+    #"(?i)\bname\s*:\s*([A-Z][A-Za-z0-9'_\-]*(?:\s+[A-Z][A-Za-z0-9'_\-]*){0,2})"#
+  ]
+
+  for pattern in patterns {
+    guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+    let nsRange = NSRange(prompt.startIndex..<prompt.endIndex, in: prompt)
+    guard let match = regex.firstMatch(in: prompt, options: [], range: nsRange), match.numberOfRanges > 1,
+      let range = Range(match.range(at: 1), in: prompt)
+    else { continue }
+
+    let candidate = String(prompt[range]).trimmingCharacters(in: .whitespacesAndNewlines)
+    if let condensed = chatBuilderCondensedText(candidate, maxLength: 24) {
+      return condensed
+    }
+  }
+
+  return nil
+}
+
+private func chatBuilderPreservedAnswers(for section: ChatBuilderReviewSection) -> [String: Any] {
+  var answers: [String: Any] = [:]
+  for field in section.fields {
+    if let value = field.value {
+      answers[field.key] = value
+    }
+  }
+  return answers
+}
+
 struct ChatBuilderPanelPayload {
   let setupState: ChatBuilderSetupState?
   let pendingUiRequest: ChatBuilderUiRequest?
   let reviewSections: [ChatBuilderReviewSection]
   let activity: [ChatBuilderActivityItem]
+  let agentEnabled: Bool?
 
   init?(raw: [String: Any]?) {
     guard let raw else { return nil }
@@ -287,337 +360,23 @@ struct ChatBuilderPanelPayload {
     self.activity =
       ((raw["activity"] as? [[String: Any]]) ?? [])
       .compactMap(ChatBuilderActivityItem.init(raw:))
+    self.agentEnabled = raw["agentEnabled"] as? Bool
 
     if setupState == nil && pendingUiRequest == nil && reviewSections.isEmpty && activity.isEmpty {
       return nil
     }
   }
 
-  var shouldShowBanner: Bool {
-    if pendingUiRequest != nil || !reviewSections.isEmpty || !activity.isEmpty {
-      return true
-    }
-    return setupState?.status != "idle" && setupState != nil
-  }
 }
 
 struct ChatBuilderPanelTheme {
   let isDark: Bool
   let backgroundColor: UIColor
   let cardColor: UIColor
+  let inputColor: UIColor
   let textColor: UIColor
   let secondaryTextColor: UIColor
   let accentColor: UIColor
-}
-
-final class ChatBuilderSetupBannerView: UIControl {
-  static let preferredHeight: CGFloat = 84.0
-
-  private let blurView = UIVisualEffectView(effect: nil)
-  private let iconContainerView = UIView()
-  private let iconView = UIImageView()
-  private let phaseLabel = UILabel()
-  private let titleLabel = UILabel()
-  private let subtitleLabel = UILabel()
-  private let actionPillView = UIView()
-  private let actionLabel = UILabel()
-  private let shimmerLayer = CAGradientLayer()
-
-  private var theme = ChatBuilderPanelTheme(
-    isDark: false,
-    backgroundColor: .systemBackground,
-    cardColor: .secondarySystemBackground,
-    textColor: .label,
-    secondaryTextColor: .secondaryLabel,
-    accentColor: .systemBlue
-  )
-
-  override init(frame: CGRect) {
-    super.init(frame: frame)
-    clipsToBounds = false
-    layer.cornerCurve = .continuous
-
-    blurView.isUserInteractionEnabled = false
-    blurView.layer.cornerCurve = .continuous
-    blurView.clipsToBounds = true
-    addSubview(blurView)
-
-    iconContainerView.layer.cornerCurve = .continuous
-    iconContainerView.clipsToBounds = true
-    blurView.contentView.addSubview(iconContainerView)
-
-    iconView.contentMode = .scaleAspectFit
-    iconContainerView.addSubview(iconView)
-
-    phaseLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-    phaseLabel.textAlignment = .left
-    blurView.contentView.addSubview(phaseLabel)
-
-    titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-    titleLabel.numberOfLines = 2
-    blurView.contentView.addSubview(titleLabel)
-
-    subtitleLabel.font = .systemFont(ofSize: 13, weight: .medium)
-    subtitleLabel.numberOfLines = 2
-    blurView.contentView.addSubview(subtitleLabel)
-
-    actionPillView.layer.cornerCurve = .continuous
-    actionPillView.clipsToBounds = true
-    blurView.contentView.addSubview(actionPillView)
-
-    actionLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-    actionLabel.textAlignment = .center
-    actionPillView.addSubview(actionLabel)
-
-    shimmerLayer.opacity = 0.0
-    shimmerLayer.startPoint = CGPoint(x: 0.0, y: 0.5)
-    shimmerLayer.endPoint = CGPoint(x: 1.0, y: 0.5)
-    shimmerLayer.colors = [
-      UIColor.clear.cgColor,
-      UIColor.white.withAlphaComponent(0.18).cgColor,
-      UIColor.clear.cgColor,
-    ]
-    blurView.contentView.layer.addSublayer(shimmerLayer)
-  }
-
-  required init?(coder: NSCoder) {
-    nil
-  }
-
-  override func layoutSubviews() {
-    super.layoutSubviews()
-    blurView.frame = bounds
-    blurView.layer.cornerRadius = bounds.height / 2.0
-    shimmerLayer.frame = blurView.bounds
-
-    let contentBounds = bounds.insetBy(dx: 14.0, dy: 12.0)
-    let iconSize: CGFloat = 36.0
-    iconContainerView.frame = CGRect(x: contentBounds.minX, y: contentBounds.minY + 6.0, width: iconSize, height: iconSize)
-    iconContainerView.layer.cornerRadius = 14.0
-    iconView.frame = iconContainerView.bounds.insetBy(dx: 8.0, dy: 8.0)
-
-    let actionVisible = !actionPillView.isHidden
-    let actionWidth: CGFloat = actionVisible ? 90.0 : 0.0
-    let actionX = bounds.width - 14.0 - actionWidth
-    actionPillView.frame = actionVisible
-      ? CGRect(x: actionX, y: (bounds.height - 34.0) * 0.5, width: actionWidth, height: 34.0)
-      : .zero
-    actionPillView.layer.cornerRadius = actionPillView.bounds.height / 2.0
-    actionLabel.frame = actionPillView.bounds.insetBy(dx: 12.0, dy: 0.0)
-
-    let textLeft = iconContainerView.frame.maxX + 12.0
-    let textRight = (actionVisible ? actionPillView.frame.minX : bounds.width - 14.0) - 10.0
-    let textWidth = max(0.0, textRight - textLeft)
-
-    phaseLabel.frame = CGRect(x: textLeft, y: contentBounds.minY, width: textWidth, height: 14.0)
-    let titleSize = titleLabel.sizeThatFits(CGSize(width: textWidth, height: 40.0))
-    titleLabel.frame = CGRect(x: textLeft, y: phaseLabel.frame.maxY + 2.0, width: textWidth, height: min(40.0, titleSize.height))
-    let subtitleHeight = max(16.0, min(34.0, subtitleLabel.sizeThatFits(CGSize(width: textWidth, height: 34.0)).height))
-    subtitleLabel.frame = CGRect(x: textLeft, y: titleLabel.frame.maxY + 2.0, width: textWidth, height: subtitleHeight)
-  }
-
-  func applyTheme(_ theme: ChatBuilderPanelTheme) {
-    self.theme = theme
-    blurView.effect =
-      UIBlurEffect(style: theme.isDark ? .systemThinMaterialDark : .systemThinMaterialLight)
-    blurView.contentView.backgroundColor = theme.backgroundColor.withAlphaComponent(theme.isDark ? 0.28 : 0.18)
-    iconContainerView.backgroundColor = theme.accentColor.withAlphaComponent(theme.isDark ? 0.28 : 0.16)
-    iconView.tintColor = theme.accentColor
-    phaseLabel.textColor = theme.secondaryTextColor
-    titleLabel.textColor = theme.textColor
-    subtitleLabel.textColor = theme.secondaryTextColor
-    actionPillView.backgroundColor = theme.accentColor.withAlphaComponent(theme.isDark ? 0.92 : 0.14)
-    actionLabel.textColor = theme.isDark ? .white : theme.accentColor
-  }
-
-  func configure(panel: ChatBuilderPanelPayload?) {
-    guard let panel, panel.shouldShowBanner else {
-      isHidden = true
-      alpha = 0.0
-      stopShimmer()
-      return
-    }
-
-    let activeItem =
-      panel.activity.first(where: { $0.status == "in_progress" })
-      ?? panel.activity.first(where: { $0.status == "attention" })
-
-    let actionTitle: String?
-    if let request = panel.pendingUiRequest {
-      phaseLabel.text = (panel.setupState?.phaseTitle ?? "Understand").uppercased()
-      titleLabel.text = request.title
-      subtitleLabel.text =
-        request.description
-        ?? activeItem?.displayText
-        ?? panel.setupState?.summary
-      actionTitle = request.submitLabel
-    } else if !panel.reviewSections.isEmpty {
-      phaseLabel.text = (panel.setupState?.phaseTitle ?? "Review").uppercased()
-      titleLabel.text = panel.setupState?.summary ?? "Review the draft before you create it"
-      subtitleLabel.text =
-        activeItem?.displayText
-        ?? "Edit any section, then create the draft when it looks right."
-      actionTitle = "Review"
-    } else {
-      phaseLabel.text = (panel.setupState?.phaseTitle ?? "Configure").uppercased()
-      titleLabel.text = panel.setupState?.summary ?? panel.setupState?.statusTitle ?? "Building your agent"
-      subtitleLabel.text = activeItem?.displayText
-      actionTitle = nil
-    }
-
-    iconView.image = UIImage(
-      systemName:
-        panel.reviewSections.isEmpty
-        ? (panel.pendingUiRequest == nil ? "sparkles" : "slider.horizontal.3")
-        : "checkmark.seal"
-    )
-    actionLabel.text = actionTitle
-    actionPillView.isHidden = actionTitle == nil
-    isHidden = false
-    alpha = 1.0
-    if activeItem?.status == "in_progress" {
-      startShimmer()
-    } else {
-      stopShimmer()
-    }
-    setNeedsLayout()
-  }
-
-  private func startShimmer() {
-    shimmerLayer.opacity = 1.0
-    if shimmerLayer.animation(forKey: "builderShimmer") != nil {
-      return
-    }
-    let animation = CABasicAnimation(keyPath: "transform.translation.x")
-    animation.fromValue = -bounds.width
-    animation.toValue = bounds.width
-    animation.duration = 1.2
-    animation.repeatCount = .infinity
-    animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-    shimmerLayer.add(animation, forKey: "builderShimmer")
-  }
-
-  private func stopShimmer() {
-    shimmerLayer.removeAnimation(forKey: "builderShimmer")
-    shimmerLayer.opacity = 0.0
-  }
-}
-
-private final class ChatBuilderActivityTreeRowView: UIView {
-  private let item: ChatBuilderActivityItem
-  private let theme: ChatBuilderPanelTheme
-  private let connectorView = UIView()
-  private let statusView = UIView()
-  private let titleLabel = UILabel()
-  private let metaLabel = UILabel()
-  private let detailLabel = UILabel()
-
-  init(item: ChatBuilderActivityItem, theme: ChatBuilderPanelTheme) {
-    self.item = item
-    self.theme = theme
-    super.init(frame: .zero)
-    translatesAutoresizingMaskIntoConstraints = false
-
-    connectorView.translatesAutoresizingMaskIntoConstraints = false
-    connectorView.backgroundColor = theme.secondaryTextColor.withAlphaComponent(0.18)
-    addSubview(connectorView)
-
-    statusView.translatesAutoresizingMaskIntoConstraints = false
-    statusView.layer.cornerCurve = .continuous
-    statusView.clipsToBounds = true
-    addSubview(statusView)
-
-    titleLabel.translatesAutoresizingMaskIntoConstraints = false
-    titleLabel.font = .systemFont(ofSize: item.depth == 0 ? 15 : 14, weight: item.depth == 0 ? .semibold : .medium)
-    titleLabel.textColor = theme.textColor
-    titleLabel.numberOfLines = 0
-    titleLabel.text = item.title
-    addSubview(titleLabel)
-
-    metaLabel.translatesAutoresizingMaskIntoConstraints = false
-    metaLabel.font = .systemFont(ofSize: 11, weight: .semibold)
-    metaLabel.textColor = theme.accentColor
-    metaLabel.numberOfLines = 1
-    metaLabel.text = item.agentLabel?.uppercased()
-    metaLabel.isHidden = (metaLabel.text ?? "").isEmpty
-    addSubview(metaLabel)
-
-    detailLabel.translatesAutoresizingMaskIntoConstraints = false
-    detailLabel.font = .systemFont(ofSize: 12, weight: .medium)
-    detailLabel.textColor = theme.secondaryTextColor
-    detailLabel.numberOfLines = 0
-    detailLabel.text = item.secondaryText
-    detailLabel.isHidden = (detailLabel.text ?? "").isEmpty
-    addSubview(detailLabel)
-
-    let leftInset = CGFloat(12 + (max(0, item.depth) * 18))
-    NSLayoutConstraint.activate([
-      connectorView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leftInset + 4.0),
-      connectorView.topAnchor.constraint(equalTo: topAnchor),
-      connectorView.bottomAnchor.constraint(equalTo: bottomAnchor),
-      connectorView.widthAnchor.constraint(equalToConstant: item.depth == 0 ? 0.0 : 1.0),
-
-      statusView.leadingAnchor.constraint(equalTo: leadingAnchor, constant: leftInset),
-      statusView.topAnchor.constraint(equalTo: topAnchor, constant: item.depth == 0 ? 4.0 : 6.0),
-      statusView.widthAnchor.constraint(equalToConstant: item.depth == 0 ? 10.0 : 8.0),
-      statusView.heightAnchor.constraint(equalTo: statusView.widthAnchor),
-
-      metaLabel.topAnchor.constraint(equalTo: topAnchor),
-      metaLabel.leadingAnchor.constraint(equalTo: statusView.trailingAnchor, constant: 12.0),
-      metaLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-
-      titleLabel.topAnchor.constraint(equalTo: metaLabel.bottomAnchor, constant: metaLabel.isHidden ? 0.0 : 2.0),
-      titleLabel.leadingAnchor.constraint(equalTo: statusView.trailingAnchor, constant: 12.0),
-      titleLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-    ])
-
-    if detailLabel.isHidden {
-      titleLabel.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
-    } else {
-      NSLayoutConstraint.activate([
-        detailLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 4.0),
-        detailLabel.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
-        detailLabel.trailingAnchor.constraint(equalTo: trailingAnchor),
-        detailLabel.bottomAnchor.constraint(equalTo: bottomAnchor),
-      ])
-    }
-
-    applyStatusStyle()
-  }
-
-  required init?(coder: NSCoder) {
-    nil
-  }
-
-  private func applyStatusStyle() {
-    switch item.status {
-    case "completed":
-      statusView.backgroundColor = UIColor(red: 83.0 / 255.0, green: 224.0 / 255.0, blue: 138.0 / 255.0, alpha: 1.0)
-      detailLabel.textColor = theme.secondaryTextColor
-    case "attention":
-      statusView.backgroundColor = UIColor(red: 1.0, green: 187.0 / 255.0, blue: 92.0 / 255.0, alpha: 1.0)
-      detailLabel.textColor = theme.accentColor
-    case "in_progress":
-      statusView.backgroundColor = theme.accentColor
-      startPulse()
-    default:
-      statusView.backgroundColor = theme.secondaryTextColor.withAlphaComponent(0.28)
-    }
-  }
-
-  private func startPulse() {
-    if layer.animation(forKey: "builderPulse") != nil {
-      return
-    }
-    let animation = CABasicAnimation(keyPath: "opacity")
-    animation.fromValue = 0.45
-    animation.toValue = 1.0
-    animation.duration = 0.9
-    animation.repeatCount = .infinity
-    animation.autoreverses = true
-    animation.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-    layer.add(animation, forKey: "builderPulse")
-  }
 }
 
 private final class ChatBuilderOptionButton: UIButton {
@@ -657,7 +416,6 @@ private final class ChatBuilderFormFieldView: UIView {
   private let titleLabel = UILabel()
   private let stackView = UIStackView()
   private let optionsStack = UIStackView()
-  private let helperLabel = UILabel()
 
   private var segmentedControl: UISegmentedControl?
   private var optionButtons: [ChatBuilderOptionButton] = []
@@ -688,18 +446,6 @@ private final class ChatBuilderFormFieldView: UIView {
     stackView.axis = .vertical
     stackView.spacing = 12.0
     addSubview(stackView)
-
-    helperLabel.translatesAutoresizingMaskIntoConstraints = false
-    helperLabel.font = .systemFont(ofSize: 12, weight: .medium)
-    helperLabel.textColor = theme.secondaryTextColor
-    helperLabel.numberOfLines = 0
-    if field.allowCustom {
-      helperLabel.text = "You can also type a custom value."
-    } else if let placeholder = field.placeholder {
-      helperLabel.text = placeholder
-    } else {
-      helperLabel.text = nil
-    }
 
     NSLayoutConstraint.activate([
       titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 16.0),
@@ -735,10 +481,6 @@ private final class ChatBuilderFormFieldView: UIView {
       let textField = makeTextField(placeholder: field.placeholder ?? "Custom value")
       customTextField = textField
       stackView.addArrangedSubview(textField)
-    }
-
-    if let text = helperLabel.text, !text.isEmpty {
-      stackView.addArrangedSubview(helperLabel)
     }
   }
 
@@ -791,7 +533,7 @@ private final class ChatBuilderFormFieldView: UIView {
       textView.translatesAutoresizingMaskIntoConstraints = false
       textView.font = .systemFont(ofSize: 15, weight: .medium)
       textView.textColor = theme.textColor
-      textView.backgroundColor = theme.backgroundColor.withAlphaComponent(theme.isDark ? 0.5 : 0.75)
+      textView.backgroundColor = theme.inputColor
       textView.layer.cornerRadius = 16.0
       textView.textContainerInset = UIEdgeInsets(top: 12.0, left: 12.0, bottom: 12.0, right: 12.0)
       textView.isScrollEnabled = false
@@ -815,7 +557,7 @@ private final class ChatBuilderFormFieldView: UIView {
     textField.font = .systemFont(ofSize: 15, weight: .medium)
     textField.textColor = theme.textColor
     textField.tintColor = theme.accentColor
-    textField.backgroundColor = theme.backgroundColor.withAlphaComponent(theme.isDark ? 0.5 : 0.75)
+    textField.backgroundColor = theme.inputColor
     textField.layer.cornerRadius = 16.0
     textField.leftView = UIView(frame: CGRect(x: 0.0, y: 0.0, width: 12.0, height: 1.0))
     textField.leftViewMode = .always
@@ -912,7 +654,7 @@ private final class ChatBuilderFormFieldView: UIView {
       button.backgroundColor =
         isSelected
         ? theme.accentColor.withAlphaComponent(theme.isDark ? 0.30 : 0.14)
-        : theme.backgroundColor.withAlphaComponent(theme.isDark ? 0.45 : 0.65)
+        : theme.inputColor
       button.setTitle(isSelected ? "✓ \(button.optionLabel)" : button.optionLabel, for: .normal)
       button.setTitleColor(isSelected ? theme.accentColor : theme.textColor, for: .normal)
     }
@@ -973,62 +715,372 @@ private final class ChatBuilderFormFieldView: UIView {
   }
 }
 
-private final class ChatBuilderReviewSectionCardView: UIControl {
-  private let titleLabel = UILabel()
-  private let summaryLabel = UILabel()
-  private let actionLabel = UILabel()
-  private let chevronView = UIImageView(image: UIImage(systemName: "chevron.right"))
+private final class ChatBuilderPanelCardView: UIView {
+  let contentStack = UIStackView()
 
-  init(section: ChatBuilderReviewSection, theme: ChatBuilderPanelTheme) {
+  init(theme: ChatBuilderPanelTheme, padding: CGFloat = 18.0, spacing: CGFloat = 12.0) {
     super.init(frame: .zero)
     translatesAutoresizingMaskIntoConstraints = false
     backgroundColor = theme.cardColor
-    layer.cornerRadius = 22.0
+    layer.cornerRadius = 24.0
     layer.cornerCurve = .continuous
 
-    titleLabel.translatesAutoresizingMaskIntoConstraints = false
-    titleLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-    titleLabel.textColor = theme.textColor
-    titleLabel.text = section.title
-    addSubview(titleLabel)
-
-    summaryLabel.translatesAutoresizingMaskIntoConstraints = false
-    summaryLabel.font = .systemFont(ofSize: 13, weight: .medium)
-    summaryLabel.textColor = theme.secondaryTextColor
-    summaryLabel.numberOfLines = 0
-    summaryLabel.text = section.summary.isEmpty ? "Edit this section" : section.summary
-    addSubview(summaryLabel)
-
-    actionLabel.translatesAutoresizingMaskIntoConstraints = false
-    actionLabel.font = .systemFont(ofSize: 13, weight: .semibold)
-    actionLabel.textColor = theme.accentColor
-    actionLabel.text = section.editable ? "Edit" : "View"
-    addSubview(actionLabel)
-
-    chevronView.translatesAutoresizingMaskIntoConstraints = false
-    chevronView.contentMode = .scaleAspectFit
-    chevronView.tintColor = theme.secondaryTextColor
-    addSubview(chevronView)
+    contentStack.translatesAutoresizingMaskIntoConstraints = false
+    contentStack.axis = .vertical
+    contentStack.spacing = spacing
+    addSubview(contentStack)
 
     NSLayoutConstraint.activate([
-      titleLabel.topAnchor.constraint(equalTo: topAnchor, constant: 16.0),
-      titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16.0),
-      titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: actionLabel.leadingAnchor, constant: -12.0),
-      summaryLabel.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 6.0),
-      summaryLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16.0),
-      summaryLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -44.0),
-      summaryLabel.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -16.0),
-      actionLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
-      actionLabel.trailingAnchor.constraint(equalTo: chevronView.leadingAnchor, constant: -4.0),
-      chevronView.centerYAnchor.constraint(equalTo: centerYAnchor),
-      chevronView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16.0),
-      chevronView.widthAnchor.constraint(equalToConstant: 10.0),
-      chevronView.heightAnchor.constraint(equalToConstant: 16.0),
+      contentStack.topAnchor.constraint(equalTo: topAnchor, constant: padding),
+      contentStack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: padding),
+      contentStack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -padding),
+      contentStack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -padding),
     ])
   }
 
-  required init?(coder: NSCoder) {
-    nil
+  required init?(coder: NSCoder) { nil }
+}
+
+private final class ChatBuilderPanelActionRow: UIControl {
+  private let highlightView = UIView()
+  private let titleLabel = UILabel()
+  private let valueLabel = UILabel()
+  private let chevronView = UIImageView()
+  private let dividerView = UIView()
+
+  override var isHighlighted: Bool {
+    didSet {
+      UIView.animate(withDuration: 0.14) {
+        self.highlightView.alpha = self.isHighlighted ? 1.0 : 0.0
+      }
+    }
+  }
+
+  init(
+    title: String,
+    value: String?,
+    theme: ChatBuilderPanelTheme,
+    showsChevron: Bool = true,
+    showsDivider: Bool = false
+  ) {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+    backgroundColor = .clear
+
+    highlightView.translatesAutoresizingMaskIntoConstraints = false
+    highlightView.backgroundColor = theme.textColor.withAlphaComponent(0.05)
+    highlightView.alpha = 0.0
+    addSubview(highlightView)
+
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    titleLabel.font = .systemFont(ofSize: 16, weight: .medium)
+    titleLabel.textColor = theme.textColor
+    titleLabel.numberOfLines = 1
+    titleLabel.text = title
+    addSubview(titleLabel)
+
+    valueLabel.translatesAutoresizingMaskIntoConstraints = false
+    valueLabel.font = .systemFont(ofSize: 15, weight: .regular)
+    valueLabel.textColor = theme.secondaryTextColor
+    valueLabel.textAlignment = .right
+    valueLabel.numberOfLines = 1
+    valueLabel.text = value
+    valueLabel.isHidden = value == nil
+    addSubview(valueLabel)
+
+    chevronView.translatesAutoresizingMaskIntoConstraints = false
+    chevronView.image = UIImage(
+      systemName: "chevron.right",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 13, weight: .semibold)
+    )
+    chevronView.tintColor = theme.secondaryTextColor.withAlphaComponent(0.55)
+    chevronView.isHidden = !showsChevron
+    addSubview(chevronView)
+
+    dividerView.translatesAutoresizingMaskIntoConstraints = false
+    dividerView.backgroundColor = theme.secondaryTextColor.withAlphaComponent(0.12)
+    dividerView.isHidden = !showsDivider
+    addSubview(dividerView)
+
+    NSLayoutConstraint.activate([
+      heightAnchor.constraint(greaterThanOrEqualToConstant: 56.0),
+      highlightView.topAnchor.constraint(equalTo: topAnchor),
+      highlightView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      highlightView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      highlightView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      chevronView.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16.0),
+      chevronView.centerYAnchor.constraint(equalTo: centerYAnchor),
+      titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+      titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16.0),
+      valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+      valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12.0),
+      dividerView.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+      dividerView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      dividerView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      dividerView.heightAnchor.constraint(equalToConstant: 0.5),
+    ])
+
+    if showsChevron {
+      valueLabel.trailingAnchor.constraint(equalTo: chevronView.leadingAnchor, constant: -8.0)
+        .isActive = true
+    } else {
+      valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16.0).isActive = true
+    }
+  }
+
+  required init?(coder: NSCoder) { nil }
+}
+
+private final class ChatBuilderToggleRow: UIView {
+  private let titleLabel = UILabel()
+  private let switchControl = UISwitch()
+  private let dividerView = UIView()
+
+  var onToggle: ((Bool) -> Void)?
+  var isOn: Bool { switchControl.isOn }
+
+  init(title: String, isOn: Bool, theme: ChatBuilderPanelTheme, showsDivider: Bool = false) {
+    super.init(frame: .zero)
+    translatesAutoresizingMaskIntoConstraints = false
+
+    titleLabel.translatesAutoresizingMaskIntoConstraints = false
+    titleLabel.font = .systemFont(ofSize: 16, weight: .medium)
+    titleLabel.textColor = theme.textColor
+    titleLabel.text = title
+    addSubview(titleLabel)
+
+    switchControl.translatesAutoresizingMaskIntoConstraints = false
+    switchControl.onTintColor = .systemGreen
+    switchControl.setOn(isOn, animated: false)
+    switchControl.addTarget(self, action: #selector(handleToggle(_:)), for: .valueChanged)
+    addSubview(switchControl)
+
+    dividerView.translatesAutoresizingMaskIntoConstraints = false
+    dividerView.backgroundColor = theme.secondaryTextColor.withAlphaComponent(0.12)
+    dividerView.isHidden = !showsDivider
+    addSubview(dividerView)
+
+    NSLayoutConstraint.activate([
+      heightAnchor.constraint(greaterThanOrEqualToConstant: 56.0),
+      titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16.0),
+      titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
+      titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: switchControl.leadingAnchor, constant: -12.0),
+      switchControl.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16.0),
+      switchControl.centerYAnchor.constraint(equalTo: centerYAnchor),
+      dividerView.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
+      dividerView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      dividerView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      dividerView.heightAnchor.constraint(equalToConstant: 0.5),
+    ])
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  @objc private func handleToggle(_ sender: UISwitch) {
+    onToggle?(sender.isOn)
+  }
+
+  func setOn(_ value: Bool) {
+    switchControl.setOn(value, animated: true)
+  }
+}
+
+private final class ChatBuilderPromptEditorController: UIViewController {
+  private let section: ChatBuilderReviewSection
+  private let field: ChatBuilderField
+  private let theme: ChatBuilderPanelTheme
+  private let textView = UITextView()
+  private let topMaskView = UIView()
+  private let topMaskGradient = CAGradientLayer()
+  private var textViewTopConstraint: NSLayoutConstraint?
+
+  var onSubmit: ((String, [String: Any], String?) -> Void)?
+
+  init(section: ChatBuilderReviewSection, field: ChatBuilderField, theme: ChatBuilderPanelTheme) {
+    self.section = section
+    self.field = field
+    self.theme = theme
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = theme.backgroundColor
+    title = "Prompt"
+    navigationItem.rightBarButtonItem = UIBarButtonItem(
+      title: "Save",
+      style: .done,
+      target: self,
+      action: #selector(handleSave)
+    )
+
+    textView.translatesAutoresizingMaskIntoConstraints = false
+    textView.font = .systemFont(ofSize: 15, weight: .regular)
+    textView.textColor = theme.textColor
+    textView.tintColor = theme.accentColor
+    textView.backgroundColor = theme.inputColor
+    textView.contentInsetAdjustmentBehavior = .never
+    textView.layer.cornerRadius = 18.0
+    textView.layer.cornerCurve = .continuous
+    textView.textContainerInset = UIEdgeInsets(top: 16.0, left: 16.0, bottom: 16.0, right: 16.0)
+    textView.text = chatBuilderTrimmedString(field.value) ?? ""
+    view.addSubview(textView)
+
+    topMaskView.isUserInteractionEnabled = false
+    topMaskGradient.colors = [
+      theme.backgroundColor.cgColor,
+      theme.backgroundColor.withAlphaComponent(0.0).cgColor,
+    ]
+    topMaskGradient.startPoint = CGPoint(x: 0.5, y: 0.0)
+    topMaskGradient.endPoint = CGPoint(x: 0.5, y: 1.0)
+    topMaskView.layer.addSublayer(topMaskGradient)
+    view.addSubview(topMaskView)
+
+    let topConstraint = textView.topAnchor.constraint(equalTo: view.topAnchor)
+    textViewTopConstraint = topConstraint
+    NSLayoutConstraint.activate([
+      topConstraint,
+      textView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16.0),
+      textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16.0),
+      textView.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -16.0),
+    ])
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    let topInset = chatBuilderResolvedHeaderInset(in: self) + 8.0
+    textViewTopConstraint?.constant = topInset
+    let maskHeight = topInset + 16.0
+    topMaskView.frame = CGRect(x: 0.0, y: 0.0, width: view.bounds.width, height: maskHeight)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    topMaskGradient.frame = topMaskView.bounds
+    CATransaction.commit()
+  }
+
+  @objc private func handleSave() {
+    var answers = chatBuilderPreservedAnswers(for: section)
+    let prompt = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    answers[field.key] = prompt
+    onSubmit?(section.requestId, answers, chatBuilderCondensedText(prompt, maxLength: 28))
+  }
+}
+
+private final class ChatBuilderToolsEditorController: UIViewController {
+  private let section: ChatBuilderReviewSection
+  private let field: ChatBuilderField
+  private let theme: ChatBuilderPanelTheme
+  private let scrollView = UIScrollView()
+  private let contentView = UIView()
+  private let cardView: ChatBuilderPanelCardView
+  private let topMaskView = UIView()
+  private let topMaskGradient = CAGradientLayer()
+  private var toolRows: [String: ChatBuilderToggleRow] = [:]
+
+  var onSubmit: ((String, [String: Any], String?) -> Void)?
+
+  init(section: ChatBuilderReviewSection, field: ChatBuilderField, theme: ChatBuilderPanelTheme) {
+    self.section = section
+    self.field = field
+    self.theme = theme
+    self.cardView = ChatBuilderPanelCardView(theme: theme, padding: 0.0, spacing: 0.0)
+    super.init(nibName: nil, bundle: nil)
+  }
+
+  required init?(coder: NSCoder) { nil }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = theme.backgroundColor
+    title = "Tools"
+
+    scrollView.translatesAutoresizingMaskIntoConstraints = false
+    scrollView.backgroundColor = theme.backgroundColor
+    scrollView.alwaysBounceVertical = true
+    scrollView.contentInsetAdjustmentBehavior = .never
+    view.addSubview(scrollView)
+
+    contentView.translatesAutoresizingMaskIntoConstraints = false
+    contentView.backgroundColor = theme.backgroundColor
+    scrollView.addSubview(contentView)
+
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    contentView.addSubview(cardView)
+
+    topMaskView.isUserInteractionEnabled = false
+    topMaskGradient.colors = [
+      theme.backgroundColor.cgColor,
+      theme.backgroundColor.withAlphaComponent(0.0).cgColor,
+    ]
+    topMaskGradient.startPoint = CGPoint(x: 0.5, y: 0.0)
+    topMaskGradient.endPoint = CGPoint(x: 0.5, y: 1.0)
+    topMaskView.layer.addSublayer(topMaskGradient)
+    view.addSubview(topMaskView)
+
+    NSLayoutConstraint.activate([
+      scrollView.topAnchor.constraint(equalTo: view.topAnchor),
+      scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+
+      contentView.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor),
+      contentView.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor),
+      contentView.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor),
+      contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
+      contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
+
+      cardView.topAnchor.constraint(equalTo: contentView.topAnchor),
+      cardView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16.0),
+      cardView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16.0),
+      cardView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
+    ])
+
+    let selected = Set(chatBuilderStringArray(field.value))
+    for (index, option) in field.options.enumerated() {
+      let row = ChatBuilderToggleRow(
+        title: option.label,
+        isOn: selected.contains(option.id),
+        theme: theme,
+        showsDivider: index < field.options.count - 1
+      )
+      row.onToggle = { [weak self] _ in
+        self?.submitChanges()
+      }
+      toolRows[option.id] = row
+      cardView.contentStack.addArrangedSubview(row)
+    }
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    let topInset = chatBuilderResolvedHeaderInset(in: self) + 8.0
+    let bottomInset = view.safeAreaInsets.bottom + 24.0
+    let desiredInsets = UIEdgeInsets(top: topInset, left: 0.0, bottom: bottomInset, right: 0.0)
+    if scrollView.contentInset != desiredInsets {
+      scrollView.contentInset = desiredInsets
+      scrollView.scrollIndicatorInsets = desiredInsets
+    }
+
+    let maskHeight = topInset + 16.0
+    topMaskView.frame = CGRect(x: 0.0, y: 0.0, width: view.bounds.width, height: maskHeight)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    topMaskGradient.frame = topMaskView.bounds
+    CATransaction.commit()
+  }
+
+  private func submitChanges() {
+    var answers = chatBuilderPreservedAnswers(for: section)
+    let selected = field.options.compactMap { option in
+      toolRows[option.id]?.isOn == true ? option.id : nil
+    }
+    answers[field.key] = selected
+    let summary = selected
+      .compactMap { id in field.options.first(where: { $0.id == id })?.label }
+      .joined(separator: ", ")
+    onSubmit?(section.requestId, answers, summary.isEmpty ? "No tools" : summary)
   }
 }
 
@@ -1047,22 +1099,28 @@ final class ChatBuilderPanelController: UIViewController {
   private let scrollView = UIScrollView()
   private let contentView = UIView()
   private let stackView = UIStackView()
+  private let topMaskView = UIView()
+  private let topMaskGradient = CAGradientLayer()
 
   private var fieldViews: [ChatBuilderFormFieldView] = []
+  private var activeRequest: ChatBuilderUiRequest?
+  private var pendingAgentEnabled: Bool?
   var onSubmitRequest: ((String, [String: Any], String?) -> Void)?
-  var onCreateDraft: (() -> Void)?
+  var onCreateDraft: ((Bool?) -> Void)?
   var onControllerDismissed: (() -> Void)?
 
   init(
     mode: ChatBuilderPanelMode,
     theme: ChatBuilderPanelTheme,
     setupState: ChatBuilderSetupState?,
-    activity: [ChatBuilderActivityItem]
+    activity: [ChatBuilderActivityItem],
+    agentEnabled: Bool? = nil
   ) {
     self.mode = mode
     self.theme = theme
     self.setupState = setupState
     self.activity = activity
+    self.pendingAgentEnabled = agentEnabled
     super.init(nibName: nil, bundle: nil)
     modalPresentationStyle = .pageSheet
   }
@@ -1074,9 +1132,17 @@ final class ChatBuilderPanelController: UIViewController {
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = theme.backgroundColor
+    additionalSafeAreaInsets = .zero
     configureNavigation()
+    configureChrome()
     configureLayout()
+    configureMasks()
     buildContent()
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    layoutMaskAndInsets()
   }
 
   override func viewDidDisappear(_ animated: Bool) {
@@ -1089,13 +1155,14 @@ final class ChatBuilderPanelController: UIViewController {
   private func configureNavigation() {
     switch mode {
     case .progress:
-      title = "Agent Progress"
+      title = "Agent Setup"
       navigationItem.leftBarButtonItem = UIBarButtonItem(
         barButtonSystemItem: .close,
         target: self,
         action: #selector(handleClosePressed)
       )
     case .request(let request):
+      activeRequest = request
       title = request.title
       if request.allowSkip {
         navigationItem.leftBarButtonItem = UIBarButtonItem(
@@ -1103,6 +1170,12 @@ final class ChatBuilderPanelController: UIViewController {
           style: .plain,
           target: self,
           action: #selector(handleSkipPressed)
+        )
+      } else {
+        navigationItem.leftBarButtonItem = UIBarButtonItem(
+          barButtonSystemItem: .close,
+          target: self,
+          action: #selector(handleClosePressed)
         )
       }
       navigationItem.rightBarButtonItem = UIBarButtonItem(
@@ -1112,25 +1185,61 @@ final class ChatBuilderPanelController: UIViewController {
         action: #selector(handleSubmitPressed)
       )
     case .review:
-      title = "Review Draft"
+      title = "Agent Setup"
       navigationItem.leftBarButtonItem = UIBarButtonItem(
         barButtonSystemItem: .close,
         target: self,
         action: #selector(handleClosePressed)
       )
-      navigationItem.rightBarButtonItem = UIBarButtonItem(
-        title: "Create Draft",
-        style: .done,
-        target: self,
-        action: #selector(handleCreateDraftPressed)
-      )
+      navigationItem.rightBarButtonItem = UIBarButtonItem(customView: makeNavigationIconButton())
     }
     navigationController?.navigationBar.tintColor = theme.accentColor
+  }
+
+  private func configureChrome() {
+    navigationController?.view.backgroundColor = theme.backgroundColor
+    navigationController?.view.clipsToBounds = true
+    view.clipsToBounds = true
+    scrollView.backgroundColor = theme.backgroundColor
+    contentView.backgroundColor = theme.backgroundColor
+
+    let appearance = UINavigationBarAppearance()
+    appearance.configureWithOpaqueBackground()
+    appearance.backgroundEffect = nil
+    appearance.backgroundColor = theme.backgroundColor
+    appearance.shadowColor = .clear
+    appearance.titleTextAttributes = [.foregroundColor: theme.textColor]
+
+    navigationController?.navigationBar.standardAppearance = appearance
+    navigationController?.navigationBar.scrollEdgeAppearance = appearance
+    navigationController?.navigationBar.compactAppearance = appearance
+    navigationController?.navigationBar.tintColor = theme.accentColor
+    navigationController?.navigationBar.prefersLargeTitles = false
+    navigationController?.navigationBar.isTranslucent = false
+  }
+
+  private func makeNavigationIconButton() -> UIButton {
+    let button = UIButton(type: .system)
+    button.translatesAutoresizingMaskIntoConstraints = false
+    button.tintColor = theme.accentColor
+    let image = UIImage(
+      systemName: "checkmark",
+      withConfiguration: UIImage.SymbolConfiguration(pointSize: 18, weight: .semibold)
+    )
+    button.setImage(image, for: .normal)
+    button.contentHorizontalAlignment = .center
+    button.contentVerticalAlignment = .center
+    button.frame = CGRect(x: 0.0, y: 0.0, width: 36.0, height: 36.0)
+    button.widthAnchor.constraint(equalToConstant: 36.0).isActive = true
+    button.heightAnchor.constraint(equalToConstant: 36.0).isActive = true
+    button.addTarget(self, action: #selector(handleCreateDraftPressed), for: .touchUpInside)
+    return button
   }
 
   private func configureLayout() {
     scrollView.translatesAutoresizingMaskIntoConstraints = false
     scrollView.alwaysBounceVertical = true
+    scrollView.contentInsetAdjustmentBehavior = .never
     view.addSubview(scrollView)
 
     contentView.translatesAutoresizingMaskIntoConstraints = false
@@ -1142,7 +1251,7 @@ final class ChatBuilderPanelController: UIViewController {
     contentView.addSubview(stackView)
 
     NSLayoutConstraint.activate([
-      scrollView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+      scrollView.topAnchor.constraint(equalTo: view.topAnchor),
       scrollView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
       scrollView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
       scrollView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
@@ -1153,18 +1262,54 @@ final class ChatBuilderPanelController: UIViewController {
       contentView.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor),
       contentView.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor),
 
-      stackView.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 20.0),
+      stackView.topAnchor.constraint(equalTo: contentView.topAnchor),
       stackView.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16.0),
       stackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16.0),
-      stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -24.0),
+      stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor),
     ])
   }
 
-  private func buildContent() {
-    if let headerCard = makeHeaderCard() {
-      stackView.addArrangedSubview(headerCard)
+  private func configureMasks() {
+    topMaskView.isUserInteractionEnabled = false
+    topMaskGradient.colors = [
+      theme.backgroundColor.cgColor,
+      theme.backgroundColor.withAlphaComponent(0.0).cgColor,
+    ]
+    topMaskGradient.startPoint = CGPoint(x: 0.5, y: 0.0)
+    topMaskGradient.endPoint = CGPoint(x: 0.5, y: 1.0)
+    topMaskView.layer.addSublayer(topMaskGradient)
+    view.addSubview(topMaskView)
+  }
+
+  private func layoutMaskAndInsets() {
+    let topPadding: CGFloat = 8.0
+    let bottomPadding = view.safeAreaInsets.bottom + 24.0
+    let headerInset = resolvedHeaderInset()
+    let desiredInsets = UIEdgeInsets(
+      top: headerInset + topPadding,
+      left: 0.0,
+      bottom: bottomPadding,
+      right: 0.0
+    )
+
+    if scrollView.contentInset != desiredInsets {
+      scrollView.contentInset = desiredInsets
+      scrollView.scrollIndicatorInsets = desiredInsets
     }
 
+    let maskHeight = desiredInsets.top + 18.0
+    topMaskView.frame = CGRect(x: 0.0, y: 0.0, width: view.bounds.width, height: maskHeight)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    topMaskGradient.frame = topMaskView.bounds
+    CATransaction.commit()
+  }
+
+  private func resolvedHeaderInset() -> CGFloat {
+    chatBuilderResolvedHeaderInset(in: self)
+  }
+
+  private func buildContent() {
     switch mode {
     case .progress:
       buildProgressContent()
@@ -1175,73 +1320,40 @@ final class ChatBuilderPanelController: UIViewController {
     }
   }
 
-  private func makeHeaderCard() -> UIView? {
-    guard setupState != nil || !activity.isEmpty else { return nil }
+  private func makeSectionTitle(_ text: String) -> UILabel {
+    let label = UILabel()
+    label.font = .systemFont(ofSize: 12, weight: .semibold)
+    label.textColor = theme.secondaryTextColor
+    label.text = text.uppercased()
+    return label
+  }
 
-    let card = UIView()
-    card.translatesAutoresizingMaskIntoConstraints = false
-    card.backgroundColor = theme.cardColor
-    card.layer.cornerRadius = 22.0
-    card.layer.cornerCurve = .continuous
-
-    let stack = UIStackView()
-    stack.translatesAutoresizingMaskIntoConstraints = false
-    stack.axis = .vertical
-    stack.spacing = 10.0
-    card.addSubview(stack)
-
-    if let setupState {
-      let phaseLabel = UILabel()
-      phaseLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-      phaseLabel.textColor = theme.secondaryTextColor
-      phaseLabel.text = "\(setupState.phaseTitle) • \(setupState.statusTitle)"
-      stack.addArrangedSubview(phaseLabel)
-
-      if let summary = setupState.summary, !summary.isEmpty {
-        let summaryLabel = UILabel()
-        summaryLabel.font = .systemFont(ofSize: 16, weight: .semibold)
-        summaryLabel.textColor = theme.textColor
-        summaryLabel.numberOfLines = 0
-        summaryLabel.text = summary
-        stack.addArrangedSubview(summaryLabel)
-      }
+  private func makeRowGroup(title: String? = nil) -> ChatBuilderPanelCardView {
+    if let title, !title.isEmpty {
+      stackView.addArrangedSubview(makeSectionTitle(title))
     }
+    return ChatBuilderPanelCardView(theme: theme, padding: 0.0, spacing: 0.0)
+  }
 
-    let sortedActivity = activity
+  private func makeStatusValue() -> String {
+    setupState?.statusTitle ?? reviewStatusDetail()
+  }
 
-    if !sortedActivity.isEmpty {
-      let activityLabel = UILabel()
-      activityLabel.font = .systemFont(ofSize: 12, weight: .semibold)
-      activityLabel.textColor = theme.secondaryTextColor
-      activityLabel.text = "LIVE WORKERS"
-      stack.addArrangedSubview(activityLabel)
-    }
-
-    for item in sortedActivity {
-      let row = ChatBuilderActivityTreeRowView(item: item, theme: theme)
-      stack.addArrangedSubview(row)
-    }
-
-    NSLayoutConstraint.activate([
-      stack.topAnchor.constraint(equalTo: card.topAnchor, constant: 16.0),
-      stack.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 16.0),
-      stack.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -16.0),
-      stack.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -16.0),
-    ])
-
-    return card
+  private func activeActivityValue() -> String? {
+    let active =
+      activity.first(where: { $0.status == "in_progress" })
+      ?? activity.first(where: { $0.status == "attention" })
+      ?? activity.first
+    return chatBuilderCondensedText(active?.title, maxLength: 24)
   }
 
   private func buildRequestContent(_ request: ChatBuilderUiRequest) {
-    if let description = request.description, !description.isEmpty {
-      let descriptionLabel = UILabel()
-      descriptionLabel.font = .systemFont(ofSize: 15, weight: .medium)
-      descriptionLabel.textColor = theme.secondaryTextColor
-      descriptionLabel.numberOfLines = 0
-      descriptionLabel.text = description
-      stackView.addArrangedSubview(descriptionLabel)
+    activeRequest = request
+    if !request.fields.isEmpty {
+      stackView.addArrangedSubview(makeSectionTitle("Questions"))
     }
 
+    fieldViews.removeAll()
     for field in request.fields {
       let fieldView = ChatBuilderFormFieldView(field: field, theme: theme)
       fieldViews.append(fieldView)
@@ -1250,124 +1362,200 @@ final class ChatBuilderPanelController: UIViewController {
   }
 
   private func buildProgressContent() {
-    let introLabel = UILabel()
-    introLabel.font = .systemFont(ofSize: 15, weight: .medium)
-    introLabel.textColor = theme.secondaryTextColor
-    introLabel.numberOfLines = 0
-    introLabel.text = "The builder is still working. These hidden workers are deciding the prompt, tools, and safety rules in real time."
-    stackView.addArrangedSubview(introLabel)
+    let card = makeRowGroup(title: "Builder")
+    let currentValue =
+      activeActivityValue()
+      ?? chatBuilderCondensedText(setupState?.summary, maxLength: 24)
+    card.contentStack.addArrangedSubview(
+      ChatBuilderPanelActionRow(
+        title: "Status",
+        value: makeStatusValue(),
+        theme: theme,
+        showsChevron: false,
+        showsDivider: true
+      )
+    )
+    card.contentStack.addArrangedSubview(
+      ChatBuilderPanelActionRow(
+        title: "Phase",
+        value: setupState?.phaseTitle ?? "Understand",
+        theme: theme,
+        showsChevron: false,
+        showsDivider: currentValue != nil
+      )
+    )
+    if let currentValue {
+      card.contentStack.addArrangedSubview(
+        ChatBuilderPanelActionRow(
+          title: "Current",
+          value: currentValue,
+          theme: theme,
+          showsChevron: false
+        )
+      )
+    }
+    stackView.addArrangedSubview(card)
   }
 
   private func buildReviewContent(_ sections: [ChatBuilderReviewSection]) {
-    let introLabel = UILabel()
-    introLabel.font = .systemFont(ofSize: 15, weight: .medium)
-    introLabel.textColor = theme.secondaryTextColor
-    introLabel.numberOfLines = 0
-    introLabel.text = "Edit any section that needs work. Create the draft when everything looks correct."
-    stackView.addArrangedSubview(introLabel)
+    let statusCard = makeRowGroup()
+    let activeRow = ChatBuilderToggleRow(
+      title: "Agent Active",
+      isOn: pendingAgentEnabled ?? true,
+      theme: theme
+    )
+    activeRow.onToggle = { [weak self] isOn in
+      self?.pendingAgentEnabled = isOn
+    }
+    statusCard.contentStack.addArrangedSubview(activeRow)
+    stackView.addArrangedSubview(statusCard)
 
-    for section in sections {
-      let card = ChatBuilderReviewSectionCardView(section: section, theme: theme)
-      card.addTarget(self, action: #selector(handleReviewSectionTapped(_:)), for: .touchUpInside)
-      card.accessibilityIdentifier = section.requestId
-      stackView.addArrangedSubview(card)
+    let promptSection = reviewSection(in: sections, fieldKeys: ["system_prompt", "prompt"])
+    let promptField = promptSection.flatMap { reviewField(in: $0, keys: ["system_prompt", "prompt"]) }
+    let promptValue = chatBuilderFieldDisplayValue(promptField)
+    let hasPrompt = promptField != nil
+    let identityCard = makeRowGroup(title: "Agent Identity")
+
+    let explicitName =
+      reviewSection(in: sections, fieldKeys: ["display_name", "name", "agent_name", "agentName"])
+      .flatMap { reviewField(in: $0, keys: ["display_name", "name", "agent_name", "agentName"]) }
+      .flatMap { chatBuilderFieldDisplayValue($0) }
+    let fallbackActivityName = activity.compactMap(\.agentLabel).first
+    let resolvedName =
+      chatBuilderDerivedAgentName(fromPrompt: promptValue)
+      ?? chatBuilderCondensedText(explicitName, maxLength: 24)
+      ?? chatBuilderCondensedText(fallbackActivityName, maxLength: 24)
+      ?? "Agent"
+
+    if hasPrompt || explicitName != nil || fallbackActivityName != nil {
+      let nameRow = ChatBuilderPanelActionRow(
+        title: "Name",
+        value: resolvedName,
+        theme: theme,
+        showsChevron: false,
+        showsDivider: hasPrompt
+      )
+      nameRow.isUserInteractionEnabled = false
+      identityCard.contentStack.addArrangedSubview(nameRow)
     }
 
-    let secondaryButton = makeSecondaryButton(title: "Keep Refining", action: #selector(handleClosePressed))
-    stackView.addArrangedSubview(secondaryButton)
+    if let promptSection, let promptField {
+      let promptRow = ChatBuilderPanelActionRow(
+        title: "Prompt",
+        value: chatBuilderCondensedText(promptValue, maxLength: 28) ?? "No prompt",
+        theme: theme
+      )
+      promptRow.addAction(UIAction { [weak self] _ in
+        self?.presentPromptEditor(section: promptSection, field: promptField)
+      }, for: .touchUpInside)
+      identityCard.contentStack.addArrangedSubview(promptRow)
+    }
+    stackView.addArrangedSubview(identityCard)
+
+    if let toolsSection = reviewSection(in: sections, fieldKeys: ["enabled_tools"]),
+      let toolsField = reviewField(in: toolsSection, keys: ["enabled_tools"])
+    {
+      let toolsCard = makeRowGroup()
+      let toolsRow = ChatBuilderPanelActionRow(
+        title: "Tool",
+        value: nil,
+        theme: theme
+      )
+      toolsRow.addAction(UIAction { [weak self] _ in
+        self?.presentToolsEditor(section: toolsSection, field: toolsField)
+      }, for: .touchUpInside)
+      toolsCard.contentStack.addArrangedSubview(toolsRow)
+      stackView.addArrangedSubview(toolsCard)
+    }
   }
 
-  private func makeSecondaryButton(title: String, action: Selector) -> UIButton {
-    let button = UIButton(type: .system)
-    button.translatesAutoresizingMaskIntoConstraints = false
-    var configuration = UIButton.Configuration.plain()
-    configuration.contentInsets = NSDirectionalEdgeInsets(top: 14.0, leading: 16.0, bottom: 14.0, trailing: 16.0)
-    button.configuration = configuration
-    button.layer.cornerRadius = 18.0
-    button.layer.cornerCurve = .continuous
-    button.backgroundColor = theme.cardColor
-    button.setTitle(title, for: .normal)
-    button.setTitleColor(theme.accentColor, for: .normal)
-    button.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
-    button.heightAnchor.constraint(greaterThanOrEqualToConstant: 52.0).isActive = true
-    button.addTarget(self, action: action, for: .touchUpInside)
-    return button
+  private func presentPromptEditor(section: ChatBuilderReviewSection, field: ChatBuilderField) {
+    let controller = ChatBuilderPromptEditorController(section: section, field: field, theme: theme)
+    controller.onSubmit = { [weak self] requestId, answers, summary in
+      self?.onSubmitRequest?(requestId, answers, summary)
+      self?.navigationController?.popViewController(animated: true)
+    }
+    navigationController?.pushViewController(controller, animated: true)
+  }
+
+  private func presentToolsEditor(section: ChatBuilderReviewSection, field: ChatBuilderField) {
+    let controller = ChatBuilderToolsEditorController(section: section, field: field, theme: theme)
+    controller.onSubmit = { [weak self] requestId, answers, summary in
+      self?.onSubmitRequest?(requestId, answers, summary)
+    }
+    navigationController?.pushViewController(controller, animated: true)
   }
 
   @objc private func handleSkipPressed() {
     guard case let .request(request) = mode else { return }
-    onSubmitRequest?(request.id, [:], "Skipped setup question")
-    dismissPanel()
-  }
-
-  @objc private func handleSubmitPressed() {
-    guard case let .request(request) = mode else { return }
-
-    var answers: [String: Any] = [:]
-    for fieldView in fieldViews {
-      if let missingFieldLabel = fieldView.validate() {
-        presentValidationAlert(message: "Please complete \(missingFieldLabel.lowercased()) before continuing.")
-        return
-      }
-      if let answer = fieldView.currentAnswer() {
-        answers[fieldView.field.key] = answer
-      }
-    }
-
-    let snippets =
-      fieldViews
-      .compactMap { view -> String? in
-        guard let snippet = view.summarySnippet(), !snippet.isEmpty else { return nil }
-        return snippet
-      }
-      .prefix(2)
-    let summary =
-      snippets.isEmpty
-      ? request.title
-      : snippets.joined(separator: " • ")
-
-    onSubmitRequest?(request.id, answers, summary)
-    dismissPanel()
-  }
-
-  @objc private func handleCreateDraftPressed() {
-    onCreateDraft?()
-    dismissPanel()
+    onSubmitRequest?(request.id, [:], "Skipped")
   }
 
   @objc private func handleClosePressed() {
     dismissPanel()
   }
 
-  @objc private func handleReviewSectionTapped(_ sender: UIControl) {
-    guard
-      case let .review(sections) = mode,
-      let requestId = sender.accessibilityIdentifier,
-      let section = sections.first(where: { $0.requestId == requestId })
-    else { return }
+  @objc private func handleCreateDraftPressed() {
+    onCreateDraft?(pendingAgentEnabled)
+    dismissPanel()
+  }
 
-    let request = ChatBuilderUiRequest(
-      id: section.requestId,
-      title: section.title,
-      description: section.summary,
-      submitLabel: "Save changes",
-      allowSkip: false,
-      fields: section.fields
-    )
+  @objc private func handleSubmitPressed() {
+    guard let request = activeRequest else { return }
+    var answers: [String: Any] = [:]
+    var firstError: String?
 
-    let controller = ChatBuilderPanelController(
-      mode: .request(request),
-      theme: theme,
-      setupState: setupState,
-      activity: activity
-    )
-    controller.onSubmitRequest = { [weak self] requestId, answers, summary in
-      self?.onSubmitRequest?(requestId, answers, summary)
-      self?.dismissPanel()
+    for view in fieldViews {
+      if let error = view.validate(), firstError == nil {
+        firstError = error
+      }
+      if let answer = view.currentAnswer() {
+        answers[view.field.key] = answer
+      }
     }
-    controller.onCreateDraft = onCreateDraft
-    controller.onControllerDismissed = onControllerDismissed
-    navigationController?.pushViewController(controller, animated: true)
+
+    if let error = firstError {
+      presentValidationAlert(message: "Please provide a value for \(error)")
+      return
+    }
+
+    let summary =
+      fieldViews
+      .compactMap { $0.summarySnippet() }
+      .first(where: { !$0.isEmpty })
+    onSubmitRequest?(request.id, answers, summary)
+    if navigationController?.viewControllers.first === self {
+      dismissPanel()
+    } else {
+      navigationController?.popViewController(animated: true)
+    }
+  }
+
+  private func reviewStatusDetail() -> String {
+    switch setupState?.status {
+    case "draft_created":
+      return "Draft created"
+    case "review_ready":
+      return "Active draft"
+    case "assembling", "clarifying", "discovering":
+      return "Draft in progress"
+    default:
+      return "Active draft"
+    }
+  }
+
+  private func reviewSection(in sections: [ChatBuilderReviewSection], fieldKeys: [String]) -> ChatBuilderReviewSection? {
+    sections.first { section in
+      fieldKeys.contains { key in
+        section.fields.contains(where: { $0.key == key })
+      }
+    }
+  }
+
+  private func reviewField(in section: ChatBuilderReviewSection, keys: [String]) -> ChatBuilderField? {
+    section.fields.first { field in
+      keys.contains(field.key)
+    }
   }
 
   private func dismissPanel() {

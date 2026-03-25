@@ -132,18 +132,14 @@ defmodule Phoenix.LiveView.Upload do
       when is_binary(reason) do
     conf = get_upload_by_ref!(socket, config_ref)
 
-    if conf.external do
-      put_upload_error(socket, conf.name, entry_ref, :external_client_failure)
-    else
-      socket
-    end
+    put_upload_error(socket, conf.name, entry_ref, :external_client_failure)
   end
 
   @doc """
   Puts the entries into the `%UploadConfig{}`.
   """
   def put_entries(%Socket{} = socket, %UploadConfig{} = conf, entries, cid) do
-    case UploadConfig.put_entries(%{conf | cid: cid}, entries) do
+    case UploadConfig.put_entries(%UploadConfig{conf | cid: cid}, entries) do
       {:ok, new_config} ->
         {:ok, update_uploads(new_config, socket)}
 
@@ -257,7 +253,7 @@ defmodule Phoenix.LiveView.Upload do
   """
   def consume_uploaded_entry(%Socket{} = socket, %UploadEntry{} = entry, func)
       when is_function(func, 1) do
-    if !entry.done?,
+    unless entry.done?,
       do: raise(ArgumentError, "cannot consume uploaded files when entries are still in progress")
 
     conf = Map.fetch!(socket.assigns[:uploads], entry.upload_config)
@@ -337,24 +333,16 @@ defmodule Phoenix.LiveView.Upload do
   @doc """
   Generates a preflight response by calling the `:external` function.
   """
-  def generate_preflight_response(%Socket{} = socket, name, cid, refs) do
+  def generate_preflight_response(%Socket{} = socket, name, cid) do
     %UploadConfig{} = conf = Map.fetch!(socket.assigns.uploads, name)
-
-    # don't send more than max_entries preflight responses
-    refs =
-      for {entry, i} <- Enum.with_index(conf.entries),
-          entry.ref in refs,
-          i < conf.max_entries && not entry.preflighted?,
-          do: entry.ref
 
     client_meta = %{
       max_file_size: conf.max_file_size,
       max_entries: conf.max_entries,
-      chunk_size: conf.chunk_size,
-      chunk_timeout: conf.chunk_timeout
+      chunk_size: conf.chunk_size
     }
 
-    {new_socket, new_conf, new_entries} = mark_preflighted(socket, conf, refs)
+    {new_socket, new_conf, new_entries} = mark_preflighted(socket, conf)
 
     case new_conf.external do
       false ->
@@ -365,8 +353,8 @@ defmodule Phoenix.LiveView.Upload do
     end
   end
 
-  defp mark_preflighted(socket, conf, refs) do
-    {new_conf, new_entries} = UploadConfig.mark_preflighted(conf, refs)
+  defp mark_preflighted(socket, conf) do
+    {new_conf, new_entries} = UploadConfig.mark_preflighted(conf)
     new_socket = update_uploads(new_conf, socket)
     {new_socket, new_conf, new_entries}
   end
@@ -379,7 +367,7 @@ defmodule Phoenix.LiveView.Upload do
          %{} = client_config_meta
        ) do
     reply_entries =
-      for entry <- entries, entry.valid?, into: %{} do
+      for entry <- entries, into: %{} do
         token =
           Phoenix.LiveView.Static.sign_token(socket.endpoint, %{
             pid: self(),
@@ -390,48 +378,25 @@ defmodule Phoenix.LiveView.Upload do
         {entry.ref, token}
       end
 
-    errors =
-      for entry <- entries,
-          not entry.valid?,
-          into: %{},
-          do: {entry.ref, entry_errors(conf, entry)}
-
-    reply = %{ref: conf.ref, config: client_config_meta, entries: reply_entries, errors: errors}
-    {:ok, reply, socket}
-  end
-
-  defp entry_errors(%UploadConfig{} = conf, %UploadEntry{} = entry) do
-    for {ref, err} <- conf.errors, ref == entry.ref, do: err
+    {:ok, %{ref: conf.ref, config: client_config_meta, entries: reply_entries}, socket}
   end
 
   defp external_preflight(%Socket{} = socket, %UploadConfig{} = conf, entries, client_config_meta) do
     reply_entries =
-      Enum.reduce_while(entries, {:ok, %{}, %{}, socket}, fn entry, {:ok, metas, errors, acc} ->
-        if conf.auto_upload? and not entry.valid? do
-          reasons = for {ref, reason} <- conf.errors, ref == entry.ref, do: %{reason: reason}
-          new_errors = Map.put(errors, entry.ref, reasons)
-          {:cont, {:ok, metas, new_errors, acc}}
-        else
-          case conf.external.(entry, acc) do
-            {:ok, %{} = meta, new_socket} ->
-              new_socket = update_upload_entry_meta(new_socket, conf.name, entry, meta)
-              {:cont, {:ok, Map.put(metas, entry.ref, meta), errors, new_socket}}
+      Enum.reduce_while(entries, {:ok, %{}, socket}, fn entry, {:ok, metas, acc} ->
+        case conf.external.(entry, acc) do
+          {:ok, %{} = meta, new_socket} ->
+            new_socket = update_upload_entry_meta(new_socket, conf.name, entry, meta)
+            {:cont, {:ok, Map.put(metas, entry.ref, meta), new_socket}}
 
-            {:error, %{} = meta, new_socket} ->
-              if conf.auto_upload? do
-                new_errors = Map.put(errors, entry.ref, [meta])
-                {:cont, {:ok, metas, new_errors, new_socket}}
-              else
-                {:halt, {:error, {entry.ref, meta}, new_socket}}
-              end
-          end
+          {:error, %{} = meta, new_socket} ->
+            {:halt, {:error, {entry.ref, meta}, new_socket}}
         end
       end)
 
     case reply_entries do
-      {:ok, entry_metas, errors, new_socket} ->
-        reply = %{ref: conf.ref, config: client_config_meta, entries: entry_metas, errors: errors}
-        {:ok, reply, new_socket}
+      {:ok, entry_metas, new_socket} ->
+        {:ok, %{ref: conf.ref, config: client_config_meta, entries: entry_metas}, new_socket}
 
       {:error, {entry_ref, meta_reason}, new_socket} ->
         new_socket = put_upload_error(new_socket, conf.name, entry_ref, meta_reason)

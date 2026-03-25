@@ -9,6 +9,7 @@ defmodule VibeWeb.AgentChannel do
   require Logger
 
   alias Vibe.AI.Agent
+  alias Vibe.AI.AgentBuilder
   alias Vibe.AgentConversation
 
   @doc """
@@ -65,39 +66,13 @@ defmodule VibeWeb.AgentChannel do
 
     Task.start(fn ->
       # Create placeholder assistant message
-      {:ok, conv} = AgentConversation.add_message(conv_id, %{
+      {:ok, _conv} = AgentConversation.add_message(conv_id, %{
         "role" => "assistant",
         "content" => "",
         "isStreaming" => true
       })
 
-      streaming_content = ""
-      tool_results = []
-
-      callback = fn
-        %{type: :text, content: chunk} ->
-          send(channel_pid, {:push, "chunk", %{text: chunk}})
-          send(channel_pid, {:append_content, chunk})
-
-        %{type: :progress, label: label} = payload ->
-          send(channel_pid, {:push, "progress", %{
-            label: label,
-            tool: payload[:tool],
-            status: payload[:status] || "running"
-          }})
-
-        %{type: :subagent} = payload ->
-          send(channel_pid, {:push, "subagent", Map.delete(payload, :type)})
-
-        %{type: :tool_result, tool: tool, result: result} = payload ->
-          send(channel_pid, {:push, "tool_result", %{
-            tool: tool,
-            result: result,
-            status: payload[:status] || "complete",
-            duration_ms: payload[:duration_ms]
-          }})
-          send(channel_pid, {:add_tool_result, %{tool: tool, result: result}})
-      end
+      callback = streaming_callback(channel_pid, conv_id)
 
       case Agent.stream_response(text, callback, history: history, images: images, user_id: user_id) do
         {:ok, full_response, _runtime_state} ->
@@ -117,6 +92,84 @@ defmodule VibeWeb.AgentChannel do
     end)
 
     {:noreply, socket}
+  end
+
+  def handle_in("builder_ui_response", %{"ui_response" => ui_response} = params, socket)
+      when is_map(ui_response) do
+    user_id = socket.assigns[:user_id]
+    conversation_id = params["conversation_id"] || socket.assigns[:active_conversation_id]
+    summary = normalize_summary(params["summary"])
+    active_agent_id = normalize_optional_string(params["active_agent_id"])
+
+    with {:ok, conv_id} <- ensure_existing_conversation(user_id, conversation_id) do
+      socket = assign(socket, :active_conversation_id, conv_id)
+      push(socket, "ack", %{status: "processing", conversation_id: conv_id})
+
+      if is_binary(summary) do
+        AgentConversation.add_message(conv_id, %{
+          "role" => "user",
+          "content" => summary
+        })
+      end
+
+      channel_pid = self()
+
+      Task.start(fn ->
+        {:ok, _conv} =
+          AgentConversation.add_message(conv_id, %{
+            "role" => "assistant",
+            "content" => "",
+            "isStreaming" => true
+          })
+
+        callback = streaming_callback(channel_pid, conv_id)
+
+        case AgentBuilder.stream_message(
+               user_id,
+               summary,
+               callback,
+               active_agent_id: active_agent_id,
+               ui_response: ui_response
+             ) do
+          {:ok, result} ->
+            send(channel_pid, {:finalize_message, conv_id, result[:reply] || result["reply"]})
+            send(channel_pid, {:push, "done", %{success: true, conversation_id: conv_id}})
+
+          {:error, reason} ->
+            Logger.error("Builder UI response error: #{inspect(reason)}")
+            send(channel_pid, {:push, "error", %{message: to_string(reason)}})
+        end
+      end)
+
+      {:noreply, socket}
+    else
+      _ ->
+        {:reply, {:error, %{reason: "conversation_required"}}, socket}
+    end
+  end
+
+  def handle_in("builder_create_draft", params, socket) do
+    answers =
+      case params["agentEnabled"] do
+        nil -> %{}
+        value -> %{"agentEnabled" => value}
+      end
+
+    ui_response = %{
+      "requestId" => "setup:create_draft",
+      "answers" => answers
+    }
+
+    handle_in(
+      "builder_ui_response",
+      %{
+        "conversation_id" => params["conversation_id"],
+        "summary" => "Create draft",
+        "active_agent_id" => params["active_agent_id"],
+        "ui_response" => ui_response
+      },
+      socket
+    )
   end
 
   # List conversations for a user
@@ -248,6 +301,96 @@ defmodule VibeWeb.AgentChannel do
         {conv.id, history}
     end
   end
+
+  defp streaming_callback(channel_pid, conversation_id) do
+    fn
+      %{type: :text, content: chunk} ->
+        send(channel_pid, {:push, "chunk", %{text: chunk, conversation_id: conversation_id}})
+        send(channel_pid, {:append_content, chunk})
+
+      %{type: :progress, label: label} = payload ->
+        send(channel_pid, {:push, "progress", %{
+          label: label,
+          tool: payload[:tool],
+          status: payload[:status] || "running",
+          conversation_id: conversation_id
+        }})
+
+      %{type: :subagent} = payload ->
+        send(
+          channel_pid,
+          {:push, "subagent", Map.put(Map.delete(payload, :type), :conversation_id, conversation_id)}
+        )
+
+      %{type: :tool_result, tool: tool, result: result} = payload ->
+        send(channel_pid, {:push, "tool_result", %{
+          tool: tool,
+          result: result,
+          status: payload[:status] || "complete",
+          duration_ms: payload[:duration_ms],
+          conversation_id: conversation_id
+        }})
+        send(channel_pid, {:add_tool_result, %{tool: tool, result: result}})
+
+      %{type: :agent_cards, cards: cards} = payload ->
+        send(channel_pid, {:push, "agent_cards", %{
+          cards: cards,
+          group_id: payload[:group_id] || payload["group_id"],
+          conversation_id: conversation_id
+        }})
+
+      %{type: :state} = payload ->
+        send(
+          channel_pid,
+          {:push, "builder_state", Map.put(Map.delete(payload, :type), :conversation_id, conversation_id)}
+        )
+
+      %{type: :ui_request} = payload ->
+        send(
+          channel_pid,
+          {:push, "ui_request", Map.put(Map.delete(payload, :type), :conversation_id, conversation_id)}
+        )
+
+      %{type: :review_ready} = payload ->
+        send(
+          channel_pid,
+          {:push, "review_ready", Map.put(Map.delete(payload, :type), :conversation_id, conversation_id)}
+        )
+    end
+  end
+
+  defp ensure_existing_conversation(user_id, nil) do
+    {:ok, conv} = AgentConversation.create(user_id, "New Chat")
+    {:ok, conv.id}
+  end
+
+  defp ensure_existing_conversation(user_id, conv_id) do
+    case AgentConversation.get_for_user(conv_id, user_id) do
+      nil ->
+        {:error, :not_found}
+
+      _conv ->
+        {:ok, conv_id}
+    end
+  end
+
+  defp normalize_summary(nil), do: nil
+
+  defp normalize_summary(value) when is_binary(value) do
+    trimmed = String.trim(value)
+    if trimmed == "", do: nil, else: String.slice(trimmed, 0, 500)
+  end
+
+  defp normalize_summary(value), do: to_string(value) |> normalize_summary()
+
+  defp normalize_optional_string(nil), do: nil
+
+  defp normalize_optional_string(value) when is_binary(value) do
+    trimmed = String.trim(value)
+    if trimmed == "", do: nil, else: trimmed
+  end
+
+  defp normalize_optional_string(value), do: value |> to_string() |> normalize_optional_string()
 
   # Generate a short, descriptive title using AI
   defp generate_title_async(conv_id, message) do

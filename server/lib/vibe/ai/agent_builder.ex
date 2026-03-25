@@ -148,6 +148,17 @@ defmodule Vibe.AI.AgentBuilder do
       }
     },
     %{
+      name: "archive_agent",
+      description:
+        "Archive (remove) the selected agent or a specific agent owned by the user. Use this when the owner asks to delete, remove, archive, or clean up an agent.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          identifier: %{type: "string", description: "Optional agent id or @username. Defaults to the selected draft."}
+        }
+      }
+    },
+    %{
       name: "rotate_secret",
       description:
         "Rotate the invoke secret for the selected agent or a specific agent. Use this when the owner asks for the current secret or wants a new one.",
@@ -175,52 +186,63 @@ defmodule Vibe.AI.AgentBuilder do
     active_agent_id = Keyword.get(opts, :active_agent_id)
     ui_response = Keyword.get(opts, :ui_response)
 
-    process_message(user_id, message, active_agent_id, ui_response)
+    process_message(user_id, message, active_agent_id, ui_response, nil, subagent_mode: false)
   end
 
   def stream_message(user_id, message, callback, opts \\ []) when is_function(callback, 1) do
     active_agent_id = Keyword.get(opts, :active_agent_id)
     ui_response = Keyword.get(opts, :ui_response)
 
-    process_message(user_id, message, active_agent_id, ui_response, callback)
+    process_message(user_id, message, active_agent_id, ui_response, callback, subagent_mode: false)
   end
 
   def delegate_task(user_id, message, opts \\ []) do
     active_agent_id = Keyword.get(opts, :active_agent_id)
+    ui_response = Keyword.get(opts, :ui_response)
     callback = Keyword.get(opts, :callback)
 
-    with true <- is_binary(message) and String.trim(message) != "" do
-      state = %{user_id: user_id, active_agent_id: active_agent_id, latest_secret: nil, subagent_mode: true}
+    trimmed_message = normalize_optional_string(message)
 
-      with {:ok, raw_reply, final_state} <-
-             AgentRuntime.run(
-               build_builder_messages([], message),
-               builder_runtime_config(state, callback)
-             ) do
-        selected_agent = resolve_owned_agent(user_id, nil, final_state.active_agent_id)
-        selected_agent_payload = if selected_agent, do: Agents.agent_payload(selected_agent)
-        reply = normalize_optional_string(raw_reply) || fallback_reply(selected_agent)
+    with true <- is_binary(trimmed_message) or is_map(ui_response),
+         {:ok, result} <-
+           process_message(
+             user_id,
+             trimmed_message,
+             active_agent_id,
+             ui_response,
+             callback,
+             subagent_mode: true
+           ) do
+      selected_agent_id = result[:active_agent_id] || result[:activeAgentId]
+      latest_secret = result[:latest_secret] || result[:latestSecret]
+      selected_agent = resolve_owned_agent(user_id, nil, selected_agent_id)
+      selected_agent_payload = if selected_agent, do: Agents.agent_payload(selected_agent)
+      reply = normalize_optional_string(result[:reply] || result["reply"]) || fallback_reply(selected_agent)
 
-        {:ok,
-         %{
-           reply: reply,
-           active_agent_id: final_state.active_agent_id,
-           latest_secret: final_state.latest_secret,
-            metadata:
-             %{}
-             |> maybe_put("selected_agent_id", final_state.active_agent_id)
-             |> maybe_put(
-               "selected_agent_username",
-               (selected_agent_payload && (Map.get(selected_agent_payload, :username) || Map.get(selected_agent_payload, "username")))
-             )
-         }}
-      end
+      {:ok,
+       %{
+         reply: reply,
+         active_agent_id: selected_agent_id,
+         latest_secret: latest_secret,
+         metadata:
+           %{}
+           |> maybe_put("selected_agent_id", selected_agent_id)
+           |> maybe_put(
+             "selected_agent_username",
+             selected_agent_payload &&
+               (Map.get(selected_agent_payload, :username) ||
+                  Map.get(selected_agent_payload, "username"))
+           )
+       }}
     else
-      _ -> {:error, "message is required"}
+      false -> {:error, "message is required"}
+      error -> error
     end
   end
 
-  defp process_message(user_id, message, active_agent_id, ui_response, callback \\ nil) do
+  defp process_message(user_id, message, active_agent_id, ui_response, callback, opts \\ []) do
+    subagent_mode = Keyword.get(opts, :subagent_mode, false)
+
     with {:ok, session} <- Agents.get_or_create_builder_session(user_id) do
       input = %{message: normalize_optional_string(message), ui_response: ui_response}
 
@@ -237,7 +259,15 @@ defmodule Vibe.AI.AgentBuilder do
               "content" => input.message
             })
 
-          with {:ok, result} <- run_builder_agent(user_id, history, input.message, active_agent_id, callback) do
+          with {:ok, result} <-
+                 run_builder_agent(
+                   user_id,
+                   history,
+                   input.message,
+                   active_agent_id,
+                   callback,
+                   subagent_mode
+                 ) do
             persist_builder_result(session, user_id, result)
           end
 
@@ -310,9 +340,14 @@ defmodule Vibe.AI.AgentBuilder do
      |> Map.merge(AgentBuilderSetup.session_fields(updated_session.metadata || %{}))}
   end
 
-  defp run_builder_agent(user_id, history, message, active_agent_id, callback) do
+  defp run_builder_agent(user_id, history, message, active_agent_id, callback, subagent_mode) do
     messages = build_builder_messages(history, message)
-    state = %{user_id: user_id, active_agent_id: active_agent_id, latest_secret: nil}
+    state = %{
+      user_id: user_id,
+      active_agent_id: active_agent_id,
+      latest_secret: nil,
+      subagent_mode: subagent_mode
+    }
 
     with {:ok, raw_reply, final_state} <-
            AgentRuntime.run(messages, builder_runtime_config(state, callback)) do
@@ -344,11 +379,22 @@ defmodule Vibe.AI.AgentBuilder do
       end
 
       {result, next_state} = execute_builder_tool(tool_name, tool_input, acc_state)
+      emit_builder_ui(callback, result)
+      safe_result = builder_tool_model_result(result)
+
+      if is_function(callback, 1) do
+        callback.(%{
+          type: :tool_result,
+          tool: tool_name,
+          result: safe_result,
+          status: "complete"
+        })
+      end
 
       tool_result = %{
         type: "tool_result",
         tool_use_id: tool["id"],
-        content: Jason.encode!(result)
+        content: Jason.encode!(safe_result)
       }
 
       {results ++ [tool_result], next_state}
@@ -378,7 +424,12 @@ defmodule Vibe.AI.AgentBuilder do
     identifier = normalize_optional_string(Map.get(input, "identifier"))
     agent = resolve_owned_agent(user_id, identifier, state.active_agent_id)
 
-    {builder_context_payload(user_id, agent, state.latest_secret), state}
+    agents = Agents.list_agents(user_id)
+
+    {builder_context_payload(user_id, agent, state.latest_secret)
+     |> Map.put("_ui_group_id", "builder:agents:list")
+     |> Map.put("_ui_cards", build_agent_cards_payloads(agents, agent && agent.id, state.latest_secret)),
+     state}
   end
 
   defp execute_builder_tool("create_agent", input, state) do
@@ -394,7 +445,9 @@ defmodule Vibe.AI.AgentBuilder do
         result = %{
           "ok" => true,
           "message" => "Agent draft created.",
-          "agent" => builder_agent_context(agent, secret)
+          "agent" => builder_agent_context(agent, secret),
+          "_ui_group_id" => "builder:agent:#{agent.id}",
+          "_ui_cards" => [agent_card_payload(agent, secret, "config")]
         }
 
         {result, %{state | active_agent_id: agent.id, latest_secret: secret}}
@@ -413,7 +466,9 @@ defmodule Vibe.AI.AgentBuilder do
         result = %{
           "ok" => true,
           "message" => "Selected agent.",
-          "agent" => builder_agent_context(agent, state.latest_secret)
+          "agent" => builder_agent_context(agent, state.latest_secret),
+          "_ui_group_id" => "builder:agent:#{agent.id}",
+          "_ui_cards" => [agent_card_payload(agent, state.latest_secret, "config")]
         }
 
         {result, %{state | active_agent_id: agent.id}}
@@ -438,7 +493,9 @@ defmodule Vibe.AI.AgentBuilder do
           result = %{
             "ok" => true,
             "message" => "Agent updated.",
-            "agent" => builder_agent_context(updated, state.latest_secret)
+            "agent" => builder_agent_context(updated, state.latest_secret),
+            "_ui_group_id" => "builder:agent:#{updated.id}",
+            "_ui_cards" => [agent_card_payload(updated, state.latest_secret, "config")]
           }
 
           {result, %{state | active_agent_id: updated.id}}
@@ -487,7 +544,9 @@ defmodule Vibe.AI.AgentBuilder do
             "ok" => true,
             "message" => "Agent published.",
             "agent" => builder_agent_context(published, state.latest_secret),
-            "integration" => integration_payload(published, state.latest_secret)
+            "integration" => integration_payload(published, state.latest_secret),
+            "_ui_group_id" => "builder:agent:#{published.id}",
+            "_ui_cards" => [agent_card_payload(published, state.latest_secret, "config")]
           }
 
           {result, %{state | active_agent_id: published.id}}
@@ -527,7 +586,9 @@ defmodule Vibe.AI.AgentBuilder do
           payload = %{
             "ok" => true,
             "message" => "Agent status updated.",
-            "agent" => builder_agent_context(updated, state.latest_secret)
+            "agent" => builder_agent_context(updated, state.latest_secret),
+            "_ui_group_id" => "builder:agent:#{updated.id}",
+            "_ui_cards" => [agent_card_payload(updated, state.latest_secret, "config")]
           }
 
           {payload, %{state | active_agent_id: updated.id}}
@@ -550,10 +611,12 @@ defmodule Vibe.AI.AgentBuilder do
         {:ok, updated, secret} ->
           result = %{
             "ok" => true,
-            "message" => "Secret rotated.",
+            "message" => "Secret rotated. The secure value is available in the config panel.",
             "secret" => secret,
             "agent" => builder_agent_context(updated, secret),
-            "integration" => integration_payload(updated, secret)
+            "integration" => integration_payload(updated, secret),
+            "_ui_group_id" => "builder:agent:#{updated.id}",
+            "_ui_cards" => [agent_card_payload(updated, secret, "config")]
           }
 
           {result, %{state | active_agent_id: updated.id, latest_secret: secret}}
@@ -576,11 +639,41 @@ defmodule Vibe.AI.AgentBuilder do
         result = %{
           "ok" => true,
           "integration" => integration_payload(agent, state.latest_secret),
-          "agent" => builder_agent_context(agent, state.latest_secret)
+          "agent" => builder_agent_context(agent, state.latest_secret),
+          "_ui_group_id" => "builder:agent:#{agent.id}",
+          "_ui_cards" => [agent_card_payload(agent, state.latest_secret, "config")]
         }
 
         {result, state}
 
+      nil ->
+        {%{"ok" => false, "error" => "Create or select an agent first."}, state}
+    end
+  end
+
+  defp execute_builder_tool("archive_agent", input, state) do
+    user_id = state.user_id
+    identifier = normalize_optional_string(Map.get(input, "identifier"))
+
+    with %{} = agent <- resolve_owned_agent(user_id, identifier, state.active_agent_id) do
+      case Agents.archive_agent(agent, user_id) do
+        {:ok, archived} ->
+          result = %{
+            "ok" => true,
+            "message" => "Agent removed.",
+            "agent" => %{
+              "id" => archived.id,
+              "display_name" => archived.display_name,
+              "status" => archived.status
+            }
+          }
+
+          {result, %{state | active_agent_id: nil, latest_secret: nil}}
+
+        {:error, reason} ->
+          {%{"ok" => false, "error" => format_reason(reason)}, state}
+      end
+    else
       nil ->
         {%{"ok" => false, "error" => "Create or select an agent first."}, state}
     end
@@ -623,15 +716,17 @@ defmodule Vibe.AI.AgentBuilder do
     - When the user describes how the agent should behave, create or update the agent and generate a polished production system prompt.
     - When the user asks about prompt quality, explain that you can read, edit, or generate the prompt and then act with tools.
     - When the user asks how to integrate from code, give exact values from tools: agent_id, user_id, @username, invoke URL, events URL, X-Vibe-Agent-Secret usage, responseMode guidance, vibeChatId values, callback headers, and signature format.
+    - The client may render structured agent config cards from tool results. When that happens, keep the text concise and do not dump long env blocks back into chat.
     - When the user asks for the Vibe chat link or chat id, prefer attached_chat_ids, attached_chat_links, and default_destination_chat. Do not present a friendId DM link as if it were an attached chatId.
     - For setup and integration requests, ask only for true blockers. Treat these as blockers: whether to create a new agent or use an existing one when that is ambiguous, destination chat selection when the user wants delivery inside Vibe and there is no default attached chat, and secret rotation when the current full secret is unavailable.
     - Do NOT ask for low-value polish when the workflow is already clear. Do not ask for channel name, display name, username, event labels, tone, welcome copy, or message formatting unless the user explicitly asked to customize them or that choice changes functionality.
     - If the user clearly asked to create a new agent and the workflow is already described, create the draft with sensible defaults immediately. Infer a practical display name from the workflow instead of blocking on naming questions.
-    - If the user asks for env vars, integration details, or Python/backend setup, always produce a clean integration pack after using tools. Prefer the env_vars and python_event_example values from tool results instead of improvising your own shape.
+    - If the user asks for env vars, integration details, or Python/backend setup, always produce a clean integration pack after using tools. Prefer integration_pack_text, env_export_lines, env_vars, and python_event_example from tool results instead of improvising your own shape.
     - When default_destination_chat is present, explain that destinationChatId is optional for external event calls. Only require a chat id in the payload when there is no default destination configured.
     - When the user already provided example event types such as trade open, trade close, order created, or signal summary, treat them as sufficient defaults. Do not ask them to restate exact event names unless the user explicitly wants strict naming control.
     - Do not tell the user to use slash commands unless they explicitly ask for slash syntax. Focus on doing the work and explaining outcomes.
-    - If the current secret is not available anymore, tell the user to rotate it.
+    - Never print or paraphrase a full secret in chat. If the current secret is not available anymore, tell the user to rotate it or open the config panel.
+    - When the owner asks to remove or delete an agent, archive it with tools instead of explaining how to do it manually.
     - Keep replies concise, practical, and step-by-step when integration is involved.
     - If subagent_mode is true, you are serving another Vibe AI worker. Return direct actionable output instead of UI coaching, and strongly prefer execution plus assumptions over extra clarification when the request is already specific.
 
@@ -663,6 +758,9 @@ defmodule Vibe.AI.AgentBuilder do
 
   defp builder_tool_progress_label("set_agent_status", _input),
     do: "Updating the agent status..."
+
+  defp builder_tool_progress_label("archive_agent", _input),
+    do: "Removing the agent..."
 
   defp builder_tool_progress_label("rotate_secret", _input),
     do: "Rotating the agent secret..."
@@ -812,7 +910,9 @@ defmodule Vibe.AI.AgentBuilder do
     default_chat = resolve_default_chat(payload.defaultDestinationChatId, attached_chat_links)
     base_url = public_base_url()
     chat_id_optional = not is_nil(default_chat)
-    destination_chat_env_value = if(default_chat, do: "", else: "<optional_if_no_default_chat>")
+    destination_chat_env_value = if(default_chat, do: nil, else: "<set_if_no_default_chat>")
+    env_export_lines = build_env_export_lines(payload, base_url, latest_secret, destination_chat_env_value, chat_id_optional)
+    integration_pack_text = build_integration_pack_text(agent, payload, base_url, env_export_lines, chat_id_optional, default_chat)
 
     %{
       "agent_id" => payload.id,
@@ -839,6 +939,7 @@ defmodule Vibe.AI.AgentBuilder do
         "VIBE_SOURCE" => "external_app",
         "VIBE_TIMEOUT_SECONDS" => "10"
       },
+      "env_export_lines" => env_export_lines,
       "env_var_notes" => %{
         "VIBE_DESTINATION_CHAT_ID" =>
           if(chat_id_optional,
@@ -846,6 +947,8 @@ defmodule Vibe.AI.AgentBuilder do
             else: "Optional only after you attach or configure a default destination chat in Vibe."
           )
       },
+      "recommended_endpoint" => build_events_url(agent),
+      "recommended_identifier" => payload.username || payload.id,
       "request_body_examples" => %{
         "reply" => %{
           "source" => "external",
@@ -894,6 +997,7 @@ defmodule Vibe.AI.AgentBuilder do
         "response = requests.post(url, json=payload, headers=headers, timeout=float(os.getenv(\"VIBE_TIMEOUT_SECONDS\", \"10\")))",
         "response.raise_for_status()"
       ],
+      "integration_pack_text" => integration_pack_text,
       "destination_chat_required" => not chat_id_optional,
       "default_destination_chat" => default_chat,
       "attached_chats" => payload.attachedChats || [],
@@ -917,6 +1021,46 @@ defmodule Vibe.AI.AgentBuilder do
         "To get a vibeChatId, DM the agent or invite it into a group/channel first."
       ]
     }
+  end
+
+  defp build_env_export_lines(payload, base_url, latest_secret, destination_chat_env_value, chat_id_optional) do
+    base_lines = [
+      "VIBE_API_BASE_URL=#{base_url}",
+      "VIBE_AGENT_IDENTIFIER=#{payload.username || payload.id}",
+      "VIBE_AGENT_SECRET=#{latest_secret || "<rotate_secret_to_reveal>"}",
+      "VIBE_SOURCE=external_app",
+      "VIBE_TIMEOUT_SECONDS=10"
+    ]
+
+    destination_line =
+      if chat_id_optional do
+        "# VIBE_DESTINATION_CHAT_ID is optional because this agent already has a default Vibe destination chat."
+      else
+        "VIBE_DESTINATION_CHAT_ID=#{destination_chat_env_value}"
+      end
+
+    base_lines ++ [destination_line]
+  end
+
+  defp build_integration_pack_text(agent, payload, base_url, env_export_lines, chat_id_optional, default_chat) do
+    identifier = payload.username || payload.id
+    destination_line =
+      if chat_id_optional do
+        "Default destination chat: configured#{if(default_chat && default_chat["chat_id"], do: " (#{default_chat["chat_id"]})", else: "")}"
+      else
+        "Default destination chat: not configured yet"
+      end
+
+    [
+      "Use this API base URL: #{base_url}",
+      "Use this agent identifier: #{identifier}",
+      "Send structured events to: #{build_events_url(agent)}",
+      destination_line,
+      "Set these env vars:",
+      Enum.map(env_export_lines, &"  #{&1}")
+    ]
+    |> List.flatten()
+    |> Enum.join("\n")
   end
 
   defp extract_chat_id(chat) when is_map(chat) do
@@ -1128,4 +1272,109 @@ defmodule Vibe.AI.AgentBuilder do
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp emit_builder_ui(callback, %{"_ui_cards" => cards} = result)
+       when is_function(callback, 1) and is_list(cards) and cards != [] do
+    callback.(%{
+      type: :agent_cards,
+      group_id: result["_ui_group_id"] || "builder:cards",
+      cards: cards
+    })
+  end
+
+  defp emit_builder_ui(_callback, _result), do: :ok
+
+  defp builder_tool_model_result(result) when is_map(result) do
+    result
+    |> Map.delete("_ui_cards")
+    |> Map.delete("_ui_group_id")
+    |> sanitize_builder_payload()
+  end
+
+  defp builder_tool_model_result(result), do: result
+
+  defp sanitize_builder_payload(value) when is_map(value) do
+    Enum.reduce(value, %{}, fn {key, inner_value}, acc ->
+      key_string = to_string(key)
+
+      cond do
+        String.starts_with?(key_string, "_") ->
+          acc
+
+        key_string in ["secret", "latest_secret"] ->
+          acc
+
+        key_string == "auth_header" and is_map(inner_value) ->
+          Map.put(acc, key, %{"X-Vibe-Agent-Secret" => "<available_in_config_panel>"})
+
+        true ->
+          Map.put(acc, key, sanitize_builder_payload(inner_value))
+      end
+    end)
+  end
+
+  defp sanitize_builder_payload(value) when is_list(value) do
+    Enum.map(value, &sanitize_builder_payload/1)
+  end
+
+  defp sanitize_builder_payload(value) when is_binary(value) do
+    value
+    |> String.replace(~r/vas_[A-Za-z0-9_\-]+/, "<available_in_config_panel>")
+    |> String.replace(~r/VIBE_AGENT_SECRET=.+/, "VIBE_AGENT_SECRET=<available_in_config_panel>")
+  end
+
+  defp sanitize_builder_payload(value), do: value
+
+  defp build_agent_cards_payloads(agents, active_agent_id, latest_secret) do
+    agents
+    |> Enum.map(fn agent ->
+      style = if agent.id == active_agent_id, do: "config", else: "summary"
+      secret = if style == "config", do: latest_secret, else: nil
+      agent_card_payload(agent, secret, style)
+    end)
+  end
+
+  defp agent_card_payload(agent, latest_secret, style) do
+    payload = Agents.agent_payload(agent)
+    integration = integration_payload(agent, latest_secret)
+
+    %{
+      "id" => "agent-card:#{payload.id}:#{style}",
+      "style" => style,
+      "agent_id" => payload.id,
+      "display_name" => payload.displayName || "Agent",
+      "username" => payload.username,
+      "identifier" => payload.username || payload.id,
+      "status" => payload.status,
+      "prompt_status" => prompt_status_line(agent),
+      "prompt_preview" => condensed_prompt_preview(payload.systemPrompt),
+      "system_prompt" => payload.systemPrompt,
+      "enabled_tools" => payload.enabledTools || [],
+      "output_modes" => payload.outputModes || [],
+      "voice_profile" => payload.voiceProfile,
+      "callback_url" => payload.callbackUrl,
+      "api_base_url" => integration["api_base_url"],
+      "invoke_url" => integration["invoke_url"],
+      "events_url" => integration["events_url"],
+      "builder_link" => integration["builder_link"],
+      "agent_dm_link" => integration["agent_dm_link"],
+      "default_destination_chat" => integration["default_destination_chat"],
+      "attached_chats" => integration["attached_chat_links"] || [],
+      "secret_hint" => payload.secretHint,
+      "latest_secret" => latest_secret,
+      "can_delete" => true
+    }
+  end
+
+  defp condensed_prompt_preview(prompt) when is_binary(prompt) do
+    prompt
+    |> String.trim()
+    |> String.replace(~r/\s+/, " ")
+    |> case do
+      "" -> nil
+      text -> String.slice(text, 0, 180)
+    end
+  end
+
+  defp condensed_prompt_preview(_prompt), do: nil
 end

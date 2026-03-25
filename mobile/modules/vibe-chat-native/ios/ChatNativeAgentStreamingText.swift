@@ -56,13 +56,33 @@ enum ChatNativeAgentTextRenderer {
     for attributedText: NSAttributedString,
     width: CGFloat
   ) -> CGFloat {
-    guard width > 1.0, attributedText.length > 0 else { return 0.0 }
+    measuredSize(for: attributedText, width: width).height
+  }
+
+  static func measuredWidth(
+    for attributedText: NSAttributedString,
+    height: CGFloat
+  ) -> CGFloat {
+    guard height > 1.0, attributedText.length > 0 else { return 0.0 }
+    let measured = attributedText.boundingRect(
+      with: CGSize(width: .greatestFiniteMagnitude, height: height),
+      options: [.usesLineFragmentOrigin, .usesFontLeading],
+      context: nil
+    )
+    return ceil(measured.width)
+  }
+
+  static func measuredSize(
+    for attributedText: NSAttributedString,
+    width: CGFloat
+  ) -> CGSize {
+    guard width > 1.0, attributedText.length > 0 else { return .zero }
     let measured = attributedText.boundingRect(
       with: CGSize(width: width, height: .greatestFiniteMagnitude),
       options: [.usesLineFragmentOrigin, .usesFontLeading],
       context: nil
     )
-    return ceil(measured.height)
+    return CGSize(width: ceil(measured.width), height: ceil(measured.height))
   }
 }
 

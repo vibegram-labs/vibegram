@@ -126,6 +126,9 @@ defmodule Vibe.AI.AgentBuilderSetup do
       is_map(pending_ui_request) and is_binary(message) ->
         true
 
+      status in ["discovering", "clarifying", "assembling"] and is_binary(message) ->
+        true
+
       status in @status_values and is_binary(message) and not explicit_legacy_intent?(message) ->
         true
 
@@ -1158,7 +1161,10 @@ defmodule Vibe.AI.AgentBuilderSetup do
 
     request =
       case result do
-        {:ok, worker_request} -> normalize_ui_request(worker_request, spec)
+        {:ok, worker_request} ->
+          normalize_ui_request(worker_request, spec) ||
+            fallback_ui_request(spec, clarifier_result)
+
         {:error, reason} ->
           Logger.warning("[AgentBuilderSetup] Question composer fallback: #{inspect(reason)}")
           fallback_ui_request(spec, clarifier_result)
@@ -2409,7 +2415,9 @@ defmodule Vibe.AI.AgentBuilderSetup do
         nil
 
       true ->
-        type = normalize_ui_field_type(key, normalized["type"], normalized["options"])
+        raw_type = normalize_ui_field_type(key, normalized["type"], normalized["options"])
+        options = normalize_field_options(raw_type, normalized["options"], key, spec)
+        type = raw_type
 
         field_payload = %{
           "key" => key,
@@ -2423,7 +2431,7 @@ defmodule Vibe.AI.AgentBuilderSetup do
         |> maybe_put("placeholder", normalize_optional_string(normalized["placeholder"]))
         |> maybe_put("renderHint", normalize_render_hint(normalized["renderHint"]))
         |> Map.put("allowCustom", normalized["allowCustom"] == true)
-        |> maybe_put("options", normalize_field_options(type, normalized["options"], key, spec))
+        |> maybe_put("options", if(type in ["single_select", "multi_select"], do: options, else: nil))
     end
   end
 
@@ -2482,6 +2490,24 @@ defmodule Vibe.AI.AgentBuilderSetup do
       %{"id" => "customer support", "label" => "Customer support"},
       %{"id" => "order updates", "label" => "Order updates"},
       %{"id" => "operations", "label" => "Operations"}
+    ]
+  end
+
+  defp default_field_options("audience", _spec) do
+    [
+      %{"id" => "customers", "label" => "Customers"},
+      %{"id" => "internal team", "label" => "Internal team"},
+      %{"id" => "admins", "label" => "Admins"}
+    ]
+  end
+
+  defp default_field_options("business_type", _spec) do
+    [
+      %{"id" => "ecommerce", "label" => "E-commerce"},
+      %{"id" => "services", "label" => "Services"},
+      %{"id" => "internal_ops", "label" => "Internal ops"},
+      %{"id" => "community", "label" => "Community"},
+      %{"id" => "content", "label" => "Content"}
     ]
   end
 
@@ -2790,7 +2816,9 @@ defmodule Vibe.AI.AgentBuilderSetup do
 
   defp looks_like_setup_request?(message) do
     normalized = String.downcase(message)
-    Enum.any?(@setup_keywords, &String.contains?(normalized, &1))
+
+    Enum.any?(@setup_keywords, &String.contains?(normalized, &1)) ||
+      semantic_setup_request?(normalized)
   end
 
   defp force_new_setup?(message) do
@@ -2810,6 +2838,26 @@ defmodule Vibe.AI.AgentBuilderSetup do
   defp explicit_legacy_intent?(message) do
     normalized = String.downcase(message)
     Enum.any?(@legacy_keywords, &String.contains?(normalized, &1))
+  end
+
+  defp semantic_setup_request?(normalized_message) do
+    mentions_agent = String.contains?(normalized_message, "agent")
+
+    has_setup_verb =
+      Enum.any?(
+        ["create", "build", "set up", "setup", "make", "draft", "configure", "new"],
+        &String.contains?(normalized_message, &1)
+      )
+
+    has_runtime_context =
+      Enum.any?(
+        ["tool", "prompt", "event", "webhook", "integration", "env", "chat id", "chat", "document", "pricing", "trade", "order"],
+        &String.contains?(normalized_message, &1)
+      )
+
+    (mentions_agent and has_setup_verb) ||
+      (has_setup_verb and has_runtime_context and
+         Enum.any?([" for my ", " for our ", "create me", "build me", "set me up"], &String.contains?(normalized_message, &1)))
   end
 
   defp summarize_active_agent(nil), do: nil

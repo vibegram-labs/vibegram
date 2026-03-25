@@ -43,6 +43,10 @@ import * as Haptics from 'expo-haptics'
 import { theme } from '../src/lib/theme'
 import SafeLiquidGlass from '../src/components/native/SafeLiquidGlass'
 import NativeStoryCamera, { isNativeStoryCameraAvailable, type NativeStoryCameraEventPayload } from '../src/components/native/NativeStoryCamera'
+import NativeStoryComposer, {
+    isNativeStoryComposerAvailable,
+    type NativeStoryComposerEventPayload,
+} from '../src/components/native/NativeStoryComposer'
 import { useStoryStore } from '../src/lib/stores/story-store'
 import { useAuthStore } from '../src/lib/stores/auth-store'
 import { RefreshIcon, ImageIcon } from '../src/components/Icons'
@@ -79,6 +83,7 @@ export function StoryCamera({ onRequestClose, deferCameraMountMs = 0 }: StoryCam
     const { createStory, saveDraft } = useStoryStore()
     const { user } = useAuthStore()
     const useNativeStoryCamera = Platform.OS === 'ios' && isNativeStoryCameraAvailable()
+    const useNativeStoryComposer = Platform.OS === 'ios' && isNativeStoryComposerAvailable()
 
     // Permissions
     const [permission, requestPermission] = useCameraPermissions()
@@ -429,6 +434,24 @@ export function StoryCamera({ onRequestClose, deferCameraMountMs = 0 }: StoryCam
         requestClose()
     }
 
+    const discardCapturedMedia = () => {
+        setCapturedMedia(null)
+        setOriginalMedia(null)
+        setEditError(null)
+        setEditRateLimitSeconds(null)
+    }
+
+    const handleSaveDraft = () => {
+        if (!capturedMedia) return
+        saveDraft({
+            mediaUri: capturedMedia.uri,
+            mediaType: capturedMedia.type
+        })
+        Alert.alert("Draft Saved", "Your story has been saved to drafts.", [
+            { text: "OK", onPress: () => requestClose() }
+        ])
+    }
+
     const handleNativeCameraEvent = ({ nativeEvent }: { nativeEvent: NativeStoryCameraEventPayload }) => {
         switch (nativeEvent.type) {
             case 'capture':
@@ -453,28 +476,50 @@ export function StoryCamera({ onRequestClose, deferCameraMountMs = 0 }: StoryCam
         }
     }
 
+    const handleNativeComposerEvent = ({ nativeEvent }: { nativeEvent: NativeStoryComposerEventPayload }) => {
+        switch (nativeEvent.type) {
+            case 'discard':
+                discardCapturedMedia()
+                return
+            case 'saveDraft':
+                handleSaveDraft()
+                return
+            case 'aiEdit':
+                void handleAIEdit(nativeEvent.prompt)
+                return
+            case 'publish':
+                void onPost({
+                    audience: nativeEvent.audience,
+                    allowScreenshots: nativeEvent.allowScreenshots,
+                    postToProfile: nativeEvent.postToProfile,
+                    duration: nativeEvent.duration,
+                })
+                return
+        }
+    }
 
+    if (capturedMedia && useNativeStoryComposer) {
+        return (
+            <View style={[styles.container, { backgroundColor: colors.bg.primary }]}>
+                <StatusBar barStyle="light-content" />
+                <NativeStoryComposer
+                    mediaUri={capturedMedia.uri}
+                    mediaType={capturedMedia.type}
+                    mirrored={!!capturedMedia.mirrored}
+                    onNativeEvent={handleNativeComposerEvent}
+                    style={styles.nativeCamera}
+                />
+            </View>
+        )
+    }
 
     if (capturedMedia) {
         return (
             <StoryPreview
                 media={capturedMedia}
-                onDiscard={() => {
-                    setCapturedMedia(null)
-                    setOriginalMedia(null)
-                }}
+                onDiscard={discardCapturedMedia}
                 onPost={onPost}
-                onSaveDraft={() => {
-                    if (capturedMedia) {
-                        saveDraft({
-                            mediaUri: capturedMedia.uri,
-                            mediaType: capturedMedia.type
-                        })
-                        Alert.alert("Draft Saved", "Your story has been saved to drafts.", [
-                            { text: "OK", onPress: () => requestClose() }
-                        ])
-                    }
-                }}
+                onSaveDraft={handleSaveDraft}
                 onSettings={() => { }}
                 onAIEdit={handleAIEdit}
                 isEditing={isEditing}

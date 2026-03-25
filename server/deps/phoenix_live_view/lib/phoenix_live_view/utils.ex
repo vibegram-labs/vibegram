@@ -3,7 +3,7 @@ defmodule Phoenix.LiveView.Utils do
   # but also Static, and LiveViewTest.
   @moduledoc false
 
-  alias Phoenix.LiveView.{Socket, Lifecycle}
+  alias Phoenix.LiveView.{Rendered, Socket, Lifecycle}
 
   # All available mount options
   @mount_opts [:temporary_assigns, :layout]
@@ -96,17 +96,12 @@ defmodule Phoenix.LiveView.Utils do
   def force_assign(assigns, nil, key, val), do: Map.put(assigns, key, val)
 
   def force_assign(assigns, changed, key, val) do
-    # If the current value is a composite type (list, map, tuple),
-    # we store it in changed so we can perform nested change tracking.
-    # Also note the use of put_new is important.
-    # We want to keep the original value from assigns and not any
-    # intermediate ones that may appear.
-    changed_val =
-      case Map.get(assigns, key) do
-        val when is_list(val) or is_map(val) or is_tuple(val) -> val
-        _ -> true
-      end
-
+    # If the current value is a map, we store it in changed so
+    # we can perform nested change tracking. Also note the use
+    # of put_new is important. We want to keep the original value
+    # from assigns and not any intermediate ones that may appear.
+    current_val = Map.get(assigns, key)
+    changed_val = if is_map(current_val), do: current_val, else: true
     changed = Map.put_new(changed, key, changed_val)
     Map.put(%{assigns | __changed__: changed}, key, val)
   end
@@ -123,7 +118,7 @@ defmodule Phoenix.LiveView.Utils do
   Clears temporary data (flash, pushes, etc) from the socket privates.
   """
   def clear_temp(socket) do
-    put_in(socket.private.live_temp, %{})
+    put_in(socket.private.__temp__, %{})
   end
 
   @doc """
@@ -200,16 +195,67 @@ defmodule Phoenix.LiveView.Utils do
   @doc """
   Validate and normalizes the layout.
   """
-  def normalize_layout(false), do: false
+  def normalize_layout(false, _warn_ctx), do: false
 
-  def normalize_layout({mod, layout}) when is_atom(mod) and is_atom(layout) do
+  def normalize_layout({mod, layout}, _warn_ctx) when is_atom(mod) and is_atom(layout) do
     {mod, Atom.to_string(layout)}
   end
 
-  def normalize_layout(other) do
+  def normalize_layout({mod, layout}, warn_ctx) when is_atom(mod) and is_binary(layout) do
+    root_template = Path.rootname(layout)
+
+    IO.warn(
+      "passing a string as a layout template in #{warn_ctx} is deprecated, please pass " <>
+        "{#{inspect(mod)}, :#{root_template}} instead of {#{inspect(mod)}, \"#{root_template}.html\"}"
+    )
+
+    {mod, root_template}
+  end
+
+  def normalize_layout(other, _warn_ctx) do
     raise ArgumentError,
-          ":layout expects a tuple of the form {MyLayouts, :my_template} or false, " <>
+          ":layout expects a tuple of the form {MyLayoutView, :my_template} or false, " <>
             "got: #{inspect(other)}"
+  end
+
+  @doc """
+  Renders the view with socket into a rendered struct.
+  """
+  def to_rendered(socket, view) do
+    assigns = render_assigns(socket)
+
+    inner_content =
+      assigns
+      |> view.render()
+      |> check_rendered!(view)
+
+    case layout(socket, view) do
+      {layout_mod, layout_template} ->
+        assigns = put_in(assigns[:inner_content], inner_content)
+        assigns = put_in(assigns.__changed__[:inner_content], true)
+
+        layout_mod
+        |> Phoenix.Template.render(to_string(layout_template), "html", assigns)
+        |> check_rendered!(layout_mod)
+
+      false ->
+        inner_content
+    end
+  end
+
+  defp check_rendered!(%Rendered{} = rendered, _view), do: rendered
+
+  defp check_rendered!(other, view) do
+    raise RuntimeError, """
+    expected #{inspect(view)} to return a %Phoenix.LiveView.Rendered{} struct
+
+    Ensure your render function uses ~H, or your template uses the .heex extension.
+
+    Got:
+
+        #{inspect(other)}
+
+    """
   end
 
   @doc """
@@ -240,7 +286,7 @@ defmodule Phoenix.LiveView.Utils do
     new_flash = Map.delete(socket.assigns.flash, key)
 
     socket = assign(socket, :flash, new_flash)
-    update_in(socket.private.live_temp[:flash], &Map.delete(&1 || %{}, key))
+    update_in(socket.private.__temp__[:flash], &Map.delete(&1 || %{}, key))
   end
 
   @doc """
@@ -251,14 +297,14 @@ defmodule Phoenix.LiveView.Utils do
     new_flash = Map.put(assigns.flash, key, msg)
 
     socket = assign(socket, :flash, new_flash)
-    update_in(socket.private.live_temp[:flash], &Map.put(&1 || %{}, key, msg))
+    update_in(socket.private.__temp__[:flash], &Map.put(&1 || %{}, key, msg))
   end
 
   @doc """
   Returns a map of the flash messages which have changed.
   """
   def changed_flash(%Socket{} = socket) do
-    socket.private.live_temp[:flash] || %{}
+    socket.private.__temp__[:flash] || %{}
   end
 
   defp flash_key(binary) when is_binary(binary), do: binary
@@ -267,43 +313,33 @@ defmodule Phoenix.LiveView.Utils do
   @doc """
   Annotates the changes with the event to be pushed.
 
-  By default, events are dispatched on the JavaScript side only after
+  Events are dispatched on the JavaScript side only after
   the current patch is invoked. Therefore, if the LiveView
-  redirects, the events won't be invoked. If the `dispatch: :before` option
-  is passed, this event will be dispatched before patching the DOM.
+  redirects, the events won't be invoked.
   """
-  def push_event(%Socket{} = socket, event, %{} = payload, opts) do
-    opts = Keyword.validate!(opts, [:dispatch])
-    dispatch_phase = Keyword.get(opts, :dispatch, :after)
-
-    case dispatch_phase do
-      :after ->
-        update_in(socket.private.live_temp[:push_events], &[[event, payload] | &1 || []])
-
-      :before ->
-        update_in(socket.private.live_temp[:push_events], &[[event, payload, true] | &1 || []])
-    end
+  def push_event(%Socket{} = socket, event, %{} = payload) do
+    update_in(socket.private.__temp__[:push_events], &[[event, payload] | &1 || []])
   end
 
   @doc """
   Annotates the reply in the socket changes.
   """
   def put_reply(%Socket{} = socket, %{} = payload) do
-    put_in(socket.private.live_temp[:push_reply], payload)
+    put_in(socket.private.__temp__[:push_reply], payload)
   end
 
   @doc """
   Returns the push events in the socket.
   """
   def get_push_events(%Socket{} = socket) do
-    Enum.reverse(socket.private.live_temp[:push_events] || [])
+    Enum.reverse(socket.private.__temp__[:push_events] || [])
   end
 
   @doc """
   Returns the reply in the socket.
   """
   def get_reply(%Socket{} = socket) do
-    socket.private.live_temp[:push_reply]
+    socket.private.__temp__[:push_reply]
   end
 
   @doc """
@@ -360,7 +396,7 @@ defmodule Phoenix.LiveView.Utils do
               {_, %Socket{} = socket} ->
                 {:ok, socket}
             end
-            |> handle_mount_result!({view, :mount, 3})
+            |> handle_mount_result!({:mount, 3, view})
 
           {socket, %{socket: socket, params: params, session: session, uri: uri}}
         end
@@ -377,26 +413,28 @@ defmodule Phoenix.LiveView.Utils do
     if Code.ensure_loaded?(component) and function_exported?(component, :mount, 1) do
       socket
       |> component.mount()
-      |> handle_mount_result!({component, :mount, 1})
+      |> handle_mount_result!({:mount, 1, component})
     else
       socket
     end
   end
 
-  defp handle_mount_result!({:ok, %Socket{} = socket, opts}, context)
+  defp handle_mount_result!({:ok, %Socket{} = socket, opts}, {:mount, arity, _view})
        when is_list(opts) do
     validate_mount_redirect!(socket.redirected)
-    handle_mount_options!(socket, opts, context)
+
+    Enum.reduce(opts, socket, fn {key, val}, acc -> mount_opt(acc, key, val, arity) end)
   end
 
-  defp handle_mount_result!({:ok, %Socket{} = socket}, _context) do
+  defp handle_mount_result!({:ok, %Socket{} = socket}, {:mount, _arity, _view}) do
     validate_mount_redirect!(socket.redirected)
+
     socket
   end
 
-  defp handle_mount_result!(response, {mod, fun, arity}) do
+  defp handle_mount_result!(response, {:mount, arity, view}) do
     raise ArgumentError, """
-    invalid result returned from #{inspect(mod)}.#{fun}/#{arity}.
+    invalid result returned from #{inspect(view)}.mount/#{arity}.
 
     Expected {:ok, socket} | {:ok, socket, opts}, got: #{inspect(response)}
     """
@@ -404,48 +442,6 @@ defmodule Phoenix.LiveView.Utils do
 
   defp validate_mount_redirect!({:live, :patch, _}), do: raise_bad_mount_and_live_patch!()
   defp validate_mount_redirect!(_), do: :ok
-
-  @doc """
-  Handle all valid options on mount/on_mount.
-  """
-  def handle_mount_options!(%Socket{} = socket, opts, {mod, fun, arity}) do
-    Enum.reduce(opts, socket, fn
-      {key, val}, socket when key in @mount_opts ->
-        handle_mount_option(socket, key, val)
-
-      {key, val}, _socket ->
-        raise ArgumentError, """
-        invalid option returned from #{inspect(mod)}.#{fun}/#{arity}.
-
-        Expected keys to be one of #{inspect(@mount_opts)},
-        got: #{inspect(key)}: #{inspect(val)}
-        """
-    end)
-  end
-
-  defp handle_mount_option(socket, :layout, layout) do
-    put_in(socket.private[:live_layout], normalize_layout(layout))
-  end
-
-  defp handle_mount_option(%Socket{} = socket, :temporary_assigns, temp_assigns) do
-    if not Keyword.keyword?(temp_assigns) do
-      raise "the :temporary_assigns mount option must be keyword list"
-    end
-
-    temp_assigns = Map.new(temp_assigns)
-
-    %{
-      socket
-      | assigns: Map.merge(temp_assigns, socket.assigns),
-        private:
-          Map.update(
-            socket.private,
-            :temporary_assigns,
-            temp_assigns,
-            &Map.merge(&1, temp_assigns)
-          )
-    }
-  end
 
   @doc """
   Calls the `handle_params/3` callback, and returns the result.
@@ -483,43 +479,31 @@ defmodule Phoenix.LiveView.Utils do
   end
 
   @doc """
-  Calls the optional `update/2` or `update_many/1` callback, otherwise update the socket(s) directly.
+  Calls the optional `update/2` callback, otherwise update the socket directly.
   """
   def maybe_call_update!(socket, component, assigns) do
-    cond do
-      function_exported?(component, :update_many, 1) ->
-        case component.update_many([{assigns, socket}]) do
-          [%Socket{} = socket] ->
+    if function_exported?(component, :update, 2) do
+      socket =
+        case component.update(assigns, socket) do
+          {:ok, %Socket{} = socket} ->
             socket
 
           other ->
-            raise "#{inspect(component)}.update_many/1 must return a list of Phoenix.LiveView.Socket " <>
-                    "of the same length as the input list, got: #{inspect(other)}"
+            raise ArgumentError, """
+            invalid result returned from #{inspect(component)}.update/2.
+
+            Expected {:ok, socket}, got: #{inspect(other)}
+            """
         end
 
-      function_exported?(component, :update, 2) ->
-        socket =
-          case component.update(assigns, socket) do
-            {:ok, %Socket{} = socket} ->
-              socket
+      if socket.redirected do
+        raise "cannot redirect socket on update. Redirect before `update/2` is called" <>
+                " or use `send/2` and redirect in the `handle_info/2` response"
+      end
 
-            other ->
-              raise ArgumentError, """
-              invalid result returned from #{inspect(component)}.update/2.
-
-              Expected {:ok, socket}, got: #{inspect(other)}
-              """
-          end
-
-        if socket.redirected do
-          raise "cannot redirect socket on update. Redirect before `update/2` is called" <>
-                  " or use `send/2` and redirect in the `handle_info/2` response"
-        end
-
-        socket
-
-      true ->
-        Enum.reduce(assigns, socket, fn {k, v}, acc -> assign(acc, k, v) end)
+      socket
+    else
+      Enum.reduce(assigns, socket, fn {k, v}, acc -> assign(acc, k, v) end)
     end
   end
 
@@ -552,8 +536,51 @@ defmodule Phoenix.LiveView.Utils do
     Base.url_encode64(binary)
   end
 
+  defp mount_opt(%Socket{} = socket, key, val, _arity) when key in @mount_opts do
+    do_mount_opt(socket, key, val)
+  end
+
+  defp mount_opt(%Socket{view: view}, key, val, arity) do
+    raise ArgumentError, """
+    invalid option returned from #{inspect(view)}.mount/#{arity}.
+
+    Expected keys to be one of #{inspect(@mount_opts)}
+    got: #{inspect(key)}: #{inspect(val)}
+    """
+  end
+
+  defp do_mount_opt(socket, :layout, layout) do
+    put_in(socket.private[:live_layout], normalize_layout(layout, "mount options"))
+  end
+
+  defp do_mount_opt(socket, :temporary_assigns, temp_assigns) do
+    unless Keyword.keyword?(temp_assigns) do
+      raise "the :temporary_assigns mount option must be keyword list"
+    end
+
+    temp_assigns = Map.new(temp_assigns)
+
+    %Socket{
+      socket
+      | assigns: Map.merge(temp_assigns, socket.assigns),
+        private: Map.put(socket.private, :temporary_assigns, temp_assigns)
+    }
+  end
+
   defp drop_private(%Socket{private: private} = socket, keys) do
-    %{socket | private: Map.drop(private, keys)}
+    %Socket{socket | private: Map.drop(private, keys)}
+  end
+
+  defp render_assigns(%{assigns: assigns} = socket) do
+    socket = %Socket{socket | assigns: %Socket.AssignsNotInSocket{__assigns__: assigns}}
+    Map.put(assigns, :socket, socket)
+  end
+
+  defp layout(socket, view) do
+    case socket.private do
+      %{live_layout: layout} -> layout
+      %{} -> view.__live__()[:layout]
+    end
   end
 
   defp flash_salt(endpoint_mod) when is_atom(endpoint_mod) do

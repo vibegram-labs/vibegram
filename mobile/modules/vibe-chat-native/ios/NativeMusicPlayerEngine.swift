@@ -23,9 +23,12 @@ final class NativeMusicPlayerEngine: NSObject {
   private var isPlaying = false
   private var isExpanded = false
   private var playbackRate: Double = 1.0
+  private var queueOrderMode: NativeMusicPlayerQueueOrderMode = .forward
+  private var isRepeatEnabled = false
   private var currentPositionMs: Double = 0.0
   private var currentDurationMs: Double = 0.0
   private var currentSourceURLKey: String?
+  private var randomizedQueueTrackIds: [String] = []
 
   private var player: AVPlayer?
   private var playerItemStatusObservation: NSKeyValueObservation?
@@ -47,7 +50,7 @@ final class NativeMusicPlayerEngine: NSObject {
 
   func getStatePayload() -> [String: Any] {
     let currentTrackPayload = currentTrack?.toPayload()
-    let queuePayload = queueTrackIds.compactMap { store.getTrack(trackId: $0)?.toPayload() }
+    let queuePayload = orderedQueueTrackIds().compactMap { store.getTrack(trackId: $0)?.toPayload() }
     return [
       "currentTrack": currentTrackPayload ?? NSNull(),
       "queue": queuePayload,
@@ -57,6 +60,8 @@ final class NativeMusicPlayerEngine: NSObject {
       "progress": currentPositionMs,
       "duration": currentDurationMs,
       "playbackRate": playbackRate,
+      "queueOrderMode": queueOrderMode.rawValue,
+      "isRepeatEnabled": isRepeatEnabled,
       "tracks": store.allTracksPayload(),
       "downloadingTracks": store.downloadingTracksPayload(),
     ]
@@ -72,6 +77,7 @@ final class NativeMusicPlayerEngine: NSObject {
       if let currentTrackId = self.currentTrackId, !self.queueTrackIds.contains(currentTrackId) {
         self.queueTrackIds.insert(currentTrackId, at: 0)
       }
+      self.syncRandomizedQueueTrackIds(anchorTrackId: self.currentTrackId, regenerate: false)
       self.publishState()
     }
   }
@@ -83,6 +89,9 @@ final class NativeMusicPlayerEngine: NSObject {
       let isSameTrack = self.currentTrackId == track.trackId
       self.currentTrackId = track.trackId
       self.isPlaying = true
+      if self.queueOrderMode == .random, !isSameTrack {
+        self.syncRandomizedQueueTrackIds(anchorTrackId: track.trackId, regenerate: true)
+      }
       if isSameTrack, self.currentSourceURLKey != nil {
         self.playCurrentIfReady()
         self.publishState()
@@ -123,12 +132,37 @@ final class NativeMusicPlayerEngine: NSObject {
     }
   }
 
+  func setQueueOrderMode(_ value: NativeMusicPlayerQueueOrderMode) {
+    DispatchQueue.main.async {
+      guard self.queueOrderMode != value else { return }
+      self.queueOrderMode = value
+      self.syncRandomizedQueueTrackIds(
+        anchorTrackId: self.currentTrackId,
+        regenerate: value == .random
+      )
+      self.publishState()
+    }
+  }
+
+  func toggleQueueOrderMode() {
+    setQueueOrderMode(queueOrderMode.next())
+  }
+
+  func setRepeatEnabled(_ value: Bool) {
+    DispatchQueue.main.async {
+      guard self.isRepeatEnabled != value else { return }
+      self.isRepeatEnabled = value
+      self.publishState()
+    }
+  }
+
+  func toggleRepeatEnabled() {
+    setRepeatEnabled(!isRepeatEnabled)
+  }
+
   func playNext() {
     DispatchQueue.main.async {
-      guard let currentTrackId = self.currentTrackId else { return }
-      guard let idx = self.queueTrackIds.firstIndex(of: currentTrackId), idx < self.queueTrackIds.count - 1
-      else { return }
-      let nextId = self.queueTrackIds[idx + 1]
+      guard let nextId = self.adjacentTrackId(step: 1, wraps: self.isRepeatEnabled) else { return }
       guard let track = self.store.getTrack(trackId: nextId) else { return }
       self.currentTrackId = track.trackId
       self.isPlaying = true
@@ -138,9 +172,7 @@ final class NativeMusicPlayerEngine: NSObject {
 
   func playPrev() {
     DispatchQueue.main.async {
-      guard let currentTrackId = self.currentTrackId else { return }
-      guard let idx = self.queueTrackIds.firstIndex(of: currentTrackId), idx > 0 else { return }
-      let prevId = self.queueTrackIds[idx - 1]
+      guard let prevId = self.adjacentTrackId(step: -1, wraps: self.isRepeatEnabled) else { return }
       guard let track = self.store.getTrack(trackId: prevId) else { return }
       self.currentTrackId = track.trackId
       self.isPlaying = true
@@ -167,6 +199,9 @@ final class NativeMusicPlayerEngine: NSObject {
       self.isExpanded = false
       self.currentTrackId = nil
       self.queueTrackIds = []
+      self.randomizedQueueTrackIds = []
+      self.queueOrderMode = .forward
+      self.isRepeatEnabled = false
       self.currentPositionMs = 0.0
       self.currentDurationMs = 0.0
       self.currentSourceURLKey = nil
@@ -197,6 +232,7 @@ final class NativeMusicPlayerEngine: NSObject {
       } else {
         self.store.removeTrack(trackId: trackId)
         self.queueTrackIds.removeAll { $0 == trackId }
+        self.syncRandomizedQueueTrackIds(anchorTrackId: self.currentTrackId, regenerate: false)
         self.publishState()
       }
     }
@@ -251,6 +287,9 @@ final class NativeMusicPlayerEngine: NSObject {
       guard let track = self.store.getTrack(trackId: trackId) else { return }
       self.ensureTrackInQueue(track.trackId)
       self.currentTrackId = track.trackId
+      if self.queueOrderMode == .random {
+        self.syncRandomizedQueueTrackIds(anchorTrackId: track.trackId, regenerate: true)
+      }
       self.currentPositionMs = 0.0
       self.currentDurationMs = (track.durationSeconds ?? 0.0) * 1000.0
 
@@ -280,6 +319,7 @@ final class NativeMusicPlayerEngine: NSObject {
   private func ensureTrackInQueue(_ trackId: String) {
     if queueTrackIds.contains(trackId) { return }
     queueTrackIds.insert(trackId, at: 0)
+    syncRandomizedQueueTrackIds(anchorTrackId: currentTrackId ?? trackId, regenerate: queueOrderMode == .random)
   }
 
   private func preparePlaybackForCurrentTrack() {
@@ -398,11 +438,7 @@ final class NativeMusicPlayerEngine: NSObject {
       return
     }
 
-    if let currentTrackId,
-      let idx = queueTrackIds.firstIndex(of: currentTrackId),
-      idx < queueTrackIds.count - 1
-    {
-      let nextId = queueTrackIds[idx + 1]
+    if let nextId = adjacentTrackId(step: 1, wraps: isRepeatEnabled) {
       self.currentTrackId = nextId
       isPlaying = true
       preparePlaybackForCurrentTrack()
@@ -445,15 +481,61 @@ final class NativeMusicPlayerEngine: NSObject {
   }
 
   private func prefetchUpcomingTrackIfNeeded() {
-    guard let currentTrackId,
-      let idx = queueTrackIds.firstIndex(of: currentTrackId),
-      idx < queueTrackIds.count - 1
-    else { return }
-
-    let nextId = queueTrackIds[idx + 1]
+    guard let nextId = adjacentTrackId(step: 1, wraps: false) else { return }
     guard let nextTrack = store.getTrack(trackId: nextId), shouldAutoDownload(nextTrack) else { return }
     guard let remoteURL = resolveRemoteDownloadURL(for: nextTrack) else { return }
     startDownload(track: nextTrack, remoteURL: remoteURL)
+  }
+
+  private func orderedQueueTrackIds() -> [String] {
+    switch queueOrderMode {
+    case .forward:
+      return queueTrackIds
+    case .reverse:
+      return Array(queueTrackIds.reversed())
+    case .random:
+      syncRandomizedQueueTrackIds(anchorTrackId: currentTrackId, regenerate: false)
+      return randomizedQueueTrackIds
+    }
+  }
+
+  private func adjacentTrackId(step: Int, wraps: Bool) -> String? {
+    guard step != 0 else { return nil }
+    guard let currentTrackId else { return nil }
+    let orderedIds = orderedQueueTrackIds()
+    guard !orderedIds.isEmpty else { return nil }
+    guard let currentIndex = orderedIds.firstIndex(of: currentTrackId) else { return nil }
+
+    let nextIndex = currentIndex + step
+    if orderedIds.indices.contains(nextIndex) {
+      return orderedIds[nextIndex]
+    }
+    guard wraps else { return nil }
+    return step > 0 ? orderedIds.first : orderedIds.last
+  }
+
+  private func syncRandomizedQueueTrackIds(anchorTrackId: String?, regenerate: Bool) {
+    let baseIds = Self.deduplicated(ids: queueTrackIds)
+    let expected = Set(baseIds)
+    let current = Set(randomizedQueueTrackIds)
+    let needsRefresh =
+      regenerate
+      || randomizedQueueTrackIds.count != baseIds.count
+      || current != expected
+
+    guard needsRefresh else { return }
+
+    var shuffledIds = baseIds
+    if let anchorTrackId,
+      let anchorIndex = shuffledIds.firstIndex(of: anchorTrackId)
+    {
+      shuffledIds.remove(at: anchorIndex)
+      shuffledIds.shuffle()
+      shuffledIds.insert(anchorTrackId, at: 0)
+    } else {
+      shuffledIds.shuffle()
+    }
+    randomizedQueueTrackIds = shuffledIds
   }
 
   private func resolvePlaybackURL(for track: NativeMusicPlayerTrack) -> URL? {

@@ -31,19 +31,21 @@ defmodule Phoenix.LiveView.Socket do
       socket "/live", MyAppWeb.UserSocket,
         websocket: [connect_info: [session: @session_options]]
 
-  If you require session options to be set at runtime, you can use
+  If you require session options to be set at runtime, you can use 
   an MFA tuple. The function it designates must return a keyword list.
 
       socket "/live", MyAppWeb.UserSocket,
         websocket: [connect_info: [session: {__MODULE__, :runtime_opts, []}]]
 
-      # ...
-
+      # ...  
+    
       def runtime_opts() do
         Keyword.put(@session_options, :domain, host())
       end
   """
   use Phoenix.Socket
+
+  require Logger
 
   @derive {Inspect,
            only: [
@@ -54,8 +56,7 @@ defmodule Phoenix.LiveView.Socket do
              :parent_pid,
              :root_pid,
              :assigns,
-             :transport_pid,
-             :sticky?
+             :transport_pid
            ]}
 
   defstruct id: nil,
@@ -65,17 +66,19 @@ defmodule Phoenix.LiveView.Socket do
             root_pid: nil,
             router: nil,
             assigns: %{__changed__: %{}},
-            private: %{live_temp: %{}},
+            private: %{__temp__: %{}},
+            fingerprints: Phoenix.LiveView.Diff.new_fingerprints(),
             redirected: nil,
             host_uri: nil,
-            transport_pid: nil,
-            sticky?: false
+            transport_pid: nil
 
   @typedoc "Struct returned when `assigns` is not in the socket."
   @opaque assigns_not_in_socket :: Phoenix.LiveView.Socket.AssignsNotInSocket.t()
 
   @typedoc "The data in a LiveView as stored in the socket."
   @type assigns :: map | assigns_not_in_socket()
+
+  @type fingerprints :: {nil, map} | {binary, map}
 
   @type t :: %__MODULE__{
           id: binary(),
@@ -86,6 +89,7 @@ defmodule Phoenix.LiveView.Socket do
           router: module(),
           assigns: assigns,
           private: map(),
+          fingerprints: fingerprints,
           redirected: nil | tuple(),
           host_uri: URI.t() | :not_mounted_at_router,
           transport_pid: pid() | nil

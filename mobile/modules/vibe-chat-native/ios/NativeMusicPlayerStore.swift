@@ -1,6 +1,23 @@
 import CryptoKit
 import Foundation
 
+enum NativeMusicPlayerQueueOrderMode: String, CaseIterable {
+  case forward
+  case reverse
+  case random
+
+  func next() -> NativeMusicPlayerQueueOrderMode {
+    switch self {
+    case .forward:
+      return .reverse
+    case .reverse:
+      return .random
+    case .random:
+      return .forward
+    }
+  }
+}
+
 struct NativeMusicPlayerTrack: Codable, Equatable {
   let trackId: String
   var videoId: String?

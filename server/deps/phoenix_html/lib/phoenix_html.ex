@@ -1,11 +1,12 @@
 defmodule Phoenix.HTML do
   @moduledoc """
-  Building blocks for working with HTML in Phoenix.
+  The default building blocks for working with HTML safely
+  in Phoenix.
 
   This library provides three main functionalities:
 
     * HTML safety
-    * Form abstractions
+    * Form handling (with CSRF protection)
     * A tiny JavaScript library to enhance applications
 
   ## HTML safety
@@ -17,23 +18,17 @@ defmodule Phoenix.HTML do
   By default, data output in templates is not considered
   safe:
 
-  ```heex
-  <%= "<hello>" %>
-  ```
+      <%= "<hello>" %>
 
   will be shown as:
 
-  ```html
-  &lt;hello&gt;
-  ```
+      &lt;hello&gt;
 
   User data or data coming from the database is almost never
   considered safe. However, in some cases, you may want to tag
   it as safe and show its "raw" contents:
 
-  ```heex
-  <%= raw "<hello>" %>
-  ```
+      <%= raw "<hello>" %>
 
   ## Form handling
 
@@ -79,19 +74,15 @@ defmodule Phoenix.HTML do
   """
 
   @doc false
+  # TODO: Deprecate me
   defmacro __using__(_) do
-    raise """
-    use Phoenix.HTML is no longer supported in v4.0.
-
-    To keep compatibility with previous versions, \
-    add {:phoenix_html_helpers, "~> 1.0"} to your mix.exs deps
-    and then, instead of "use Phoenix.HTML", you might:
-
-        import Phoenix.HTML
-        import Phoenix.HTML.Form
-        use PhoenixHTMLHelpers
-
-    """
+    quote do
+      import Phoenix.HTML
+      import Phoenix.HTML.Form
+      import Phoenix.HTML.Link
+      import Phoenix.HTML.Tag, except: [attributes_escape: 1]
+      import Phoenix.HTML.Format
+    end
   end
 
   @typedoc "Guaranteed to be safe"
@@ -99,6 +90,36 @@ defmodule Phoenix.HTML do
 
   @typedoc "May be safe or unsafe (i.e. it needs to be converted)"
   @type unsafe :: Phoenix.HTML.Safe.t()
+
+  @doc false
+  @deprecated "use the ~H sigil instead"
+  defmacro sigil_e(expr, opts) do
+    handle_sigil(expr, opts, __CALLER__)
+  end
+
+  @doc false
+  @deprecated "use the ~H sigil instead"
+  defmacro sigil_E(expr, opts) do
+    handle_sigil(expr, opts, __CALLER__)
+  end
+
+  defp handle_sigil({:<<>>, meta, [expr]}, [], caller) do
+    options = [
+      engine: Phoenix.HTML.Engine,
+      file: caller.file,
+      line: caller.line + 1,
+      indentation: meta[:indentation] || 0
+    ]
+
+    EEx.compile_string(expr, options)
+  end
+
+  defp handle_sigil(_, _, _) do
+    raise ArgumentError,
+          "interpolation not allowed in ~e sigil. " <>
+            "Remove the interpolation, use <%= %> to insert values, " <>
+            "or use ~E to show the interpolation literally"
+  end
 
   @doc """
   Marks the given content as raw.
@@ -125,7 +146,7 @@ defmodule Phoenix.HTML do
       iex> html_escape("<hello>")
       {:safe, [[[] | "&lt;"], "hello" | "&gt;"]}
 
-      iex> html_escape(~c"<hello>")
+      iex> html_escape('<hello>')
       {:safe, ["&lt;", 104, 101, 108, 108, 111, "&gt;"]}
 
       iex> html_escape(1)
@@ -301,7 +322,7 @@ defmodule Phoenix.HTML do
   defp attr_escape(other), do: Phoenix.HTML.Safe.to_iodata(other)
 
   @doc """
-  Escapes HTML content to be inserted into a JavaScript string.
+  Escapes HTML content to be inserted a JavaScript string.
 
   This function is useful in JavaScript responses when there is a need
   to escape HTML rendered from other templates, like in the following:
@@ -343,75 +364,4 @@ defmodule Phoenix.HTML do
     do: javascript_escape(t, <<acc::binary, h>>)
 
   defp javascript_escape(<<>>, acc), do: acc
-
-  @doc """
-  Escapes a string for use as a CSS identifier.
-
-  ## Examples
-
-      iex> css_escape("hello world")
-      "hello\\\\ world"
-
-      iex> css_escape("-123")
-      "-\\\\31 23"
-
-  """
-  @spec css_escape(String.t()) :: String.t()
-  def css_escape(value) when is_binary(value) do
-    # This is a direct translation of
-    # https://github.com/mathiasbynens/CSS.escape/blob/master/css.escape.js
-    # into Elixir.
-    value
-    |> String.to_charlist()
-    |> escape_css_chars()
-    |> IO.iodata_to_binary()
-  end
-
-  defp escape_css_chars(chars) do
-    case chars do
-      # If the character is the first character and is a `-` (U+002D), and
-      # there is no second character, […]
-      [?- | []] -> ["\\-"]
-      _ -> escape_css_chars(chars, 0, [])
-    end
-  end
-
-  defp escape_css_chars([], _, acc), do: Enum.reverse(acc)
-
-  defp escape_css_chars([char | rest], index, acc) do
-    escaped =
-      cond do
-        # If the character is NULL (U+0000), then the REPLACEMENT CHARACTER
-        # (U+FFFD).
-        char == 0 ->
-          <<0xFFFD::utf8>>
-
-        # If the character is in the range [\1-\1F] (U+0001 to U+001F) or is
-        # U+007F,
-        # if the character is the first character and is in the range [0-9]
-        # (U+0030 to U+0039),
-        # if the character is the second character and is in the range [0-9]
-        # (U+0030 to U+0039) and the first character is a `-` (U+002D),
-        char in 0x0001..0x001F or char == 0x007F or
-          (index == 0 and char in ?0..?9) or
-            (index == 1 and char in ?0..?9 and hd(acc) == "-") ->
-          # https://drafts.csswg.org/cssom/#escape-a-character-as-code-point
-          ["\\", Integer.to_string(char, 16), " "]
-
-        # If the character is not handled by one of the above rules and is
-        # greater than or equal to U+0080, is `-` (U+002D) or `_` (U+005F), or
-        # is in one of the ranges [0-9] (U+0030 to U+0039), [A-Z] (U+0041 to
-        # U+005A), or [a-z] (U+0061 to U+007A), […]
-        char >= 0x0080 or char in [?-, ?_] or char in ?0..?9 or char in ?A..?Z or char in ?a..?z ->
-          # the character itself
-          <<char::utf8>>
-
-        true ->
-          # Otherwise, the escaped character.
-          # https://drafts.csswg.org/cssom/#escape-a-character
-          ["\\", <<char::utf8>>]
-      end
-
-    escape_css_chars(rest, index + 1, [escaped | acc])
-  end
 end

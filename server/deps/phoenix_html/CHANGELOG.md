@@ -1,49 +1,5 @@
 # Changelog
 
-## 4.3.0 (2025-09-28)
-
-* Enhancements
-  * Implement `Phoenix.HTML.Safe` for Duration
-  * Add function head for argument names of `normalize_value/2` to improve documentation
-  * Allow custom tags in options_for_select
-  * Allow datetime as form option values
-
-* Bug fixes
-  * Avoid false positive warnings on Elixir v1.19
-
-## 4.2.1 (2025-02-21)
-
-* Enhancements
-  * Add type to `Phoenix.HTML.FormField`
-  * Allow keyword lists in options to use nil as key/value
-
-## 4.2.0 (2024-12-28)
-
-* Enhancements
-  * Add `Phoenix.HTML.css_escape/1` to escape strings for use inside CSS selectors
-  * Add the ability to pass `:hr` to `options_for_select/2` to render a horizontal rule
-
-* Bug fixes
-  * Pass form action through in FormData implementation
-
-## v4.1.1 (2024-03-01)
-  * Fix dependency resolution error
-
-## v4.1.0 (2024-02-29)
-
-* Enhancements
-  * Introduce form `:action` and consider input as changed if action changes to support better change tracking
-
-## v4.0.0 (2023-12-19)
-
-This version removes deprecated functionality and moved all HTML helpers to a separate library. HTML Helpers are no longer used in new apps from Phoenix v1.7, instead it relies on function components from `Phoenix.LiveView`. Older applications who wish to maintain compatibility, add `{:phoenix_html_helpers, "~> 1.0"}` to your `mix.exs` and then replace `use Phoenix.HTML` in your applications by:
-
-```elixir
-import Phoenix.HTML
-import Phoenix.HTML.Form
-use PhoenixHTMLHelpers
-```
-
 ## v3.3.3 (2023-10-09)
 
 * Enhancements

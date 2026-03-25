@@ -65,7 +65,7 @@
         return false;
       }
 
-      if (element.getAttribute("data-method") && element.getAttribute("data-to")) {
+      if (element.getAttribute("data-method")) {
         handleClick(element, e.metaKey || e.shiftKey);
         e.preventDefault();
         return false;

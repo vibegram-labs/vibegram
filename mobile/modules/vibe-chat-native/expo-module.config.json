@@ -20,7 +20,8 @@
       "ChatNativeHomeListModule",
       "ChatNativeAgentModule",
       "NativeGlobalMusicPlayerModule",
-      "NativeStoryCameraModule"
+      "NativeStoryCameraModule",
+      "NativeStoryComposerModule"
     ],
     "podspecPath": "ChatNative.podspec"
   },

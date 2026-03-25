@@ -1167,22 +1167,23 @@ final class ChatAttachmentMenuController: UIViewController, UITextFieldDelegate 
     CATransaction.commit()
   }
 
-  private func reloadCameraTile() {
-    guard galleryCollectionView.numberOfSections > 0,
-      galleryCollectionView.numberOfItems(inSection: 0) > 0
-    else { return }
-    galleryCollectionView.reloadItems(at: [IndexPath(item: 0, section: 0)])
+  private func updateCameraTileLoadingState() {
+    let indexPath = IndexPath(item: 0, section: 0)
+    if let cell = galleryCollectionView.cellForItem(at: indexPath) as? ChatAttachmentCameraCell {
+      cell.setLoading(isCameraLoading)
+      cell.setCameraAvailable(cameraPreviewAvailable)
+    }
   }
 
   private func startCameraPreview() {
     isCameraLoading = true
-    reloadCameraTile()
+    updateCameraTileLoadingState()
     ChatAttachmentMenuCameraManager.shared.requestStart { [weak self] success in
       self?.cameraPreviewAvailable = success
       // Small delay to ensure the first frame is actually visible before removing blur
       DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
         self?.isCameraLoading = false
-        self?.reloadCameraTile()
+        self?.updateCameraTileLoadingState()
       }
     }
   }
@@ -1551,7 +1552,6 @@ private final class ChatAttachmentCameraCell: UICollectionViewCell {
   private let unavailableIcon = UIImageView()
   private let unavailableLabel = UILabel()
   private let loadingBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
-  private let loadingIndicator = UIActivityIndicatorView(style: .medium)
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -1594,11 +1594,6 @@ private final class ChatAttachmentCameraCell: UICollectionViewCell {
     loadingBlurView.frame = bounds
     loadingBlurView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
     contentView.addSubview(loadingBlurView)
-    
-    loadingIndicator.color = .white
-    loadingIndicator.startAnimating()
-    loadingIndicator.autoresizingMask = [.flexibleTopMargin, .flexibleBottomMargin, .flexibleLeftMargin, .flexibleRightMargin]
-    loadingBlurView.contentView.addSubview(loadingIndicator)
   }
 
   required init?(coder: NSCoder) { nil }
@@ -1609,8 +1604,6 @@ private final class ChatAttachmentCameraCell: UICollectionViewCell {
     unavailableIcon.frame = CGRect(x: (bounds.width - 20) * 0.5, y: cy - 16, width: 20, height: 20)
     unavailableLabel.frame = CGRect(
       x: 6, y: unavailableIcon.frame.maxY + 2, width: bounds.width - 12, height: 14)
-      
-    loadingIndicator.center = CGPoint(x: bounds.midX, y: bounds.midY)
 
     let b = previewView.bounds
     let path = UIBezierPath()

@@ -1023,13 +1023,6 @@ private class NativeRowsAdapter(
     }
   }
 
-  private fun dp(value: Int): Int =
-    TypedValue.applyDimension(
-      TypedValue.COMPLEX_UNIT_DIP,
-      value.toFloat(),
-      context.resources.displayMetrics,
-    ).toInt()
-
   private fun resolveFileName(fileName: String?, mediaUrl: String?): String {
     if (!fileName.isNullOrBlank()) return fileName
     val parsed = mediaUrl?.trim().orEmpty()

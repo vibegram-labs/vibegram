@@ -826,24 +826,30 @@ private func resolvedAudioVoiceTitle(_ row: ChatListRow) -> String {
   let rawTitle =
     row.fileName?.trimmingCharacters(in: .whitespacesAndNewlines)
     ?? row.text.trimmingCharacters(in: .whitespacesAndNewlines)
-  guard !rawTitle.isEmpty else {
-    return "Audio"
-  }
   let sanitizedTitle = (rawTitle as NSString).lastPathComponent
   let displayTitle = (sanitizedTitle as NSString).deletingPathExtension
-  return displayTitle.isEmpty ? sanitizedTitle : displayTitle
+  if displayTitle.isEmpty || displayTitle.count < 2 {
+    let lowerType = row.messageType.lowercased()
+    if lowerType == "mp3" { return "MP3" }
+    if lowerType == "music" { return "Music" }
+    if row.fileName?.lowercased().hasSuffix(".mp3") ?? false { return "MP3" }
+    return "Audio"
+  }
+  return displayTitle
 }
 
 private func resolvedAudioVoiceStaticDetail(_ row: ChatListRow) -> String {
   var components: [String] = []
-  let timestamp = row.timestamp.trimmingCharacters(in: .whitespacesAndNewlines)
-  if !timestamp.isEmpty {
-    components.append(timestamp)
-  }
   if let duration = row.duration, duration.isFinite, duration > 0 {
     components.append(formatBubbleDuration(seconds: duration))
   }
-  return components.isEmpty ? "Audio" : components.joined(separator: " • ")
+  if components.isEmpty {
+    let lowerType = row.messageType.lowercased()
+    if lowerType == "mp3" { return "MP3" }
+    if lowerType == "music" { return "Music" }
+    return "Audio"
+  }
+  return components.joined(separator: " • ")
 }
 
 private func trimmedBubbleText(_ row: ChatListRow) -> String {
@@ -2235,6 +2241,20 @@ final class ChatAudioQueueRegistry {
     items(for: chatId).map(\.track)
   }
 
+  func tracks(for chatId: String?, fallbackTrackId: String?) -> [NativeMusicPlayerTrack] {
+    if let fallbackTrackId,
+      let resolvedChatId = resolvedChatId(for: fallbackTrackId, preferredChatId: chatId)
+    {
+      return items(for: resolvedChatId).map(\.track)
+    }
+    return tracks(for: chatId)
+  }
+
+  func artwork(for trackId: String, in chatId: String?) -> UIImage? {
+    item(trackId: trackId, in: chatId)?.artwork
+      ?? resolvedItem(trackId: trackId, preferredChatId: chatId)?.artwork
+  }
+
   fileprivate func items(for chatId: String?) -> [ChatAudioQueueItem] {
     let trimmedChatId = chatId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     guard !trimmedChatId.isEmpty else { return [] }
@@ -2243,6 +2263,55 @@ final class ChatAudioQueueRegistry {
 
   fileprivate func item(trackId: String, in chatId: String?) -> ChatAudioQueueItem? {
     items(for: chatId).first { $0.track.trackId == trackId }
+  }
+
+  fileprivate func resolvedItem(trackId: String, preferredChatId: String?) -> ChatAudioQueueItem? {
+    if let item = item(trackId: trackId, in: preferredChatId) {
+      return item
+    }
+    guard let resolvedChatId = resolvedChatId(for: trackId, preferredChatId: preferredChatId) else {
+      return nil
+    }
+    return item(trackId: trackId, in: resolvedChatId)
+  }
+
+  fileprivate func adjacentItem(trackId: String, in chatId: String?, step: Int) -> ChatAudioQueueItem? {
+    guard step != 0 else { return nil }
+    guard let resolvedChatId = resolvedChatId(for: trackId, preferredChatId: chatId) else {
+      return nil
+    }
+    let chatItems = items(for: resolvedChatId)
+    guard let currentIndex = chatItems.firstIndex(where: {
+      $0.messageId == trackId || $0.track.trackId == trackId
+    }) else {
+      return nil
+    }
+    let nextIndex = currentIndex + step
+    guard chatItems.indices.contains(nextIndex) else { return nil }
+    return chatItems[nextIndex]
+  }
+
+  fileprivate func resolvedChatId(for trackId: String, preferredChatId: String?) -> String? {
+    let trimmedTrackId = trackId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedTrackId.isEmpty else { return nil }
+
+    let trimmedPreferredChatId = preferredChatId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !trimmedPreferredChatId.isEmpty,
+      itemsByChatId[trimmedPreferredChatId]?.contains(where: {
+        $0.messageId == trimmedTrackId || $0.track.trackId == trimmedTrackId
+      }) == true
+    {
+      return trimmedPreferredChatId
+    }
+
+    for (chatId, chatItems) in itemsByChatId {
+      if chatItems.contains(where: {
+        $0.messageId == trimmedTrackId || $0.track.trackId == trimmedTrackId
+      }) {
+        return chatId
+      }
+    }
+    return nil
   }
 
   private func makeItem(from row: ChatListRow, fallbackChatId: String) -> ChatAudioQueueItem? {
@@ -2312,6 +2381,9 @@ struct VoiceBubblePlaybackSnapshot {
   let isPlaying: Bool
   let progress: CGFloat
   let duration: Double
+  let playbackRate: Double
+  let queueOrderMode: NativeMusicPlayerQueueOrderMode
+  let isRepeatEnabled: Bool
   let isDownloading: Bool
   let downloadProgress: CGFloat?
   let title: String?
@@ -2325,6 +2397,9 @@ struct VoiceBubblePlaybackSnapshot {
     isPlaying: false,
     progress: 0.0,
     duration: 0.0,
+    playbackRate: 1.0,
+    queueOrderMode: .forward,
+    isRepeatEnabled: false,
     isDownloading: false,
     downloadProgress: nil,
     title: nil,
@@ -2355,6 +2430,9 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   private var playbackProgress: CGFloat = 0.0
   private var level: CGFloat = 0.0
   private var isPlaying = false
+  private var playbackRate: Double = 1.0
+  private var queueOrderMode: NativeMusicPlayerQueueOrderMode = .forward
+  private var isRepeatEnabled = false
   private var activeDownloadTask: URLSessionDownloadTask?
   private var activeDownloadProgress: CGFloat?
   private var activeMediaKey: String?
@@ -2367,6 +2445,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   private var shouldResumeAfterInterruption = false
   private var didConfigureRemoteCommands = false
   private var lastNowPlayingSignature: String?
+  private var randomizedQueueMessageIds: [String] = []
   private(set) var currentSnapshot = VoiceBubblePlaybackSnapshot.empty
 
   private override init() {
@@ -2629,7 +2708,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       nowPlayingInfo.removeValue(forKey: MPMediaItemPropertyArtwork)
     }
     nowPlayingInfo[MPNowPlayingInfoPropertyElapsedPlaybackTime] = elapsed
-    nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? 1.0 : 0.0
+    nowPlayingInfo[MPNowPlayingInfoPropertyPlaybackRate] = isPlaying ? playbackRate : 0.0
     nowPlayingInfo[MPNowPlayingInfoPropertyMediaType] = MPNowPlayingInfoMediaType.audio.rawValue
 
     MPNowPlayingInfoCenter.default().nowPlayingInfo = nowPlayingInfo
@@ -2669,8 +2748,9 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     let accepted: Bool
     if let player {
       accepted = player.play()
+      player.rate = Float(playbackRate)
     } else if let streamingPlayer {
-      streamingPlayer.playImmediately(atRate: 1.0)
+      streamingPlayer.playImmediately(atRate: Float(playbackRate))
       accepted = true
     } else {
       return false
@@ -2926,45 +3006,20 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       }
     }
 
-    stopActivePlayback(resetProgress: true)
-    activeChatId = presentsGlobalPlayer ? normalizedChatAudioId(chatId) : nil
-    activeMediaURL = mediaURL
-    activeMediaKey = mediaKey
-    activeFileName = fileName
-    activeTitle = title
-    activeSubtitle = subtitle
-    activeArtwork = artwork
-    activeDuration = max(0.0, duration ?? 0.0)
-    self.presentsGlobalPlayer = presentsGlobalPlayer
-    activeCell = cell
-
-    guard let resolvedURL = resolveAudioURL(from: mediaURL) else {
-      NSLog(
-        "[ChatListView] voice resolveAudioURL failed messageId=%@ raw=%@",
-        messageId,
-        shortMediaURL(mediaURL)
-      )
-      return
-    }
-    NSLog(
-      "[ChatListView] voice resolved URL messageId=%@ isFile=%@ path=%@",
-      messageId,
-      resolvedURL.isFileURL.description,
-      resolvedURL.path
+    beginPlayback(
+      cell: cell,
+      messageId: messageId,
+      chatId: chatId,
+      mediaURL: mediaURL,
+      mediaKey: mediaKey,
+      fileName: fileName,
+      title: title,
+      subtitle: subtitle,
+      artwork: artwork,
+      duration: duration,
+      presentsGlobalPlayer: presentsGlobalPlayer,
+      suppressEmptySnapshotDuringTransition: false
     )
-
-    if !resolvedURL.isFileURL {
-      playRemoteURL(
-        resolvedURL,
-        messageId: messageId,
-        cell: cell,
-        mediaKey: mediaKey,
-        fileName: fileName
-      )
-      return
-    }
-
-    playLocalURL(resolvedURL, messageId: messageId, cell: cell)
   }
 
   func toggleCurrentPlayback() {
@@ -2987,12 +3042,12 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   }
 
   func playNextTrack() {
-    guard let nextItem = adjacentQueueItem(step: 1) else { return }
+    guard let nextItem = adjacentQueueItem(step: 1, wraps: isRepeatEnabled) else { return }
     startQueueItem(nextItem, cell: nil)
   }
 
   func playPreviousTrack() {
-    guard let previousItem = adjacentQueueItem(step: -1) else { return }
+    guard let previousItem = adjacentQueueItem(step: -1, wraps: isRepeatEnabled) else { return }
     startQueueItem(previousItem, cell: nil)
   }
 
@@ -3005,8 +3060,16 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       }
       return
     }
-    guard let item = ChatAudioQueueRegistry.shared.item(trackId: trimmedTrackId, in: activeChatId) else {
+    guard
+      let item = ChatAudioQueueRegistry.shared.resolvedItem(
+        trackId: trimmedTrackId,
+        preferredChatId: activeChatId
+      )
+    else {
       return
+    }
+    if queueOrderMode == .random {
+      syncRandomizedQueueMessageIds(anchorMessageId: item.messageId, regenerate: true)
     }
     startQueueItem(item, cell: nil)
   }
@@ -3039,11 +3102,114 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   func refreshCurrentSnapshotIfNeeded(forChatId chatId: String) {
     let trimmedChatId = chatId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmedChatId.isEmpty, activeChatId == trimmedChatId else { return }
+    syncRandomizedQueueMessageIds(anchorMessageId: activeMessageId, regenerate: false)
     publishSnapshot(forceNowPlaying: true)
   }
 
+  func currentPlaybackRate() -> Double {
+    playbackRate
+  }
+
+  func setPlaybackRate(_ value: Double) {
+    let nextRate = max(1.0, min(2.0, value))
+    playbackRate = nextRate
+    if let player {
+      player.enableRate = true
+      player.rate = Float(nextRate)
+    }
+    if let streamingPlayer, isPlaying {
+      streamingPlayer.playImmediately(atRate: Float(nextRate))
+    }
+    publishSnapshot(forceNowPlaying: true)
+  }
+
+  func cyclePlaybackRate() {
+    let rates: [Double] = [1.0, 1.5, 2.0]
+    let index = rates.firstIndex(where: { abs($0 - playbackRate) < 0.05 }) ?? 0
+    let nextRate = rates[(index + 1) % rates.count]
+    setPlaybackRate(nextRate)
+  }
+
+  func currentQueueOrderMode() -> NativeMusicPlayerQueueOrderMode {
+    queueOrderMode
+  }
+
+  func repeatEnabled() -> Bool {
+    isRepeatEnabled
+  }
+
+  func toggleQueueOrderMode() {
+    queueOrderMode = queueOrderMode.next()
+    syncRandomizedQueueMessageIds(
+      anchorMessageId: activeMessageId,
+      regenerate: queueOrderMode == .random
+    )
+    publishSnapshot(forceNowPlaying: true)
+  }
+
+  func toggleRepeatEnabled() {
+    isRepeatEnabled.toggle()
+    publishSnapshot(forceNowPlaying: true)
+  }
+
+  func displayQueueTracks() -> [NativeMusicPlayerTrack] {
+    orderedQueueItems().map(\.track)
+  }
+
+  private func orderedQueueItems() -> [ChatAudioQueueItem] {
+    let baseItems = resolvedQueueItems()
+    switch queueOrderMode {
+    case .forward:
+      return baseItems
+    case .reverse:
+      return Array(baseItems.reversed())
+    case .random:
+      syncRandomizedQueueMessageIds(anchorMessageId: activeMessageId, regenerate: false)
+      let itemsByMessageId = Dictionary(uniqueKeysWithValues: baseItems.map { ($0.messageId, $0) })
+      return randomizedQueueMessageIds.compactMap { itemsByMessageId[$0] }
+    }
+  }
+
+  private func resolvedQueueItems() -> [ChatAudioQueueItem] {
+    guard let activeMessageId else { return [] }
+    guard
+      let resolvedChatId = ChatAudioQueueRegistry.shared.resolvedChatId(
+        for: activeMessageId,
+        preferredChatId: activeChatId
+      )
+    else {
+      return []
+    }
+    activeChatId = resolvedChatId
+    return ChatAudioQueueRegistry.shared.items(for: resolvedChatId)
+  }
+
+  private func syncRandomizedQueueMessageIds(anchorMessageId: String?, regenerate: Bool) {
+    let baseIds = resolvedQueueItems().map(\.messageId)
+    let expected = Set(baseIds)
+    let current = Set(randomizedQueueMessageIds)
+    let needsRefresh =
+      regenerate
+      || randomizedQueueMessageIds.count != baseIds.count
+      || current != expected
+
+    guard needsRefresh else { return }
+
+    var shuffledIds = baseIds
+    if let anchorMessageId,
+      let anchorIndex = shuffledIds.firstIndex(of: anchorMessageId)
+    {
+      shuffledIds.remove(at: anchorIndex)
+      shuffledIds.shuffle()
+      shuffledIds.insert(anchorMessageId, at: 0)
+    } else {
+      shuffledIds.shuffle()
+    }
+    randomizedQueueMessageIds = shuffledIds
+  }
+
   private func startQueueItem(_ item: ChatAudioQueueItem, cell: VoicePlayableCell?) {
-    toggle(
+    beginPlayback(
       cell: cell,
       messageId: item.messageId,
       chatId: item.chatId,
@@ -3054,24 +3220,105 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       subtitle: item.subtitle,
       artwork: item.artwork,
       duration: item.duration,
-      presentsGlobalPlayer: true
+      presentsGlobalPlayer: true,
+      suppressEmptySnapshotDuringTransition: true,
+      preserveQueueOrder: true
     )
   }
 
-  private func adjacentQueueItem(step: Int) -> ChatAudioQueueItem? {
+  private func adjacentQueueItem(step: Int, wraps: Bool) -> ChatAudioQueueItem? {
     guard step != 0 else { return nil }
     guard let activeMessageId else { return nil }
-    let items = ChatAudioQueueRegistry.shared.items(for: activeChatId)
+    let items = orderedQueueItems()
+    guard !items.isEmpty else {
+      return nil
+    }
     guard let currentIndex = items.firstIndex(where: { $0.messageId == activeMessageId }) else {
       return nil
     }
     let nextIndex = currentIndex + step
-    guard items.indices.contains(nextIndex) else { return nil }
-    return items[nextIndex]
+    let nextItem: ChatAudioQueueItem?
+    if items.indices.contains(nextIndex) {
+      nextItem = items[nextIndex]
+    } else if wraps {
+      nextItem = step > 0 ? items.first : items.last
+    } else {
+      nextItem = nil
+    }
+    activeChatId = nextItem?.chatId
+    return nextItem
+  }
+
+  private func beginPlayback(
+    cell: VoicePlayableCell?,
+    messageId: String?,
+    chatId: String? = nil,
+    mediaURL: String?,
+    mediaKey: String? = nil,
+    fileName: String? = nil,
+    title: String? = nil,
+    subtitle: String? = nil,
+    artwork: UIImage? = nil,
+    duration: Double? = nil,
+    presentsGlobalPlayer: Bool = false,
+    suppressEmptySnapshotDuringTransition: Bool = false,
+    preserveQueueOrder: Bool = false
+  ) {
+    stopActivePlayback(
+      resetProgress: true,
+      suppressSnapshot: suppressEmptySnapshotDuringTransition
+    )
+    activeChatId = presentsGlobalPlayer ? normalizedChatAudioId(chatId) : nil
+    if presentsGlobalPlayer && queueOrderMode == .random && !preserveQueueOrder {
+      syncRandomizedQueueMessageIds(anchorMessageId: messageId, regenerate: true)
+    }
+    activeMediaURL = mediaURL
+    activeMediaKey = mediaKey
+    activeFileName = fileName
+    activeTitle = title
+    activeSubtitle = subtitle
+    activeArtwork = artwork
+    activeDuration = max(0.0, duration ?? 0.0)
+    self.presentsGlobalPlayer = presentsGlobalPlayer
+    activeCell = cell
+
+    guard let messageId, !messageId.isEmpty, let mediaURL, !mediaURL.isEmpty else {
+      publishSnapshot(forceNowPlaying: true)
+      return
+    }
+
+    guard let resolvedURL = resolveAudioURL(from: mediaURL) else {
+      NSLog(
+        "[ChatListView] voice resolveAudioURL failed messageId=%@ raw=%@",
+        messageId,
+        shortMediaURL(mediaURL)
+      )
+      publishSnapshot(forceNowPlaying: true)
+      return
+    }
+    NSLog(
+      "[ChatListView] voice resolved URL messageId=%@ isFile=%@ path=%@",
+      messageId,
+      resolvedURL.isFileURL.description,
+      resolvedURL.path
+    )
+
+    if !resolvedURL.isFileURL {
+      playRemoteURL(
+        resolvedURL,
+        messageId: messageId,
+        cell: cell,
+        mediaKey: mediaKey,
+        fileName: fileName
+      )
+      return
+    }
+
+    playLocalURL(resolvedURL, messageId: messageId, cell: cell)
   }
 
   private func advanceToNextQueuedTrackIfAvailable() -> Bool {
-    guard let nextItem = adjacentQueueItem(step: 1) else { return false }
+    guard let nextItem = adjacentQueueItem(step: 1, wraps: isRepeatEnabled) else { return false }
     startQueueItem(nextItem, cell: nil)
     return true
   }
@@ -3359,6 +3606,8 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       let nextPlayer = try AVAudioPlayer(contentsOf: url)
       nextPlayer.delegate = self
       nextPlayer.prepareToPlay()
+      nextPlayer.enableRate = true
+      nextPlayer.rate = Float(playbackRate)
       nextPlayer.isMeteringEnabled = true
       player = nextPlayer
       activeMessageId = messageId
@@ -3505,7 +3754,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     playLocalURL(localURL, messageId: messageId, cell: activeCell)
   }
 
-  private func stopActivePlayback(resetProgress: Bool) {
+  private func stopActivePlayback(resetProgress: Bool, suppressSnapshot: Bool = false) {
     let previousCell = activeCell
     let previousMessageId = activeMessageId
     let previousMediaURL = activeMediaURL
@@ -3544,7 +3793,9 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     activeDuration = 0.0
     presentsGlobalPlayer = false
     activeCell = nil
-    publishSnapshot(forceNowPlaying: true)
+    if !suppressSnapshot {
+      publishSnapshot(forceNowPlaying: true)
+    }
   }
 
   private func cleanupStreamingPlayer() {
@@ -3743,6 +3994,9 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
         isPlaying: isPlaying,
         progress: playbackProgress,
         duration: duration,
+        playbackRate: playbackRate,
+        queueOrderMode: queueOrderMode,
+        isRepeatEnabled: isRepeatEnabled,
         isDownloading: activeDownloadTask != nil,
         downloadProgress: activeDownloadProgress,
         title: activeTitle,

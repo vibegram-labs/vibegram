@@ -13,19 +13,14 @@ defmodule Phoenix.LiveView.JS do
   rich `push` API, for extending the default `phx-` binding pushes with
   options to customize targets, loading states, and additional payload values.
 
-  If you need to trigger these commands via JavaScript, see [JavaScript interoperability](js-interop.md#js-commands).
-
   ## Client Utility Commands
 
   The following utilities are included:
 
     * `add_class` - Add classes to elements, with optional transitions
     * `remove_class` - Remove classes from elements, with optional transitions
-    * `toggle_class` - Sets or removes classes from elements, with optional transitions
     * `set_attribute` - Set an attribute on elements
     * `remove_attribute` - Remove an attribute from elements
-    * `toggle_attribute` - Sets or removes element attribute based on attribute presence.
-    * `ignore_attributes` - Marks attributes as ignored, skipping them when patching the DOM.
     * `show` - Show elements, with optional transitions
     * `hide` - Hide elements, with optional transitions
     * `toggle` - Shows or hides elements based on visibility, with optional transitions
@@ -54,7 +49,7 @@ defmodule Phoenix.LiveView.JS do
             phx-key="escape"
           >
             <button class="phx-modal-close" phx-click={hide_modal()}>✖</button>
-            <p>{@text}</p>
+            <p><%= @text %></p>
           </div>
         </div>
         """
@@ -68,73 +63,33 @@ defmodule Phoenix.LiveView.JS do
   with the event, apply loading states to external elements, etc. For example,
   given this basic `phx-click` event:
 
-  ```heex
-  <button phx-click="inc">+</button>
-  ```
+      <button phx-click="inc">+</button>
 
   Imagine you need to target your current component, and apply a loading state
   to the parent container while the client awaits the server acknowledgement:
 
       alias Phoenix.LiveView.JS
 
-      ~H"""
       <button phx-click={JS.push("inc", loading: ".thermo", target: @myself)}>+</button>
-      """
 
   Push commands also compose with all other utilities. For example,
   to add a class when pushing:
 
-  ```heex
-  <button phx-click={
-    JS.push("inc", loading: ".thermo", target: @myself)
-    |> JS.add_class("warmer", to: ".thermo")
-  }>+</button>
-  ```
+      <button phx-click={
+        JS.push("inc", loading: ".thermo", target: @myself)
+        |> JS.add_class("warmer", to: ".thermo")
+      }>+</button>
 
   Any `phx-value-*` attributes will also be included in the payload, their
   values will be overwritten by values given directly to `push/1`. Any
   `phx-target` attribute will also be used, and overwritten.
 
-  ```heex
-  <button
-    phx-click={JS.push("inc", value: %{limit: 40})}
-    phx-value-room="bedroom"
-    phx-value-limit="this value will be 40"
-    phx-target={@myself}
-  >+</button>
-  ```
-
-  ## DOM Selectors
-
-  The client utility commands in this module all take an optional DOM selector
-  using the `:to` option.
-
-  This can be a string for a regular DOM selector such as:
-
-  ```elixir
-  JS.add_class("warmer", to: ".thermo")
-  JS.hide(to: "#modal")
-  JS.show(to: "body a:nth-child(2)")
-  ```
-
-  It is also possible to provide scopes to the DOM selector. The following scopes
-  are available:
-
-   * `{:inner, "selector"}` To target an element within the interacted element.
-   * `{:closest, "selector"}` To target the closest element from the interacted
-   element upwards.
-
-   For example, if building a dropdown component, the button could use the `:inner`
-   scope:
-
-   ```heex
-   <div phx-click={JS.show(to: {:inner, ".menu"})}>
-     <div>Open me</div>
-     <div class="menu hidden" phx-click-away={JS.hide()}>
-       I'm in the dropdown menu
-     </div>
-   </div>
-   ```
+      <button
+        phx-click={JS.push("inc", value: %{limit: 40})}
+        phx-value-room="bedroom"
+        phx-value-limit="this value will be 40"
+        phx-target={@myself}
+      >+</button>
 
   ## Custom JS events with `JS.dispatch/1` and `window.addEventListener`
 
@@ -148,24 +103,20 @@ defmodule Phoenix.LiveView.JS do
   a copy-to-clipboard functionality in your application. You can
   add a custom event for it:
 
-  ```javascript
-  window.addEventListener("my_app:clipcopy", (event) => {
-    if ("clipboard" in navigator) {
-      const text = event.target.textContent;
-      navigator.clipboard.writeText(text);
-    } else {
-      alert("Sorry, your browser does not support clipboard copy.");
-    }
-  });
-  ```
+      window.addEventListener("my_app:clipcopy", (event) => {
+        if ("clipboard" in navigator) {
+          const text = event.target.textContent;
+          navigator.clipboard.writeText(text);
+        } else {
+          alert("Sorry, your browser does not support clipboard copy.");
+        }
+      });
 
   Now you can have a button like this:
 
-  ```heex
-  <button phx-click={JS.dispatch("my_app:clipcopy", to: "#element-with-text-to-copy")}>
-    Copy content
-  </button>
-  ```
+      <button phx-click={JS.dispatch("my_app:clipcopy", to: "#element-with-text-to-copy")}>
+        Copy content
+      </button>
 
   The combination of `dispatch/1` with `window.addEventListener` is
   a powerful mechanism to increase the amount of actions you can trigger
@@ -173,46 +124,12 @@ defmodule Phoenix.LiveView.JS do
 
   You can also use `window.addEventListener` to listen to events pushed
   from the server. You can learn more in our [JS interoperability guide](js-interop.md).
-
-  ## Composing JS commands
-
-  All the functions in this module optionally accept an existing `%JS{}` struct as the first argument,
-  allowing you to chain multiple commands, like pushing an event to the server and optimistically hiding
-  a modal:
-
-  ```heex
-  <div id="modal" class="modal">
-    My Modal
-  </div>
-
-  <button phx-click={JS.push("modal-closed") |> JS.remove_class("show", to: "#modal", transition: "fade-out")}>
-    hide modal
-  </button>
-  ```
-
-  Note that the commands themselves are executed on the client in the order they are composed
-  and the client does not wait for a confirmation before executing the next command. If you chain
-  `JS.push(...) |> JS.hide(...)`, since hide is a fully client-side command, it hides immediately
-  after pushing the event, not waiting for the server to respond.
-
-  JS commands interacting with the server are documented as such. If you chain multiple commands that
-  interact with the server, those are also guaranteed to be executed in the order they are composed,
-  since a LiveView can only handle one event at a time. Therefore, if you do something like
-
-  ```elixir
-  JS.push("my-event") |> JS.patch("/my-path?foo=bar")
-  ```
-
-  it is guaranteed that the event will be pushed first and the patch will only be handled after
-  the first event was handled by the LiveView.
-
   '''
   alias Phoenix.LiveView.JS
 
   defstruct ops: []
 
-  @opaque internal :: []
-  @type t :: %__MODULE__{ops: internal}
+  @opaque t :: %__MODULE__{}
 
   @default_transition_time 200
 
@@ -229,27 +146,20 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:target` - A selector or component ID to push to. This value will
+    * `:target` - The selector or component ID to push to. This value will
       overwrite any `phx-target` attribute present on the element.
-    * `:loading` - A selector to apply the phx loading classes to,
-      such as `phx-click-loading` in case the event was triggered by
-      `phx-click`. The element will be locked from server updates
-      until the push is acknowledged by the server.
+    * `:loading` - The selector to apply the phx loading classes to.
     * `:page_loading` - Boolean to trigger the phx:page-loading-start and
       phx:page-loading-stop events for this push. Defaults to `false`.
-    * `:value` - A map of values to send to the server. These values will be
+    * `:value` - The map of values to send to the server. These values will be
       merged over any `phx-value-*` attributes that are present on the element.
-      All keys will be treated as strings when merging. When used on a form event
-      like `phx-change` or `phx-submit`, the precedence is
-      `JS.push value > phx-value-* > input value`.
+      All keys will be treated as strings when merging.
 
   ## Examples
 
-  ```heex
-  <button phx-click={JS.push("clicked")}>click me!</button>
-  <button phx-click={JS.push("clicked", value: %{id: @id})}>click me!</button>
-  <button phx-click={JS.push("clicked", page_loading: true)}>click me!</button>
-  ```
+      <button phx-click={JS.push("clicked")}>click me!</button>
+      <button phx-click={JS.push("clicked", value: %{id: @id})}>click me!</button>
+      <button phx-click={JS.push("clicked", page_loading: true)}>click me!</button>
   """
   def push(event) when is_binary(event) do
     push(%JS{}, event, [])
@@ -272,7 +182,7 @@ defmodule Phoenix.LiveView.JS do
       |> put_target()
       |> put_value()
 
-    put_op(js, "push", Keyword.put(opts, :event, event))
+    put_op(js, "push", Enum.into(opts, %{event: event}))
   end
 
   @doc """
@@ -292,26 +202,18 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to dispatch the event to.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:detail` - An optional detail map to dispatch along
+    * `:to` - The optional DOM selector to dispatch the event to.
+      Defaults to the interacted element.
+    * `:detail` - The optional detail map to dispatch along
       with the client event. The details will be available in the
       `event.detail` attribute for event listeners.
-    * `:bubbles` – A boolean flag to bubble the event or not. Defaults to `true`.
-    * `:blocking` - A boolean flag to block the UI until the event handler calls `event.detail.done()`.
-      The done function is injected by LiveView and *must* be called eventually to unblock the UI.
-      This is useful to integrate with third party JavaScript based animation libraries.
+    * `:bubbles` – The boolean flag to bubble the event or not. Default `true`.
 
   ## Examples
 
-  ```javascript
-  window.addEventListener("click", e => console.log("clicked!", e.detail))
-  ```
+      window.addEventListener("click", e => console.log("clicked!", e.detail))
 
-  ```heex
-  <button phx-click={JS.dispatch("click", to: ".nav")}>Click me!</button>
-  ```
+      <button phx-click={JS.dispatch("click", to: ".nav")}>Click me!</button>
   """
   def dispatch(js \\ %JS{}, event)
   def dispatch(%JS{} = js, event), do: dispatch(js, event, [])
@@ -319,13 +221,13 @@ defmodule Phoenix.LiveView.JS do
 
   @doc "See `dispatch/2`."
   def dispatch(%JS{} = js, event, opts) do
-    opts = validate_keys(opts, :dispatch, [:to, :detail, :bubbles, :blocking])
-    args = [event: event, to: opts[:to]]
+    opts = validate_keys(opts, :dispatch, [:to, :detail, :bubbles])
+    args = %{event: event, to: opts[:to]}
 
     args =
       case Keyword.fetch(opts, :bubbles) do
         {:ok, val} when is_boolean(val) ->
-          Keyword.put(args, :bubbles, val)
+          Map.put(args, :bubbles, val)
 
         {:ok, other} ->
           raise ArgumentError, "expected :bubbles to be a boolean, got: #{inspect(other)}"
@@ -333,21 +235,6 @@ defmodule Phoenix.LiveView.JS do
         :error ->
           args
       end
-
-    if opts[:blocking] do
-      case opts[:detail] do
-        map when is_map(map) and (is_map_key(map, "done") or is_map_key(map, :done)) ->
-          raise ArgumentError, """
-          the detail map passed to JS.dispatch must not contain a `done` key
-          when `blocking: true` is used!
-
-          Got: #{inspect(map)}
-          """
-
-        _ ->
-          :ok
-      end
-    end
 
     args =
       case {event, Keyword.fetch(opts, :detail)} do
@@ -366,24 +253,10 @@ defmodule Phoenix.LiveView.JS do
               })
           """
 
-        {_, {:ok, detail}} when is_map(detail) ->
-          Keyword.put(args, :detail, detail)
-
         {_, {:ok, detail}} ->
-          raise ArgumentError, """
-          the detail option to JS.dispatch must be a map, got: #{inspect(detail)}
-          """
+          Map.put(args, :detail, detail)
 
         {_, :error} ->
-          args
-      end
-
-    args =
-      case Keyword.get(opts, :blocking) do
-        true ->
-          Keyword.put(args, :blocking, opts[:blocking])
-
-        _ ->
           args
       end
 
@@ -395,39 +268,34 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to toggle.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:in` - A string of classes to apply when toggling in, or
+    * `:to` - The optional DOM selector to toggle.
+      Defaults to the interacted element.
+    * `:in` - The string of classes to apply when toggling in, or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-0", "opacity-100"}`
-    * `:out` - A string of classes to apply when toggling out, or
+    * `:out` - The string of classes to apply when toggling out, or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-100", "opacity-0"}`
-    * `:time` - The time in milliseconds to apply the transition `:in` and `:out` classes.
-      Defaults to #{@default_transition_time}.
-    * `:display` - An optional display value to set when toggling in. Defaults
-      to `"block"`.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
+    * `:time` - The time to apply the transition `:in` and `:out` classes.
+      Defaults #{@default_transition_time}
+    * `:display` - The optional display value to set when toggling in. Defaults `"block"`.
 
   When the toggle is complete on the client, a `phx:show-start` or `phx:hide-start`, and
   `phx:show-end` or `phx:hide-end` event will be dispatched to the toggled elements.
 
   ## Examples
 
-  ```heex
-  <div id="item">My Item</div>
+      <div id="item">My Item</div>
 
-  <button phx-click={JS.toggle(to: "#item")}>
-    toggle item!
-  </button>
+      <button phx-click={JS.toggle(to: "#item")}>
+        toggle item!
+      </button>
 
-  <button phx-click={JS.toggle(to: "#item", in: "fade-in-scale", out: "fade-out-scale")}>
-    toggle fancy!
-  </button>
-  ```
+      <button phx-click={JS.toggle(to: "#item", in: "fade-in-scale", out: "fade-out-scale")}>
+        toggle fancy!
+      </button>
   """
   def toggle(opts \\ [])
   def toggle(%JS{} = js), do: toggle(js, [])
@@ -435,39 +303,34 @@ defmodule Phoenix.LiveView.JS do
 
   @doc "See `toggle/1`."
   def toggle(js, opts) when is_list(opts) do
-    opts = validate_keys(opts, :toggle, [:to, :in, :out, :display, :time, :blocking])
+    opts = validate_keys(opts, :toggle, [:to, :in, :out, :display, :time])
     in_classes = transition_class_names(opts[:in])
     out_classes = transition_class_names(opts[:out])
-    time = opts[:time]
+    time = opts[:time] || @default_transition_time
 
-    put_op(js, "toggle",
+    put_op(js, "toggle", %{
       to: opts[:to],
       display: opts[:display],
       ins: in_classes,
       outs: out_classes,
-      time: time,
-      blocking: opts[:blocking]
-    )
+      time: time
+    })
   end
 
   @doc """
   Shows elements.
 
-  *Note*: Only targets elements that are hidden, meaning they have a height and/or width equal to zero.
-
   ## Options
 
-    * `:to` - An optional DOM selector to show.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:transition` - A string of classes to apply before showing or
+    * `:to` - The optional DOM selector to show.
+      Defaults to the interacted element.
+    * `:transition` - The string of classes to apply before showing or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-0", "opacity-100"}`
-    * `:time` - The time in milliseconds to apply the transition from `:transition`.
-      Defaults to #{@default_transition_time}.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
-    * `:display` - An optional display value to set when showing. Defaults to `"block"`.
+    * `:time` - The time to apply the transition from `:transition`.
+      Defaults #{@default_transition_time}
+    * `:display` - The optional display value to set when showing. Defaults `"block"`.
 
   During the process, the following events will be dispatched to the shown elements:
 
@@ -476,17 +339,15 @@ defmodule Phoenix.LiveView.JS do
 
   ## Examples
 
-  ```heex
-  <div id="item">My Item</div>
+      <div id="item">My Item</div>
 
-  <button phx-click={JS.show(to: "#item")}>
-    show!
-  </button>
+      <button phx-click={JS.show(to: "#item")}>
+        show!
+      </button>
 
-  <button phx-click={JS.show(to: "#item", transition: "fade-in-scale")}>
-    show fancy!
-  </button>
-  ```
+      <button phx-click={JS.show(to: "#item", transition: "fade-in-scale")}>
+        show fancy!
+      </button>
   """
   def show(opts \\ [])
   def show(%JS{} = js), do: show(js, [])
@@ -494,36 +355,31 @@ defmodule Phoenix.LiveView.JS do
 
   @doc "See `show/1`."
   def show(js, opts) when is_list(opts) do
-    opts = validate_keys(opts, :show, [:to, :transition, :display, :time, :blocking])
+    opts = validate_keys(opts, :show, [:to, :transition, :display, :time])
     transition = transition_class_names(opts[:transition])
-    time = opts[:time]
+    time = opts[:time] || @default_transition_time
 
-    put_op(js, "show",
+    put_op(js, "show", %{
       to: opts[:to],
       display: opts[:display],
       transition: transition,
-      time: time,
-      blocking: opts[:blocking]
-    )
+      time: time
+    })
   end
 
   @doc """
   Hides elements.
 
-  *Note*: Only targets elements that are visible, meaning they have a height and/or width greater than zero.
-
   ## Options
 
-    * `:to` - An optional DOM selector to hide.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:transition` - A string of classes to apply before hiding or
+    * `:to` - The optional DOM selector to hide.
+      Defaults to the interacted element.
+    * `:transition` - The string of classes to apply before hiding or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-100", "opacity-0"}`
-    * `:time` - The time in milliseconds to apply the transition from `:transition`.
-      Defaults to #{@default_transition_time}.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
+    * `:time` - The time to apply the transition from `:transition`.
+      Defaults #{@default_transition_time}
 
   During the process, the following events will be dispatched to the hidden elements:
 
@@ -532,17 +388,15 @@ defmodule Phoenix.LiveView.JS do
 
   ## Examples
 
-  ```heex
-  <div id="item">My Item</div>
+      <div id="item">My Item</div>
 
-  <button phx-click={JS.hide(to: "#item")}>
-    hide!
-  </button>
+      <button phx-click={JS.hide(to: "#item")}>
+        hide!
+      </button>
 
-  <button phx-click={JS.hide(to: "#item", transition: "fade-out-scale")}>
-    hide fancy!
-  </button>
-  ```
+      <button phx-click={JS.hide(to: "#item", transition: "fade-out-scale")}>
+        hide fancy!
+      </button>
   """
   def hide(opts \\ [])
   def hide(%JS{} = js), do: hide(js, [])
@@ -550,44 +404,39 @@ defmodule Phoenix.LiveView.JS do
 
   @doc "See `hide/1`."
   def hide(js, opts) when is_list(opts) do
-    opts = validate_keys(opts, :hide, [:to, :transition, :time, :blocking])
+    opts = validate_keys(opts, :hide, [:to, :transition, :time])
     transition = transition_class_names(opts[:transition])
-    time = opts[:time]
+    time = opts[:time] || @default_transition_time
 
-    put_op(js, "hide",
+    put_op(js, "hide", %{
       to: opts[:to],
       transition: transition,
-      time: time,
-      blocking: opts[:blocking]
-    )
+      time: time
+    })
   end
 
   @doc """
   Adds classes to elements.
 
-    * `names` - A string with one or more class names to add.
+    * `names` - The string of classes to add.
 
   ## Options
 
-    * `:to` - An optional DOM selector to add classes to.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:transition` - A string of classes to apply before adding classes or
+    * `:to` - The optional DOM selector to add classes to.
+      Defaults to the interacted element.
+    * `:transition` - The string of classes to apply before adding classes or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-0", "opacity-100"}`
-    * `:time` - The time in milliseconds to apply the transition from `:transition`.
-      Defaults to #{@default_transition_time}.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
+    * `:time` - The time to apply the transition from `:transition`.
+      Defaults #{@default_transition_time}
 
   ## Examples
 
-  ```heex
-  <div id="item">My Item</div>
-  <button phx-click={JS.add_class("highlight underline", to: "#item")}>
-    highlight!
-  </button>
-  ```
+      <div id="item">My Item</div>
+      <button phx-click={JS.add_class("highlight underline", to: "#item")}>
+        highlight!
+      </button>
   """
   def add_class(names) when is_binary(names), do: add_class(%JS{}, names, [])
 
@@ -602,94 +451,39 @@ defmodule Phoenix.LiveView.JS do
 
   @doc "See `add_class/1`."
   def add_class(%JS{} = js, names, opts) when is_binary(names) and is_list(opts) do
-    opts = validate_keys(opts, :add_class, [:to, :transition, :time, :blocking])
-    time = opts[:time]
+    opts = validate_keys(opts, :add_class, [:to, :transition, :time])
+    time = opts[:time] || @default_transition_time
 
-    put_op(js, "add_class",
+    put_op(js, "add_class", %{
       to: opts[:to],
       names: class_names(names),
       transition: transition_class_names(opts[:transition]),
-      time: time,
-      blocking: opts[:blocking]
-    )
-  end
-
-  @doc """
-  Adds or removes element classes based on presence.
-
-    * `names` - A string with one or more class names to toggle.
-
-  ## Options
-
-    * `:to` - An optional DOM selector to target.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:transition` - A string of classes to apply before adding classes or
-      a 3-tuple containing the transition class, the class to apply
-      to start the transition, and the ending transition class, such as:
-      `{"ease-out duration-300", "opacity-0", "opacity-100"}`
-    * `:time` - The time in milliseconds to apply the transition from `:transition`.
-      Defaults to #{@default_transition_time}.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
-
-  ## Examples
-
-  ```heex
-  <div id="item">My Item</div>
-  <button phx-click={JS.toggle_class("active", to: "#item")}>
-    toggle active!
-  </button>
-  ```
-  """
-  def toggle_class(names) when is_binary(names), do: toggle_class(%JS{}, names, [])
-
-  def toggle_class(%JS{} = js, names) when is_binary(names) do
-    toggle_class(js, names, [])
-  end
-
-  def toggle_class(names, opts) when is_binary(names) and is_list(opts) do
-    toggle_class(%JS{}, names, opts)
-  end
-
-  def toggle_class(%JS{} = js, names, opts) when is_binary(names) and is_list(opts) do
-    opts = validate_keys(opts, :toggle_class, [:to, :transition, :time, :blocking])
-    time = opts[:time]
-
-    put_op(js, "toggle_class",
-      to: opts[:to],
-      names: class_names(names),
-      transition: transition_class_names(opts[:transition]),
-      time: time,
-      blocking: opts[:blocking]
-    )
+      time: time
+    })
   end
 
   @doc """
   Removes classes from elements.
 
-    * `names` - A string with one or more class names to remove.
+    * `names` - The string of classes to remove.
 
   ## Options
 
-    * `:to` - An optional DOM selector to remove classes from.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:transition` - A string of classes to apply before removing classes or
+    * `:to` - The optional DOM selector to remove classes from.
+      Defaults to the interacted element.
+    * `:transition` - The string of classes to apply before removing classes or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-0", "opacity-100"}`
-    * `:time` - The time in milliseconds to apply the transition from `:transition`.
-      Defaults to #{@default_transition_time}.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
+    * `:time` - The time to apply the transition from `:transition`.
+      Defaults #{@default_transition_time}
 
   ## Examples
 
-  ```heex
-  <div id="item">My Item</div>
-  <button phx-click={JS.remove_class("highlight underline", to: "#item")}>
-    remove highlight!
-  </button>
-  ```
+      <div id="item">My Item</div>
+      <button phx-click={JS.remove_class("highlight underline", to: "#item")}>
+        remove highlight!
+      </button>
   """
   def remove_class(names) when is_binary(names), do: remove_class(%JS{}, names, [])
 
@@ -704,48 +498,39 @@ defmodule Phoenix.LiveView.JS do
 
   @doc "See `remove_class/1`."
   def remove_class(%JS{} = js, names, opts) when is_binary(names) and is_list(opts) do
-    opts = validate_keys(opts, :remove_class, [:to, :transition, :time, :blocking])
-    time = opts[:time]
+    opts = validate_keys(opts, :remove_class, [:to, :transition, :time])
+    time = opts[:time] || @default_transition_time
 
-    put_op(js, "remove_class",
+    put_op(js, "remove_class", %{
       to: opts[:to],
       names: class_names(names),
       transition: transition_class_names(opts[:transition]),
-      time: time,
-      blocking: opts[:blocking]
-    )
+      time: time
+    })
   end
 
   @doc """
   Transitions elements.
 
-    * `transition` - A string of classes to apply during the transition or
+    * `transition` - The string of classes to apply before removing classes or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
       `{"ease-out duration-300", "opacity-0", "opacity-100"}`
 
   Transitions are useful for temporarily adding an animation class
-  to elements, such as for highlighting content changes.
+  to element(s), such as for highlighting content changes.
 
   ## Options
 
-    * `:to` - An optional DOM selector to apply transitions to.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-    * `:time` - The time in milliseconds to apply the transition from `:transition`.
-      Defaults to #{@default_transition_time}.
-    * `:blocking` - A boolean flag to block the UI during the transition. Defaults `true`.
+    * `:to` - The optional DOM selector to apply transitions to.
+      Defaults to the interacted element.
+    * `:time` - The time to apply the transition from `:transition`.
+      Defaults #{@default_transition_time}
 
   ## Examples
 
-  ```heex
-  <div id="item">My Item</div>
-  <button phx-click={JS.transition("shake", to: "#item")}>Shake!</button>
-
-  <div phx-mounted={JS.transition({"ease-out duration-300", "opacity-0", "opacity-100"}, time: 300)}>
-      duration-300 milliseconds matches time: 300 milliseconds
-  </div>
-  ```
+      <div id="item">My Item</div>
+      <button phx-click={JS.transition("shake", to: "#item")}>Shake!</button>
   """
   def transition(transition) when is_binary(transition) or is_tuple(transition) do
     transition(%JS{}, transition, [])
@@ -764,15 +549,14 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `transition/1`."
   def transition(%JS{} = js, transition, opts)
       when (is_binary(transition) or is_tuple(transition)) and is_list(opts) do
-    opts = validate_keys(opts, :transition, [:to, :time, :blocking])
-    time = opts[:time]
+    opts = validate_keys(opts, :transition, [:to, :time])
+    time = opts[:time] || @default_transition_time
 
-    put_op(js, "transition",
+    put_op(js, "transition", %{
       time: time,
       to: opts[:to],
-      transition: transition_class_names(transition),
-      blocking: opts[:blocking]
-    )
+      transition: transition_class_names(transition)
+    })
   end
 
   @doc """
@@ -782,45 +566,14 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to add attributes to.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
+    * `:to` - The optional DOM selector to add attributes to.
+      Defaults to the interacted element.
 
   ## Examples
 
-  ```heex
-  <button phx-click={JS.set_attribute({"aria-expanded", "true"}, to: "#dropdown")}>
-    show
-  </button>
-  ```
-
-  > #### A note on properties {: .warning}
-  >
-  > `JS.set_attribute/1` cannot be used to set DOM properties such as the [`value` of an input](https://jakearchibald.com/2024/attributes-vs-properties/#value-on-input-fields).
-  > So if you find yourself wanting to do `JS.set_attribute({"value", "..."})` on an input, and
-  > see that updated value reflected in a form event, you should use `JS.dispatch/2`
-  > instead:
-  >
-  > Instead of
-  >
-  > ```heex
-  > <.button phx-click={JS.set_attribute({"value", ""}, to: "#my_input")}>...</.button>
-  > ```
-  >
-  > do
-  >
-  > ```heex
-  > <script :type={Phoenix.LiveView.ColocatedJS} name="clear_input">
-  >   window.addEventListener("input:clear", (e) => {
-  >     e.target.value = ""
-  >     e.target.dispatchEvent(new Event("input", {bubbles: true}))
-  >   })
-  > </script>
-  > <.button phx-click={JS.dispatch("input:clear", to: "#my_input")}>...</.button>
-  > ```
-  >
-  > Note: this uses `Phoenix.LiveView.ColocatedJS`, but you can also define the event listener directly inside
-  > your `app.js` instead.
+      <button phx-click={JS.set_attribute({"aria-expanded", "true"}, to: "#dropdown")}>
+        show
+      </button>
   """
   def set_attribute({attr, val}), do: set_attribute(%JS{}, {attr, val}, [])
 
@@ -833,7 +586,7 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `set_attribute/1`."
   def set_attribute(%JS{} = js, {attr, val}, opts) when is_list(opts) do
     opts = validate_keys(opts, :set_attribute, [:to])
-    put_op(js, "set_attr", to: opts[:to], attr: [attr, val])
+    put_op(js, "set_attr", %{to: opts[:to], attr: [attr, val]})
   end
 
   @doc """
@@ -843,17 +596,14 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to remove attributes from.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
+    * `:to` - The optional DOM selector to remove attributes from.
+      Defaults to the interacted element.
 
   ## Examples
 
-  ```heex
-  <button phx-click={JS.remove_attribute("aria-expanded", to: "#dropdown")}>
-    hide
-  </button>
-  ```
+      <button phx-click={JS.remove_attribute("aria-expanded", to: "#dropdown")}>
+        hide
+      </button>
   """
   def remove_attribute(attr), do: remove_attribute(%JS{}, attr, [])
 
@@ -866,117 +616,7 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `remove_attribute/1`."
   def remove_attribute(%JS{} = js, attr, opts) when is_list(opts) do
     opts = validate_keys(opts, :remove_attribute, [:to])
-    put_op(js, "remove_attr", to: opts[:to], attr: attr)
-  end
-
-  @doc """
-  Sets or removes element attribute based on attribute presence.
-
-  Accepts a two or three-element tuple:
-
-  * `{attr, val}` - Sets the attribute to the given value or removes it
-  * `{attr, val1, val2}` - Toggles the attribute between `val1` and `val2`
-
-  ## Options
-
-    * `:to` - An optional DOM selector to set or remove attributes from.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-
-  ## Examples
-
-  ```heex
-  <button phx-click={JS.toggle_attribute({"aria-expanded", "true", "false"}, to: "#dropdown")}>
-    toggle
-  </button>
-
-  <button phx-click={JS.toggle_attribute({"open", "true"}, to: "#dialog")}>
-    toggle
-  </button>
-  ```
-
-  """
-  def toggle_attribute({attr, val}), do: toggle_attribute(%JS{}, {attr, val}, [])
-  def toggle_attribute({attr, val1, val2}), do: toggle_attribute(%JS{}, {attr, val1, val2}, [])
-
-  @doc "See `toggle_attribute/1`."
-  def toggle_attribute({attr, val}, opts) when is_list(opts),
-    do: toggle_attribute(%JS{}, {attr, val}, opts)
-
-  def toggle_attribute({attr, val1, val2}, opts) when is_list(opts),
-    do: toggle_attribute(%JS{}, {attr, val1, val2}, opts)
-
-  def toggle_attribute(%JS{} = js, {attr, val}), do: toggle_attribute(js, {attr, val}, [])
-
-  def toggle_attribute(%JS{} = js, {attr, val1, val2}),
-    do: toggle_attribute(js, {attr, val1, val2}, [])
-
-  @doc "See `toggle_attribute/1`."
-  def toggle_attribute(%JS{} = js, {attr, val}, opts) when is_list(opts) do
-    opts = validate_keys(opts, :toggle_attribute, [:to])
-    put_op(js, "toggle_attr", to: opts[:to], attr: [attr, val])
-  end
-
-  def toggle_attribute(%JS{} = js, {attr, val1, val2}, opts) when is_list(opts) do
-    opts = validate_keys(opts, :toggle_attribute, [:to])
-    put_op(js, "toggle_attr", to: opts[:to], attr: [attr, val1, val2])
-  end
-
-  @doc """
-  Mark attributes as ignored, skipping them when patching the DOM.
-
-  Accepts a single attribute name or a list of attribute names.
-  An asterisk `*` can be used as a wildcard.
-
-  Once set, the given attributes will not be patched across LiveView updates.
-  This includes attributes that are removed by the server.
-
-  If you need to "unmark" an attribute, you need to call `ignore_attributes/1` again
-  with an updated list of attributes.
-
-  This is mostly useful in combination with the `phx-mounted` binding, for example:
-
-  ```heex
-  <dialog phx-mounted={JS.ignore_attributes("open")}>
-    ...
-  </dialog>
-  ```
-
-  > #### A note on the behavior of phx-mounted {: .info}
-  >
-  > The `phx-mounted` binding executes when the LiveView is mounted.
-  > This means that you cannot use `ignore_attributes/1` to retain attributes
-  > that are set on the client during the disconnected render.
-  > `JS.ignore_attributes/0` will only ever ignore future changes from the server.
-
-  ## Options
-
-    * `:to` - An optional DOM selector to select the target element.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
-
-  ## Examples
-
-      JS.ignore_attributes(["open", "data-*"], to: "#my-dialog")
-
-  """
-
-  def ignore_attributes(attrs) when is_list(attrs) or is_binary(attrs),
-    do: ignore_attributes(%JS{}, attrs, [])
-
-  def ignore_attributes(attrs, opts) when (is_list(attrs) or is_binary(attrs)) and is_list(opts),
-    do: ignore_attributes(%JS{}, attrs, opts)
-
-  def ignore_attributes(%JS{} = js, attrs, opts)
-      when (is_list(attrs) or is_binary(attrs)) and is_list(opts) do
-    attrs =
-      case attrs do
-        attr when is_binary(attr) -> [attr]
-        attrs when is_list(attrs) -> attrs
-      end
-
-    opts = validate_keys(opts, :ignore_attributes, [:attrs, :to])
-    put_op(js, "ignore_attrs", to: opts[:to], attrs: attrs)
+    put_op(js, "remove_attr", %{to: opts[:to], attr: attr})
   end
 
   @doc """
@@ -984,9 +624,8 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to send focus to.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
+    * `:to` - The optional DOM selector to send focus to.
+      Defaults to the current element.
 
   ## Examples
 
@@ -999,7 +638,7 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `focus/1`."
   def focus(%JS{} = js, opts) when is_list(opts) do
     opts = validate_keys(opts, :focus, [:to])
-    put_op(js, "focus", to: opts[:to])
+    put_op(js, "focus", %{to: opts[:to]})
   end
 
   @doc """
@@ -1007,9 +646,8 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to focus.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
+    * `:to` - The optional DOM selector to focus.
+      Defaults to the current element.
 
   ## Examples
 
@@ -1022,7 +660,7 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `focus_first/1`."
   def focus_first(%JS{} = js, opts) when is_list(opts) do
     opts = validate_keys(opts, :focus_first, [:to])
-    put_op(js, "focus_first", to: opts[:to])
+    put_op(js, "focus_first", %{to: opts[:to]})
   end
 
   @doc """
@@ -1030,9 +668,8 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:to` - An optional DOM selector to push focus to.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
+    * `:to` - The optional DOM selector to push focus to.
+      Defaults to the current element.
 
   ## Examples
 
@@ -1046,7 +683,7 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `push_focus/1`."
   def push_focus(%JS{} = js, opts) when is_list(opts) do
     opts = validate_keys(opts, :push_focus, [:to])
-    put_op(js, "push_focus", to: opts[:to])
+    put_op(js, "push_focus", %{to: opts[:to]})
   end
 
   @doc """
@@ -1057,7 +694,7 @@ defmodule Phoenix.LiveView.JS do
       JS.pop_focus()
   """
   def pop_focus(%JS{} = js \\ %JS{}) do
-    put_op(js, "pop_focus", [])
+    put_op(js, "pop_focus", %{})
   end
 
   @doc """
@@ -1065,7 +702,7 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:replace` - Whether to replace the browser's pushState history. Defaults to `false`.
+    * `:replace` - Whether to replace the browser's pushState history. Defaults false.
 
   ## Examples
 
@@ -1087,7 +724,7 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `navigate/1`."
   def navigate(%JS{} = js, href, opts) when is_binary(href) and is_list(opts) do
     opts = validate_keys(opts, :navigate, [:replace])
-    put_op(js, "navigate", href: href, replace: !!opts[:replace])
+    put_op(js, "navigate", %{href: href, replace: !!opts[:replace]})
   end
 
   @doc """
@@ -1095,7 +732,7 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:replace` - Whether to replace the browser's pushState history. Defaults to `false`.
+    * `:replace` - Whether to replace the browser's pushState history. Defaults false.
 
   ## Examples
 
@@ -1117,26 +754,23 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `patch/1`."
   def patch(%JS{} = js, href, opts) when is_binary(href) and is_list(opts) do
     opts = validate_keys(opts, :patch, [:replace])
-    put_op(js, "patch", href: href, replace: !!opts[:replace])
+    put_op(js, "patch", %{href: href, replace: !!opts[:replace]})
   end
 
   @doc """
-  Executes JS commands located in an element's attribute.
+  Executes JS commands located in element attributes.
 
     * `attr` - The string attribute where the JS command is specified
 
   ## Options
 
-    * `:to` - An optional DOM selector to fetch the attribute from.
-      Defaults to the interacted element. See the `DOM selectors`
-      section for details.
+    * `:to` - The optional DOM selector to fetch the attribute from.
+      Defaults to the current element.
 
   ## Examples
 
-  ```heex
-  <div id="modal" phx-remove={JS.hide("#modal")}>...</div>
-  <button phx-click={JS.exec("phx-remove", to: "#modal")}>close</button>
-  ```
+      <div id="modal" phx-remove={JS.hide("#modal")}>...</div>
+      <button phx-click={JS.exec("phx-remove", to: "#modal")}>close</button>
   """
   def exec(attr) when is_binary(attr) do
     exec(%JS{}, attr, [])
@@ -1154,29 +788,21 @@ defmodule Phoenix.LiveView.JS do
   @doc "See `exec/1`."
   def exec(%JS{} = js, attr, opts) when is_binary(attr) and is_list(opts) do
     opts = validate_keys(opts, :exec, [:to])
-    put_op(js, "exec", attr: attr, to: opts[:to])
+    ops = if to = opts[:to], do: [attr, to], else: [attr]
+    put_op(js, "exec", ops)
   end
-
-  @doc """
-  Combines two JS commands, appending the second to the first.
-  """
-  def concat(%JS{ops: first}, %JS{ops: second}), do: %JS{ops: first ++ second}
 
   defp put_op(%JS{ops: ops} = js, kind, args) do
-    args = drop_nil_values(args)
-    struct!(js, ops: ops ++ [[kind, args]])
+    %JS{js | ops: ops ++ [[kind, args]]}
   end
 
-  defp drop_nil_values(args) when is_list(args) do
-    Enum.reject(args, fn {_k, v} -> is_nil(v) end)
-    |> Map.new()
-  end
+  defp class_names(nil), do: []
 
   defp class_names(names) do
-    String.split(names, " ", trim: true)
+    String.split(names, " ")
   end
 
-  defp transition_class_names(nil), do: nil
+  defp transition_class_names(nil), do: [[], [], []]
 
   defp transition_class_names(transition) when is_binary(transition),
     do: [class_names(transition), [], []]
@@ -1187,32 +813,16 @@ defmodule Phoenix.LiveView.JS do
   end
 
   defp validate_keys(opts, kind, allowed_keys) do
-    Enum.map(opts, fn
-      {:to, {scope, _selector}} when scope not in [:closest, :inner, :document] ->
+    for key <- Keyword.keys(opts) do
+      if key not in allowed_keys do
         raise ArgumentError, """
-        invalid scope for :to option in #{kind}.
-        Valid scopes are :closest, :inner, :document. Got: #{inspect(scope)}
+        invalid option for #{kind}
+        Expected keys to be one of #{inspect(allowed_keys)}, got: #{inspect(key)}
         """
+      end
+    end
 
-      {:to, {:document, selector}} ->
-        {:to, selector}
-
-      {:to, {scope, selector}} ->
-        {:to, %{scope => selector}}
-
-      {:to, selector} when is_binary(selector) ->
-        {:to, selector}
-
-      {key, val} ->
-        if key not in allowed_keys do
-          raise ArgumentError, """
-          invalid option for #{kind}
-          Expected keys to be one of #{inspect(allowed_keys)}, got: #{inspect(key)}
-          """
-        end
-
-        {key, val}
-    end)
+    opts
   end
 
   defp put_value(opts) do
