@@ -490,7 +490,7 @@ final class NativeMusicPlayerEngine: NSObject {
       return nil
     }
     return URL(
-      string: "https://modest-recreation-production-8329.up.railway.app/api/music/stream/\(value)")
+      string: "https://api.vibegram.io/api/music/stream/\(value)")
   }
 
   private func resolveNetworkURL(from value: String?) -> URL? {

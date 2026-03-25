@@ -202,7 +202,7 @@ const downloadTrackFallback = async (
 
     setDownloading(0)
 
-    const backendBaseUrl = 'https://modest-recreation-production-8329.up.railway.app'
+    const backendBaseUrl = 'https://api.vibegram.io'
     const videoIdForBackend = track.video_id.length === 11 ? track.video_id : safeId
     const backendStreamUrl = `${backendBaseUrl}/api/music/stream/${videoIdForBackend}`
 

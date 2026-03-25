@@ -99,7 +99,7 @@ private final class ChatNativeHomePresentationDelegate: NSObject,
 }
 
 public class ChatNativeHomeModule: Module {
-  private static let fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+  private static let fallbackApiBaseURL = "https://api.vibegram.io"
   private var pendingNewChatPromise: Promise?
   private weak var pendingNewChatController: UIViewController?
   private let newChatPresentationDelegate = ChatNativeHomePresentationDelegate()

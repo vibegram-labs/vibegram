@@ -124,8 +124,8 @@ class ProxyManager {
             }
         }
 
-        // Always ensure primary server from ConnectionManager is first
-        let primaryUrl = this.sanitizeUrl(localStorage.getItem('custom_server_url') || 'https://modest-recreation-production-8329.up.railway.app');
+        // Always ensure the branded primary API server is first
+        let primaryUrl = this.sanitizeUrl(localStorage.getItem('custom_server_url') || 'https://api.vibegram.io');
 
         // Upgrade to https if not localhost
         if (primaryUrl.startsWith('http://') && !primaryUrl.includes('localhost') && !primaryUrl.includes('127.0.0.1')) {
@@ -136,7 +136,7 @@ class ProxyManager {
         if (!this.endpoints.some(e => e.url === primaryUrl)) {
             this.endpoints.unshift({
                 url: primaryUrl,
-                name: 'Primary Server (Railway)',
+                name: 'Primary Server (Vibegram API)',
                 type: 'direct',
                 priority: 0,
                 status: 'unknown'

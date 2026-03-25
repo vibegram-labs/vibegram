@@ -240,7 +240,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private var pendingSends: [ChatNativeAgentPendingSend] = []
   private var registeredSurfaceId: String = ""
 
-  private static let fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+  private static let fallbackApiBaseURL = "https://api.vibegram.io"
   private static let persistenceKey = "vibe.native.agent.screen.v1"
 
   required init(appContext: AppContext? = nil) {

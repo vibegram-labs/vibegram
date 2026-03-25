@@ -5,7 +5,7 @@ import android.net.Uri
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 internal const val fallbackNativeApiBaseUrl =
-  "https://modest-recreation-production-8329.up.railway.app"
+  "https://api.vibegram.io"
 
 internal fun resolveNativeApiBaseUrl(context: Context): String? {
   val config = ChatEngineStore.getConfig(context)

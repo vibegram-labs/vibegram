@@ -3,7 +3,7 @@ import UIKit
 
 enum ChatNativeAvatarURLResolver {
   private static let fallbackAPIBaseURL =
-    "https://modest-recreation-production-8329.up.railway.app"
+    "https://api.vibegram.io"
 
   static func resolve(
     rawAvatar: String?,

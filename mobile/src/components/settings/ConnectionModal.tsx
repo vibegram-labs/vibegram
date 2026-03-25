@@ -141,8 +141,12 @@ function buildLocations(relays: DirectoryRelay[], endpoints: ServerEndpoint[]): 
         });
     }
     for (const ep of endpoints) {
-        // Filter out default Railway server and empty custom server
-        if (ep.name === 'Main Server (Railway)' || ep.name === 'Custom Server') continue;
+        // Filter out the built-in default server and empty custom server entries
+        if (
+            ep.name === 'Main Server (Railway)' ||
+            ep.name === 'Main Server (Vibegram API)' ||
+            ep.name === 'Custom Server'
+        ) continue;
         if (ep.url.includes('railway.app')) continue;
 
         const info = getRegionInfo('unknown');

@@ -6,8 +6,8 @@
     ],
     "servers": [
         {
-            "url": "https://modest-recreation-production-8329.up.railway.app",
-            "name": "Railway Production",
+            "url": "https://api.vibegram.io",
+            "name": "Vibegram API",
             "type": "cloud",
             "priority": 100
         },
@@ -18,5 +18,5 @@
             "priority": 10
         }
     ],
-    "note": "Railway server deployed 2026-01-28"
+    "note": "Primary API domain"
 }

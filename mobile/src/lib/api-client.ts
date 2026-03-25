@@ -7,12 +7,12 @@ import {
 } from './transport/BlackoutState';
 
 // Connection priority order:
-// 1. Railway (direct) - fastest for users with unrestricted access
+// 1. Vibegram API (direct)
 // 2. ngrok tunnel - stable fallback for censored regions
 // 3. Local dev server - for development only
 const BASE_URLS = [
-    'https://modest-recreation-production-8329.up.railway.app/api',  // Railway (direct)
-    'https://vibe.ngrok.io/api',                                      // ngrok (tunnel to Railway)
+    'https://api.vibegram.io/api',                                    // Primary API (direct)
+    'https://vibe.ngrok.io/api',                                      // ngrok tunnel
     Platform.OS === 'android' ? 'http://10.0.2.2:4000/api' : 'http://localhost:4000/api', // Local dev
 ]
 

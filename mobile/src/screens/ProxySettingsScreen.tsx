@@ -50,7 +50,7 @@ export default function ProxySettingsScreen({ navigation }: any) {
             <View style={styles.inputContainer}>
                 <TextInput
                     style={styles.input}
-                    placeholder="https://your-app.up.railway.app"
+                    placeholder="https://api.vibegram.io"
                     placeholderTextColor="#666"
                     value={url}
                     autoCapitalize="none"

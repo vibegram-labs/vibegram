@@ -31,7 +31,7 @@ internal class ChatPhoenixClient(
     /// Generate with: openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64
     /// Set to empty to disable pinning (e.g. during development).
     var pinnedSPKIHashes: Map<String, List<String>> = mapOf(
-      // "modest-recreation-production-8329.up.railway.app" to listOf(
+      // "api.vibegram.io" to listOf(
       //   "u6dScLDuE2TrAks7ct4HDBekXo9byFES6oApqW/pAjQ=",
       //   "AlSQhgtJirc8ahLyekmtX+Iw+v46yPYRLJt9Cq1GlB0="
       // )

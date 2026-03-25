@@ -38,8 +38,8 @@ const BOOTSTRAP_SOURCES = [
     // API endpoint on any working server (self-discovery)
     // removed '/api/servers' as it causes 404s on static hosting
 
-    // Known working server API (Reliable Fallback)
-    'https://modest-recreation-production-8329.up.railway.app/api/servers',
+    // Known working server API (Primary branded fallback)
+    'https://api.vibegram.io/api/servers',
 
     // Official Vibe Source Gist
     'https://gist.githubusercontent.com/Vibe-source/37d1709f5dbacb24a669ac0c04f4929d/raw/servers.json'

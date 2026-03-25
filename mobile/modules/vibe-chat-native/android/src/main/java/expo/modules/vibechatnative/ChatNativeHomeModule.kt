@@ -88,7 +88,7 @@ private fun chatNativeHomeParseChats(body: String): List<Map<String, Any?>> {
 
 class ChatNativeHomeModule : Module() {
   companion object {
-    private const val fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+    private const val fallbackApiBaseURL = "https://api.vibegram.io"
     private val httpClient by lazy {
       OkHttpClient.Builder()
         .connectTimeout(20, TimeUnit.SECONDS)

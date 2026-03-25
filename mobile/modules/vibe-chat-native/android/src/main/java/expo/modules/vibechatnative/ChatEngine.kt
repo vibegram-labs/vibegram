@@ -338,7 +338,7 @@ internal object ChatEngine {
       .callTimeout(45L, TimeUnit.SECONDS)
       .build()
   }
-  private const val fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+  private const val fallbackApiBaseURL = "https://api.vibegram.io"
   private const val AGENT_USER_ID = "00000000-0000-0000-0000-000000000001"
 
   private fun currentOutboundUserIdLocked(): String? =

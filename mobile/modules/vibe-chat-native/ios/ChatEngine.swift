@@ -400,7 +400,7 @@ final class ChatEngine {
   private var cachedDecryptPrivateKeyPem: String?
   private var cachedDecryptPrivateKey: SecKey?
   private var cachedDecryptKeyTimestamp: Date?
-  private static let fallbackApiBaseURL = "https://modest-recreation-production-8329.up.railway.app"
+  private static let fallbackApiBaseURL = "https://api.vibegram.io"
   /// Time-to-live for the cached private key in memory (seconds).
   /// After this period of inactivity the key is cleared and re-derived from Keychain on next use.
   private let keyTTL: TimeInterval = 300

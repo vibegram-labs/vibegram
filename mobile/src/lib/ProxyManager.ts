@@ -72,10 +72,10 @@ class ProxyManager {
         }
 
         if (this.endpoints.length === 0) {
-            // Default Fallback to Railway
+            // Default fallback to the primary Vibegram API domain
             this.endpoints.push({
-                url: 'https://modest-recreation-production-8329.up.railway.app',
-                name: 'Main Server (Railway)',
+                url: 'https://api.vibegram.io',
+                name: 'Main Server (Vibegram API)',
                 type: 'direct',
                 protocol: 'https',
                 priority: 1,
@@ -175,7 +175,7 @@ class ProxyManager {
     }
 
     getBestUrl(): string {
-        return this.currentEndpoint?.url || this.endpoints[0]?.url || 'https://modest-recreation-production-8329.up.railway.app';
+        return this.currentEndpoint?.url || this.endpoints[0]?.url || 'https://api.vibegram.io';
     }
 
     // ─── Relay Integration ────────────────────────────────────────
