@@ -1,6 +1,7 @@
 2026-03-26
 
 Completed:
+- Tightened standalone builder chat-id behavior: added a `validate_destination_chat` tool that re-reads the current owner-visible destination state, compares a provided chat id against live attached/default chats, repairs stale default destinations when needed, and explains when the same DM chat id is still correct.
 - Fixed owner-facing agent destination chat exposure: attached/default chat ids shown by the builder now only come from chats shared by both the agent shadow user and the owning user, so the agent no longer hands out writable-but-invisible chat ids.
 - Added an agentic destination-chat flow for standalone agents: the builder can now create or reuse the real owner<->agent DM, return the actual `chat_id`, and optionally set it as the agent's default destination chat instead of forcing a manual lookup step.
 - Tightened DM resolution in `Vibe.Chat.find_chat_between_users/2` to only return `dm` rooms, then added `Vibe.Chat.ensure_dm_chat/2` so chat creation/reuse/restoration is consistent for builder and normal chat creation.
@@ -22,6 +23,7 @@ Completed:
 - Added detached top and bottom gradient masks to the config panel, matching the attachment sheet pattern so the sheet header/body transition no longer shows hard edges.
 
 Remaining:
+- Live-validate the repeated chat-id flow in the app: ask the standalone agent whether a previously returned chat id is still correct, confirm it re-checks live state instead of repeating memory, and confirm it explains when the same DM id is expected versus when it repaired a stale default.
 - Re-test the live flow with a freshly returned chat id from the agent after the owner-visible chat filter fix. The old chat id the user copied may still point at a chat the owner cannot access.
 - Live-validate the new `ensure_destination_chat` builder flow in the app: ask the standalone agent for the chat id, confirm it creates or reuses the DM, updates the inline config card, and copies the returned default/attached chat id from the native config panel.
 - Decide whether `get_integration_details` should stay read-only or automatically invoke `ensure_destination_chat` when the user clearly asks for the easiest setup path.

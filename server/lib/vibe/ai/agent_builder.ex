@@ -240,6 +240,30 @@ defmodule Vibe.AI.AgentBuilder do
           }
         }
       }
+    },
+    %{
+      name: "validate_destination_chat",
+      description:
+        "Look up the current owner-visible destination chat for the selected agent, compare it with a provided chat id, and repair stale or missing default destination settings when needed. Use this when the owner asks whether a chat id is correct, asks again for the current chat id, says the previous id may be wrong, or asks for the current destination after setup.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          identifier: %{
+            type: "string",
+            description: "Optional agent id or @username. Defaults to the selected draft."
+          },
+          chat_id: %{
+            type: "string",
+            description:
+              "Optional chat id to verify against the agent's current live destination state."
+          },
+          repair_default: %{
+            type: "boolean",
+            description:
+              "Optional. Defaults to true. When true, repair stale or missing default destination settings before returning the current chat id."
+          }
+        }
+      }
     }
   ]
 
@@ -758,6 +782,44 @@ defmodule Vibe.AI.AgentBuilder do
     end
   end
 
+  defp execute_builder_tool("validate_destination_chat", input, state) do
+    user_id = state.user_id
+    identifier = normalize_optional_string(Map.get(input, "identifier"))
+    provided_chat_id = normalize_optional_string(Map.get(input, "chat_id"))
+    repair_default = Map.get(input, "repair_default")
+
+    case resolve_owned_agent(user_id, identifier, state.active_agent_id) do
+      %{} = agent ->
+        with {:ok, updated_agent, validation} <-
+               validate_destination_chat(agent, user_id, provided_chat_id, repair_default) do
+          result = %{
+            "ok" => true,
+            "message" => validation.message,
+            "provided_chat_id" => provided_chat_id,
+            "provided_chat_status" => validation.provided_status,
+            "current_chat_id" => validation.current_chat_id,
+            "current_chat" => validation.current_chat,
+            "current_destination_kind" => validation.current_destination_kind,
+            "current_destination_status" => validation.current_destination_status,
+            "default_destination_status" => validation.default_destination_status,
+            "destination_chat_open_link" => validation.current_chat["open_link"],
+            "integration" => integration_payload(updated_agent, state.latest_secret),
+            "agent" => builder_agent_context(updated_agent, state.latest_secret),
+            "_ui_group_id" => "builder:agent:#{updated_agent.id}",
+            "_ui_cards" => [agent_card_payload(updated_agent, state.latest_secret, "config")]
+          }
+
+          {result, %{state | active_agent_id: updated_agent.id}}
+        else
+          {:error, reason} ->
+            {%{"ok" => false, "error" => format_reason(reason)}, state}
+        end
+
+      nil ->
+        {%{"ok" => false, "error" => "Create or select an agent first."}, state}
+    end
+  end
+
   defp execute_builder_tool("archive_agent", input, state) do
     user_id = state.user_id
     identifier = normalize_optional_string(Map.get(input, "identifier"))
@@ -820,12 +882,15 @@ defmodule Vibe.AI.AgentBuilder do
     - Never claim an agent was created, updated, published, disabled, or rotated unless a tool result confirms it.
     - Use tools whenever you need agent state, ids, URLs, prompts, secrets, attached vibeChatId values, or integration guidance.
     - Before answering setup or integration questions, call get_builder_context or get_integration_details.
+    - When the user asks whether a chat id is correct, asks again for the current chat id, says the previous id may be stale or wrong, or asks for a new/current destination, call validate_destination_chat or ensure_destination_chat first. Never answer those from memory or from a prior turn.
     - When the user asks for a chat id or the easiest delivery destination and no attached/default chat is ready yet, call ensure_destination_chat so you can create or reuse the real DM and return its chatId instead of sending the user on a manual lookup flow.
     - When the user describes how the agent should behave, create or update the agent and generate a polished production system prompt.
     - When the user asks about prompt quality, explain that you can read, edit, or generate the prompt and then act with tools.
     - When the user asks how to integrate from code, give exact values from tools: agent_id, user_id, @username, invoke URL, events URL, X-Vibe-Agent-Secret usage, responseMode guidance, vibeChatId values, callback headers, and signature format.
     - The client may render structured agent config cards from tool results. When that happens, keep the text concise and do not dump long env blocks back into chat.
     - When the user asks for the Vibe chat link or chat id, prefer attached_chat_ids, attached_chat_links, and default_destination_chat. Do not present a friendId DM link as if it were an attached chatId.
+    - If the live lookup returns the same chat id again, say that explicitly and explain why: Vibe may reuse the same real DM or current default destination, so the correct current id can remain unchanged.
+    - When you are not sure about current state, look it up and analyze tool results before you respond. Do not guess, recycle stale ids, or paraphrase uncertain setup details.
     - For setup and integration requests, ask only for true blockers. Treat these as blockers: whether to create a new agent or use an existing one when that is ambiguous, destination chat selection when the user wants delivery inside Vibe and there is no default attached chat, and secret rotation when the current full secret is unavailable.
     - Do NOT ask for low-value polish when the workflow is already clear. Do not ask for channel name, display name, username, event labels, tone, welcome copy, or message formatting unless the user explicitly asked to customize them or that choice changes functionality.
     - If the user clearly asked to create a new agent and the workflow is already described, create the draft with sensible defaults immediately. Infer a practical display name from the workflow instead of blocking on naming questions.
@@ -878,6 +943,9 @@ defmodule Vibe.AI.AgentBuilder do
 
   defp builder_tool_progress_label("ensure_destination_chat", _input),
     do: "Preparing a real Vibe destination chat..."
+
+  defp builder_tool_progress_label("validate_destination_chat", _input),
+    do: "Re-checking the live destination chat..."
 
   defp builder_tool_progress_label(_tool_name, _input),
     do: "Working on the agent setup..."
@@ -1255,6 +1323,14 @@ defmodule Vibe.AI.AgentBuilder do
     end
   end
 
+  defp find_visible_default_chat(default_chat_id, attached_chat_links) do
+    desired_id = normalize_optional_string(default_chat_id)
+
+    if is_binary(desired_id) do
+      Enum.find(attached_chat_links, fn chat -> chat["chat_id"] == desired_id end)
+    end
+  end
+
   defp build_chat_link(chat_id) when is_binary(chat_id) do
     "vibe://chat?chatId=#{chat_id}"
   end
@@ -1308,6 +1384,204 @@ defmodule Vibe.AI.AgentBuilder do
       end
 
     base <> suffix
+  end
+
+  defp validate_destination_chat(agent, user_id, provided_chat_id, repair_default) do
+    should_repair_default = repair_default != false
+    payload = Agents.agent_payload(agent)
+    attached_chat_links = build_attached_chat_links(payload.attachedChats || [])
+
+    visible_default_chat =
+      find_visible_default_chat(payload.defaultDestinationChatId, attached_chat_links)
+
+    cond do
+      visible_default_chat ->
+        {:ok, agent,
+         build_destination_validation_result(
+           visible_default_chat,
+           attached_chat_links,
+           provided_chat_id,
+           "existing",
+           "unchanged",
+           "default"
+         )}
+
+      attached_chat_links != [] ->
+        current_chat = List.first(attached_chat_links)
+
+        if should_repair_default do
+          case Agents.update_agent(
+                 agent,
+                 %{"default_destination_chat_id" => current_chat["chat_id"]},
+                 user_id
+               ) do
+            {:ok, updated_agent} ->
+              refreshed_payload = Agents.agent_payload(updated_agent)
+              refreshed_links = build_attached_chat_links(refreshed_payload.attachedChats || [])
+
+              refreshed_chat =
+                find_visible_default_chat(
+                  refreshed_payload.defaultDestinationChatId,
+                  refreshed_links
+                ) ||
+                  List.first(refreshed_links) ||
+                  current_chat
+
+              {:ok, updated_agent,
+               build_destination_validation_result(
+                 refreshed_chat,
+                 refreshed_links,
+                 provided_chat_id,
+                 "existing",
+                 "updated",
+                 "attached"
+               )}
+
+            {:error, reason} ->
+              {:error, reason}
+          end
+        else
+          {:ok, agent,
+           build_destination_validation_result(
+             current_chat,
+             attached_chat_links,
+             provided_chat_id,
+             "existing",
+             "unchanged",
+             "attached"
+           )}
+        end
+
+      true ->
+        with {:ok, chat_id, chat_status} <- Chat.ensure_dm_chat(user_id, agent.agent_user_id),
+             {:ok, updated_agent, default_status} <-
+               maybe_set_default_destination_chat(agent, user_id, chat_id, should_repair_default) do
+          refreshed_payload = Agents.agent_payload(updated_agent)
+          refreshed_links = build_attached_chat_links(refreshed_payload.attachedChats || [])
+
+          current_chat =
+            Enum.find(refreshed_links, fn chat -> chat["chat_id"] == chat_id end) ||
+              %{
+                "chat_id" => chat_id,
+                "name" =>
+                  refreshed_payload.displayName || refreshed_payload.username || "Agent DM",
+                "type" => "dm",
+                "open_link" => build_chat_link(chat_id)
+              }
+
+          {:ok, updated_agent,
+           build_destination_validation_result(
+             current_chat,
+             refreshed_links,
+             provided_chat_id,
+             chat_status,
+             default_status,
+             "ensured"
+           )}
+        end
+    end
+  end
+
+  defp build_destination_validation_result(
+         current_chat,
+         attached_chat_links,
+         provided_chat_id,
+         current_destination_status,
+         default_destination_status,
+         current_destination_kind
+       ) do
+    current_chat_id = current_chat["chat_id"]
+
+    provided_status =
+      cond do
+        not is_binary(provided_chat_id) ->
+          "not_provided"
+
+        provided_chat_id == current_chat_id ->
+          "matches_current"
+
+        Enum.any?(attached_chat_links, fn chat -> chat["chat_id"] == provided_chat_id end) ->
+          "attached_but_not_current"
+
+        true ->
+          "not_found"
+      end
+
+    %{
+      current_chat_id: current_chat_id,
+      current_chat: current_chat,
+      current_destination_kind: current_destination_kind,
+      current_destination_status: current_destination_status,
+      default_destination_status: default_destination_status,
+      provided_status: provided_status,
+      message:
+        destination_validation_message(
+          current_chat,
+          provided_chat_id,
+          provided_status,
+          current_destination_status,
+          default_destination_status,
+          current_destination_kind
+        )
+    }
+  end
+
+  defp destination_validation_message(
+         current_chat,
+         provided_chat_id,
+         provided_status,
+         current_destination_status,
+         default_destination_status,
+         current_destination_kind
+       ) do
+    current_chat_id = current_chat["chat_id"]
+
+    base =
+      case provided_status do
+        "matches_current" ->
+          "I re-checked live state. #{provided_chat_id} is still the correct destination chat id."
+
+        "attached_but_not_current" ->
+          "I re-checked live state. #{provided_chat_id} is attached and visible, but the current destination chat id is #{current_chat_id}."
+
+        "not_found" ->
+          "I re-checked live state. #{provided_chat_id} is not a current owner-visible destination for this agent. The correct chat id is #{current_chat_id}."
+
+        _ ->
+          case current_destination_status do
+            "created" ->
+              "I created the real Vibe destination chat and its chat id is #{current_chat_id}."
+
+            "restored" ->
+              "I restored the real Vibe destination chat and its chat id is #{current_chat_id}."
+
+            _ ->
+              "I re-checked live state. The current destination chat id is #{current_chat_id}."
+          end
+      end
+
+    reuse_note =
+      if provided_status == "matches_current" and
+           (current_destination_kind in ["default", "ensured"] ||
+              current_chat["type"] == "dm") do
+        " Vibe can reuse the same real DM or current default destination, so asking again can return the same id when it is still correct."
+      else
+        ""
+      end
+
+    default_note =
+      case default_destination_status do
+        "updated" ->
+          " I also updated the agent's default destination to that chat."
+
+        "already_set" ->
+          " It is already the default destination."
+
+        _ ->
+          ""
+      end
+
+    base <> reuse_note <> default_note
   end
 
   defp build_agent_dm_link(user_id) when is_binary(user_id) do
