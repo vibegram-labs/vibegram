@@ -31,6 +31,8 @@ interface NativeTabEditActionPayload {
     action: 'primary' | 'secondary';
 }
 
+interface NativeTabStopPayload {}
+
 interface NativeTabViewItem {
     key: string;
     title: string;
@@ -47,6 +49,7 @@ interface NativeChatTabsViewProps {
     inactiveTintColor?: number | null;
     isDark?: boolean;
     isVibeExpanded?: boolean;
+    isVibeStreaming?: boolean;
     editMode?: {
         isActive: boolean;
         primaryTitle: string;
@@ -57,6 +60,7 @@ interface NativeChatTabsViewProps {
     };
     onIndexChange?: (event: NativeSyntheticEvent<NativeTabPressPayload>) => void;
     onVibeSubmit?: (event: NativeSyntheticEvent<{ text: string }>) => void;
+    onVibeStop?: (event: NativeSyntheticEvent<NativeTabStopPayload>) => void;
     onEditActionPress?: (event: NativeSyntheticEvent<NativeTabEditActionPayload>) => void;
     style?: any;
 }
@@ -114,7 +118,9 @@ export interface NativeTabBarProps {
     onVibePress?: () => void;
     fallbackTabWidth?: number;
     isVibeExpanded?: boolean;
+    isVibeStreaming?: boolean;
     onVibeSubmit?: (text: string) => void;
+    onVibeStop?: () => void;
     editMode?: NativeTabBarEditMode;
 }
 
@@ -207,7 +213,9 @@ export default function NativeTabBar({
     onVibePress,
     fallbackTabWidth,
     isVibeExpanded,
+    isVibeStreaming,
     onVibeSubmit,
+    onVibeStop,
     editMode,
 }: NativeTabBarProps) {
     const vibeIndex = tabs.findIndex(isVibeTab);
@@ -342,6 +350,7 @@ export default function NativeTabBar({
                     inactiveTintColor={nativeInactiveTintColor}
                     isDark={isDark}
                     isVibeExpanded={isVibeExpanded}
+                    isVibeStreaming={isVibeStreaming}
                     editMode={nativeEditMode}
                     onIndexChange={handleNativeIndexChange}
                     onVibeSubmit={(e: any) => {
@@ -349,6 +358,9 @@ export default function NativeTabBar({
                         if (payload?.text && onVibeSubmit) {
                             onVibeSubmit(payload.text);
                         }
+                    }}
+                    onVibeStop={() => {
+                        onVibeStop?.();
                     }}
                     onEditActionPress={handleNativeEditActionPress}
                 />

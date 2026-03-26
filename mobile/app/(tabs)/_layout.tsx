@@ -148,7 +148,9 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
     inactiveTintColor,
     isDark,
     isVibeExpanded,
+    isVibeStreaming,
     onVibeSubmit,
+    onVibeStop,
     bottomBarFadeStyle,
     t,
     editMode,
@@ -161,7 +163,9 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
     inactiveTintColor: string;
     isDark: boolean;
     isVibeExpanded: boolean;
+    isVibeStreaming: boolean;
     onVibeSubmit: (text: string) => void;
+    onVibeStop: () => void;
     bottomBarFadeStyle: any;
     t: (key: string) => string;
     editMode?: NativeTabBarEditMode;
@@ -221,8 +225,10 @@ const NativeTabsMemo = React.memo(function NativeTabsMemo({
                 inactiveTintColor={inactiveTintColor}
                 isDark={isDark}
                 isVibeExpanded={isVibeExpanded}
+                isVibeStreaming={isVibeStreaming}
                 onVibePress={nativeOnVibePress}
                 onVibeSubmit={onVibeSubmit}
+                onVibeStop={onVibeStop}
                 editMode={editMode}
             />
         </AnimatedView>
@@ -325,6 +331,7 @@ export default function TabLayout() {
 
     // Local State for Active Tab (Defaults to 'home')
     const [currentTab, setCurrentTab] = useState<PageName>('home')
+    const [isVibeStreaming, setIsVibeStreaming] = useState(false)
 
     // Fallback tab bar indicator
     const translateX = useSharedValue(-PAGES['home'] * SCREEN_WIDTH)
@@ -366,6 +373,22 @@ export default function TabLayout() {
         } catch (error) {
             console.error('[TabsLayout] Vibe send error', error)
         }
+    }, [])
+
+    const handleVibeStop = useCallback(() => {
+        DeviceEventEmitter.emit('onVibeStop')
+    }, [])
+
+    useEffect(() => {
+        const sub = DeviceEventEmitter.addListener('onVibeStreamingState', (payload: any) => {
+            if (typeof payload === 'boolean') {
+                setIsVibeStreaming(payload)
+                return
+            }
+            setIsVibeStreaming(!!payload?.isStreaming)
+        })
+
+        return () => sub.remove()
     }, [])
 
     useEffect(() => {
@@ -580,7 +603,9 @@ export default function TabLayout() {
                                 inactiveTintColor={isDark ? 'rgba(229,229,229,0.6)' : 'rgba(0,0,0,0.4)'}
                                 isDark={isDark}
                                 isVibeExpanded={currentTab === 'vibe'}
+                                isVibeStreaming={isVibeStreaming}
                                 onVibeSubmit={handleVibeSubmit}
+                                onVibeStop={handleVibeStop}
                                 bottomBarFadeStyle={bottomBarFadeStyle}
                                 t={t}
                                 editMode={homeEditMode}

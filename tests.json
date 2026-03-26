@@ -13,9 +13,17 @@
       "status": "passed",
       "details": "Builder payload sanitization now compiles with explicit handling for DateTime, NaiveDateTime, Date, Time, Decimal, and fallback structs."
     },
+    "mobile_git_diff_check": {
+      "status": "passed",
+      "details": "git diff --check passed for the modified native agent, config panel, and tab-bar bridge files."
+    },
+    "mobile_typescript_check": {
+      "status": "inconclusive",
+      "details": "`./node_modules/.bin/tsc --noEmit -p tsconfig.json` did not return usable output through the terminal wrapper in this session, so no pass/fail claim was recorded."
+    },
     "ios_native_validation": {
       "status": "not_run",
-      "details": "No iOS build/test command was run from this workspace."
+      "details": "No iOS build/test command was run from this workspace for the stream failure handling, stop button, or env panel changes."
     }
   }
 }

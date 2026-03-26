@@ -193,6 +193,7 @@ export type NativeChatHeaderMode = 'default' | 'savedMessages';
 export interface NativeChatAgentModule {
   isSupported?: () => boolean;
   submitText?: (surfaceId: string, text: string) => Promise<void>;
+  stopStreaming?: (surfaceId: string) => Promise<void>;
 }
 
 export interface NativeChatEngineModule {

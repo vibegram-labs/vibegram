@@ -316,10 +316,14 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private var reconnectWorkItem: DispatchWorkItem?
   private var streamingTimeoutWorkItem: DispatchWorkItem?
   private var pendingSends: [ChatNativeAgentPendingSend] = []
+  private var lastReportedStreamingState = false
+  private var isStoppingStreamManually = false
   private var builderQuestionNavigationController: UINavigationController?
   private var queuedBuilderQuestionRequest: ChatBuilderUiRequest?
   private var builderSetupState: ChatBuilderSetupState?
   private var builderActivity: [ChatBuilderActivityItem] = []
+  private var builderActiveAgentId: String?
+  private var builderLatestSecret: String?
   private var registeredSurfaceId: String = ""
 
   private static let fallbackApiBaseURL = "https://api.vibegram.io"
@@ -482,6 +486,14 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     applyAppearance(rawAppearance)
   }
 
+  func setBuilderActiveAgentId(_ activeAgentId: String?) {
+    builderActiveAgentId = Self.normalizedString(activeAgentId)
+  }
+
+  func setBuilderLatestSecret(_ latestSecret: String?) {
+    builderLatestSecret = Self.normalizedString(latestSecret)
+  }
+
   func submitText(_ rawText: String) {
     let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !text.isEmpty else { return }
@@ -542,6 +554,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     }
 
     streamingConversationId = conversationId
+    notifyStreamingStateChanged()
     currentSpacerHeight = 0.0
     persistState()
     refreshHistoryList()
@@ -886,7 +899,10 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
 
   private func presentAgentCardPanel(_ card: ChatListRow.AgentCard) {
     guard let presenter = topMostViewController() else { return }
-    let controller = ChatNativeAgentConfigPanelController(card: card, appearance: appearance)
+    let controller = ChatNativeAgentConfigPanelController(
+      card: resolvedAgentCard(card),
+      appearance: appearance
+    )
     controller.onToast = { [weak self] message in
       self?.onNativeEvent(["type": "agentToast", "message": message])
     }
@@ -978,13 +994,19 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       },
       onClose: { [weak self] _, _ in
         DispatchQueue.main.async {
-          self?.handleSocketClose()
+          self?.handleSocketClose(
+            streamFailureMessage: "Connection lost. Tap regenerate to retry.",
+            toastMessage: "Connection lost"
+          )
         }
       },
       onError: { [weak self] error in
         DispatchQueue.main.async {
           NSLog("[ChatNativeAgent] socket error %@", error)
-          self?.handleSocketClose()
+          self?.handleSocketClose(
+            streamFailureMessage: "Connection lost. Tap regenerate to retry.",
+            toastMessage: "Connection lost"
+          )
         }
       },
       onEvent: { [weak self] frame in
@@ -1020,10 +1042,27 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     }
   }
 
-  private func handleSocketClose() {
+  private func handleSocketClose(
+    streamFailureMessage: String? = nil,
+    toastMessage: String? = nil
+  ) {
+    let hadActiveStream = streamingConversationId != nil
+    let stoppedManually = isStoppingStreamManually
+    isStoppingStreamManually = false
     joinedTopic = false
     pendingReplies.removeAll()
     phoenixClient = nil
+
+    if hadActiveStream && !stoppedManually {
+      if let toastMessage, !toastMessage.isEmpty {
+        onNativeEvent(["type": "agentToast", "message": toastMessage])
+      }
+      finishStreaming(
+        fallbackText: streamFailureMessage ?? "Connection lost. Tap regenerate to retry.",
+        forceErrorText: true
+      )
+    }
+
     scheduleReconnect()
   }
 
@@ -1171,7 +1210,8 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       let message = (frame.payload["message"] as? String)?.trimmingCharacters(
         in: .whitespacesAndNewlines)
       finishStreaming(
-        fallbackText: (message?.isEmpty == false ? message : "Something went wrong."),
+        fallbackText:
+          (message?.isEmpty == false ? message : "Something went wrong. Tap regenerate to retry."),
         forceErrorText: true
       )
     case "title_updated":
@@ -1245,7 +1285,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       ?? Self.normalizedString(payload["groupId"])
       ?? "builder:cards"
     let rawCards = (payload["cards"] as? [[String: Any]]) ?? []
-    let cards = rawCards.compactMap(ChatListRow.AgentCard.parse)
+    let cards = rawCards.compactMap(ChatListRow.AgentCard.parse).map(resolvedAgentCard)
     guard !cards.isEmpty else { return }
     guard let conversationId = streamingConversationId ?? activeConversationId else { return }
 
@@ -1276,6 +1316,44 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     builderActivity =
       ((payload["activity"] as? [[String: Any]]) ?? [])
       .compactMap(ChatBuilderActivityItem.init(raw:))
+  }
+
+  private func resolvedAgentCard(_ card: ChatListRow.AgentCard) -> ChatListRow.AgentCard {
+    guard
+      card.latestSecret == nil,
+      let activeAgentId = builderActiveAgentId,
+      let latestSecret = builderLatestSecret,
+      card.agentId == activeAgentId
+    else {
+      return card
+    }
+
+    return ChatListRow.AgentCard(
+      id: card.id,
+      style: card.style,
+      agentId: card.agentId,
+      displayName: card.displayName,
+      username: card.username,
+      identifier: card.identifier,
+      status: card.status,
+      promptStatus: card.promptStatus,
+      promptPreview: card.promptPreview,
+      systemPrompt: card.systemPrompt,
+      enabledTools: card.enabledTools,
+      outputModes: card.outputModes,
+      voiceProfile: card.voiceProfile,
+      callbackURL: card.callbackURL,
+      apiBaseURL: card.apiBaseURL,
+      invokeURL: card.invokeURL,
+      eventsURL: card.eventsURL,
+      builderLink: card.builderLink,
+      agentDMURL: card.agentDMURL,
+      secretHint: card.secretHint,
+      latestSecret: latestSecret,
+      defaultDestinationChat: card.defaultDestinationChat,
+      attachedChats: card.attachedChats,
+      canDelete: card.canDelete
+    )
   }
 
   private func handleBuilderUiRequestEvent(_ payload: [String: Any]) {
@@ -1427,6 +1505,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     }
 
     streamingConversationId = conversationId
+    notifyStreamingStateChanged()
     currentSpacerHeight = 0.0
     persistState()
     refreshHistoryList()
@@ -1614,9 +1693,27 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     }
 
     streamingConversationId = nil
+    notifyStreamingStateChanged()
     persistState()
     refreshHistoryList()
     rebuildChatRows(scrollToBottom: false, animated: false)
+  }
+
+  func stopStreaming() {
+    guard let conversationId = streamingConversationId else { return }
+
+    isStoppingStreamManually = true
+    pendingReplies.removeAll()
+    pendingSends.removeAll { $0.conversationId == conversationId }
+
+    finishStreaming(fallbackText: "Stopped.", forceErrorText: false)
+    onNativeEvent(["type": "agentToast", "message": "Stopped response"])
+
+    joinedTopic = false
+    reconnectWorkItem?.cancel()
+    phoenixClient?.disconnect()
+    phoenixClient = nil
+    scheduleReconnect()
   }
 
   private func deleteAgent(_ card: ChatListRow.AgentCard, dismiss: @escaping () -> Void) {
@@ -1709,7 +1806,10 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     streamingTimeoutWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
       NSLog("[ChatNativeAgent] streaming timeout fired after 120s")
-      self?.finishStreaming(fallbackText: "Response stopped.", forceErrorText: false)
+      self?.finishStreaming(
+        fallbackText: "Response timed out. Tap regenerate to retry.",
+        forceErrorText: true
+      )
     }
     streamingTimeoutWorkItem = workItem
     DispatchQueue.main.asyncAfter(deadline: .now() + 120.0, execute: workItem)
@@ -2233,6 +2333,16 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     conversations[index] = conversation
   }
 
+  private func notifyStreamingStateChanged() {
+    let isStreaming = streamingConversationId != nil
+    guard isStreaming != lastReportedStreamingState else { return }
+    lastReportedStreamingState = isStreaming
+    onNativeEvent([
+      "type": "agentStreamingState",
+      "isStreaming": isStreaming,
+    ])
+  }
+
   private func updateSpacerForSend(conversationId: String) {
     currentSpacerHeight = 0.0
   }
@@ -2244,7 +2354,22 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     else {
       return
     }
-    conversations = state.conversations
+    conversations = state.conversations.map { conversation in
+      var normalizedConversation = conversation
+      normalizedConversation.messages = conversation.messages.map { message in
+        guard message.role == .assistant, message.isStreaming else { return message }
+        var normalizedMessage = message
+        normalizedMessage.isStreaming = false
+        normalizedMessage.streamSegments.removeAll { $0.isRunningProgress }
+        if normalizedMessage.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+          let fallbackText = "Previous response was interrupted. Tap regenerate to retry."
+          normalizedMessage.content = fallbackText
+          normalizedMessage.streamSegments = [.text(fallbackText)]
+        }
+        return normalizedMessage
+      }
+      return normalizedConversation
+    }
     activeConversationId = state.activeConversationId
   }
 

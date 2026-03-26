@@ -124,6 +124,7 @@ private final class ChatNativeEditActionButton: UIControl {
 public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextFieldDelegate {
   public var onIndexChange = EventDispatcher()
   public var onVibeSubmit = EventDispatcher()
+  public var onVibeStop = EventDispatcher()
   public var onEditActionPress = EventDispatcher()
 
   // Custom TabBar that ignores safe-area
@@ -149,6 +150,7 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
   private var vibeTextFieldLeadingConstraint: NSLayoutConstraint?
   private var vibeTextFieldTrailingConstraint: NSLayoutConstraint?
   private var isVibeExpanded = false
+  private var isVibeStreaming = false
   private var isEditActionsActive = false
 
   private var tabs: [ChatNativeTabItem] = []
@@ -606,7 +608,19 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     }
   }
 
+  func setVibeStreaming(_ streaming: Bool) {
+    guard isVibeStreaming != streaming else { return }
+    isVibeStreaming = streaming
+    updateVibeButton(for: tabs.first(where: \.isVibe))
+    textDidChange()
+  }
+
   @objc private func handleVibeSubmitAction() {
+    if isVibeStreaming {
+      onVibeStop(["action": "stop"])
+      return
+    }
+
     print("[VibeTabBar] Submit native pressed! Text length: \(vibeTextField.text?.count ?? 0)")
     guard let text = vibeTextField.text,
       !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -638,7 +652,10 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
     let hasText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
 
     UIView.animate(withDuration: 0.2) {
-      if hasText {
+      if self.isVibeStreaming {
+        self.vibeSubmitButton.backgroundColor = UIColor.systemRed.withAlphaComponent(0.92)
+        self.vibeIconView.tintColor = .white
+      } else if hasText {
         self.vibeSubmitButton.backgroundColor = self.activeTintColor
         self.vibeIconView.tintColor = .white
       } else {
@@ -719,13 +736,19 @@ public final class ChatNativeTabBarView: ExpoView, UITabBarDelegate, UITextField
 
     vibeChromeView.isHidden = false
 
-    // Exclusively rely on the optimized Native SVG path.
-    // This allows it to scale crisply when it transforms into a send button!
-    print("[VibeTabBar] Drawing native SVG path for vibe logo")
-    let image = resolveLogoImage(targetSize: CGSize(width: 26, height: 26))?.withRenderingMode(
-      .alwaysTemplate)
-
-    vibeIconView.image = image
+    if isVibeExpanded && isVibeStreaming {
+      vibeIconView.image = UIImage(
+        systemName: "stop.fill",
+        withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .semibold)
+      )?.withRenderingMode(.alwaysTemplate)
+    } else {
+      // Exclusively rely on the optimized Native SVG path.
+      // This allows it to scale crisply when it transforms into a send button!
+      print("[VibeTabBar] Drawing native SVG path for vibe logo")
+      let image = resolveLogoImage(targetSize: CGSize(width: 26, height: 26))?.withRenderingMode(
+        .alwaysTemplate)
+      vibeIconView.image = image
+    }
     vibeIconView.tintColor = .white
 
     vibeButton.setTitle(nil, for: .normal)
@@ -981,10 +1004,13 @@ public class ChatNativeTabBarModule: Module {
       Prop("isVibeExpanded") { (view: ChatNativeTabBarView, expanded: Bool) in
         view.setVibeExpanded(expanded)
       }
+      Prop("isVibeStreaming") { (view: ChatNativeTabBarView, streaming: Bool) in
+        view.setVibeStreaming(streaming)
+      }
       Prop("editMode") { (view: ChatNativeTabBarView, editMode: [String: Any]) in
         view.setEditMode(editMode)
       }
-      Events("onIndexChange", "onVibeSubmit", "onEditActionPress")
+      Events("onIndexChange", "onVibeSubmit", "onVibeStop", "onEditActionPress")
     }
   }
 }

@@ -5,7 +5,12 @@ Completed:
 - Adjusted assistant row assembly so agent cards stay hidden until streamed text exists or streaming finishes, and action buttons render after the final assistant entry. The visible order is now `loading/streaming -> text -> card -> actions`.
 - Deferred `agent_cards` channel events until the first streamed text chunk or finalization so the client no longer receives card events ahead of post-tool text.
 - Fixed a Railway builder crash in `sanitize_builder_payload/1` by handling `DateTime`, `NaiveDateTime`, `Date`, `Time`, `Decimal`, and other structs safely instead of treating structs as enumerable maps.
+- Added native agent stream failure handling so socket closes, channel errors, persisted stale streams, and the 120s timeout all resolve into a non-loading assistant state with retryable fallback text instead of hanging forever.
+- Wired the expanded Vibe tab bar button into native agent streaming state so it switches to a stop action while a response is running and locally stops the current stream.
+- Restyled the native agent config/env panel to match the builder setup panel palette and row treatment, including the same background, cards, divider color, prompt surface, and interaction highlight.
+- Filled the env panel secret gap by letting native agent cards reuse the builder session `latestSecret` for the active agent and by accepting `secret`/`invoke_secret` fallback keys when cards are parsed.
 
 Remaining:
-- Validate the iOS flow on device or simulator, especially card taps opening the config panel and builder/subagent turns that emit cards before text.
+- Validate the iOS flow on device or simulator, especially card taps opening the config panel, env secret display/copy, builder/subagent turns that emit cards before text, and the stop-streaming state in the Vibe tab bar.
 - `mix test` cannot run in `server/` because `server/config/test.exs` is missing.
+- A full mobile TypeScript check was not recorded as passing in this session; `git diff --check` passed for the changed files, but no simulator/device build was run.

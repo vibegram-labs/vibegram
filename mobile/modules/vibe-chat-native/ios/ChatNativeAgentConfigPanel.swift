@@ -1,23 +1,45 @@
 import UIKit
 
+private func chatNativeAgentBuilderThemeColor(_ hex: String) -> UIColor {
+  let sanitized =
+    hex.trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(
+      of: "#", with: "")
+  guard sanitized.count == 6, let value = Int(sanitized, radix: 16) else {
+    return .systemBackground
+  }
+
+  return UIColor(
+    red: CGFloat((value >> 16) & 0xff) / 255.0,
+    green: CGFloat((value >> 8) & 0xff) / 255.0,
+    blue: CGFloat(value & 0xff) / 255.0,
+    alpha: 1.0
+  )
+}
+
 private struct ChatNativeAgentConfigTheme {
-  let backgroundColor: UIColor
-  let cardColor: UIColor
-  let textColor: UIColor
-  let secondaryTextColor: UIColor
-  let accentColor: UIColor
-  let borderColor: UIColor
+  let panelTheme: ChatBuilderPanelTheme
   let destructiveColor: UIColor
 
   init(appearance: ChatListAppearance) {
-    backgroundColor = appearance.wallpaperGradient.first ?? .black
-    cardColor = appearance.bubbleThemColor.withAlphaComponent(0.28)
-    textColor = appearance.textColorThem
-    secondaryTextColor = appearance.timeColorThem.withAlphaComponent(0.92)
-    accentColor = appearance.textColorThem
-    borderColor = appearance.dayBorderColor.withAlphaComponent(0.24)
+    let isDarkTheme = appearance.isDark
+    panelTheme = ChatBuilderPanelTheme(
+      isDark: isDarkTheme,
+      backgroundColor: chatNativeAgentBuilderThemeColor(isDarkTheme ? "#121212" : "#F5F4F1"),
+      cardColor: chatNativeAgentBuilderThemeColor(isDarkTheme ? "#242424" : "#FFFFFF"),
+      inputColor: chatNativeAgentBuilderThemeColor(isDarkTheme ? "#222222" : "#F2F2F2"),
+      textColor: chatNativeAgentBuilderThemeColor(isDarkTheme ? "#E8E6F0" : "#1A1A1F"),
+      secondaryTextColor: chatNativeAgentBuilderThemeColor(isDarkTheme ? "#9896A8" : "#5A5A66"),
+      accentColor: chatNativeAgentBuilderThemeColor(isDarkTheme ? "#7CB8B8" : "#4A8D8E")
+    )
     destructiveColor = UIColor.systemRed
   }
+
+  var backgroundColor: UIColor { panelTheme.backgroundColor }
+  var cardColor: UIColor { panelTheme.cardColor }
+  var inputColor: UIColor { panelTheme.inputColor }
+  var textColor: UIColor { panelTheme.textColor }
+  var secondaryTextColor: UIColor { panelTheme.secondaryTextColor }
+  var accentColor: UIColor { panelTheme.accentColor }
 }
 
 private final class ChatNativeAgentConfigSectionView: UIView {
@@ -27,30 +49,27 @@ private final class ChatNativeAgentConfigSectionView: UIView {
     super.init(frame: .zero)
     translatesAutoresizingMaskIntoConstraints = false
 
-    let container = UIView()
-    container.translatesAutoresizingMaskIntoConstraints = false
-    container.backgroundColor = theme.cardColor
-    container.layer.cornerRadius = 22.0
-    container.layer.cornerCurve = .continuous
-    container.layer.borderWidth = 1.0
-    container.layer.borderColor = theme.borderColor.cgColor
-    addSubview(container)
+    let cardView = UIView()
+    cardView.translatesAutoresizingMaskIntoConstraints = false
+    cardView.backgroundColor = theme.cardColor
+    cardView.layer.cornerRadius = 24.0
+    cardView.layer.cornerCurve = .continuous
+    addSubview(cardView)
 
     contentStack.translatesAutoresizingMaskIntoConstraints = false
     contentStack.axis = .vertical
     contentStack.spacing = 0.0
-    container.addSubview(contentStack)
+    cardView.addSubview(contentStack)
 
-    NSLayoutConstraint.activate([
-      container.topAnchor.constraint(equalTo: topAnchor),
-      container.leadingAnchor.constraint(equalTo: leadingAnchor),
-      container.trailingAnchor.constraint(equalTo: trailingAnchor),
-      container.bottomAnchor.constraint(equalTo: bottomAnchor),
-      contentStack.topAnchor.constraint(equalTo: container.topAnchor),
-      contentStack.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-      contentStack.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-      contentStack.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-    ])
+    var constraints = [
+      cardView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      cardView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      cardView.bottomAnchor.constraint(equalTo: bottomAnchor),
+      contentStack.topAnchor.constraint(equalTo: cardView.topAnchor),
+      contentStack.leadingAnchor.constraint(equalTo: cardView.leadingAnchor),
+      contentStack.trailingAnchor.constraint(equalTo: cardView.trailingAnchor),
+      contentStack.bottomAnchor.constraint(equalTo: cardView.bottomAnchor),
+    ]
 
     if let title, !title.isEmpty {
       let titleLabel = UILabel()
@@ -60,11 +79,16 @@ private final class ChatNativeAgentConfigSectionView: UIView {
       titleLabel.text = title.uppercased()
       addSubview(titleLabel)
 
-      NSLayoutConstraint.activate([
+      constraints.append(contentsOf: [
         titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4.0),
-        titleLabel.bottomAnchor.constraint(equalTo: container.topAnchor, constant: -8.0),
+        titleLabel.topAnchor.constraint(equalTo: topAnchor),
+        cardView.topAnchor.constraint(equalTo: titleLabel.bottomAnchor, constant: 8.0),
       ])
+    } else {
+      constraints.append(cardView.topAnchor.constraint(equalTo: topAnchor))
     }
+
+    NSLayoutConstraint.activate(constraints)
   }
 
   required init?(coder: NSCoder) {
@@ -73,6 +97,7 @@ private final class ChatNativeAgentConfigSectionView: UIView {
 }
 
 private final class ChatNativeAgentConfigRow: UIControl {
+  private let highlightView = UIView()
   private let titleLabel = UILabel()
   private let valueLabel = UILabel()
   private let accessoryView = UIImageView()
@@ -82,8 +107,8 @@ private final class ChatNativeAgentConfigRow: UIControl {
 
   override var isHighlighted: Bool {
     didSet {
-      UIView.animate(withDuration: 0.12) {
-        self.alpha = self.isHighlighted ? 0.76 : 1.0
+      UIView.animate(withDuration: 0.14) {
+        self.highlightView.alpha = self.isHighlighted ? 1.0 : 0.0
       }
     }
   }
@@ -99,19 +124,29 @@ private final class ChatNativeAgentConfigRow: UIControl {
   ) {
     super.init(frame: .zero)
     translatesAutoresizingMaskIntoConstraints = false
+    backgroundColor = .clear
+
+    highlightView.translatesAutoresizingMaskIntoConstraints = false
+    highlightView.backgroundColor = theme.textColor.withAlphaComponent(0.05)
+    highlightView.alpha = 0.0
+    addSubview(highlightView)
 
     titleLabel.translatesAutoresizingMaskIntoConstraints = false
-    titleLabel.font = .systemFont(ofSize: 15.0, weight: .medium)
+    titleLabel.font = .systemFont(ofSize: 16.0, weight: .medium)
     titleLabel.textColor = destructive ? theme.destructiveColor : theme.textColor
+    titleLabel.numberOfLines = 1
     titleLabel.text = title
     addSubview(titleLabel)
 
     valueLabel.translatesAutoresizingMaskIntoConstraints = false
-    valueLabel.font = .systemFont(ofSize: 14.0, weight: .regular)
-    valueLabel.textColor = destructive ? theme.destructiveColor.withAlphaComponent(0.8) : theme.secondaryTextColor
-    valueLabel.numberOfLines = 2
+    valueLabel.font = .systemFont(ofSize: 15.0, weight: .regular)
+    valueLabel.textColor =
+      destructive ? theme.destructiveColor.withAlphaComponent(0.8) : theme.secondaryTextColor
+    valueLabel.numberOfLines = 1
     valueLabel.textAlignment = .right
+    valueLabel.lineBreakMode = .byTruncatingMiddle
     valueLabel.text = value
+    valueLabel.isHidden = value == nil
     addSubview(valueLabel)
 
     accessoryView.translatesAutoresizingMaskIntoConstraints = false
@@ -119,17 +154,24 @@ private final class ChatNativeAgentConfigRow: UIControl {
       systemName: showsChevron ? "chevron.right" : "doc.on.doc",
       withConfiguration: UIImage.SymbolConfiguration(pointSize: 13.0, weight: .semibold)
     )
-    accessoryView.tintColor = destructive ? theme.destructiveColor.withAlphaComponent(0.72) : theme.secondaryTextColor.withAlphaComponent(0.58)
+    accessoryView.tintColor =
+      destructive
+      ? theme.destructiveColor.withAlphaComponent(0.72)
+      : theme.secondaryTextColor.withAlphaComponent(showsChevron ? 0.55 : 0.58)
     accessoryView.isHidden = !showsAccessory
     addSubview(accessoryView)
 
     dividerView.translatesAutoresizingMaskIntoConstraints = false
-    dividerView.backgroundColor = theme.borderColor
+    dividerView.backgroundColor = theme.secondaryTextColor.withAlphaComponent(0.12)
     dividerView.isHidden = !showsDivider
     addSubview(dividerView)
 
     NSLayoutConstraint.activate([
-      heightAnchor.constraint(greaterThanOrEqualToConstant: 58.0),
+      heightAnchor.constraint(greaterThanOrEqualToConstant: 56.0),
+      highlightView.topAnchor.constraint(equalTo: topAnchor),
+      highlightView.leadingAnchor.constraint(equalTo: leadingAnchor),
+      highlightView.trailingAnchor.constraint(equalTo: trailingAnchor),
+      highlightView.bottomAnchor.constraint(equalTo: bottomAnchor),
       titleLabel.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16.0),
       titleLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
       titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: valueLabel.leadingAnchor, constant: -12.0),
@@ -138,13 +180,19 @@ private final class ChatNativeAgentConfigRow: UIControl {
       accessoryView.widthAnchor.constraint(equalToConstant: 18.0),
       accessoryView.heightAnchor.constraint(equalToConstant: 18.0),
       valueLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleLabel.trailingAnchor, constant: 12.0),
-      valueLabel.trailingAnchor.constraint(equalTo: accessoryView.leadingAnchor, constant: -8.0),
       valueLabel.centerYAnchor.constraint(equalTo: centerYAnchor),
       dividerView.leadingAnchor.constraint(equalTo: titleLabel.leadingAnchor),
       dividerView.trailingAnchor.constraint(equalTo: trailingAnchor),
       dividerView.bottomAnchor.constraint(equalTo: bottomAnchor),
       dividerView.heightAnchor.constraint(equalToConstant: 0.5),
     ])
+
+    if showsAccessory {
+      valueLabel.trailingAnchor.constraint(equalTo: accessoryView.leadingAnchor, constant: -8.0)
+        .isActive = true
+    } else {
+      valueLabel.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16.0).isActive = true
+    }
 
     addTarget(self, action: #selector(handleTap), for: .touchUpInside)
   }
@@ -179,10 +227,10 @@ private final class ChatNativeAgentPromptViewController: UIViewController {
     title = "Prompt"
 
     textView.translatesAutoresizingMaskIntoConstraints = false
-    textView.backgroundColor = theme.cardColor
+    textView.backgroundColor = theme.inputColor
     textView.textColor = theme.textColor
     textView.font = .systemFont(ofSize: 15.0, weight: .regular)
-    textView.layer.cornerRadius = 18.0
+    textView.layer.cornerRadius = 16.0
     textView.layer.cornerCurve = .continuous
     textView.isEditable = false
     textView.text = prompt
@@ -264,7 +312,7 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
 
     stackView.translatesAutoresizingMaskIntoConstraints = false
     stackView.axis = .vertical
-    stackView.spacing = 20.0
+    stackView.spacing = 14.0
     contentView.addSubview(stackView)
 
     NSLayoutConstraint.activate([
@@ -308,10 +356,10 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     if let callbackURL = card.callbackURL {
       endpointsSection.contentStack.addArrangedSubview(makeCopyRow(title: "Callback", value: callbackURL, copyValue: callbackURL))
     }
-    if let latestSecret = card.latestSecret {
-      endpointsSection.contentStack.addArrangedSubview(makeCopyRow(title: "Secret", value: latestSecret, copyValue: latestSecret))
-    } else if let secretHint = card.secretHint {
-      endpointsSection.contentStack.addArrangedSubview(makeCopyRow(title: "Secret Hint", value: secretHint, copyValue: nil))
+    if let secretValue = secretDisplayValue() {
+      endpointsSection.contentStack.addArrangedSubview(
+        makeCopyRow(title: "Secret", value: secretValue, copyValue: card.latestSecret)
+      )
     }
     stackView.addArrangedSubview(endpointsSection)
 
@@ -402,6 +450,16 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
       self.onToast?("Copied \(title)")
     }
     return row
+  }
+
+  private func secretDisplayValue() -> String? {
+    if let latestSecret = card.latestSecret {
+      return latestSecret
+    }
+    if let secretHint = card.secretHint {
+      return secretHint
+    }
+    return "Rotate to reveal"
   }
 
   private func envExportBlock() -> String {

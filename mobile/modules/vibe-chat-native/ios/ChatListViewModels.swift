@@ -164,7 +164,10 @@ struct ChatListRow {
         builderLink: parseNonEmptyString(raw["builder_link"] ?? raw["builderLink"]),
         agentDMURL: parseNonEmptyString(raw["agent_dm_link"] ?? raw["agentDmLink"]),
         secretHint: parseNonEmptyString(raw["secret_hint"] ?? raw["secretHint"]),
-        latestSecret: parseNonEmptyString(raw["latest_secret"] ?? raw["latestSecret"]),
+        latestSecret:
+          parseNonEmptyString(
+            raw["latest_secret"] ?? raw["latestSecret"] ?? raw["secret"] ?? raw["invoke_secret"]
+              ?? raw["invokeSecret"]),
         defaultDestinationChat: defaultDestinationChat,
         attachedChats: attachedChats,
         canDelete:

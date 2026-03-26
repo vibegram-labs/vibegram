@@ -18,11 +18,14 @@ try {
 
 export interface NativeAgentChatSurfaceRef {
   submitText: (text: string) => Promise<void>;
+  stopStreaming: () => Promise<void>;
 }
 
 interface NativeAgentChatSurfaceProps {
   surfaceId: string;
   appearance?: NativeChatAppearance;
+  activeAgentId?: string | null;
+  latestSecret?: string | null;
   forceRender?: boolean;
   onNativeEvent?: (event: { nativeEvent: Record<string, unknown> }) => void;
   onNativeError?: (error: unknown, context: string) => void;
@@ -31,7 +34,7 @@ interface NativeAgentChatSurfaceProps {
 export const NativeAgentChatSurface = forwardRef<
   NativeAgentChatSurfaceRef,
   NativeAgentChatSurfaceProps
->(({ surfaceId, appearance, forceRender, onNativeEvent, onNativeError }, ref) => {
+>(({ surfaceId, appearance, activeAgentId, latestSecret, forceRender, onNativeEvent, onNativeError }, ref) => {
   const nativeAgentModule = useMemo(
     () => getNativeChatAgentModule() as NativeChatAgentModule | null,
     [],
@@ -53,6 +56,14 @@ export const NativeAgentChatSurface = forwardRef<
           reportNativeError(error, 'submitText');
         }
       },
+      stopStreaming: async () => {
+        if (!nativeAgentModule?.stopStreaming) return;
+        try {
+          await nativeAgentModule.stopStreaming(surfaceId);
+        } catch (error) {
+          reportNativeError(error, 'stopStreaming');
+        }
+      },
     }),
     [nativeAgentModule, onNativeError, surfaceId],
   );
@@ -71,6 +82,8 @@ export const NativeAgentChatSurface = forwardRef<
       style={styles.fill}
       surfaceId={surfaceId}
       appearance={appearance}
+      activeAgentId={activeAgentId ?? null}
+      latestSecret={latestSecret ?? null}
       onNativeEvent={(event: any) => {
         try {
           onNativeEvent?.(event);

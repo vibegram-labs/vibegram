@@ -33,6 +33,7 @@ import { BlurView } from 'expo-blur'
 import { useThemeStore } from '../../lib/stores/theme-store'
 import { useWallpaperStore, resolveThemeVariant } from '../../lib/stores/wallpaper-store'
 import { useAgentStore } from '../../lib/agent/AgentStore'
+import { useVibeAgentBuilderStore } from '../../lib/agent/VibeAgentBuilderStore'
 import AuthManager from '../../lib/AuthManager'
 import ProxyManager from '../../lib/ProxyManager'
 import ChatInput from '../../components/shared/ChatInput'
@@ -294,6 +295,8 @@ function NativeBackedAgentChatScreen({
     const [inputText, setInputText] = useState('')
     const [toastVisible, setToastVisible] = useState(false)
     const [toastMessage, setToastMessage] = useState('Copied to clipboard')
+    const builderActiveAgentId = useVibeAgentBuilderStore((state) => state.activeAgentId)
+    const builderLatestSecret = useVibeAgentBuilderStore((state) => state.latestSecret)
 
     const resolvedTheme = useMemo(() => {
         return resolveThemeVariant(activeTheme, effectiveTheme === 'dark')
@@ -371,13 +374,23 @@ function NativeBackedAgentChatScreen({
     }
 
     useEffect(() => {
-        const sub = DeviceEventEmitter.addListener('onVibeSubmit', (payload: any) => {
+        DeviceEventEmitter.emit('onVibeStreamingState', false)
+
+        const submitSub = DeviceEventEmitter.addListener('onVibeSubmit', (payload: any) => {
             const text = typeof payload === 'string' ? payload : payload?.text;
             if (text && text.trim()) {
                 nativeSurfaceRef.current?.submitText(text.trim())
             }
         })
-        return () => sub.remove()
+        const stopSub = DeviceEventEmitter.addListener('onVibeStop', () => {
+            nativeSurfaceRef.current?.stopStreaming()
+        })
+
+        return () => {
+            submitSub.remove()
+            stopSub.remove()
+            DeviceEventEmitter.emit('onVibeStreamingState', false)
+        }
     }, [])
 
     return (
@@ -386,6 +399,8 @@ function NativeBackedAgentChatScreen({
                 ref={nativeSurfaceRef}
                 surfaceId={surfaceIdRef.current}
                 appearance={appearance}
+                activeAgentId={builderActiveAgentId}
+                latestSecret={builderLatestSecret}
                 forceRender={true}
                 onNativeEvent={(event) => {
                     const type = typeof event?.nativeEvent?.type === 'string'
@@ -399,6 +414,11 @@ function NativeBackedAgentChatScreen({
                             ? event.nativeEvent.message
                             : 'Copied to clipboard'
                         showNativeToast(message)
+                    } else if (type === 'agentStreamingState') {
+                        DeviceEventEmitter.emit(
+                            'onVibeStreamingState',
+                            !!event?.nativeEvent?.isStreaming,
+                        )
                     }
                 }}
             />

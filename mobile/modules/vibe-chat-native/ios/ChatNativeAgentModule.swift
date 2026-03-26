@@ -14,6 +14,12 @@ public class ChatNativeAgentModule: Module {
       }
     }
 
+    AsyncFunction("stopStreaming") { (surfaceId: String) in
+      DispatchQueue.main.async {
+        ChatNativeAgentRegistry.shared.view(for: surfaceId)?.stopStreaming()
+      }
+    }
+
     View(ChatNativeAgentView.self) {
       Prop("surfaceId") { (view: ChatNativeAgentView, value: String) in
         view.surfaceId = value
@@ -21,6 +27,14 @@ public class ChatNativeAgentModule: Module {
 
       Prop("appearance") { (view: ChatNativeAgentView, value: [String: Any]?) in
         view.setAppearance(value ?? [:])
+      }
+
+      Prop("activeAgentId") { (view: ChatNativeAgentView, value: String?) in
+        view.setBuilderActiveAgentId(value)
+      }
+
+      Prop("latestSecret") { (view: ChatNativeAgentView, value: String?) in
+        view.setBuilderLatestSecret(value)
       }
 
       Events("onNativeEvent")
