@@ -2,6 +2,7 @@ defmodule Vibe.Chat do
   import Ecto.Query, warn: false
   require Logger
   alias Vibe.ChatHomeCache
+  alias Vibe.Agent
   alias Vibe.Repo
   alias Vibe.RepoRLS
   alias Vibe.SupabaseStorage
@@ -108,6 +109,26 @@ defmodule Vibe.Chat do
           |> Repo.all()
           |> Enum.group_by(& &1.chat_id)
 
+        agent_friend_user_ids =
+          friend_participants
+          |> Map.values()
+          |> List.flatten()
+          |> Enum.filter(&(&1.user && &1.user.is_agent))
+          |> Enum.map(& &1.user_id)
+          |> Enum.uniq()
+
+        agent_friends_by_user_id =
+          if agent_friend_user_ids == [] do
+            %{}
+          else
+            from(a in Agent,
+              where: a.agent_user_id in ^agent_friend_user_ids,
+              select: {a.agent_user_id, %{display_name: a.display_name, avatar_url: a.avatar_url}}
+            )
+            |> Repo.all()
+            |> Map.new()
+          end
+
         # Batch-fetch latest 15 messages per chat using a window function
         ranked_query =
           from(m in Message,
@@ -175,6 +196,7 @@ defmodule Vibe.Chat do
         Enum.map(results, fn {chat_id, my_settings} ->
           room = Map.get(rooms, chat_id)
           friend_p = List.first(Map.get(friend_participants, chat_id, []))
+          friend_agent = if(friend_p, do: Map.get(agent_friends_by_user_id, friend_p.user_id), else: nil)
 
           # Filter last message by cleared_at if applicable
           chat_messages = Map.get(last_messages_by_chat, chat_id, [])
@@ -219,9 +241,16 @@ defmodule Vibe.Chat do
             memberCount: Map.get(member_counts, chat_id),
             role: my_settings.role,
             friendId: if(friend_p, do: friend_p.user_id, else: nil),
-            friendName: if(friend_p && friend_p.user, do: friend_p.user.username, else: nil),
+            friendName:
+              present_chat_friend_name(
+                if(friend_p, do: friend_p.user, else: nil),
+                friend_agent
+              ),
             friendImage:
-              if(friend_p && friend_p.user, do: friend_p.user.profile_image, else: nil),
+              present_chat_friend_image(
+                if(friend_p, do: friend_p.user, else: nil),
+                friend_agent
+              ),
             members: members,
             messages: messages_for_client,
             unreadCount: 0,
@@ -244,6 +273,24 @@ defmodule Vibe.Chat do
         []
     end
   end
+
+  defp present_chat_friend_name(user, agent_payload) do
+    present_string(agent_payload && agent_payload.display_name) ||
+      present_string(user && user.name) ||
+      present_string(user && user.username)
+  end
+
+  defp present_chat_friend_image(user, agent_payload) do
+    present_string(agent_payload && agent_payload.avatar_url) ||
+      present_string(user && user.profile_image)
+  end
+
+  defp present_string(value) when is_binary(value) do
+    trimmed = String.trim(value)
+    if trimmed == "", do: nil, else: trimmed
+  end
+
+  defp present_string(_), do: nil
 
   def find_chat_between_users(u1, u2) do
     query =

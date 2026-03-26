@@ -1,6 +1,10 @@
 {
   "updated_at": "2026-03-26",
   "checks": {
+    "server_chat_list_agent_display_name": {
+      "status": "passed",
+      "details": "Patched `Vibe.Chat.list_chats_uncached/1` so DM rows whose peer is an agent shadow user now resolve `friendName` from the owning agent `display_name` and prefer the agent avatar for `friendImage`, instead of exposing the shadow username/invoke-style id. `mix compile` passed after the change."
+    },
     "server_mix_test": {
       "status": "failed",
       "details": "Command failed because server/config/test.exs is missing."

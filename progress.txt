@@ -1,6 +1,7 @@
 2026-03-26
 
 Completed:
+- Fixed the home-list agent naming mismatch in `server/lib/vibe/chat.ex`. `/api/chats/:user_id` now resolves DM friend payloads for agent shadow users through the owning `Agent` record, so `friendName` uses the agent `display_name` and `friendImage` prefers the agent avatar instead of the shadow username/invoke-style id.
 - Fixed agent-originated push notification delivery on the server. `AgentEventRuntime` now follows the same notification path as normal chat messages for external-event agent posts, and `GroupAgent` now sends push notifications for agent replies instead of only broadcasting `user:new_message`.
 - Fixed standalone agent naming at creation time: the builder now derives a practical fallback `display_name` from the user’s workflow description/persona instead of hard-defaulting to `New Agent`, and the builder prompt now explicitly tells the model to pass `display_name` whenever the user provided or corrected a name.
 - Added native rename support to the standalone agent config panel in `ChatNativeAgentConfigPanel.swift`. The panel now shows a `Name` row, opens a native text-field alert, and saves the new name through the authenticated `PUT /api/agents/:id` API instead of forcing renames through chat only.
@@ -31,6 +32,7 @@ Completed:
 - Added detached top and bottom gradient masks to the config panel, matching the attachment sheet pattern so the sheet header/body transition no longer shows hard edges.
 
 Remaining:
+- Live-verify the home list after one more remote `/api/chats/:user_id` refresh or external event send: the DM row that previously showed the invoke/shadow username should now show the agent `display_name` without needing a separate client-side remap.
 - Live-send one agent event and one group-agent reply after deploy to confirm Expo push notifications now fire for agent-originated messages, not just `user:new_message` channel updates.
 - If you want event summaries to be truly batched, that still needs a separate runtime change. The current `AgentEventRuntime` groups events by `thread_key` and keeps one evolving thread summary/state, but it still posts one summary/update per ingested event rather than waiting and emitting a delayed batch summary across multiple incoming events.
 - Capture a fresh device log after another cold app start or external event send and verify the new cached-start reconciliation path: `loadChats using offline cached data ...`, then `scheduling background remote chat reconciliation`, then `background remote chat reconciliation firing`, then `loadChats begin ... forceRemote=true`, then `native fetchChats succeeded` with the missing agent chat id included. That will confirm the home list no longer needs a hot reload/manual refresh to pick up new remote chats.
