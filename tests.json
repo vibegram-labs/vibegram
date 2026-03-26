@@ -48,6 +48,10 @@
     "ios_native_home_debug_logging": {
       "status": "passed",
       "details": "Added targeted native logging to ChatNativeHomeModule.fetchChats, ChatNativeHomeListView.setRows/didChange, and ChatEngine.postChangeLocked. `xcrun swiftc -parse` passed for the touched Swift files and `git diff --check` passed for the touched mobile files."
+    },
+    "mobile_chatstore_realtime_reload_logging": {
+      "status": "passed",
+      "details": "Added unconditional ChatStore logs for `user:new_chat`, `user:new_message`, forced `scheduleLoadChats`, and `loadChats(forceRemote)` cache-bypass decisions so the next device run will show whether realtime is triggering the remote `/chats` refresh path."
     }
   }
 }

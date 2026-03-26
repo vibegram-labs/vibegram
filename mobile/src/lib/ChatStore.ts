@@ -483,6 +483,13 @@ let suppressNextSocketFailure = false;
 let transportPolicySignature: string | null = null;
 let forceRemoteChatsReload = false;
 
+const summarizeChatIdForRealtimeLog = (value: unknown) => {
+    if (typeof value !== 'string') return '<empty>';
+    const trimmed = value.trim();
+    if (!trimmed) return '<empty>';
+    return trimmed.length > 12 ? `${trimmed.slice(0, 12)}...` : trimmed;
+};
+
 const ensureTransportControlReady = (): Promise<void> => {
     if (!transportControlReadyPromise) {
         transportControlReadyPromise = Promise.resolve(ensureBlackoutControlReady())
@@ -1606,13 +1613,16 @@ export const useChatStore = create<ChatState>()(
                         socket.connect();
                         set({ socket }); // Update store state with socket instance
 
-                        const scheduleLoadChats = (delayMs = 180, forceRemote = false) => {
+                        const scheduleLoadChats = (delayMs = 180, forceRemote = false, reason = 'unspecified') => {
                             if (loadChatsDebounceTimer) return;
                             loadChatsDebounceTimer = setTimeout(() => {
                                 loadChatsDebounceTimer = null;
                                 if (forceRemote) {
                                     forceRemoteChatsReload = true;
                                 }
+                                console.log(
+                                    `[ChatStore] scheduleLoadChats firing reason=${reason} forceRemote=${forceRemote ? 'true' : 'false'} delayMs=${delayMs}`,
+                                );
                                 get().loadChats();
                             }, delayMs);
                         };
@@ -1733,7 +1743,7 @@ export const useChatStore = create<ChatState>()(
 
                     // Re-join chat channels on every reconnect.
                     // We clear channel refs above, so skipping this leaves retry queue without writable channels.
-                    scheduleLoadChats(100);
+                    scheduleLoadChats(100, false, 'socket_reconnect');
 
                     // Join User Channel for signaling/status.
                     // Recreate it on reconnect if an old instance is stuck in a non-joined state.
@@ -1826,14 +1836,18 @@ export const useChatStore = create<ChatState>()(
 
                         // Listen for new chat creation (e.g., first message from a new contact)
                         userChannel.on('new_chat', (payload: any) => {
+                            const chatId = payload?.chatId || payload?.chat_id;
+                            console.log(
+                                `[ChatStore] user:new_chat chatId=${summarizeChatIdForRealtimeLog(chatId)} -> schedule remote reload`,
+                            );
 
                             // Reload chats to get the new chat
-                            scheduleLoadChats(250, true);
+                            scheduleLoadChats(250, true, 'user_new_chat');
                         });
 
                         // Listen for new message notification (for chats we might not have yet or deleted)
                         userChannel.on('new_message', (payload: any) => {
-                            chatStoreLog('[ChatStore] user:new_message received', payload);
+                            console.log('[ChatStore] user:new_message received', payload);
                             const msgId = payload.message_id || payload.messageId;
                             if (msgId && recentlyProcessedMsgIds.has(msgId)) return;
 
@@ -1843,6 +1857,9 @@ export const useChatStore = create<ChatState>()(
                             // Check if we have this chat and are subscribed to its channel
                             const existingChat = chats.find(c => c.chatId === chatId);
                             const isSubscribed = chatChannels.has(chatId);
+                            console.log(
+                                `[ChatStore] user:new_message chatId=${summarizeChatIdForRealtimeLog(chatId)} existingChat=${existingChat ? 'true' : 'false'} subscribed=${isSubscribed ? 'true' : 'false'}`,
+                            );
 
                             if (!existingChat || !isSubscribed) {
                                 // Chat doesn't exist in our list OR we're not subscribed
@@ -1850,7 +1867,7 @@ export const useChatStore = create<ChatState>()(
                                 // 1. New chat we never had
                                 // 2. Chat we deleted (but someone messaged us)
 
-                                scheduleLoadChats(250, true);
+                                scheduleLoadChats(250, true, 'user_new_message_missing_chat');
                             }
                         });
 
@@ -2085,6 +2102,9 @@ export const useChatStore = create<ChatState>()(
                 const wasEmpty = get().chats.length === 0;
                 const forceRemote = options?.forceRemote === true || forceRemoteChatsReload;
                 forceRemoteChatsReload = false;
+                console.log(
+                    `[ChatStore] loadChats begin wasEmpty=${wasEmpty ? 'true' : 'false'} forceRemote=${forceRemote ? 'true' : 'false'} cachedChats=${get().chats.length}`,
+                );
                 if (wasEmpty && emptyChatsRetryCount === 0) {
                     set({ isLoading: true });
                 }
@@ -2097,6 +2117,11 @@ export const useChatStore = create<ChatState>()(
                      // Let the UI finish rendering from local AsyncStorage before background syncing.
                      // The background sync could happen via Phoenix auto-sync or delayed retry.
                      return;
+                }
+                if (!wasEmpty && forceRemote) {
+                    console.log(
+                        `[ChatStore] loadChats bypassing cached path and fetching remote chats (cached=${get().chats.length})`,
+                    );
                 }
 
                 try {

@@ -1,6 +1,7 @@
 2026-03-26
 
 Completed:
+- Added unconditional JS-side chat refresh diagnostics in `mobile/src/lib/ChatStore.ts` so the app now logs `user:new_chat`, `user:new_message`, forced reload scheduling, and whether `loadChats` is using the cached path or bypassing it for a real remote fetch.
 - Debugged the missing trade-event chat end to end: live `curl` to `/api/agents/:identifier/events` returned `200 messagePosted:true`, the live chat API confirmed the message is present in chat `73928163c120`, and the live `/api/chats/:user_id` response confirmed that chat is already in the owner-visible home list data.
 - Added targeted native home-list diagnostics in `ChatNativeHomeModule`, `ChatNativeHomeListView`, and `ChatEngine` so the app now logs fetched chat ids, applied row ids, and whether engine change notifications hit an existing row or miss the current row set.
 - Tightened the JS chat-list refresh path so `user:new_chat`, `user:new_message`, app-resume reloads, and pull-to-refresh can force a real remote `/chats` fetch instead of silently returning the cached non-empty list.
@@ -26,7 +27,7 @@ Completed:
 - Added detached top and bottom gradient masks to the config panel, matching the attachment sheet pattern so the sheet header/body transition no longer shows hard edges.
 
 Remaining:
-- Capture a fresh device log after another external event send and verify which of these happens on-device: `fetchChats` includes `73928163c120`, `setRows` includes it, or `didChange` reports `missingRow` for that chat. That will isolate whether the remaining issue is JS row propagation, native row application, or list presentation.
+- Capture a fresh device log after another external event send and verify the full chain: `user:new_message` or `user:new_chat` log appears, `scheduleLoadChats` fires with `forceRemote=true`, `loadChats begin ... forceRemote=true` appears, `fetchChats` includes `73928163c120`, and then `setRows` either adds or still misses that chat. That will isolate whether the remaining issue is missed user-channel realtime, skipped remote refresh, JS row propagation, or native row application.
 - Live-validate the repeated chat-id flow in the app: ask the standalone agent whether a previously returned chat id is still correct, confirm it re-checks live state instead of repeating memory, and confirm it explains when the same DM id is expected versus when it repaired a stale default.
 - Re-test the live flow with a freshly returned chat id from the agent after the owner-visible chat filter fix. The old chat id the user copied may still point at a chat the owner cannot access.
 - Live-validate the new `ensure_destination_chat` builder flow in the app: ask the standalone agent for the chat id, confirm it creates or reuses the DM, updates the inline config card, and copies the returned default/attached chat id from the native config panel.
