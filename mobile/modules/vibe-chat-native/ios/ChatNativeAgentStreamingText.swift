@@ -312,11 +312,20 @@ enum ChatNativeAgentTextRenderer {
 final class AgentCodeBlockView: UIView {
   private let cardView = UIView()
   private let topBarView = UIView()
+  private let langLabel = UILabel()
   private let codeLabel = UILabel()
   private let copyButton = UIButton(type: .system)
+  private let expandButton = UIButton(type: .system)
   private let copiedLabel = UILabel()
   private var codeContent = ""
+  private var codeLang: String?
+  private var codeFont = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
+  private var baseTextColor = UIColor.white
+  private var isExpanded = false
+  private var maxCollapsedLines = 12
+  private var totalLineCount = 0
   private var copyFeedbackWork: DispatchWorkItem?
+  private var currentAvailableWidth: CGFloat = 0
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -326,13 +335,14 @@ final class AgentCodeBlockView: UIView {
     cardView.layer.cornerRadius = 10.0
     cardView.layer.cornerCurve = .continuous
     cardView.clipsToBounds = true
-    cardView.backgroundColor = UIColor(white: 0.5, alpha: 0.10)
-    cardView.layer.borderWidth = 0.5
-    cardView.layer.borderColor = UIColor(white: 0.5, alpha: 0.20).cgColor
     addSubview(cardView)
 
-    topBarView.backgroundColor = UIColor(white: 0.5, alpha: 0.07)
+    topBarView.backgroundColor = UIColor(white: 0.5, alpha: 0.06)
     cardView.addSubview(topBarView)
+
+    langLabel.font = .monospacedSystemFont(ofSize: 11.5, weight: .medium)
+    langLabel.textColor = UIColor(white: 0.65, alpha: 0.9)
+    topBarView.addSubview(langLabel)
 
     codeLabel.numberOfLines = 0
     codeLabel.backgroundColor = .clear
@@ -343,6 +353,11 @@ final class AgentCodeBlockView: UIView {
     copyButton.tintColor = UIColor(white: 0.65, alpha: 0.9)
     copyButton.addTarget(self, action: #selector(handleCopy), for: .touchUpInside)
     topBarView.addSubview(copyButton)
+
+    expandButton.setImage(UIImage(systemName: "arrow.up.left.and.arrow.down.right", withConfiguration: cfg), for: .normal)
+    expandButton.tintColor = UIColor(white: 0.65, alpha: 0.9)
+    expandButton.addTarget(self, action: #selector(handleExpand), for: .touchUpInside)
+    topBarView.addSubview(expandButton)
 
     copiedLabel.text = "Copied!"
     copiedLabel.font = .systemFont(ofSize: 11.0, weight: .medium)
@@ -356,68 +371,145 @@ final class AgentCodeBlockView: UIView {
   @discardableResult
   func configure(code: String, language: String? = nil, textColor: UIColor, baseFont: UIFont, availableWidth: CGFloat) -> CGFloat {
     codeContent = code
-    let monoFont = UIFont.monospacedSystemFont(ofSize: max(12.5, baseFont.pointSize - 2.5), weight: .regular)
-    let outerH: CGFloat = 6.0
+    codeLang = language
+    baseTextColor = textColor
+    currentAvailableWidth = availableWidth
+    codeFont = UIFont.monospacedSystemFont(ofSize: max(12.5, baseFont.pointSize - 2.5), weight: .regular)
+
+    let outerH: CGFloat = 0.0
     let hPad: CGFloat = 12.0
     let vPad: CGFloat = 10.0
     let barH: CGFloat = 32.0
-    let copyW: CGFloat = 30.0
+    let btnW: CGFloat = 30.0
     let cardWidth = max(1.0, availableWidth - outerH * 2)
     let labelWidth = max(1.0, cardWidth - hPad * 2)
 
-    let attributed = highlightedAttributedCode(code: code, language: language, font: monoFont, baseColor: textColor)
+    // Language label
+    langLabel.text = language?.lowercased()
+    langLabel.isHidden = language == nil
+
+    // Count total lines
+    totalLineCount = code.components(separatedBy: "\n").count
+
+    // Determine display text (collapsed vs expanded)
+    let displayCode: String
+    let needsCollapse = !isExpanded && totalLineCount > maxCollapsedLines
+    if needsCollapse {
+      displayCode = code.components(separatedBy: "\n").prefix(maxCollapsedLines).joined(separator: "\n")
+    } else {
+      displayCode = code
+    }
+
+    // Plain monospace by default; colorized when expanded
+    let attributed: NSAttributedString
+    if isExpanded {
+      attributed = highlightedCode(displayCode, font: codeFont, baseColor: textColor)
+    } else {
+      attributed = NSAttributedString(string: displayCode, attributes: [
+        .font: codeFont,
+        .foregroundColor: textColor.withAlphaComponent(0.88)
+      ])
+    }
     codeLabel.attributedText = attributed
 
     let textHeight = ceil(attributed.boundingRect(
       with: CGSize(width: labelWidth, height: .greatestFiniteMagnitude),
       options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil
     ).height)
-    let bodyH = max(ceil(monoFont.lineHeight), textHeight)
+    let bodyH = max(ceil(codeFont.lineHeight), textHeight)
     let cardH = barH + vPad + bodyH + vPad
+
+    cardView.backgroundColor = UIColor(white: 0.5, alpha: 0.09)
+    cardView.layer.borderWidth = 0.5
+    cardView.layer.borderColor = UIColor(white: 0.5, alpha: 0.18).cgColor
     cardView.frame = CGRect(x: outerH, y: 0, width: cardWidth, height: cardH)
     topBarView.frame = CGRect(x: 0, y: 0, width: cardWidth, height: barH)
-    copyButton.frame = CGRect(
-      x: cardWidth - copyW - 4.0, y: (barH - copyW) * 0.5, width: copyW, height: copyW)
+
+    // Top bar layout: [langLabel ...  copyBtn  expandBtn]
+    langLabel.sizeToFit()
+    langLabel.frame = CGRect(x: hPad, y: (barH - langLabel.frame.height) * 0.5,
+                             width: langLabel.frame.width, height: langLabel.frame.height)
+
+    expandButton.frame = CGRect(x: cardWidth - btnW - 4.0, y: (barH - btnW) * 0.5, width: btnW, height: btnW)
+    copyButton.frame = CGRect(x: expandButton.frame.minX - btnW, y: (barH - btnW) * 0.5, width: btnW, height: btnW)
+
     copiedLabel.sizeToFit()
     copiedLabel.frame.origin = CGPoint(
       x: copyButton.frame.minX - copiedLabel.frame.width - 6.0,
       y: (barH - copiedLabel.frame.height) * 0.5
     )
+
+    // Update expand icon
+    let expandCfg = UIImage.SymbolConfiguration(pointSize: 12.0, weight: .medium)
+    let expandIcon = isExpanded
+      ? "arrow.down.right.and.arrow.up.left"
+      : "arrow.up.left.and.arrow.down.right"
+    expandButton.setImage(UIImage(systemName: expandIcon, withConfiguration: expandCfg), for: .normal)
+    expandButton.isHidden = totalLineCount <= maxCollapsedLines
+
     codeLabel.frame = CGRect(x: hPad, y: barH + vPad, width: labelWidth, height: bodyH)
     return outerH + cardH + 8.0
   }
 
-  private func highlightedAttributedCode(code: String, language: String?, font: UIFont, baseColor: UIColor) -> NSAttributedString {
-    let ns = code as NSString
+  // MARK: - Syntax highlighting (only used in expanded mode)
+
+  private func highlightedCode(_ code: String, font: UIFont, baseColor: UIColor) -> NSAttributedString {
     let mutable = NSMutableAttributedString(string: code, attributes: [
       .font: font,
       .foregroundColor: baseColor.withAlphaComponent(0.88)
     ])
-    let fullRange = NSRange(location: 0, length: ns.length)
+    let fullRange = NSRange(location: 0, length: (code as NSString).length)
 
-    // Basic keyword set (multi-language common tokens)
-    let keywords = ["func","let","var","if","else","for","while","return","class","struct","enum","import","extension","guard","in","where","as","try","catch","throw","switch","case","default","public","private","protocol","static","const","function","new","this","super","await","async","yield","package","interface","implements","override","final","val","def","namespace","using"]
-    let keywordPattern = "\\b(" + keywords.joined(separator: "|") + ")\\b"
-    if let re = try? NSRegularExpression(pattern: keywordPattern, options: .caseInsensitive) {
-      for m in re.matches(in: code, options: [], range: fullRange) { mutable.addAttribute(.foregroundColor, value: UIColor.systemPurple, range: m.range) }
+    // Keywords
+    let kw = "func|let|var|if|else|for|while|return|class|struct|enum|import|extension|guard|in|where|as|try|catch|throw|switch|case|default|public|private|protocol|static|const|function|new|this|super|await|async|yield|package|interface|implements|override|final|val|def|namespace|using|fn|mut|use|mod|pub|impl|type|trait|match|loop|break|continue|self|Self|nil|null|true|false|None|Some"
+    if let re = try? NSRegularExpression(pattern: "\\b(\(kw))\\b") {
+      for m in re.matches(in: code, range: fullRange) {
+        mutable.addAttribute(.foregroundColor, value: UIColor.systemPink, range: m.range)
+      }
+    }
+
+    // Types / Macros (capitalized words, or word!)
+    if let re = try? NSRegularExpression(pattern: "\\b[A-Z][a-zA-Z0-9_]*\\b|\\b[a-z_]+!") {
+      for m in re.matches(in: code, range: fullRange) {
+        mutable.addAttribute(.foregroundColor, value: UIColor(red: 0.4, green: 0.75, blue: 1.0, alpha: 1.0), range: m.range)
+      }
     }
 
     // Numbers
     if let re = try? NSRegularExpression(pattern: "\\b\\d+(?:\\.\\d+)?\\b") {
-      for m in re.matches(in: code, options: [], range: fullRange) { mutable.addAttribute(.foregroundColor, value: UIColor.systemOrange, range: m.range) }
+      for m in re.matches(in: code, range: fullRange) {
+        mutable.addAttribute(.foregroundColor, value: UIColor.systemOrange, range: m.range)
+      }
     }
 
-    // Strings (single and double quoted)
-    if let re = try? NSRegularExpression(pattern: "\"(\\\\.|[^\"\\\\])*\"|'(\\\\.|[^'\\\\])*'") {
-      for m in re.matches(in: code, options: [], range: fullRange) { mutable.addAttribute(.foregroundColor, value: UIColor.systemGreen, range: m.range) }
+    // Strings
+    if let re = try? NSRegularExpression(pattern: "\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'") {
+      for m in re.matches(in: code, range: fullRange) {
+        mutable.addAttribute(.foregroundColor, value: UIColor.systemGreen, range: m.range)
+      }
     }
 
-    // Comments (single-line // and block /* */)
-    if let re = try? NSRegularExpression(pattern: "//.*|/\\*[\\s\\S]*?\\*/", options: [.dotMatchesLineSeparators, .anchorsMatchLines]) {
-      for m in re.matches(in: code, options: [], range: fullRange) { mutable.addAttribute(.foregroundColor, value: UIColor(white: 0.7, alpha: 1.0), range: m.range) }
+    // Comments (must be last to override)
+    if let re = try? NSRegularExpression(pattern: "//.*|#.*|/\\*[\\s\\S]*?\\*/", options: [.dotMatchesLineSeparators, .anchorsMatchLines]) {
+      for m in re.matches(in: code, range: fullRange) {
+        mutable.addAttribute(.foregroundColor, value: UIColor(white: 0.55, alpha: 1.0), range: m.range)
+      }
     }
 
     return mutable
+  }
+
+  @objc private func handleExpand() {
+    isExpanded.toggle()
+    _ = configure(code: codeContent, language: codeLang, textColor: baseTextColor, baseFont: codeFont, availableWidth: currentAvailableWidth)
+
+    // Trigger parent re-layout
+    if let sv = superview {
+      sv.setNeedsLayout()
+      sv.layoutIfNeeded()
+    }
+    // Post notification so the table/collection can invalidate its layout
+    NotificationCenter.default.post(name: Notification.Name("AgentCodeBlockExpanded"), object: nil)
   }
 
   @objc private func handleCopy() {

@@ -419,8 +419,8 @@ private final class ChatNativeAgentPlainTextView: UIView {
     let isProgress = row.messageType == "agent_progress"
     let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
 
-    let topPadding: CGFloat = isProgress ? 8.0 : 2.0
-    let bottomPadding: CGFloat = isProgress ? 6.0 : 10.0
+    let topPadding: CGFloat = isProgress ? 8.0 : 0.0
+    let bottomPadding: CGFloat = isProgress ? 6.0 : 14.0
     let leftPadding: CGFloat = 8.0
     let rightPadding: CGFloat = 32.0
     let labelWidth = max(1.0, availableWidth - leftPadding - rightPadding)
@@ -924,7 +924,7 @@ private final class ChatNativeAgentProgressTreeView: UIView {
 }
 
 private final class ChatNativeAgentActionBarView: UIView {
-  private let buttonSize: CGFloat = 20.0
+  private let buttonSize: CGFloat = 28.0
   private let stackView = UIStackView()
   private let copyButton = UIButton(type: .system)
   private let thumbUpButton = UIButton(type: .system)
@@ -945,13 +945,13 @@ private final class ChatNativeAgentActionBarView: UIView {
     stackView.axis = .horizontal
     stackView.alignment = .center
     stackView.distribution = .fill
-    stackView.spacing = 4.0
+    stackView.spacing = 2.0
     addSubview(stackView)
 
     configureButton(copyButton, symbolName: "doc.on.doc", action: .copy)
     configureButton(thumbUpButton, symbolName: "hand.thumbsup", action: .thumbUp)
     configureButton(thumbDownButton, symbolName: "hand.thumbsdown", action: .thumbDown)
-    configureButton(regenerateButton, symbolName: "arrow.clockwise", action: .regenerate)
+    configureButton(regenerateButton, symbolName: "arrow.trianglehead.2.counterclockwise", action: .regenerate)
   }
 
   required init?(coder: NSCoder) {
@@ -967,7 +967,7 @@ private final class ChatNativeAgentActionBarView: UIView {
     sourceText = row.agentActionSourceText ?? row.plainContent ?? row.text
     regeneratePrompt = row.agentRegeneratePrompt ?? ""
 
-    let iconColor = appearance.timeColorThem.withAlphaComponent(0.78)
+    let iconColor = appearance.timeColorThem.withAlphaComponent(0.55)
 
     [copyButton, thumbUpButton, thumbDownButton, regenerateButton].forEach { button in
       button.tintColor = iconColor
@@ -988,20 +988,17 @@ private final class ChatNativeAgentActionBarView: UIView {
       + CGFloat(max(0, visibleButtons.count - 1)) * stackView.spacing
     cachedStackFrame = CGRect(
       x: 8.0,
-      y: 2.0,
+      y: 0.0,
       width: min(max(1.0, contentWidth), max(1.0, availableWidth - 40.0)),
       height: buttonSize
     )
     setNeedsLayout()
-    return 30.0
+    return buttonSize + 4.0
   }
 
   override func layoutSubviews() {
     super.layoutSubviews()
     stackView.frame = cachedStackFrame
-    [copyButton, thumbUpButton, thumbDownButton, regenerateButton].forEach { button in
-      button.layer.cornerRadius = 0.0
-    }
   }
 
   private func configureButton(
@@ -1009,14 +1006,14 @@ private final class ChatNativeAgentActionBarView: UIView {
     symbolName: String,
     action: ChatNativeAgentMessageAction
   ) {
-    let config = UIImage.SymbolConfiguration(pointSize: 13.0, weight: .medium)
+    let config = UIImage.SymbolConfiguration(pointSize: 14.0, weight: .regular)
     button.translatesAutoresizingMaskIntoConstraints = false
     var buttonConfiguration = UIButton.Configuration.plain()
     buttonConfiguration.contentInsets = NSDirectionalEdgeInsets(
-      top: 3.0,
-      leading: 3.0,
-      bottom: 3.0,
-      trailing: 3.0
+      top: 4.0,
+      leading: 4.0,
+      bottom: 4.0,
+      trailing: 4.0
     )
     buttonConfiguration.image = UIImage(systemName: symbolName, withConfiguration: config)
     button.configuration = buttonConfiguration
@@ -1047,17 +1044,11 @@ private final class ChatNativeAgentActionBarView: UIView {
 
 private final class ChatNativeAgentCardView: UIControl {
   private let cardView = UIView()
-  private let iconView = UIImageView()
   private let titleLabel = UILabel()
-  private let statusDot = UIView()
-  private let statusLabel = UILabel()
-  private let chevronView = UIImageView()
+  private let arrowView = UIImageView()
   private var cachedCardFrame: CGRect = .zero
-  private var cachedIconFrame: CGRect = .zero
   private var cachedTitleFrame: CGRect = .zero
-  private var cachedStatusDotFrame: CGRect = .zero
-  private var cachedStatusLabelFrame: CGRect = .zero
-  private var cachedChevronFrame: CGRect = .zero
+  private var cachedArrowFrame: CGRect = .zero
   private var currentCard: ChatListRow.AgentCard?
   var onNativeEvent: (([String: Any]) -> Void)?
 
@@ -1080,26 +1071,16 @@ private final class ChatNativeAgentCardView: UIControl {
     cardView.isUserInteractionEnabled = false
     addSubview(cardView)
 
-    iconView.contentMode = .scaleAspectFit
-    iconView.tintColor = .white
-    cardView.addSubview(iconView)
-
     titleLabel.font = .systemFont(ofSize: 14.0, weight: .semibold)
     titleLabel.numberOfLines = 1
     titleLabel.lineBreakMode = .byTruncatingTail
     cardView.addSubview(titleLabel)
 
-    statusDot.layer.cornerRadius = 3.5
-    cardView.addSubview(statusDot)
-
-    statusLabel.font = .systemFont(ofSize: 11.0, weight: .medium)
-    cardView.addSubview(statusLabel)
-
-    chevronView.image = UIImage(
-      systemName: "chevron.right",
+    arrowView.image = UIImage(
+      systemName: "arrow.up.right",
       withConfiguration: UIImage.SymbolConfiguration(pointSize: 11.0, weight: .semibold)
     )
-    cardView.addSubview(chevronView)
+    cardView.addSubview(arrowView)
 
     addTarget(self, action: #selector(handleTap), for: .touchUpInside)
   }
@@ -1123,66 +1104,42 @@ private final class ChatNativeAgentCardView: UIControl {
     let outerLeft: CGFloat = 6.0
     let outerRight: CGFloat = 26.0
     let cardWidth = max(1.0, availableWidth - outerLeft - outerRight)
-    let cardHeight: CGFloat = 40.0
-    let leftPadding: CGFloat = 12.0
-    let rightPadding: CGFloat = 12.0
-    let chevronSize = CGSize(width: 12.0, height: 12.0)
+    let cardHeight: CGFloat = 38.0
+    let leftPadding: CGFloat = 14.0
+    let rightPadding: CGFloat = 14.0
+    let arrowSize = CGSize(width: 12.0, height: 12.0)
 
     cardView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.18)
     cardView.layer.borderWidth = 0.5
     cardView.layer.borderColor = appearance.dayBorderColor.withAlphaComponent(0.18).cgColor
 
-    iconView.isHidden = true
-
     titleLabel.text = card.displayName
     titleLabel.textColor = appearance.textColorThem
 
-    let isPublished = card.status.lowercased() == "published"
-    let statusText = card.status.capitalized
-    statusLabel.text = statusText
-    statusLabel.textColor = appearance.timeColorThem.withAlphaComponent(0.7)
-    statusDot.backgroundColor = isPublished
-      ? UIColor.systemGreen.withAlphaComponent(0.85)
-      : appearance.timeColorThem.withAlphaComponent(0.4)
+    arrowView.tintColor = appearance.timeColorThem.withAlphaComponent(0.45)
 
-    chevronView.tintColor = appearance.timeColorThem.withAlphaComponent(0.4)
+    // Layout — title centered vertically, arrow on right
+    let arrowX = cardWidth - rightPadding - arrowSize.width
+    let arrowY = (cardHeight - arrowSize.height) * 0.5
+    cachedArrowFrame = CGRect(x: arrowX, y: arrowY, width: arrowSize.width, height: arrowSize.height)
 
-    // Layout — icon hidden, text starts at leftPadding
-    let textLeft = leftPadding
-    let chevronX = cardWidth - rightPadding - chevronSize.width
-    let chevronY = (cardHeight - chevronSize.height) * 0.5
-    cachedChevronFrame = CGRect(x: chevronX, y: chevronY, width: chevronSize.width, height: chevronSize.height)
+    let textRight = arrowX - 8.0
+    let textWidth = max(1.0, textRight - leftPadding)
+    let titleHeight: CGFloat = 18.0
+    let titleY = (cardHeight - titleHeight) * 0.5
+    cachedTitleFrame = CGRect(x: leftPadding, y: titleY, width: textWidth, height: titleHeight)
 
-    let textRight = chevronX - 8.0
-    let textWidth = max(1.0, textRight - textLeft)
-
-    let titleY: CGFloat = 6.0
-    let titleHeight: CGFloat = 16.0
-    cachedTitleFrame = CGRect(x: textLeft, y: titleY, width: textWidth, height: titleHeight)
-
-    let dotSize: CGFloat = 7.0
-    let statusY = titleY + titleHeight + 2.0
-    cachedStatusDotFrame = CGRect(x: textLeft, y: statusY + 2.5, width: dotSize, height: dotSize)
-
-    let statusTextX = textLeft + dotSize + 5.0
-    cachedStatusLabelFrame = CGRect(x: statusTextX, y: statusY, width: textWidth - dotSize - 5.0, height: 12.0)
-
-    cachedIconFrame = .zero
-    cachedCardFrame = CGRect(x: outerLeft, y: 4.0, width: cardWidth, height: cardHeight)
+    cachedCardFrame = CGRect(x: outerLeft, y: 2.0, width: cardWidth, height: cardHeight)
 
     setNeedsLayout()
-    return cachedCardFrame.maxY + 4.0
+    return cachedCardFrame.maxY + 6.0
   }
 
   override func layoutSubviews() {
     super.layoutSubviews()
     cardView.frame = cachedCardFrame
-    iconView.frame = cachedIconFrame
     titleLabel.frame = cachedTitleFrame
-    statusDot.frame = cachedStatusDotFrame
-    statusDot.layer.cornerRadius = cachedStatusDotFrame.width * 0.5
-    statusLabel.frame = cachedStatusLabelFrame
-    chevronView.frame = cachedChevronFrame
+    arrowView.frame = cachedArrowFrame
   }
 
   @objc private func handleTap() {
