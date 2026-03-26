@@ -29,17 +29,190 @@ enum ChatNativeAgentTextRenderer {
       paragraphStyle.maximumLineHeight = lineHeight
     }
 
-    var attrs: [NSAttributedString.Key: Any] = [
+    var baseAttrs: [NSAttributedString.Key: Any] = [
       .font: font,
       .foregroundColor: textColor,
       .paragraphStyle: paragraphStyle,
     ]
     if let lineHeight {
-      attrs[.baselineOffset] = (lineHeight - font.lineHeight) * 0.25
+      baseAttrs[.baselineOffset] = (lineHeight - font.lineHeight) * 0.25
     }
-    let mutable = NSMutableAttributedString(string: text, attributes: attrs)
 
-    // 1) Parse Markdown links [label](https://...) first so indices remain valid.
+    // Split text into fenced code blocks and regular text blocks.
+    let blocks = splitFencedCodeBlocks(text)
+
+    guard blocks.count > 1 else {
+      // Fast path: no code fences — process lines directly.
+      if case .normalText(let t) = blocks.first ?? .normalText(text) {
+        return applyLineMarkdown(t, baseAttrs: baseAttrs, font: font, textColor: textColor)
+      }
+      return applyLineMarkdown(text, baseAttrs: baseAttrs, font: font, textColor: textColor)
+    }
+
+    let result = NSMutableAttributedString()
+    for (i, block) in blocks.enumerated() {
+      if i > 0 { result.append(NSAttributedString(string: "\n", attributes: baseAttrs)) }
+      switch block {
+      case .normalText(let t):
+        result.append(applyLineMarkdown(t, baseAttrs: baseAttrs, font: font, textColor: textColor))
+      case .codeBlock(let code):
+        result.append(renderCodeBlock(code, baseFont: font, textColor: textColor))
+      }
+    }
+    return result
+  }
+
+  // MARK: - Block-level parsing
+
+  private enum MarkdownBlock {
+    case normalText(String)
+    case codeBlock(String)
+  }
+
+  /// Splits raw markdown text into alternating normalText / codeBlock segments
+  /// by detecting fenced code blocks (``` ... ```).
+  private static func splitFencedCodeBlocks(_ text: String) -> [MarkdownBlock] {
+    var blocks: [MarkdownBlock] = []
+    var normalLines: [String] = []
+    var codeLines: [String] = []
+    var inCodeBlock = false
+
+    for line in text.components(separatedBy: "\n") {
+      if line.hasPrefix("```") {
+        if inCodeBlock {
+          // End of fenced code block.
+          let codeText = codeLines.joined(separator: "\n")
+          if !codeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(.codeBlock(codeText))
+          }
+          codeLines = []
+          inCodeBlock = false
+        } else {
+          // Start of fenced code block — flush buffered normal lines first.
+          let normalText = normalLines.joined(separator: "\n")
+          if !normalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(.normalText(normalText))
+          }
+          normalLines = []
+          inCodeBlock = true
+        }
+      } else if inCodeBlock {
+        codeLines.append(line)
+      } else {
+        normalLines.append(line)
+      }
+    }
+
+    // Flush remaining lines (handles unclosed code blocks during streaming).
+    if inCodeBlock, !codeLines.isEmpty {
+      blocks.append(.codeBlock(codeLines.joined(separator: "\n")))
+    } else if !normalLines.isEmpty {
+      let t = normalLines.joined(separator: "\n")
+      if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        blocks.append(.normalText(t))
+      }
+    }
+
+    return blocks.isEmpty ? [.normalText(text)] : blocks
+  }
+
+  /// Processes a normal-text block line by line, handling headings and table
+  /// separator rows, then applying inline formatting to each regular line.
+  private static func applyLineMarkdown(
+    _ text: String,
+    baseAttrs: [NSAttributedString.Key: Any],
+    font: UIFont,
+    textColor: UIColor
+  ) -> NSAttributedString {
+    let result = NSMutableAttributedString()
+    var addedAny = false
+
+    for line in text.components(separatedBy: "\n") {
+      // Skip table separator rows like |---|---|
+      if isTableSeparatorLine(line) { continue }
+
+      if addedAny {
+        result.append(NSAttributedString(string: "\n", attributes: baseAttrs))
+      }
+
+      // Heading lines: # / ## / ###
+      if let (level, headingText) = parseHeadingLine(line) {
+        result.append(renderHeadingLine(headingText, level: level, baseFont: font, textColor: textColor, baseAttrs: baseAttrs))
+        addedAny = true
+        continue
+      }
+
+      // Regular line with inline formatting (bold, links, code, URLs).
+      result.append(applyInlineFormatting(line, baseAttrs: baseAttrs, font: font))
+      addedAny = true
+    }
+
+    return result
+  }
+
+  private static func isTableSeparatorLine(_ line: String) -> Bool {
+    let t = line.trimmingCharacters(in: .whitespaces)
+    guard t.count > 2, t.hasPrefix("|") else { return false }
+    for ch in t { if ch != "|" && ch != "-" && ch != ":" && ch != " " { return false } }
+    return true
+  }
+
+  private static func parseHeadingLine(_ line: String) -> (Int, String)? {
+    let trimmed = line.trimmingCharacters(in: .whitespaces)
+    var level = 0
+    var idx = trimmed.startIndex
+    while idx < trimmed.endIndex, trimmed[idx] == "#" {
+      level += 1
+      idx = trimmed.index(after: idx)
+    }
+    guard level >= 1, level <= 6, idx < trimmed.endIndex, trimmed[idx] == " " else { return nil }
+    let content = String(trimmed[trimmed.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
+    return content.isEmpty ? nil : (level, content)
+  }
+
+  private static func renderHeadingLine(
+    _ text: String,
+    level: Int,
+    baseFont: UIFont,
+    textColor: UIColor,
+    baseAttrs: [NSAttributedString.Key: Any]
+  ) -> NSAttributedString {
+    let scale: CGFloat = level == 1 ? 1.22 : level == 2 ? 1.10 : 1.0
+    let headingFont: UIFont = {
+      if let d = baseFont.fontDescriptor.withSymbolicTraits(.traitBold) {
+        return UIFont(descriptor: d, size: round(baseFont.pointSize * scale))
+      }
+      return UIFont.boldSystemFont(ofSize: round(baseFont.pointSize * scale))
+    }()
+    // Build a fresh paragraph style without the tight line-height lock.
+    let ps = NSMutableParagraphStyle()
+    if let existing = baseAttrs[.paragraphStyle] as? NSParagraphStyle { ps.setParagraphStyle(existing) }
+    ps.minimumLineHeight = 0
+    ps.maximumLineHeight = 0
+    var attrs = baseAttrs
+    attrs[.font] = headingFont
+    attrs[.foregroundColor] = textColor
+    attrs[.paragraphStyle] = ps
+    attrs.removeValue(forKey: .baselineOffset)
+    return NSAttributedString(string: text, attributes: attrs)
+  }
+
+  private static func renderCodeBlock(_ code: String, baseFont: UIFont, textColor: UIColor) -> NSAttributedString {
+    let monoFont = UIFont.monospacedSystemFont(ofSize: max(11.0, baseFont.pointSize - 2.0), weight: .regular)
+    return NSAttributedString(string: code, attributes: [
+      .font: monoFont,
+      .foregroundColor: textColor.withAlphaComponent(0.85),
+    ])
+  }
+
+  private static func applyInlineFormatting(
+    _ text: String,
+    baseAttrs: [NSAttributedString.Key: Any],
+    font: UIFont
+  ) -> NSAttributedString {
+    let mutable = NSMutableAttributedString(string: text, attributes: baseAttrs)
+
+    // 1) Markdown links [label](url) — replace first to preserve offsets.
     let linkMatches = chatNativeAgentMarkdownLinkRegex.matches(
       in: mutable.string,
       range: NSRange(mutable.string.startIndex..., in: mutable.string)
@@ -51,8 +224,7 @@ enum ChatNativeAgentTextRenderer {
       else { continue }
       let label = String(mutable.string[labelRange])
       let urlString = String(mutable.string[urlRange])
-      let replacement = NSAttributedString(string: label, attributes: attrs)
-      mutable.replaceCharacters(in: match.range, with: replacement)
+      mutable.replaceCharacters(in: match.range, with: NSAttributedString(string: label, attributes: baseAttrs))
       let replacedRange = NSRange(location: match.range.location, length: (label as NSString).length)
       if let url = URL(string: urlString) {
         mutable.addAttribute(.link, value: url, range: replacedRange)
@@ -69,14 +241,13 @@ enum ChatNativeAgentTextRenderer {
     for match in boldMatches.reversed() {
       guard let range = Range(match.range(at: 1), in: mutable.string) else { continue }
       let boldText = String(mutable.string[range])
-      var boldAttrs = attrs
-      if let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold) {
-        boldAttrs[.font] = UIFont(descriptor: descriptor, size: font.pointSize)
+      var boldAttrs = baseAttrs
+      if let d = font.fontDescriptor.withSymbolicTraits(.traitBold) {
+        boldAttrs[.font] = UIFont(descriptor: d, size: font.pointSize)
       } else {
         boldAttrs[.font] = UIFont.boldSystemFont(ofSize: font.pointSize)
       }
-      let replacement = NSAttributedString(string: boldText, attributes: boldAttrs)
-      mutable.replaceCharacters(in: match.range, with: replacement)
+      mutable.replaceCharacters(in: match.range, with: NSAttributedString(string: boldText, attributes: boldAttrs))
     }
 
     // 3) Inline code `code`
@@ -87,13 +258,12 @@ enum ChatNativeAgentTextRenderer {
     for match in codeMatches.reversed() {
       guard let range = Range(match.range(at: 1), in: mutable.string) else { continue }
       let codeText = String(mutable.string[range])
-      var codeAttrs = attrs
+      var codeAttrs = baseAttrs
       codeAttrs[.font] = UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
-      let replacement = NSAttributedString(string: codeText, attributes: codeAttrs)
-      mutable.replaceCharacters(in: match.range, with: replacement)
+      mutable.replaceCharacters(in: match.range, with: NSAttributedString(string: codeText, attributes: codeAttrs))
     }
 
-    // 4) Auto-detect bare URLs (e.g. https://...) and style them if not already linked.
+    // 4) Auto-detect bare URLs and style them if not already linked.
     if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
       let urlMatches = detector.matches(
         in: mutable.string,
