@@ -1,6 +1,8 @@
 2026-03-26
 
 Completed:
+- Fixed standalone agent naming at creation time: the builder now derives a practical fallback `display_name` from the user’s workflow description/persona instead of hard-defaulting to `New Agent`, and the builder prompt now explicitly tells the model to pass `display_name` whenever the user provided or corrected a name.
+- Added native rename support to the standalone agent config panel in `ChatNativeAgentConfigPanel.swift`. The panel now shows a `Name` row, opens a native text-field alert, and saves the new name through the authenticated `PUT /api/agents/:id` API instead of forcing renames through chat only.
 - Fixed cached-start home list refresh in `mobile/src/lib/ChatStore.ts`: when chats are already hydrated from AsyncStorage, `loadChats()` now schedules one short background remote `/chats` reconciliation instead of only returning cached rows forever, and any real remote reload clears that timer and updates the cooldown so realtime/manual refreshes do not double-fetch.
 - Added unconditional JS-side chat refresh diagnostics in `mobile/src/lib/ChatStore.ts` so the app now logs `user:new_chat`, `user:new_message`, forced reload scheduling, and whether `loadChats` is using the cached path or bypassing it for a real remote fetch.
 - Debugged the missing trade-event chat end to end: live `curl` to `/api/agents/:identifier/events` returned `200 messagePosted:true`, the live chat API confirmed the message is present in chat `73928163c120`, and the live `/api/chats/:user_id` response confirmed that chat is already in the owner-visible home list data.
@@ -28,6 +30,7 @@ Completed:
 - Added detached top and bottom gradient masks to the config panel, matching the attachment sheet pattern so the sheet header/body transition no longer shows hard edges.
 
 Remaining:
+- If you want event summaries to be truly batched, that still needs a separate runtime change. The current `AgentEventRuntime` groups events by `thread_key` and keeps one evolving thread summary/state, but it still posts one summary/update per ingested event rather than waiting and emitting a delayed batch summary across multiple incoming events.
 - Capture a fresh device log after another cold app start or external event send and verify the new cached-start reconciliation path: `loadChats using offline cached data ...`, then `scheduling background remote chat reconciliation`, then `background remote chat reconciliation firing`, then `loadChats begin ... forceRemote=true`, then `native fetchChats succeeded` with the missing agent chat id included. That will confirm the home list no longer needs a hot reload/manual refresh to pick up new remote chats.
 - Live-validate the repeated chat-id flow in the app: ask the standalone agent whether a previously returned chat id is still correct, confirm it re-checks live state instead of repeating memory, and confirm it explains when the same DM id is expected versus when it repaired a stale default.
 - Re-test the live flow with a freshly returned chat id from the agent after the owner-visible chat filter fix. The old chat id the user copied may still point at a chat the owner cannot access.

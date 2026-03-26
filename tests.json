@@ -17,6 +17,10 @@
       "status": "passed",
       "details": "Added builder tool `validate_destination_chat` so the standalone agent re-checks live attached/default destination chats, compares a provided chat id against current owner-visible state, repairs stale default destinations when needed, and explains why the same DM id can still be correct."
     },
+    "server_builder_agent_naming": {
+      "status": "passed",
+      "details": "The standalone builder now infers a practical creation-time `display_name` from the provided workflow description/persona when the tool input omitted a name, and the builder prompt now requires explicit `display_name` usage for create/rename requests. `mix compile` passed after the backend change."
+    },
     "server_live_event_delivery_debug": {
       "status": "passed",
       "details": "Live curl to `/api/agents/:identifier/events` returned `200` with `messagePosted: true`; authenticated live GET `/api/chat/73928163c120/messages` and `/api/chats/:user_id` both confirmed the agent event message is present in chat `73928163c120` and that chat is in the owner-visible home list API payload."
@@ -48,6 +52,10 @@
     "ios_native_home_debug_logging": {
       "status": "passed",
       "details": "Added targeted native logging to ChatNativeHomeModule.fetchChats, ChatNativeHomeListView.setRows/didChange, and ChatEngine.postChangeLocked. `xcrun swiftc -parse` passed for the touched Swift files and `git diff --check` passed for the touched mobile files."
+    },
+    "ios_native_agent_config_rename": {
+      "status": "passed",
+      "details": "The native standalone agent config panel now exposes a `Name` row that opens a native rename alert and saves through `PUT /api/agents/:id`. `xcrun swiftc -parse mobile/modules/vibe-chat-native/ios/ChatNativeAgentConfigPanel.swift mobile/modules/vibe-chat-native/ios/ChatListViewModels.swift` passed."
     },
     "mobile_chatstore_realtime_reload_logging": {
       "status": "passed",

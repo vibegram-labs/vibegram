@@ -894,6 +894,7 @@ defmodule Vibe.AI.AgentBuilder do
     - For setup and integration requests, ask only for true blockers. Treat these as blockers: whether to create a new agent or use an existing one when that is ambiguous, destination chat selection when the user wants delivery inside Vibe and there is no default attached chat, and secret rotation when the current full secret is unavailable.
     - Do NOT ask for low-value polish when the workflow is already clear. Do not ask for channel name, display name, username, event labels, tone, welcome copy, or message formatting unless the user explicitly asked to customize them or that choice changes functionality.
     - If the user clearly asked to create a new agent and the workflow is already described, create the draft with sensible defaults immediately. Infer a practical display name from the workflow instead of blocking on naming questions.
+    - When the user gives a preferred agent name, says the generated name is bad, or asks to rename the agent, always pass display_name explicitly to create_agent or update_agent instead of leaving the old default in place.
     - If the user asks for env vars, integration details, or Python/backend setup, always produce a clean integration pack after using tools. Prefer integration_pack_text, env_export_lines, env_vars, and python_event_example from tool results instead of improvising your own shape.
     - When default_destination_chat is present, explain that destinationChatId is optional for external event calls. Only require a chat id in the payload when there is no default destination configured.
     - When the user already provided example event types such as trade open, trade close, order created, or signal summary, treat them as sufficient defaults. Do not ask them to restate exact event names unless the user explicitly wants strict naming control.
@@ -954,7 +955,7 @@ defmodule Vibe.AI.AgentBuilder do
     %{}
     |> maybe_put(
       "display_name",
-      normalize_optional_string(Map.get(input, "display_name")) || "New Agent"
+      inferred_create_display_name(input)
     )
     |> maybe_put("username", normalize_optional_string(Map.get(input, "username")))
     |> maybe_put("system_prompt", normalize_optional_string(Map.get(input, "system_prompt")))
@@ -976,6 +977,76 @@ defmodule Vibe.AI.AgentBuilder do
     |> maybe_put("output_modes", normalize_string_list(Map.get(input, "output_modes")))
     |> maybe_put("voice_profile", normalize_optional_string(Map.get(input, "voice_profile")))
     |> maybe_put("welcome_message", normalize_optional_string(Map.get(input, "welcome_message")))
+  end
+
+  defp inferred_create_display_name(input) do
+    normalize_optional_string(Map.get(input, "display_name")) ||
+      normalize_optional_string(Map.get(input, "name")) ||
+      infer_display_name_from_text(Map.get(input, "description")) ||
+      infer_display_name_from_text(Map.get(input, "persona")) ||
+      "New Agent"
+  end
+
+  defp infer_display_name_from_text(value) do
+    text = normalize_optional_string(value)
+
+    with true <- is_binary(text) do
+      candidate =
+        text
+        |> String.split(~r/[.!?\n]/, parts: 2)
+        |> List.first()
+        |> normalize_optional_string()
+        |> strip_display_name_prefixes()
+        |> case do
+          nil -> nil
+          trimmed -> trimmed |> String.trim(" -,:;") |> normalize_optional_string()
+        end
+
+      candidate
+      |> case do
+        nil ->
+          nil
+
+        phrase ->
+          words =
+            phrase
+            |> String.split(~r/\s+/, trim: true)
+            |> Enum.take(4)
+
+          title =
+            words
+            |> Enum.map(&String.capitalize/1)
+            |> Enum.join(" ")
+            |> normalize_optional_string()
+
+          cond do
+            is_nil(title) ->
+              nil
+
+            Regex.match?(~r/\b(agent|assistant|bot)\b/i, title) ->
+              title
+
+            true ->
+              "#{title} Agent"
+          end
+          |> case do
+            nil -> nil
+            inferred -> inferred |> String.slice(0, 48) |> String.trim() |> normalize_optional_string()
+          end
+      end
+    else
+      _ -> nil
+    end
+  end
+
+  defp strip_display_name_prefixes(nil), do: nil
+
+  defp strip_display_name_prefixes(text) do
+    text
+    |> String.replace(~r/^(i\s+(need|want)\s+|please\s+)?(create|build|make|set\s*up|setup)\s+(me\s+|us\s+|a\s+|an\s+)?/i, "")
+    |> String.replace(~r/^(an?\s+)?(agent|assistant|bot)\s+(for|that|to)\s+/i, "")
+    |> String.replace(~r/^(for|about)\s+/i, "")
+    |> normalize_optional_string()
   end
 
   defp maybe_apply_generated_prompt(attrs, nil), do: attrs

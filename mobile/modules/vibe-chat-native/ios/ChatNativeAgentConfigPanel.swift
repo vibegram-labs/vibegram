@@ -878,6 +878,17 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     stackView.addArrangedSubview(secretCardView)
 
     let agentSection = ChatNativeAgentConfigSectionView(title: "Agent", theme: theme)
+    let nameRow = ChatNativeAgentConfigRow(
+      title: "Name",
+      value: card.displayName,
+      theme: theme,
+      symbolName: "person.crop.square",
+      showsChevron: true
+    )
+    nameRow.onTap = { [weak self] in
+      self?.promptRename()
+    }
+    agentSection.contentStack.addArrangedSubview(nameRow)
     agentSection.contentStack.addArrangedSubview(
       makeCopyRow(
         title: "Agent ID",
@@ -1070,6 +1081,16 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     )
   }
 
+  private func rebuildContent() {
+    stackView.arrangedSubviews.forEach { view in
+      stackView.removeArrangedSubview(view)
+      view.removeFromSuperview()
+    }
+    buildContent()
+    configureCallbacks()
+    refreshHeaderAndSecret()
+  }
+
   private func makeCopyRow(
     title: String,
     value: String,
@@ -1094,7 +1115,7 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     return row
   }
 
-  private func secretRequestURL(path: String) -> URL? {
+  private func apiRequestURL(path: String) -> URL? {
     guard let apiContext else { return nil }
     let encodedAgentId =
       card.agentId.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? card.agentId
@@ -1107,18 +1128,22 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
       ?? apiContext.apiBaseURL.appendingPathComponent(normalizedPath)
   }
 
-  private func secretHeaders(_ request: inout URLRequest) {
+  private func apiHeaders(_ request: inout URLRequest) {
     guard let apiContext else { return }
     request.setValue("Bearer \(apiContext.token)", forHTTPHeaderField: "Authorization")
     request.setValue("application/json", forHTTPHeaderField: "Accept")
   }
 
-  private func updateCard(secret: String?, secretHint: String?) {
+  private func updateCard(
+    displayName: String? = nil,
+    secret: String? = nil,
+    secretHint: String? = nil
+  ) {
     card = ChatListRow.AgentCard(
       id: card.id,
       style: card.style,
       agentId: card.agentId,
-      displayName: card.displayName,
+      displayName: displayName ?? card.displayName,
       username: card.username,
       identifier: card.identifier,
       status: card.status,
@@ -1142,6 +1167,82 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     )
   }
 
+  private func promptRename() {
+    let alert = UIAlertController(
+      title: "Rename Agent",
+      message: "Choose the name shown for this agent across Vibe.",
+      preferredStyle: .alert
+    )
+    alert.addTextField { textField in
+      textField.placeholder = "Agent name"
+      textField.text = self.card.displayName
+      textField.clearButtonMode = .whileEditing
+      textField.autocapitalizationType = .words
+    }
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+    alert.addAction(UIAlertAction(title: "Save", style: .default) { [weak self, weak alert] _ in
+      guard let self else { return }
+      let proposedName =
+        alert?.textFields?.first?.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      self.renameAgent(to: proposedName)
+    })
+    present(alert, animated: true)
+  }
+
+  private func renameAgent(to proposedName: String) {
+    let normalizedName = proposedName.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedName.isEmpty else {
+      onToast?("Name cannot be empty")
+      return
+    }
+    guard normalizedName != card.displayName else {
+      onToast?("Name unchanged")
+      return
+    }
+    guard let url = apiRequestURL(path: "/api/agents/{agent_id}") else {
+      onToast?("Missing API session")
+      return
+    }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "PUT"
+    apiHeaders(&request)
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: ["display_name": normalizedName])
+
+    let task = ChatPhoenixClient.makePinnedURLSession().dataTask(with: request) {
+      [weak self] data, response, error in
+      DispatchQueue.main.async {
+        guard let self else { return }
+
+        if let error {
+          NSLog("[ChatNativeAgentConfig] rename agent failed %@", error.localizedDescription)
+          self.onToast?("Could not rename agent")
+          return
+        }
+
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(statusCode), let data else {
+          self.onToast?("Could not rename agent")
+          return
+        }
+
+        let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let updatedName =
+          chatNativeAgentNormalizedString(payload?["displayName"])
+          ?? chatNativeAgentNormalizedString(payload?["display_name"])
+          ?? normalizedName
+
+        self.updateCard(displayName: updatedName)
+        self.rebuildContent()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        self.onToast?("Renamed agent")
+      }
+    }
+
+    task.resume()
+  }
+
   private func loadSecret(
     revealAfterLoad: Bool,
     userInitiated: Bool,
@@ -1157,7 +1258,7 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     }
 
     guard !isSecretLoading else { return }
-    guard let url = secretRequestURL(path: "/api/agents/{agent_id}/secret") else {
+    guard let url = apiRequestURL(path: "/api/agents/{agent_id}/secret") else {
       if userInitiated {
         onToast?("Missing API session")
       }
@@ -1166,7 +1267,7 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
 
     var request = URLRequest(url: url)
     request.httpMethod = "GET"
-    secretHeaders(&request)
+    apiHeaders(&request)
 
     isSecretLoading = true
     refreshHeaderAndSecret()
@@ -1259,14 +1360,14 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
 
   private func rotateSecret() {
     guard !isSecretLoading else { return }
-    guard let url = secretRequestURL(path: "/api/agents/{agent_id}/secret/rotate") else {
+    guard let url = apiRequestURL(path: "/api/agents/{agent_id}/secret/rotate") else {
       onToast?("Missing API session")
       return
     }
 
     var request = URLRequest(url: url)
     request.httpMethod = "POST"
-    secretHeaders(&request)
+    apiHeaders(&request)
 
     isSecretLoading = true
     refreshHeaderAndSecret()
