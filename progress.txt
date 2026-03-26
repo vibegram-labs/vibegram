@@ -13,8 +13,10 @@ Completed:
 - Reworked the native agent config sheet into a more compact agent panel with a glass/metal-style secret surface, a masked `vas_...` placeholder, and explicit reveal/copy/rotate actions that use the real fetched secret.
 - Cached builder secrets per agent id inside the native agent screen so a freshly created agent keeps its real secret available in the config panel even after builder state changes.
 - Removed the automatic secret fetch when the config panel opens, removed the visible "tap to load" prompt, and changed the hidden secret cover to a detached glass canvas so its edges do not bleed into the touch layer.
+- Updated native `builder_state` handling so `activeAgentId` and `latestSecret` from streamed builder events also populate the per-agent secret cache; this fixes copy/reveal for newly created agents before any rotate call.
+- Added detached top and bottom gradient masks to the config panel, matching the attachment sheet pattern so the sheet header/body transition no longer shows hard edges.
 
 Remaining:
-- Validate the iOS flow on device or simulator, especially card taps opening the config panel, cached secret reuse after agent creation, secret reveal/copy/rotate, the detached glass overlay appearance, builder/subagent turns that emit cards before text, and the stop-streaming state in the Vibe tab bar.
+- Validate the iOS flow on device or simulator, especially card taps opening the config panel, cached secret reuse after agent creation, copy before rotate, secret reveal/copy/rotate, the detached glass overlay appearance, the masked header edge treatment, builder/subagent turns that emit cards before text, and the stop-streaming state in the Vibe tab bar.
 - `mix test` cannot run in `server/` because `server/config/test.exs` is missing.
 - The full mobile TypeScript check still fails with existing repo-wide errors outside the touched native agent files; `git diff --check` passed for the changed files, but no simulator/device build was run.

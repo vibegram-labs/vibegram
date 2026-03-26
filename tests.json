@@ -27,7 +27,7 @@
     },
     "ios_native_validation": {
       "status": "not_run",
-      "details": "No iOS build/test command was run from this workspace for cached secret reuse after agent creation, the detached glass secret cover, the secret reveal/copy/rotate flow, the stream failure handling, or the stop button."
+      "details": "No iOS build/test command was run from this workspace for cached secret reuse after agent creation, copy before rotate, the detached glass secret cover, the masked header edge treatment, the secret reveal/copy/rotate flow, the stream failure handling, or the stop button."
     }
   }
 }

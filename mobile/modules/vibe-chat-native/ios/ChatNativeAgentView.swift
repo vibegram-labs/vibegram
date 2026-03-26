@@ -1317,6 +1317,16 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   }
 
   private func handleBuilderStateEvent(_ payload: [String: Any]) {
+    if let activeAgentId = Self.normalizedString(payload["activeAgentId"] ?? payload["active_agent_id"])
+    {
+      builderActiveAgentId = activeAgentId
+    }
+    if let latestSecret = Self.normalizedString(payload["latestSecret"] ?? payload["latest_secret"])
+    {
+      builderLatestSecret = latestSecret
+    }
+    cacheBuilderSecretIfPossible()
+
     if let setupState = ChatBuilderSetupState(raw: payload["setupState"] as? [String: Any]) {
       builderSetupState = setupState
     }

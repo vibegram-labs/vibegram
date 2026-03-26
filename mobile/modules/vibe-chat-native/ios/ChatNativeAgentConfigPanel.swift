@@ -712,6 +712,10 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
   private let contentView = UIView()
   private let stackView = UIStackView()
   private let secretCardView = ChatNativeAgentSecretCardView()
+  private let topMaskView = UIView()
+  private let bottomMaskView = UIView()
+  private let topMaskGradient = CAGradientLayer()
+  private let bottomMaskGradient = CAGradientLayer()
 
   private var currentSecret: String?
   private var isSecretLoading = false
@@ -746,9 +750,15 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     view.backgroundColor = theme.backgroundColor
     configureNavigation()
     configureLayout()
+    configureEdgeMasks()
     buildContent()
     configureCallbacks()
     refreshHeaderAndSecret()
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    layoutEdgeMasks()
   }
 
   private func configureNavigation() {
@@ -809,6 +819,57 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
       stackView.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16.0),
       stackView.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -28.0),
     ])
+  }
+
+  private func configureEdgeMasks() {
+    topMaskView.isUserInteractionEnabled = false
+    bottomMaskView.isUserInteractionEnabled = false
+    topMaskView.backgroundColor = .clear
+    bottomMaskView.backgroundColor = .clear
+
+    topMaskGradient.colors = [
+      theme.backgroundColor.cgColor,
+      theme.backgroundColor.withAlphaComponent(0.0).cgColor,
+    ]
+    topMaskGradient.startPoint = CGPoint(x: 0.5, y: 0.0)
+    topMaskGradient.endPoint = CGPoint(x: 0.5, y: 1.0)
+    topMaskView.layer.addSublayer(topMaskGradient)
+
+    bottomMaskGradient.colors = [
+      theme.backgroundColor.withAlphaComponent(0.0).cgColor,
+      theme.backgroundColor.cgColor,
+    ]
+    bottomMaskGradient.startPoint = CGPoint(x: 0.5, y: 0.0)
+    bottomMaskGradient.endPoint = CGPoint(x: 0.5, y: 1.0)
+    bottomMaskView.layer.addSublayer(bottomMaskGradient)
+
+    view.addSubview(topMaskView)
+    view.addSubview(bottomMaskView)
+  }
+
+  private func layoutEdgeMasks() {
+    let width = view.bounds.width
+    let height = view.bounds.height
+    let safeTop = view.safeAreaInsets.top
+
+    let topMaskHeight = max(84.0, safeTop + 44.0)
+    topMaskView.frame = CGRect(x: 0.0, y: 0.0, width: width, height: topMaskHeight)
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    topMaskGradient.frame = topMaskView.bounds
+    CATransaction.commit()
+
+    let bottomMaskHeight: CGFloat = 96.0
+    bottomMaskView.frame = CGRect(
+      x: 0.0,
+      y: max(0.0, height - bottomMaskHeight),
+      width: width,
+      height: bottomMaskHeight
+    )
+    CATransaction.begin()
+    CATransaction.setDisableActions(true)
+    bottomMaskGradient.frame = bottomMaskView.bounds
+    CATransaction.commit()
   }
 
   private func buildContent() {
