@@ -17,6 +17,7 @@ defmodule Vibe.AI.AgentEventRuntime do
   alias Vibe.Agents
   alias Vibe.Chat
   alias Vibe.Chat.AgentMessageCrypto
+  alias Vibe.Notifications
   alias Vibe.Repo
 
   @safe_action_types ~w[post_message post_checklist request_confirmation set_thread_status]
@@ -834,6 +835,8 @@ defmodule Vibe.AI.AgentEventRuntime do
         Chat.get_all_participant_settings(chat_id)
         |> Enum.each(fn participant ->
           if participant.user_id != agent.agent_user_id do
+            if participant.deleted, do: Chat.restore_if_deleted(chat_id, participant.user_id)
+
             VibeWeb.Endpoint.broadcast!("user:#{participant.user_id}", "new_message", %{
               chat_id: chat_id,
               from_id: agent.agent_user_id,
@@ -841,6 +844,18 @@ defmodule Vibe.AI.AgentEventRuntime do
               timestamp: timestamp,
               muted: participant.muted || false
             })
+
+            if not participant.muted do
+              _ =
+                Notifications.send_message_push(participant.user_id, %{
+                  "chat_id" => chat_id,
+                  "message_id" => message_id,
+                  "from_id" => agent.agent_user_id,
+                  "type" => message_type,
+                  "body" => normalize_string(body),
+                  "media_url" => media_url
+                })
+            end
           end
         end)
 

@@ -8,6 +8,7 @@ defmodule Vibe.AI.GroupAgent do
   require Logger
 
   alias Vibe.Chat.{GroupAgent, GroupAgentMemory, GroupAgentDocument, AgentMessageCrypto}
+  alias Vibe.Notifications
   alias Vibe.Repo
 
   @claude_api "https://api.anthropic.com/v1/messages"
@@ -4042,13 +4043,29 @@ defmodule Vibe.AI.GroupAgent do
               participants = Vibe.Chat.get_all_participant_settings(chat_id)
 
               Enum.each(participants, fn p ->
-                VibeWeb.Endpoint.broadcast!("user:#{p.user_id}", "new_message", %{
-                  chat_id: chat_id,
-                  from_id: @agent_user_id,
-                  message_id: message_id,
-                  timestamp: timestamp,
-                  muted: p.muted || false
-                })
+                if p.user_id != @agent_user_id do
+                  if p.deleted, do: Vibe.Chat.restore_if_deleted(chat_id, p.user_id)
+
+                  VibeWeb.Endpoint.broadcast!("user:#{p.user_id}", "new_message", %{
+                    chat_id: chat_id,
+                    from_id: @agent_user_id,
+                    message_id: message_id,
+                    timestamp: timestamp,
+                    muted: p.muted || false
+                  })
+
+                  if not p.muted do
+                    _ =
+                      Notifications.send_message_push(p.user_id, %{
+                        "chat_id" => chat_id,
+                        "message_id" => message_id,
+                        "from_id" => @agent_user_id,
+                        "type" => message_type,
+                        "body" => plain_text,
+                        "media_url" => attachment && attachment.url
+                      })
+                  end
+                end
               end)
 
             {:error, reason} ->

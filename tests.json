@@ -21,6 +21,10 @@
       "status": "passed",
       "details": "The standalone builder now infers a practical creation-time `display_name` from the provided workflow description/persona when the tool input omitted a name, and the builder prompt now requires explicit `display_name` usage for create/rename requests. `mix compile` passed after the backend change."
     },
+    "server_agent_message_push_notifications": {
+      "status": "passed",
+      "details": "Patched `AgentEventRuntime` and `GroupAgent` so agent-originated messages now restore deleted chats if needed, broadcast `user:new_message`, and call `Notifications.send_message_push/2` for unmuted participants just like normal user messages. `mix compile` passed after the change."
+    },
     "server_live_event_delivery_debug": {
       "status": "passed",
       "details": "Live curl to `/api/agents/:identifier/events` returned `200` with `messagePosted: true`; authenticated live GET `/api/chat/73928163c120/messages` and `/api/chats/:user_id` both confirmed the agent event message is present in chat `73928163c120` and that chat is in the owner-visible home list API payload."
