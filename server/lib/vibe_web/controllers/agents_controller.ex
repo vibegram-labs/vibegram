@@ -42,6 +42,21 @@ defmodule VibeWeb.AgentsController do
     end
   end
 
+  def secret(conn, %{"id" => id}) do
+    owner_id = conn.assigns.current_user.id
+
+    with %{} = agent <- Agents.get_agent(id, owner_id),
+         {:ok, secret} <- Agents.callback_signing_secret(agent) do
+      json(conn, %{secret: secret, secretHint: agent.secret_hint})
+    else
+      nil ->
+        conn |> put_status(:not_found) |> json(%{error: "Agent not found"})
+
+      {:error, reason} ->
+        conn |> put_status(:unprocessable_entity) |> json(%{error: inspect(reason)})
+    end
+  end
+
   def update(conn, %{"id" => id} = params) do
     owner_id = conn.assigns.current_user.id
 

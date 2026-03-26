@@ -7,23 +7,27 @@
     },
     "server_mix_compile": {
       "status": "passed",
-      "details": "Compiled successfully after the AgentChannel and AgentBuilder fixes; only pre-existing warnings were reported."
+      "details": "Compiled successfully after adding the authenticated agent secret endpoint; only pre-existing warnings were reported."
     },
     "server_builder_struct_sanitization": {
       "status": "passed",
       "details": "Builder payload sanitization now compiles with explicit handling for DateTime, NaiveDateTime, Date, Time, Decimal, and fallback structs."
     },
+    "server_agent_secret_endpoint": {
+      "status": "passed",
+      "details": "The authenticated GET /api/agents/:id/secret route compiles and returns the decrypted callback signing secret for the owning user."
+    },
     "mobile_git_diff_check": {
       "status": "passed",
-      "details": "git diff --check passed for the modified native agent, config panel, and tab-bar bridge files."
+      "details": "git diff --check passed for the modified native agent view, config panel, notes files, and agent secret endpoint files."
     },
     "mobile_typescript_check": {
-      "status": "inconclusive",
-      "details": "`./node_modules/.bin/tsc --noEmit -p tsconfig.json` did not return usable output through the terminal wrapper in this session, so no pass/fail claim was recorded."
+      "status": "failed",
+      "details": "`./node_modules/.bin/tsc --noEmit -p tsconfig.json --pretty false` reports existing repo-wide TypeScript errors outside the touched native agent files, including FlashList typing, NativeChatAppearance shape, old temp files, and relay typing issues."
     },
     "ios_native_validation": {
       "status": "not_run",
-      "details": "No iOS build/test command was run from this workspace for the stream failure handling, stop button, or env panel changes."
+      "details": "No iOS build/test command was run from this workspace for cached secret reuse after agent creation, the detached glass secret cover, the secret reveal/copy/rotate flow, the stream failure handling, or the stop button."
     }
   }
 }

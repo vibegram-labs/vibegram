@@ -9,8 +9,12 @@ Completed:
 - Wired the expanded Vibe tab bar button into native agent streaming state so it switches to a stop action while a response is running and locally stops the current stream.
 - Restyled the native agent config/env panel to match the builder setup panel palette and row treatment, including the same background, cards, divider color, prompt surface, and interaction highlight.
 - Filled the env panel secret gap by letting native agent cards reuse the builder session `latestSecret` for the active agent and by accepting `secret`/`invoke_secret` fallback keys when cards are parsed.
+- Added an authenticated `GET /api/agents/:id/secret` endpoint so the native agent config panel can fetch the current decrypted invoke secret for the signed-in owner instead of falling back to the hint suffix.
+- Reworked the native agent config sheet into a more compact agent panel with a glass/metal-style secret surface, a masked `vas_...` placeholder, and explicit reveal/copy/rotate actions that use the real fetched secret.
+- Cached builder secrets per agent id inside the native agent screen so a freshly created agent keeps its real secret available in the config panel even after builder state changes.
+- Removed the automatic secret fetch when the config panel opens, removed the visible "tap to load" prompt, and changed the hidden secret cover to a detached glass canvas so its edges do not bleed into the touch layer.
 
 Remaining:
-- Validate the iOS flow on device or simulator, especially card taps opening the config panel, env secret display/copy, builder/subagent turns that emit cards before text, and the stop-streaming state in the Vibe tab bar.
+- Validate the iOS flow on device or simulator, especially card taps opening the config panel, cached secret reuse after agent creation, secret reveal/copy/rotate, the detached glass overlay appearance, builder/subagent turns that emit cards before text, and the stop-streaming state in the Vibe tab bar.
 - `mix test` cannot run in `server/` because `server/config/test.exs` is missing.
-- A full mobile TypeScript check was not recorded as passing in this session; `git diff --check` passed for the changed files, but no simulator/device build was run.
+- The full mobile TypeScript check still fails with existing repo-wide errors outside the touched native agent files; `git diff --check` passed for the changed files, but no simulator/device build was run.

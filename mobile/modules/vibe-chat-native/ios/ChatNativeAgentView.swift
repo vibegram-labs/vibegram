@@ -324,6 +324,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private var builderActivity: [ChatBuilderActivityItem] = []
   private var builderActiveAgentId: String?
   private var builderLatestSecret: String?
+  private var cachedAgentSecrets: [String: String] = [:]
   private var registeredSurfaceId: String = ""
 
   private static let fallbackApiBaseURL = "https://api.vibegram.io"
@@ -488,10 +489,12 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
 
   func setBuilderActiveAgentId(_ activeAgentId: String?) {
     builderActiveAgentId = Self.normalizedString(activeAgentId)
+    cacheBuilderSecretIfPossible()
   }
 
   func setBuilderLatestSecret(_ latestSecret: String?) {
     builderLatestSecret = Self.normalizedString(latestSecret)
+    cacheBuilderSecretIfPossible()
   }
 
   func submitText(_ rawText: String) {
@@ -899,9 +902,13 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
 
   private func presentAgentCardPanel(_ card: ChatListRow.AgentCard) {
     guard let presenter = topMostViewController() else { return }
+    let apiContext = resolveAPIConfig().map {
+      ChatNativeAgentConfigAPIContext(apiBaseURL: $0.apiBaseURL, token: $0.token)
+    }
     let controller = ChatNativeAgentConfigPanelController(
       card: resolvedAgentCard(card),
-      appearance: appearance
+      appearance: appearance,
+      apiContext: apiContext
     )
     controller.onToast = { [weak self] message in
       self?.onNativeEvent(["type": "agentToast", "message": message])
@@ -1318,7 +1325,51 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       .compactMap(ChatBuilderActivityItem.init(raw:))
   }
 
+  private func cacheBuilderSecretIfPossible() {
+    guard
+      let agentId = builderActiveAgentId,
+      let latestSecret = builderLatestSecret,
+      !latestSecret.isEmpty
+    else { return }
+
+    cachedAgentSecrets[agentId] = latestSecret
+  }
+
   private func resolvedAgentCard(_ card: ChatListRow.AgentCard) -> ChatListRow.AgentCard {
+    if let latestSecret = Self.normalizedString(card.latestSecret), !latestSecret.isEmpty {
+      cachedAgentSecrets[card.agentId] = latestSecret
+      return card
+    }
+
+    if let cachedSecret = cachedAgentSecrets[card.agentId], !cachedSecret.isEmpty {
+      return ChatListRow.AgentCard(
+        id: card.id,
+        style: card.style,
+        agentId: card.agentId,
+        displayName: card.displayName,
+        username: card.username,
+        identifier: card.identifier,
+        status: card.status,
+        promptStatus: card.promptStatus,
+        promptPreview: card.promptPreview,
+        systemPrompt: card.systemPrompt,
+        enabledTools: card.enabledTools,
+        outputModes: card.outputModes,
+        voiceProfile: card.voiceProfile,
+        callbackURL: card.callbackURL,
+        apiBaseURL: card.apiBaseURL,
+        invokeURL: card.invokeURL,
+        eventsURL: card.eventsURL,
+        builderLink: card.builderLink,
+        agentDMURL: card.agentDMURL,
+        secretHint: card.secretHint,
+        latestSecret: cachedSecret,
+        defaultDestinationChat: card.defaultDestinationChat,
+        attachedChats: card.attachedChats,
+        canDelete: card.canDelete
+      )
+    }
+
     guard
       card.latestSecret == nil,
       let activeAgentId = builderActiveAgentId,
@@ -1327,6 +1378,8 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     else {
       return card
     }
+
+    cachedAgentSecrets[activeAgentId] = latestSecret
 
     return ChatListRow.AgentCard(
       id: card.id,

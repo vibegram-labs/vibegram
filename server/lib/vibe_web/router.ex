@@ -123,6 +123,7 @@ defmodule VibeWeb.Router do
     get "/agents", AgentsController, :index
     post "/agents", AgentsController, :create
     get "/agents/:id", AgentsController, :show
+    get "/agents/:id/secret", AgentsController, :secret
     put "/agents/:id", AgentsController, :update
     post "/agents/:id/publish", AgentsController, :publish
     post "/agents/:id/secret/rotate", AgentsController, :rotate_secret
