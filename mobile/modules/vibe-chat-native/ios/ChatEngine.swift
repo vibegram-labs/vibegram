@@ -5903,6 +5903,19 @@ final class ChatEngine {
     var info = userInfo
     info["reason"] = reason
     info["timestamp"] = nowMs()
+    if ["chatMessageInserted", "chatMessageChanged", "chatRowsReloaded", "presenceChanged"]
+      .contains(reason)
+    {
+      let rawChatId =
+        (info["chatId"] as? String) ??
+        (info["chat_id"] as? String) ??
+        ""
+      let chatId =
+        rawChatId.count > 12 ? String(rawChatId.prefix(12)) + "..." : rawChatId
+      print(
+        "[ChatEngine] didChange reason=\(reason) chatId=\(chatId.isEmpty ? "<empty>" : chatId)"
+      )
+    }
     NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: info)
   }
 

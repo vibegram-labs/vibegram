@@ -415,7 +415,7 @@ interface ChatState {
     disconnect: () => void;
     resetSessionCache: (nextUserId?: string | null) => Promise<void>;
     initSocket: () => void;
-    loadChats: () => Promise<void>;
+    loadChats: (options?: { forceRemote?: boolean }) => Promise<void>;
     startChat: (friendId: string, friendInfo?: { username?: string, profileImage?: string, publicKey?: string }) => Promise<string>; // Returns chatId
     sendMessage: (chatId: string, text: string, type?: Message['type'], metadata?: any, existingId?: string) => Promise<void>;
     editMessage: (chatId: string, messageId: string, text: string) => Promise<boolean>;
@@ -481,6 +481,7 @@ let blackoutStateSubscription: (() => void) | null = null;
 let nativeTransportStatusTimer: ReturnType<typeof setTimeout> | null = null;
 let suppressNextSocketFailure = false;
 let transportPolicySignature: string | null = null;
+let forceRemoteChatsReload = false;
 
 const ensureTransportControlReady = (): Promise<void> => {
     if (!transportControlReadyPromise) {
@@ -1605,10 +1606,13 @@ export const useChatStore = create<ChatState>()(
                         socket.connect();
                         set({ socket }); // Update store state with socket instance
 
-                        const scheduleLoadChats = (delayMs = 180) => {
+                        const scheduleLoadChats = (delayMs = 180, forceRemote = false) => {
                             if (loadChatsDebounceTimer) return;
                             loadChatsDebounceTimer = setTimeout(() => {
                                 loadChatsDebounceTimer = null;
+                                if (forceRemote) {
+                                    forceRemoteChatsReload = true;
+                                }
                                 get().loadChats();
                             }, delayMs);
                         };
@@ -1824,7 +1828,7 @@ export const useChatStore = create<ChatState>()(
                         userChannel.on('new_chat', (payload: any) => {
 
                             // Reload chats to get the new chat
-                            scheduleLoadChats(250);
+                            scheduleLoadChats(250, true);
                         });
 
                         // Listen for new message notification (for chats we might not have yet or deleted)
@@ -1846,7 +1850,7 @@ export const useChatStore = create<ChatState>()(
                                 // 1. New chat we never had
                                 // 2. Chat we deleted (but someone messaged us)
 
-                                scheduleLoadChats(250);
+                                scheduleLoadChats(250, true);
                             }
                         });
 
@@ -2048,7 +2052,7 @@ export const useChatStore = create<ChatState>()(
                     });
             },
 
-            loadChats: async () => {
+            loadChats: async (options) => {
                 await ensureTransportControlReady();
                 let auth = AuthManager.getInstance().getSession();
                 if (!auth) {
@@ -2079,6 +2083,8 @@ export const useChatStore = create<ChatState>()(
                 }
 
                 const wasEmpty = get().chats.length === 0;
+                const forceRemote = options?.forceRemote === true || forceRemoteChatsReload;
+                forceRemoteChatsReload = false;
                 if (wasEmpty && emptyChatsRetryCount === 0) {
                     set({ isLoading: true });
                 }
@@ -2086,7 +2092,7 @@ export const useChatStore = create<ChatState>()(
 
                 // If hydrated and not empty, delay the network fetch by a bit
                 // to avoid slamming the DB on developer reload loops.
-                if (!wasEmpty) {
+                if (!wasEmpty && !forceRemote) {
                      console.log(`[ChatStore] loadChats using offline cached data (${get().chats.length} chats) — deferring background sync`);
                      // Let the UI finish rendering from local AsyncStorage before background syncing.
                      // The background sync could happen via Phoenix auto-sync or delayed retry.

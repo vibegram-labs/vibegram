@@ -83,6 +83,11 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     // before the user taps into a chat. Only trigger on first load or
     // when the chat list changes to avoid redundant requests.
     let currentChatIds = Set(rows.map(\.chatId))
+    let addedChatIds = Array(currentChatIds.subtracting(previousChatIds)).sorted()
+    let removedChatIds = Array(previousChatIds.subtracting(currentChatIds)).sorted()
+    print(
+      "[ChatNativeHomeListView] setRows rows=\(rows.count) added=\(summarizeChatIdsForLog(addedChatIds)) removed=\(summarizeChatIdsForLog(removedChatIds))"
+    )
     if previousChatIds != currentChatIds {
       mediaPrefetchedChatIds.removeAll()
       lastPrefetchedScrollIndex = 0
@@ -346,21 +351,46 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
         (notification.userInfo?["chatId"] as? String)?
         .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
       guard !changedChatId.isEmpty else {
+        print(
+          "[ChatNativeHomeListView] didChange reason=\(reason) chatId=<empty> rows=\(rows.count) -> reloadData"
+        )
         tableView.reloadData()
         return
       }
       if let rowIndex = rows.firstIndex(where: { $0.chatId == changedChatId }) {
+        print(
+          "[ChatNativeHomeListView] didChange reason=\(reason) chatId=\(summarizeChatIdForLog(changedChatId)) rowIndex=\(rowIndex)"
+        )
         tableView.reloadRows(
           at: [IndexPath(row: rowIndex, section: 0)],
           with: .none
+        )
+      } else {
+        let visibleChatIds = rows.map(\.chatId)
+        print(
+          "[ChatNativeHomeListView] didChange reason=\(reason) chatId=\(summarizeChatIdForLog(changedChatId)) missingRow visibleRows=\(summarizeChatIdsForLog(visibleChatIds))"
         )
       }
       return
     }
 
     if reason == "presenceChanged" {
+      print("[ChatNativeHomeListView] didChange reason=presenceChanged rows=\(rows.count) -> reloadData")
       tableView.reloadData()
     }
+  }
+
+  private func summarizeChatIdsForLog(_ chatIds: [String]) -> String {
+    guard !chatIds.isEmpty else { return "[]" }
+    let limited = chatIds.prefix(6).map(summarizeChatIdForLog)
+    let suffix = chatIds.count > limited.count ? ",..." : ""
+    return "[" + limited.joined(separator: ",") + suffix + "]"
+  }
+
+  private func summarizeChatIdForLog(_ chatId: String) -> String {
+    let trimmed = chatId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard trimmed.count > 12 else { return trimmed }
+    return String(trimmed.prefix(12)) + "..."
   }
 
   private func resolvedPresenceRow(for row: ChatNativeHomeListRow) -> ChatNativeHomeListRow {

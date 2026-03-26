@@ -182,7 +182,13 @@ public class ChatNativeHomeModule: Module {
       )
 
       let chats = try chatNativeHomeParseChats(data)
-      print("[ChatNativeHome] fetchChats parsed \(chats.count) chats")
+      let chatIds = chats.compactMap { chatNativeHomeNormalizedString($0["chatId"] ?? $0["chat_id"]) }
+      let previewIds = chatIds.prefix(6).map { chatId in
+        chatId.count > 12 ? String(chatId.prefix(12)) + "..." : chatId
+      }
+      print(
+        "[ChatNativeHome] fetchChats parsed \(chats.count) chats ids=\(previewIds)\(chatIds.count > previewIds.count ? ",..." : "")"
+      )
       return ["chats": chats]
     }
 

@@ -1507,7 +1507,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
                 if (now - lastReloadRef.current > 3000) {
                     // console.log('[HomeScreen] App became active, reloading chats...');
                     lastReloadRef.current = now;
-                    loadChats();
+                    loadChats({ forceRemote: true });
                     void loadSavedMessagesPreview();
                     void loadAgentBuilder();
                     // Ensure connection is active upon resume
@@ -1746,7 +1746,7 @@ export default function HomeScreen({ onChatSelect, onOpenStoryCamera, onOpenVibe
         setIsPullRefreshing(true)
         try {
             await Promise.all([
-                Promise.resolve(loadChats()),
+                Promise.resolve(loadChats({ forceRemote: true })),
                 Promise.resolve(loadSavedMessagesPreview()),
                 Promise.resolve(loadAgentBuilder()),
             ])

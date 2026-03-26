@@ -1,6 +1,9 @@
 2026-03-26
 
 Completed:
+- Debugged the missing trade-event chat end to end: live `curl` to `/api/agents/:identifier/events` returned `200 messagePosted:true`, the live chat API confirmed the message is present in chat `73928163c120`, and the live `/api/chats/:user_id` response confirmed that chat is already in the owner-visible home list data.
+- Added targeted native home-list diagnostics in `ChatNativeHomeModule`, `ChatNativeHomeListView`, and `ChatEngine` so the app now logs fetched chat ids, applied row ids, and whether engine change notifications hit an existing row or miss the current row set.
+- Tightened the JS chat-list refresh path so `user:new_chat`, `user:new_message`, app-resume reloads, and pull-to-refresh can force a real remote `/chats` fetch instead of silently returning the cached non-empty list.
 - Tightened standalone builder chat-id behavior: added a `validate_destination_chat` tool that re-reads the current owner-visible destination state, compares a provided chat id against live attached/default chats, repairs stale default destinations when needed, and explains when the same DM chat id is still correct.
 - Fixed owner-facing agent destination chat exposure: attached/default chat ids shown by the builder now only come from chats shared by both the agent shadow user and the owning user, so the agent no longer hands out writable-but-invisible chat ids.
 - Added an agentic destination-chat flow for standalone agents: the builder can now create or reuse the real owner<->agent DM, return the actual `chat_id`, and optionally set it as the agent's default destination chat instead of forcing a manual lookup step.
@@ -23,6 +26,7 @@ Completed:
 - Added detached top and bottom gradient masks to the config panel, matching the attachment sheet pattern so the sheet header/body transition no longer shows hard edges.
 
 Remaining:
+- Capture a fresh device log after another external event send and verify which of these happens on-device: `fetchChats` includes `73928163c120`, `setRows` includes it, or `didChange` reports `missingRow` for that chat. That will isolate whether the remaining issue is JS row propagation, native row application, or list presentation.
 - Live-validate the repeated chat-id flow in the app: ask the standalone agent whether a previously returned chat id is still correct, confirm it re-checks live state instead of repeating memory, and confirm it explains when the same DM id is expected versus when it repaired a stale default.
 - Re-test the live flow with a freshly returned chat id from the agent after the owner-visible chat filter fix. The old chat id the user copied may still point at a chat the owner cannot access.
 - Live-validate the new `ensure_destination_chat` builder flow in the app: ask the standalone agent for the chat id, confirm it creates or reuses the DM, updates the inline config card, and copies the returned default/attached chat id from the native config panel.
