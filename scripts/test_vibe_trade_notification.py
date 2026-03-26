@@ -195,6 +195,7 @@ def send_event(args: argparse.Namespace, payload: dict) -> int:
         headers={
             "Content-Type": "application/json",
             "Accept": "application/json",
+            "User-Agent": "Vibegram-TradeNotifier/1.0",
             "X-Vibe-Agent-Secret": agent_secret,
         },
     )

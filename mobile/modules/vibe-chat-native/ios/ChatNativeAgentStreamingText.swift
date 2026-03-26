@@ -89,7 +89,6 @@ enum ChatNativeAgentTextRenderer {
       let codeText = String(mutable.string[range])
       var codeAttrs = attrs
       codeAttrs[.font] = UIFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular)
-      codeAttrs[.backgroundColor] = UIColor(white: 0.95, alpha: 1.0)
       let replacement = NSAttributedString(string: codeText, attributes: codeAttrs)
       mutable.replaceCharacters(in: match.range, with: replacement)
     }
@@ -152,7 +151,7 @@ enum ChatNativeAgentTextRenderer {
   }
 }
 
-final class ChatNativeStreamingTextLabel: UILabel {
+final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
   private static let revealInterval: CFTimeInterval = 0.01
   private static let tokenRegex = try! NSRegularExpression(pattern: "\\S+|\\s+")
 
@@ -165,15 +164,34 @@ final class ChatNativeStreamingTextLabel: UILabel {
   weak var linkDelegate: ChatNativeStreamingTextLabelDelegate?
   private static let uuidRegex = try! NSRegularExpression(pattern: "[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}")
 
+  // Compatibility properties for callers using UILabel API
+  var numberOfLines: Int {
+    get { textContainer.maximumNumberOfLines }
+    set { textContainer.maximumNumberOfLines = newValue }
+  }
+
   required init?(coder: NSCoder) {
     return nil
   }
 
-  override init(frame: CGRect) {
-    super.init(frame: frame)
+  convenience init() {
+    self.init(frame: .zero, textContainer: nil)
+  }
+
+  override init(frame: CGRect, textContainer: NSTextContainer?) {
+    super.init(frame: frame, textContainer: textContainer)
+    isEditable = false
+    isScrollEnabled = false
+    isSelectable = false
+    self.textContainerInset = .zero
+    self.textContainer.lineFragmentPadding = 0
+    backgroundColor = .clear
     isUserInteractionEnabled = true
-    let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
-    addGestureRecognizer(tap)
+    linkTextAttributes = [
+      .foregroundColor: UIColor.systemBlue,
+      .underlineStyle: NSUnderlineStyle.single.rawValue,
+    ]
+    delegate = self
   }
 
   deinit {
@@ -200,8 +218,10 @@ final class ChatNativeStreamingTextLabel: UILabel {
     applyVisibleTokenState()
 
     if isStreaming {
+      isSelectable = false
       startStreamingAnimation()
     } else {
+      isSelectable = true
       stopStreamingAnimation()
     }
   }
@@ -212,7 +232,8 @@ final class ChatNativeStreamingTextLabel: UILabel {
     rawTextValue = nil
     tokenRanges = []
     revealedTokenCount = 0
-    super.attributedText = nil
+    attributedText = nil
+    isSelectable = false
   }
 
   private func startStreamingAnimation() {
@@ -257,17 +278,18 @@ final class ChatNativeStreamingTextLabel: UILabel {
 
     if revealedTokenCount >= tokenRanges.count {
       stopStreamingAnimation()
+      isSelectable = true
     }
   }
 
   private func applyVisibleTokenState() {
     guard let fullAttributedValue else {
-      super.attributedText = nil
+      attributedText = nil
       return
     }
 
     guard revealedTokenCount < tokenRanges.count else {
-      super.attributedText = fullAttributedValue
+      attributedText = fullAttributedValue
       return
     }
 
@@ -294,7 +316,7 @@ final class ChatNativeStreamingTextLabel: UILabel {
         mutable.addAttribute(.foregroundColor, value: fallbackColor, range: range)
       }
     }
-    super.attributedText = mutable
+    attributedText = mutable
   }
 
   private static func tokenize(_ string: String) -> [NSRange] {
@@ -308,41 +330,17 @@ final class ChatNativeStreamingTextLabel: UILabel {
     return matches
   }
 
-  @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
-    guard let attributed = attributedText, attributed.length > 0 else { return }
+  // MARK: - UITextViewDelegate
 
-    // Build layout manager for hit-testing
-    let textStorage = NSTextStorage(attributedString: attributed)
-    let layoutManager = NSLayoutManager()
-    textStorage.addLayoutManager(layoutManager)
-    let textContainer = NSTextContainer(size: bounds.size)
-    textContainer.lineFragmentPadding = 0
-    textContainer.maximumNumberOfLines = numberOfLines
-    textContainer.lineBreakMode = lineBreakMode
-    layoutManager.addTextContainer(textContainer)
-
-    let location = gesture.location(in: self)
-    // Compute y offset for vertical alignment
-    let usedRect = layoutManager.usedRect(for: textContainer)
-    let yOffset = (bounds.size.height - usedRect.size.height) / 2 - usedRect.origin.y
-    let textContainerPoint = CGPoint(x: location.x, y: location.y - yOffset)
-
-    let index = layoutManager.characterIndex(for: textContainerPoint, in: textContainer, fractionOfDistanceBetweenInsertionPoints: nil)
-    guard index < textStorage.length else { return }
-
-    var range = NSRange(location: 0, length: 0)
-    let attrs = attributed.attributes(at: index, effectiveRange: &range)
-    if let linkValue = attrs[.link] {
-      var url: URL?
-      if let u = linkValue as? URL { url = u }
-      else if let s = linkValue as? String { url = URL(string: s) }
-      if let url {
-        // Delegate first
-        linkDelegate?.streamingTextLabel(self, didTap: url)
-        // Default handling: open in-app browser or route to internal chat
-        handleTappedURL(url)
-      }
-    }
+  func textView(
+    _ textView: UITextView,
+    shouldInteractWith url: URL,
+    in characterRange: NSRange,
+    interaction: UITextItemInteraction
+  ) -> Bool {
+    linkDelegate?.streamingTextLabel(self, didTap: url)
+    handleTappedURL(url)
+    return false
   }
 
   private func handleTappedURL(_ url: URL) {

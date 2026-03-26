@@ -173,6 +173,203 @@ final class ChatNativeAgentBubbleMenuOverlay: UIView {
   }
 }
 
+// MARK: - User Message Long-Press Menu Overlay (Glass, No Reactions)
+
+final class ChatNativeAgentUserMenuOverlay: UIView {
+  private let backgroundGlassView: UIVisualEffectView
+  private let menuCard: UIVisualEffectView
+  private let menuStack = UIStackView()
+  private let sourceFrame: CGRect
+  private let text: String
+  private let messageId: String
+  private let onAction: (String) -> Void
+  private var isDismissing = false
+
+  init(
+    sourceFrame: CGRect,
+    text: String,
+    messageId: String,
+    appearance: ChatListAppearance,
+    onAction: @escaping (String) -> Void
+  ) {
+    self.sourceFrame = sourceFrame
+    self.text = text
+    self.messageId = messageId
+    self.onAction = onAction
+
+    let bgStyle: UIBlurEffect.Style =
+      appearance.isDark ? .systemMaterialDark : .systemMaterialLight
+    self.backgroundGlassView = UIVisualEffectView(effect: UIBlurEffect(style: bgStyle))
+
+    let colorOverlay = UIView()
+    let overlayBase: UIColor = appearance.isDark ? .black : .white
+    let overlayAlpha: CGFloat = appearance.isDark ? 0.42 : 0.32
+    colorOverlay.backgroundColor = overlayBase.withAlphaComponent(overlayAlpha)
+    colorOverlay.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+    self.backgroundGlassView.contentView.addSubview(colorOverlay)
+
+    if #available(iOS 26.0, *) {
+      let glass = UIGlassEffect(style: .regular)
+      self.menuCard = UIVisualEffectView(effect: glass)
+      self.menuCard.layer.cornerRadius = 14.0
+      self.menuCard.layer.cornerCurve = .continuous
+    } else {
+      self.menuCard = UIVisualEffectView(effect: UIBlurEffect(style: .systemMaterial))
+      self.menuCard.layer.cornerRadius = 14.0
+      self.menuCard.layer.cornerCurve = .continuous
+    }
+    self.menuCard.clipsToBounds = true
+
+    super.init(frame: .zero)
+
+    backgroundGlassView.alpha = 0
+    addSubview(backgroundGlassView)
+
+    menuCard.alpha = 0
+    addSubview(menuCard)
+
+    menuStack.axis = .vertical
+    menuStack.spacing = 0
+    menuCard.contentView.addSubview(menuStack)
+
+    let actions: [(String, String, String)] = [
+      ("doc.on.doc", "Copy", "copy"),
+      ("trash", "Delete", "delete"),
+    ]
+
+    for (index, item) in actions.enumerated() {
+      let button = makeMenuItem(
+        icon: item.0,
+        title: item.1,
+        actionId: item.2,
+        isDestructive: item.2 == "delete",
+        showDivider: index < actions.count - 1
+      )
+      menuStack.addArrangedSubview(button)
+    }
+
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handleBackgroundTap))
+    tap.cancelsTouchesInView = false
+    backgroundGlassView.addGestureRecognizer(tap)
+  }
+
+  required init?(coder: NSCoder) { fatalError() }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    backgroundGlassView.frame = bounds
+
+    let menuWidth: CGFloat = 200.0
+    let menuHeight = menuStack.systemLayoutSizeFitting(
+      CGSize(width: menuWidth, height: UIView.layoutFittingCompressedSize.height)
+    ).height
+    menuStack.frame = CGRect(x: 0, y: 0, width: menuWidth, height: menuHeight)
+
+    let safeTop = safeAreaInsets.top + 10.0
+    let safeBottom = bounds.height - safeAreaInsets.bottom - 10.0
+
+    // Place menu above or below source depending on space
+    var menuY = sourceFrame.maxY + 8.0
+    if menuY + menuHeight > safeBottom {
+      menuY = sourceFrame.minY - menuHeight - 8.0
+    }
+    menuY = max(safeTop, min(safeBottom - menuHeight, menuY))
+
+    // Align near the right side (user messages are on the right)
+    let menuX = max(16.0, min(sourceFrame.maxX - menuWidth, bounds.width - menuWidth - 16.0))
+    menuCard.frame = CGRect(x: menuX, y: menuY, width: menuWidth, height: menuHeight)
+  }
+
+  func animateIn() {
+    setNeedsLayout()
+    layoutIfNeeded()
+    menuCard.transform = CGAffineTransform(scaleX: 0.9, y: 0.9).translatedBy(x: 0, y: -8)
+
+    UIView.animate(
+      withDuration: 0.3,
+      delay: 0,
+      usingSpringWithDamping: 0.82,
+      initialSpringVelocity: 0,
+      options: .allowUserInteraction
+    ) {
+      self.backgroundGlassView.alpha = 1.0
+      self.menuCard.alpha = 1.0
+      self.menuCard.transform = .identity
+    }
+  }
+
+  private func animateOut(completion: (() -> Void)? = nil) {
+    guard !isDismissing else { return }
+    isDismissing = true
+    UIView.animate(withDuration: 0.2, delay: 0, options: .curveEaseIn) {
+      self.backgroundGlassView.alpha = 0
+      self.menuCard.alpha = 0
+      self.menuCard.transform = CGAffineTransform(scaleX: 0.95, y: 0.95)
+    } completion: { _ in
+      self.removeFromSuperview()
+      completion?()
+    }
+  }
+
+  @objc private func handleBackgroundTap() {
+    animateOut()
+  }
+
+  private func makeMenuItem(
+    icon: String,
+    title: String,
+    actionId: String,
+    isDestructive: Bool,
+    showDivider: Bool
+  ) -> UIView {
+    let container = UIView()
+    container.translatesAutoresizingMaskIntoConstraints = false
+
+    let button = UIButton(type: .system)
+    button.translatesAutoresizingMaskIntoConstraints = false
+    let config = UIImage.SymbolConfiguration(pointSize: 15.0, weight: .medium)
+    button.setImage(UIImage(systemName: icon, withConfiguration: config), for: .normal)
+    button.setTitle("  \(title)", for: .normal)
+    button.titleLabel?.font = .systemFont(ofSize: 15.0, weight: .regular)
+    button.tintColor = isDestructive ? .systemRed : .label
+    button.contentHorizontalAlignment = .leading
+    button.contentEdgeInsets = UIEdgeInsets(top: 12, left: 16, bottom: 12, right: 16)
+    button.accessibilityIdentifier = actionId
+    button.addTarget(self, action: #selector(handleMenuAction(_:)), for: .touchUpInside)
+    container.addSubview(button)
+
+    if showDivider {
+      let divider = UIView()
+      divider.translatesAutoresizingMaskIntoConstraints = false
+      divider.backgroundColor = UIColor.separator.withAlphaComponent(0.3)
+      container.addSubview(divider)
+      NSLayoutConstraint.activate([
+        divider.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+        divider.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+        divider.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        divider.heightAnchor.constraint(equalToConstant: 0.5),
+      ])
+    }
+
+    NSLayoutConstraint.activate([
+      button.topAnchor.constraint(equalTo: container.topAnchor),
+      button.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+      button.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+      button.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+      button.heightAnchor.constraint(equalToConstant: 44.0),
+    ])
+
+    return container
+  }
+
+  @objc private func handleMenuAction(_ sender: UIButton) {
+    guard let actionId = sender.accessibilityIdentifier else { return }
+    animateOut { [onAction] in
+      onAction(actionId)
+    }
+  }
+}
+
 // MARK: - Agent Message Views
 
 private final class ChatNativeAgentPlainTextView: UIView {
@@ -194,6 +391,7 @@ private final class ChatNativeAgentPlainTextView: UIView {
       $0.backgroundColor = .clear
       addSubview($0)
     }
+    shimmerLabel.isUserInteractionEnabled = false
 
     shimmerGradient.startPoint = CGPoint(x: 0, y: 0.5)
     shimmerGradient.endPoint = CGPoint(x: 1, y: 0.5)
@@ -226,8 +424,8 @@ private final class ChatNativeAgentPlainTextView: UIView {
       ? appearance.timeColorThem.withAlphaComponent(0.85)
       : appearance.textColorThem
 
-    let topPadding: CGFloat = isProgress ? 8.0 : 4.0
-    let bottomPadding: CGFloat = isProgress ? 6.0 : 16.0
+    let topPadding: CGFloat = isProgress ? 8.0 : 2.0
+    let bottomPadding: CGFloat = isProgress ? 6.0 : 10.0
     let leftPadding: CGFloat = 8.0
     let rightPadding: CGFloat = 32.0
     let labelWidth = max(1.0, availableWidth - leftPadding - rightPadding)
@@ -677,7 +875,7 @@ private final class ChatNativeAgentProgressTreeView: UIView {
 }
 
 private final class ChatNativeAgentActionBarView: UIView {
-  private let buttonSize: CGFloat = 28.0
+  private let buttonSize: CGFloat = 20.0
   private let stackView = UIStackView()
   private let copyButton = UIButton(type: .system)
   private let thumbUpButton = UIButton(type: .system)
@@ -698,7 +896,7 @@ private final class ChatNativeAgentActionBarView: UIView {
     stackView.axis = .horizontal
     stackView.alignment = .center
     stackView.distribution = .fill
-    stackView.spacing = 8.0
+    stackView.spacing = 4.0
     addSubview(stackView)
 
     configureButton(copyButton, symbolName: "doc.on.doc", action: .copy)
@@ -741,12 +939,12 @@ private final class ChatNativeAgentActionBarView: UIView {
       + CGFloat(max(0, visibleButtons.count - 1)) * stackView.spacing
     cachedStackFrame = CGRect(
       x: 8.0,
-      y: 6.0,
+      y: 2.0,
       width: min(max(1.0, contentWidth), max(1.0, availableWidth - 40.0)),
       height: buttonSize
     )
     setNeedsLayout()
-    return 40.0
+    return 30.0
   }
 
   override func layoutSubviews() {
@@ -762,14 +960,14 @@ private final class ChatNativeAgentActionBarView: UIView {
     symbolName: String,
     action: ChatNativeAgentMessageAction
   ) {
-    let config = UIImage.SymbolConfiguration(pointSize: 16.0, weight: .medium)
+    let config = UIImage.SymbolConfiguration(pointSize: 13.0, weight: .medium)
     button.translatesAutoresizingMaskIntoConstraints = false
     var buttonConfiguration = UIButton.Configuration.plain()
     buttonConfiguration.contentInsets = NSDirectionalEdgeInsets(
-      top: 6.0,
-      leading: 6.0,
-      bottom: 6.0,
-      trailing: 6.0
+      top: 3.0,
+      leading: 3.0,
+      bottom: 3.0,
+      trailing: 3.0
     )
     buttonConfiguration.image = UIImage(systemName: symbolName, withConfiguration: config)
     button.configuration = buttonConfiguration
@@ -876,28 +1074,21 @@ private final class ChatNativeAgentCardView: UIControl {
     let outerLeft: CGFloat = 6.0
     let outerRight: CGFloat = 26.0
     let cardWidth = max(1.0, availableWidth - outerLeft - outerRight)
-    let cardHeight: CGFloat = 48.0
+    let cardHeight: CGFloat = 40.0
     let leftPadding: CGFloat = 12.0
     let rightPadding: CGFloat = 12.0
-    let iconSize: CGFloat = 26.0
     let chevronSize = CGSize(width: 12.0, height: 12.0)
 
     cardView.backgroundColor = appearance.bubbleThemColor.withAlphaComponent(0.18)
     cardView.layer.borderWidth = 0.5
     cardView.layer.borderColor = appearance.dayBorderColor.withAlphaComponent(0.18).cgColor
 
-    let isPublished = card.status.lowercased() == "published"
-    let iconSymbol = isPublished ? "bolt.fill" : "gearshape.fill"
-    iconView.image = UIImage(
-      systemName: iconSymbol,
-      withConfiguration: UIImage.SymbolConfiguration(pointSize: 14.0, weight: .medium)
-    )
-    let publishedBase = appearance.bubbleMeGradient.first ?? appearance.bubbleThemColor
-    iconView.tintColor = isPublished ? publishedBase : appearance.timeColorThem.withAlphaComponent(0.7)
+    iconView.isHidden = true
 
     titleLabel.text = card.displayName
     titleLabel.textColor = appearance.textColorThem
 
+    let isPublished = card.status.lowercased() == "published"
     let statusText = card.status.capitalized
     statusLabel.text = statusText
     statusLabel.textColor = appearance.timeColorThem.withAlphaComponent(0.7)
@@ -907,34 +1098,31 @@ private final class ChatNativeAgentCardView: UIControl {
 
     chevronView.tintColor = appearance.timeColorThem.withAlphaComponent(0.4)
 
-    // Layout
-    let iconX = leftPadding
-    let iconY = (cardHeight - iconSize) * 0.5
-    cachedIconFrame = CGRect(x: iconX, y: iconY, width: iconSize, height: iconSize)
-
+    // Layout — icon hidden, text starts at leftPadding
+    let textLeft = leftPadding
     let chevronX = cardWidth - rightPadding - chevronSize.width
     let chevronY = (cardHeight - chevronSize.height) * 0.5
     cachedChevronFrame = CGRect(x: chevronX, y: chevronY, width: chevronSize.width, height: chevronSize.height)
 
-    let textLeft = iconX + iconSize + 10.0
     let textRight = chevronX - 8.0
     let textWidth = max(1.0, textRight - textLeft)
 
-    let titleY: CGFloat = 8.0
-    let titleHeight: CGFloat = 18.0
+    let titleY: CGFloat = 6.0
+    let titleHeight: CGFloat = 16.0
     cachedTitleFrame = CGRect(x: textLeft, y: titleY, width: textWidth, height: titleHeight)
 
     let dotSize: CGFloat = 7.0
-    let statusY = titleY + titleHeight + 3.0
-    cachedStatusDotFrame = CGRect(x: textLeft, y: statusY + 3.5, width: dotSize, height: dotSize)
+    let statusY = titleY + titleHeight + 2.0
+    cachedStatusDotFrame = CGRect(x: textLeft, y: statusY + 2.5, width: dotSize, height: dotSize)
 
     let statusTextX = textLeft + dotSize + 5.0
-    cachedStatusLabelFrame = CGRect(x: statusTextX, y: statusY, width: textWidth - dotSize - 5.0, height: 14.0)
+    cachedStatusLabelFrame = CGRect(x: statusTextX, y: statusY, width: textWidth - dotSize - 5.0, height: 12.0)
 
+    cachedIconFrame = .zero
     cachedCardFrame = CGRect(x: outerLeft, y: 4.0, width: cardWidth, height: cardHeight)
 
     setNeedsLayout()
-    return cachedCardFrame.maxY + 6.0
+    return cachedCardFrame.maxY + 4.0
   }
 
   override func layoutSubviews() {
@@ -967,6 +1155,7 @@ private final class ChatNativeAgentRowHostView: UIView {
   private var cachedSubviewFrame: CGRect = .zero
   private var currentRowText: String = ""
   private var currentSourceMessageId: String = ""
+  private var currentAppearance = ChatListAppearance.fallback
   private let longPressGesture = UILongPressGestureRecognizer()
 
   var onNativeEvent: (([String: Any]) -> Void)? {
@@ -982,7 +1171,7 @@ private final class ChatNativeAgentRowHostView: UIView {
     isOpaque = false
 
     legacyCell.isUserInteractionEnabled = false
-    assistantView.isUserInteractionEnabled = false
+    assistantView.isUserInteractionEnabled = true
     assistantProgressTreeView.isUserInteractionEnabled = false
     assistantActionsView.isUserInteractionEnabled = true
     assistantAgentCardView.isUserInteractionEnabled = true
@@ -1003,21 +1192,22 @@ private final class ChatNativeAgentRowHostView: UIView {
 
   @objc private func handleLongPress(_ gesture: UILongPressGestureRecognizer) {
     guard gesture.state == .began else { return }
-    guard currentPresentationKind == .assistant else { return }
+    guard currentPresentationKind == .legacy else { return }
     let trimmedText = currentRowText.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !trimmedText.isEmpty else { return }
 
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-    showAgentBubbleMenu(text: trimmedText)
+    showUserBubbleMenu(text: trimmedText)
   }
 
-  private func showAgentBubbleMenu(text: String) {
+  private func showUserBubbleMenu(text: String) {
     guard let window = window else { return }
-    let overlay = ChatNativeAgentBubbleMenuOverlay(
-      sourceView: assistantView,
-      sourceFrame: assistantView.convert(assistantView.bounds, to: window),
+    let sourceFrame = legacyCell.convert(legacyCell.bounds, to: window)
+    let overlay = ChatNativeAgentUserMenuOverlay(
+      sourceFrame: sourceFrame,
       text: text,
       messageId: currentSourceMessageId,
+      appearance: currentAppearance,
       onAction: { [weak self] action in
         guard let self else { return }
         self.onNativeEvent?([
@@ -1038,6 +1228,7 @@ private final class ChatNativeAgentRowHostView: UIView {
     appearance: ChatListAppearance,
     availableWidth: CGFloat
   ) -> CGFloat {
+    currentAppearance = appearance
     let nextKind: ChatNativeAgentRowPresentationKind = {
       if row.kind == .message && row.isAgentMessage {
         switch row.messageType {
@@ -1060,9 +1251,12 @@ private final class ChatNativeAgentRowHostView: UIView {
     assistantActionsView.isHidden = nextKind != .assistantActions
     assistantAgentCardView.isHidden = nextKind != .assistantAgentCard
 
-    // Track text for long-press copy
-    longPressGesture.isEnabled = nextKind == .assistant
-    if nextKind == .assistant {
+    // Track text for long-press copy — only on user ("me") messages
+    longPressGesture.isEnabled = nextKind == .legacy
+    if nextKind == .legacy {
+      currentRowText = row.plainContent ?? row.text
+      currentSourceMessageId = row.agentActionSourceId ?? row.messageId ?? row.key
+    } else if nextKind == .assistant {
       currentRowText = row.plainContent ?? row.text
       currentSourceMessageId = row.agentActionSourceId ?? row.messageId ?? row.key
     } else {
