@@ -1245,11 +1245,7 @@ defmodule Vibe.AI.AgentBuilder do
 
     cond do
       is_binary(desired_id) ->
-        Enum.find(attached_chat_links, fn chat -> chat["chat_id"] == desired_id end) ||
-          %{
-            "chat_id" => desired_id,
-            "open_link" => build_chat_link(desired_id)
-          }
+        Enum.find(attached_chat_links, fn chat -> chat["chat_id"] == desired_id end)
 
       attached_chat_links != [] ->
         List.first(attached_chat_links)
@@ -1266,18 +1262,26 @@ defmodule Vibe.AI.AgentBuilder do
   defp build_chat_link(_chat_id), do: nil
 
   defp maybe_set_default_destination_chat(agent, user_id, chat_id, requested_default) do
+    current_default_id = normalize_optional_string(agent.default_destination_chat_id)
+
+    current_default_visible =
+      Agents.attached_chats(agent)
+      |> Enum.any?(fn chat ->
+        normalize_optional_string(chat[:chatId] || chat["chatId"]) == current_default_id
+      end)
+
     should_set_default =
       case requested_default do
         true -> true
         false -> false
-        _ -> not is_binary(normalize_optional_string(agent.default_destination_chat_id))
+        _ -> not is_binary(current_default_id) or not current_default_visible
       end
 
     cond do
       not should_set_default ->
         {:ok, agent, "unchanged"}
 
-      normalize_optional_string(agent.default_destination_chat_id) == chat_id ->
+      current_default_id == chat_id ->
         {:ok, agent, "already_set"}
 
       true ->

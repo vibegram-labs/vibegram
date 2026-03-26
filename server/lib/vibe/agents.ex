@@ -223,9 +223,14 @@ defmodule Vibe.Agents do
   def attached_chats(%Agent{} = agent) do
     Repo.all(
       from r in Room,
-        join: p in Participant,
-        on: p.chat_id == r.id,
-        where: p.user_id == ^agent.agent_user_id,
+        join: agent_p in Participant,
+        on: agent_p.chat_id == r.id,
+        join: owner_p in Participant,
+        on: owner_p.chat_id == r.id,
+        where:
+          agent_p.user_id == ^agent.agent_user_id and
+            owner_p.user_id == ^agent.owner_user_id and
+            (is_nil(owner_p.deleted) or owner_p.deleted == false),
         select: %{
           chatId: r.id,
           type: r.type,

@@ -13,6 +13,10 @@
       "status": "passed",
       "details": "Added builder tool `ensure_destination_chat`, shared `Chat.ensure_dm_chat/2`, and DM-only chat resolution so the standalone agent can create/reuse a real attached DM chat and return its chat id."
     },
+    "server_owner_visible_attached_chats": {
+      "status": "passed",
+      "details": "Owner-facing attached/default destination chats now only include chats shared by both the agent shadow user and the owner, preventing the builder from returning invisible-but-writable chat ids."
+    },
     "server_builder_struct_sanitization": {
       "status": "passed",
       "details": "Builder payload sanitization now compiles with explicit handling for DateTime, NaiveDateTime, Date, Time, Decimal, and fallback structs."
