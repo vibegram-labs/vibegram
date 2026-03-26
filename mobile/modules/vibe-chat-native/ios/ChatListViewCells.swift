@@ -2759,7 +2759,12 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     isPlaying = accepted
     ensureDisplayLink()
     if updateCell {
-      activeCell?.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
+      let isDownloading = self.activeDownloadTask != nil
+      activeCell?.applyVoiceDownloadState(
+        needsDownload: isDownloading,
+        isDownloading: isDownloading,
+        progress: activeDownloadProgress
+      )
       activeCell?.applyVoicePlaybackState(
         isPlaying: accepted,
         progress: playbackProgress,
@@ -2777,7 +2782,12 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     isPlaying = false
     level = 0.0
     if updateCell {
-      activeCell?.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
+      let isDownloading = self.activeDownloadTask != nil
+      activeCell?.applyVoiceDownloadState(
+        needsDownload: isDownloading,
+        isDownloading: isDownloading,
+        progress: activeDownloadProgress
+      )
       activeCell?.applyVoicePlaybackState(
         isPlaying: false,
         progress: playbackProgress,
@@ -2904,29 +2914,18 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
       return
     }
-    if activeMessageId == messageId, hasActivePlaybackEngine {
-      activeCell = cell
-      cell.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
-      cell.applyVoicePlaybackState(
-        isPlaying: isPlaying, progress: playbackProgress, level: level
-      )
-      return
-    }
-    if activeMessageId == messageId, activeDownloadTask != nil {
-      activeCell = cell
-      cell.applyVoiceDownloadState(
-        needsDownload: true,
-        isDownloading: true,
-        progress: activeDownloadProgress
-      )
-      cell.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
-      return
-    }
     if activeMessageId == messageId {
       activeCell = cell
-      cell.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
+      let isDownloading = activeDownloadTask != nil
+      cell.applyVoiceDownloadState(
+        needsDownload: isDownloading,
+        isDownloading: isDownloading,
+        progress: activeDownloadProgress
+      )
       cell.applyVoicePlaybackState(
-        isPlaying: isPlaying, progress: playbackProgress, level: level
+        isPlaying: isPlaying,
+        progress: playbackProgress,
+        level: level
       )
       return
     }
@@ -3435,7 +3434,12 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       self.playbackProgress = duration > 0.0 ? CGFloat(currentTime / duration) : 0.0
       self.level = self.isPlaybackCurrentlyPlaying() ? 0.18 : 0.0
       self.isPlaying = self.isPlaybackCurrentlyPlaying()
-      self.activeCell?.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
+      let isDownloading = self.activeDownloadTask != nil
+      self.activeCell?.applyVoiceDownloadState(
+        needsDownload: isDownloading,
+        isDownloading: isDownloading,
+        progress: self.activeDownloadProgress
+      )
       self.activeCell?.applyVoicePlaybackState(
         isPlaying: self.isPlaying,
         progress: self.playbackProgress,
@@ -3605,7 +3609,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     }
     activeDownloadTask = task
     // Track download progress so the cell and Now Playing show a percentage while waiting.
-    // Only update the cell when the streaming player has not yet started (avoids flicker).
+    // Track download progress and always push it to the cell while a download is active.
     activeDownloadProgressObservation = task.progress.observe(
       \.fractionCompleted,
       options: [.initial, .new]
@@ -3617,12 +3621,10 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
         let previous = self.activeDownloadProgress ?? 0.0
         guard abs(Double(previous) - value) >= 0.01 else { return }
         self.activeDownloadProgress = CGFloat(value)
-        // Only push download progress to the cell when streaming hasn't taken over yet.
-        if self.streamingPlayer == nil || self.streamingPlayer?.timeControlStatus != .playing {
-          self.activeCell?.applyVoiceDownloadState(
-            needsDownload: true, isDownloading: true, progress: CGFloat(value))
-          self.publishSnapshot()
-        }
+        // Always push download progress to the cell while a download task is active.
+        self.activeCell?.applyVoiceDownloadState(
+          needsDownload: true, isDownloading: true, progress: CGFloat(value))
+        self.publishSnapshot()
       }
     }
     task.resume()
@@ -3713,7 +3715,12 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       playbackProgress = max(0.0, min(1.0, playbackProgress))
       level = streamingPlayer.timeControlStatus == .playing ? 0.18 : 0.0
       isPlaying = streamingPlayer.timeControlStatus == .playing
-      activeCell?.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
+      let isDownloading = activeDownloadTask != nil
+      activeCell?.applyVoiceDownloadState(
+        needsDownload: isDownloading,
+        isDownloading: isDownloading,
+        progress: activeDownloadProgress
+      )
       activeCell?.applyVoicePlaybackState(
         isPlaying: isPlaying,
         progress: playbackProgress,
