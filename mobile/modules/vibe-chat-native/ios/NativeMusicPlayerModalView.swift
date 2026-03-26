@@ -448,7 +448,7 @@ final class NativeMusicPlayerModalView: UIViewController, UIScrollViewDelegate {
     primaryActionButton.layer.cornerCurve = .continuous
     primaryActionButton.layer.cornerRadius = 26.0
     primaryActionButton.setImage(
-      UIImage(systemName: "music.note.list")?.withConfiguration(
+      UIImage(systemName: "list.bullet")?.withConfiguration(
         UIImage.SymbolConfiguration(pointSize: 18.0, weight: .semibold)),
       for: .normal
     )
@@ -840,9 +840,9 @@ final class NativeMusicPlayerModalView: UIViewController, UIScrollViewDelegate {
   private func queueOrderIconName() -> String {
     switch queueOrderMode {
     case .forward:
-      return "arrow.down"
+      return "chevron.down"
     case .reverse:
-      return "arrow.up"
+      return "chevron.up"
     case .random:
       return "shuffle"
     }

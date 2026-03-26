@@ -138,8 +138,13 @@ defmodule Vibe.AI.SubagentRegistry do
            user_id: user_id,
            chat_id: chat_id,
            system_prompt: system_prompt,
-           enabled_tools: enabled_tools
+           enabled_tools: enabled_tools,
+           max_tokens: 1024,
+           max_depth: 1
          ) do
+      {:ok, reply, _state} ->
+        {:ok, %{reply: reply, metadata: %{"subagent" => spec.id}}}
+
       {:ok, reply} ->
         {:ok, %{reply: reply, metadata: %{"subagent" => spec.id}}}
 
@@ -220,8 +225,15 @@ defmodule Vibe.AI.SubagentRegistry do
       %{type: :review_ready} = event ->
         callback.(event)
 
-      %{type: :text} ->
-        :ok
+      %{type: :text, content: content} ->
+        # Forward subagent text chunks so the frontend shows streaming activity
+        callback.(%{
+          type: :subagent,
+          event: "text",
+          subagent: spec.id,
+          label: spec.label,
+          content: content
+        })
 
       _ ->
         :ok

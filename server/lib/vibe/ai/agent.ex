@@ -206,6 +206,8 @@ defmodule Vibe.AI.Agent do
     chat_id = Keyword.get(opts, :chat_id, nil)
     system_prompt = Keyword.get(opts, :system_prompt, @system_prompt)
     enabled_tools = Keyword.get(opts, :enabled_tools, available_tool_names())
+    max_tokens = Keyword.get(opts, :max_tokens, 4096)
+    max_depth = Keyword.get(opts, :max_depth, 3)
     tools = filter_tools(enabled_tools)
 
     messages = build_messages(conversation_history, user_message, image_urls)
@@ -214,8 +216,8 @@ defmodule Vibe.AI.Agent do
       messages,
       %AgentRuntime.Config{
         model: @claude_model,
-        max_tokens: 4096,
-        max_depth: 3,
+        max_tokens: max_tokens,
+        max_depth: max_depth,
         system_prompt: system_prompt,
         tools: tools,
         state: %{user_id: user_id, chat_id: chat_id},
@@ -315,11 +317,11 @@ defmodule Vibe.AI.Agent do
   end
 
   defp execute_tools(tool_calls, callback, user_id, chat_id) do
-    Enum.map(tool_calls, fn tool ->
+    # Send all progress labels immediately so the UI shows activity
+    Enum.each(tool_calls, fn tool ->
       tool_name = tool["name"]
       tool_input = tool["input"] || %{}
 
-      # Send progress IMMEDIATELY (before any text)
       label = case tool_name do
         "search_music" ->
            q = tool_input["query"] || "music"
@@ -344,70 +346,91 @@ defmodule Vibe.AI.Agent do
         _ -> "Working..."
       end
       callback.(%{type: :progress, label: label, tool: tool_name, status: "running"})
-
-      # Execute the tool
-      start_time = System.monotonic_time(:millisecond)
-
-      result =
-        cond do
-          tool_name == "search_music" ->
-            Vibe.AI.Tools.Music.search(tool["input"])
-
-          tool_name == "search_google" ->
-            Vibe.AI.Tools.Search.google(tool["input"])
-
-          tool_name == "analyze_image" ->
-            Vibe.AI.Tools.Vision.analyze(tool["input"])
-
-          tool_name == "analyze_document" ->
-            Vibe.AI.Tools.Document.analyze(tool["input"])
-
-          tool_name in GroupAgent.standalone_tool_names() ->
-            GroupAgent.execute_standalone_tool(tool_name, tool["input"], user_id, chat_id)
-
-          tool_name == "post_to_channel" ->
-            Vibe.AI.Tools.Channel.post_to_channel(tool["input"], user_id)
-
-          tool_name == "get_channel_analytics" ->
-            Vibe.AI.Tools.Channel.get_analytics(tool["input"], user_id)
-
-          tool_name == "schedule_channel_post" ->
-            Vibe.AI.Tools.Channel.schedule_post(tool["input"], user_id)
-
-          tool_name == "delegate_to_subagent" ->
-            case SubagentRegistry.run(
-                   tool_input["subagent_id"],
-                   tool_input["task"],
-                   user_id: user_id,
-                   chat_id: chat_id,
-                   callback: callback
-                 ) do
-              {:ok, payload} -> payload
-              {:error, reason} -> %{"ok" => false, "error" => inspect(reason)}
-            end
-
-          true ->
-            %{error: "Unknown tool"}
-        end
-
-      duration_ms = System.monotonic_time(:millisecond) - start_time
-      Logger.info("[Agent] Tool #{tool_name} completed in #{duration_ms}ms")
-
-      # Send tool result with completion status
-      callback.(%{
-        type: :tool_result,
-        tool: tool_name,
-        result: result,
-        status: "complete",
-        duration_ms: duration_ms
-      })
-
-      %{
-        type: "tool_result",
-        tool_use_id: tool["id"],
-        content: Jason.encode!(result)
-      }
     end)
+
+    # Run tool calls in parallel using Task.async for concurrent execution
+    tasks =
+      Enum.map(tool_calls, fn tool ->
+        Task.async(fn ->
+          execute_single_tool(tool, callback, user_id, chat_id)
+        end)
+      end)
+
+    # Await all tasks with a generous timeout (120s per tool)
+    Enum.map(tasks, fn task ->
+      case Task.yield(task, 120_000) || Task.shutdown(task) do
+        {:ok, result} -> result
+        nil ->
+          Logger.error("[Agent] Tool execution timed out after 120s")
+          %{type: "tool_result", tool_use_id: "unknown", content: Jason.encode!(%{error: "Tool timed out"})}
+      end
+    end)
+  end
+
+  defp execute_single_tool(tool, callback, user_id, chat_id) do
+    tool_name = tool["name"]
+    tool_input = tool["input"] || %{}
+    start_time = System.monotonic_time(:millisecond)
+
+    result =
+      cond do
+        tool_name == "search_music" ->
+          Vibe.AI.Tools.Music.search(tool["input"])
+
+        tool_name == "search_google" ->
+          Vibe.AI.Tools.Search.google(tool["input"])
+
+        tool_name == "analyze_image" ->
+          Vibe.AI.Tools.Vision.analyze(tool["input"])
+
+        tool_name == "analyze_document" ->
+          Vibe.AI.Tools.Document.analyze(tool["input"])
+
+        tool_name in GroupAgent.standalone_tool_names() ->
+          GroupAgent.execute_standalone_tool(tool_name, tool["input"], user_id, chat_id)
+
+        tool_name == "post_to_channel" ->
+          Vibe.AI.Tools.Channel.post_to_channel(tool["input"], user_id)
+
+        tool_name == "get_channel_analytics" ->
+          Vibe.AI.Tools.Channel.get_analytics(tool["input"], user_id)
+
+        tool_name == "schedule_channel_post" ->
+          Vibe.AI.Tools.Channel.schedule_post(tool["input"], user_id)
+
+        tool_name == "delegate_to_subagent" ->
+          case SubagentRegistry.run(
+                 tool_input["subagent_id"],
+                 tool_input["task"],
+                 user_id: user_id,
+                 chat_id: chat_id,
+                 callback: callback
+               ) do
+            {:ok, payload} -> payload
+            {:error, reason} -> %{"ok" => false, "error" => inspect(reason)}
+          end
+
+        true ->
+          %{error: "Unknown tool"}
+      end
+
+    duration_ms = System.monotonic_time(:millisecond) - start_time
+    Logger.info("[Agent] Tool #{tool_name} completed in #{duration_ms}ms")
+
+    # Send tool result with completion status
+    callback.(%{
+      type: :tool_result,
+      tool: tool_name,
+      result: result,
+      status: "complete",
+      duration_ms: duration_ms
+    })
+
+    %{
+      type: "tool_result",
+      tool_use_id: tool["id"],
+      content: Jason.encode!(result)
+    }
   end
 
   defp filter_tools(enabled_tools) do

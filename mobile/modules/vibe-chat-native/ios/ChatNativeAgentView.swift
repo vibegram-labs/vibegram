@@ -1103,12 +1103,16 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     switch frame.event {
     case "chunk":
       let text = (frame.payload["text"] as? String) ?? ""
+      NSLog("[ChatNativeAgent] chunk received len=%d total_segments=%d", text.count, conversation(for: streamingConversationId ?? activeConversationId ?? "")?.messages.last?.streamSegments.count ?? 0)
+      scheduleStreamingTimeout()
       appendChunk(text)
     case "progress":
       let label =
         (frame.payload["label"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
       let tool = frame.payload["tool"] as? String
       let status = (frame.payload["status"] as? String) ?? "running"
+      NSLog("[ChatNativeAgent] progress tool=%@ status=%@ label=%@", tool ?? "nil", status, label)
+      scheduleStreamingTimeout()
 
       guard let conversationId = streamingConversationId ?? activeConversationId else { break }
       updateConversation(conversationId) { conversation in
@@ -1138,14 +1142,20 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       }
       rebuildChatRows(scrollToBottom: false, animated: false)
     case "subagent":
+      NSLog("[ChatNativeAgent] subagent event=%@", (frame.payload["event"] as? String) ?? "unknown")
+      scheduleStreamingTimeout()
       handleSubagentEvent(frame.payload)
     case "agent_cards":
+      scheduleStreamingTimeout()
       handleAgentCardsEvent(frame.payload)
     case "builder_state":
+      scheduleStreamingTimeout()
       handleBuilderStateEvent(frame.payload)
     case "ui_request":
+      scheduleStreamingTimeout()
       handleBuilderUiRequestEvent(frame.payload)
     case "review_ready":
+      scheduleStreamingTimeout()
       handleBuilderReviewReadyEvent(frame.payload)
     case "ack":
       if let conversationId = frame.payload["conversation_id"] as? String {
@@ -1507,24 +1517,47 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   }
 
   private func appendChunk(_ chunk: String) {
-    guard let conversationId = streamingConversationId ?? activeConversationId else { return }
+    guard let conversationId = streamingConversationId ?? activeConversationId else {
+      NSLog("[ChatNativeAgent] appendChunk: no active conversation, dropping chunk len=%d", chunk.count)
+      return
+    }
     updateConversation(conversationId) { conversation in
-      guard !conversation.messages.isEmpty else { return }
+      guard !conversation.messages.isEmpty else {
+        NSLog("[ChatNativeAgent] appendChunk: no messages in conversation")
+        return
+      }
       let lastIndex = conversation.messages.count - 1
-      guard conversation.messages[lastIndex].role == .assistant else { return }
+      guard conversation.messages[lastIndex].role == .assistant else {
+        NSLog("[ChatNativeAgent] appendChunk: last message is not assistant")
+        return
+      }
       conversation.messages[lastIndex].content += chunk
       conversation.messages[lastIndex].isStreaming = true
       conversation.updatedAt = Self.nowMs()
 
-      // Append to the last .text segment, or create a new one
-      // This preserves ordering: if the last segment was a progress,
-      // a new text block starts AFTER it — achieving mid-response progress
-      if case .text(let existing) = conversation.messages[lastIndex].streamSegments.last {
-        let updatedIndex = conversation.messages[lastIndex].streamSegments.count - 1
-        conversation.messages[lastIndex].streamSegments[updatedIndex] = .text(existing + chunk)
+      // Append to the last .text segment (skip over any trailing card segments),
+      // or create a new one. This preserves ordering: if the last non-card segment
+      // was a progress, a new text block starts AFTER it.
+      let lastTextOrProgressIndex = conversation.messages[lastIndex].streamSegments.lastIndex(where: {
+        switch $0 {
+        case .text: return true
+        case .progress: return true
+        case .cards: return false
+        }
+      })
+      if let lastIdx = lastTextOrProgressIndex,
+         case .text(let existing) = conversation.messages[lastIndex].streamSegments[lastIdx] {
+        conversation.messages[lastIndex].streamSegments[lastIdx] = .text(existing + chunk)
       } else {
-        conversation.messages[lastIndex].streamSegments.append(.text(chunk))
+        // Insert before any trailing card segments
+        let insertIndex = lastTextOrProgressIndex.map { $0 + 1 } ?? conversation.messages[lastIndex].streamSegments.count
+        conversation.messages[lastIndex].streamSegments.insert(.text(chunk), at: min(insertIndex, conversation.messages[lastIndex].streamSegments.count))
       }
+
+      NSLog("[ChatNativeAgent] appendChunk: content_len=%d segments=%d chunk_len=%d",
+            conversation.messages[lastIndex].content.count,
+            conversation.messages[lastIndex].streamSegments.count,
+            chunk.count)
     }
     rebuildChatRows(scrollToBottom: false, animated: false)
   }
@@ -1558,8 +1591,11 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     streamingTimeoutWorkItem?.cancel()
 
     guard let conversationId = streamingConversationId ?? activeConversationId else {
+      NSLog("[ChatNativeAgent] finishStreaming: no active conversation")
       return
     }
+    NSLog("[ChatNativeAgent] finishStreaming conversationId=%@ fallback=%@ forceError=%d",
+          String(conversationId.prefix(8)), fallbackText ?? "nil", forceErrorText ? 1 : 0)
 
     updateConversation(conversationId) { conversation in
       guard !conversation.messages.isEmpty else { return }
@@ -1671,10 +1707,11 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
   private func scheduleStreamingTimeout() {
     streamingTimeoutWorkItem?.cancel()
     let workItem = DispatchWorkItem { [weak self] in
+      NSLog("[ChatNativeAgent] streaming timeout fired after 120s")
       self?.finishStreaming(fallbackText: "Response stopped.", forceErrorText: false)
     }
     streamingTimeoutWorkItem = workItem
-    DispatchQueue.main.asyncAfter(deadline: .now() + 30.0, execute: workItem)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 120.0, execute: workItem)
   }
 
   private func createConversation(title: String) -> String {
@@ -1990,6 +2027,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
     into entries: inout [ChatNativeAgentRenderEntry]
   ) {
     var pendingProgressSegments: [ChatNativeAgentStreamSegment] = []
+    var deferredCardEntries: [ChatNativeAgentRenderEntry] = []
     let lastTextSegmentIndex = message.streamSegments.lastIndex(where: {
       if case .text(let text) = $0 {
         return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -2052,10 +2090,10 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
           ))
 
       case .cards(let groupId, let cards):
-        // Same as for text: drop progress accumulated before a card group.
+        // Defer card entries to render after all text content
         pendingProgressSegments.removeAll()
         for (cardIndex, card) in cards.enumerated() {
-          entries.append(
+          deferredCardEntries.append(
             ChatNativeAgentRenderEntry(
               id: "\(message.id)-card-\(groupId)-\(cardIndex)",
               role: .assistant,
@@ -2096,6 +2134,9 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
           actionSourceText: isStreaming ? nil : message.content
         ))
     }
+
+    // Append deferred card entries after all text content
+    entries.append(contentsOf: deferredCardEntries)
   }
 
   private func buildProgressNodes(from segments: [ChatNativeAgentStreamSegment]) -> [[String: Any]] {
