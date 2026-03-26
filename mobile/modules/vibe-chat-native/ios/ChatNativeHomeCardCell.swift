@@ -531,7 +531,7 @@ final class ChatNativeHomeCardCell: UITableViewCell {
       muteIconView.heightAnchor.constraint(equalToConstant: 14),
       pinIconView.widthAnchor.constraint(equalToConstant: 14),
       pinIconView.heightAnchor.constraint(equalToConstant: 14),
-      contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 84),
+      { let c = contentView.heightAnchor.constraint(greaterThanOrEqualToConstant: 84); c.priority = .defaultHigh; return c }(),
     ])
 
     rowContentContainer.addGestureRecognizer(swipePanGestureRecognizer)
@@ -1165,9 +1165,16 @@ private final class ChatNativeHomeSwipeActionTileView: UIView {
     self.iconWidthConstraint = iconWidthConstraint
     self.iconHeightConstraint = iconHeightConstraint
 
+    let centerXConstraint = stackView.centerXAnchor.constraint(equalTo: centerXAnchor)
+    let centerYConstraint = stackView.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1)
+    centerXConstraint.priority = .defaultHigh
+    centerYConstraint.priority = .defaultHigh
+    stackLeadingConstraint.priority = .defaultHigh
+    stackTrailingConstraint.priority = .defaultHigh
+
     NSLayoutConstraint.activate([
-      stackView.centerXAnchor.constraint(equalTo: centerXAnchor),
-      stackView.centerYAnchor.constraint(equalTo: centerYAnchor, constant: 1),
+      centerXConstraint,
+      centerYConstraint,
       stackLeadingConstraint,
       stackTrailingConstraint,
       iconWidthConstraint,
