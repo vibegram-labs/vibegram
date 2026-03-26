@@ -1,4 +1,5 @@
 import AVFoundation
+import AVKit
 import ExpoModulesCore
 import QuickLook
 import UIKit
@@ -2142,8 +2143,18 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     if isMediaOrVideo {
       let mediaDownloadState = remoteMediaDownloadState(for: row)
       if mediaDownloadState.needsDownload {
-        startRemoteMediaDownload(for: row, presentOnComplete: true)
-        return
+        // Skip the full-file download for unencrypted remote audio — openDocumentInApp will stream it.
+        let isStreamableAudio: Bool = {
+          let key = resolvedMediaKey(for: row)
+          let noKey = key?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+          guard noKey, let rawURL = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines) else { return false }
+          return isAudioAttachmentURI(rawURL, fileNameHint: row.fileName)
+            && (URL(string: rawURL)?.scheme.map { ["http","https"].contains($0.lowercased()) } ?? false)
+        }()
+        if !isStreamableAudio {
+          startRemoteMediaDownload(for: row, presentOnComplete: true)
+          return
+        }
       }
     }
     guard isFileLikeType || hasFileNameHint || isAgentDocURL || isMediaOrVideo else { return }
@@ -4942,6 +4953,33 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   }
 
   private func openDocumentInApp(row: ChatListRow) {
+    // Stream unencrypted remote audio directly via AVPlayer.
+    // AVPlayer performs progressive HTTP buffering so playback starts after the
+    // first few seconds of data arrive, not after the full file is downloaded.
+    let audioMediaKey = resolvedMediaKey(for: row)
+    let noEncryptionKey = audioMediaKey?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true
+    if noEncryptionKey,
+       row.visualKind != .voice,
+       let rawAudioURL = row.mediaUrl?.trimmingCharacters(in: .whitespacesAndNewlines),
+       isAudioAttachmentURI(rawAudioURL, fileNameHint: row.fileName),
+       let remoteAudioURL = URL(string: rawAudioURL),
+       ["http", "https"].contains(remoteAudioURL.scheme?.lowercased() ?? ""),
+       let presenter = topPresentingViewController()
+    {
+      NSLog(
+        "[ChatListView] streamAudio progressive msgId=%@ remote=%@",
+        row.messageId ?? "-",
+        remoteAudioURL.absoluteString
+      )
+      let player = AVPlayer(url: remoteAudioURL)
+      let playerVC = AVPlayerViewController()
+      playerVC.player = player
+      presenter.present(playerVC, animated: true) {
+        player.play()
+      }
+      return
+    }
+
     let downloadState = remoteMediaDownloadState(for: row)
     if downloadState.needsDownload {
       chatListDebugLog(

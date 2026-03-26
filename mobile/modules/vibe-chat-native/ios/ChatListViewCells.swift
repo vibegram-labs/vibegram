@@ -2434,6 +2434,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   private var queueOrderMode: NativeMusicPlayerQueueOrderMode = .forward
   private var isRepeatEnabled = false
   private var activeDownloadTask: URLSessionDownloadTask?
+  private var activeDownloadProgressObservation: NSKeyValueObservation?
   private var activeDownloadProgress: CGFloat?
   private var activeMediaKey: String?
   private var activeFileName: String?
@@ -3395,7 +3396,10 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
 
     let item = AVPlayerItem(url: url)
     let nextPlayer = AVPlayer(playerItem: item)
-    nextPlayer.automaticallyWaitsToMinimizeStalling = true
+    // Play as soon as the first chunk is buffered rather than waiting to minimise stalling.
+    // Gives near-instant audio start on reliable connections; may stall briefly on slow links
+    // but the user hears sound much sooner than with the default true.
+    nextPlayer.automaticallyWaitsToMinimizeStalling = false
     streamingPlayer = nextPlayer
 
     streamingPlayerStatusObservation = item.observe(\.status, options: [.initial, .new]) {
@@ -3451,7 +3455,9 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       }
     }
 
-    cell?.applyVoiceDownloadState(needsDownload: false, isDownloading: false, progress: nil)
+    // Show a buffering/loading indicator while AVPlayer is connecting.
+    // The time observer will clear this once the first chunk starts playing.
+    cell?.applyVoiceDownloadState(needsDownload: true, isDownloading: true, progress: nil)
     cell?.applyVoicePlaybackState(isPlaying: false, progress: 0.0, level: 0.0)
     ensureDisplayLink()
     publishSnapshot(forceNowPlaying: true)
@@ -3466,6 +3472,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   ) {
     let localURL = cachedRemoteVoiceURL(for: url, fileName: fileName)
     let task = URLSession.shared.downloadTask(with: url) { [weak self] tempURL, response, error in
+    // Note: progress observation is set up below after task is assigned to activeDownloadTask.
       guard let self, let tempURL = tempURL, error == nil else {
         NSLog(
           "[ChatListView] voice download failed url=%@ error=%@", url.absoluteString,
@@ -3597,6 +3604,27 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       }
     }
     activeDownloadTask = task
+    // Track download progress so the cell and Now Playing show a percentage while waiting.
+    // Only update the cell when the streaming player has not yet started (avoids flicker).
+    activeDownloadProgressObservation = task.progress.observe(
+      \.fractionCompleted,
+      options: [.initial, .new]
+    ) { [weak self] progress, _ in
+      guard let self else { return }
+      let value = max(0.03, min(1.0, progress.fractionCompleted))
+      DispatchQueue.main.async {
+        guard self.activeMessageId == messageId else { return }
+        let previous = self.activeDownloadProgress ?? 0.0
+        guard abs(Double(previous) - value) >= 0.01 else { return }
+        self.activeDownloadProgress = CGFloat(value)
+        // Only push download progress to the cell when streaming hasn't taken over yet.
+        if self.streamingPlayer == nil || self.streamingPlayer?.timeControlStatus != .playing {
+          self.activeCell?.applyVoiceDownloadState(
+            needsDownload: true, isDownloading: true, progress: CGFloat(value))
+          self.publishSnapshot()
+        }
+      }
+    }
     task.resume()
   }
 
@@ -3738,6 +3766,8 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     autoPlayWhenFinished: Bool = true
   ) {
     activeDownloadTask = nil
+    activeDownloadProgressObservation?.invalidate()
+    activeDownloadProgressObservation = nil
     activeDownloadProgress = nil
     _ = NativeMusicPlayerStore.shared.updateLocalURI(trackId: messageId, localURI: localMediaURL)
     guard activeMessageId == messageId else { return }
@@ -3761,6 +3791,8 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     shouldResumeAfterInterruption = false
     activeDownloadTask?.cancel()
     activeDownloadTask = nil
+    activeDownloadProgressObservation?.invalidate()
+    activeDownloadProgressObservation = nil
     activeDownloadProgress = nil
     player?.stop()
     player = nil
