@@ -373,13 +373,21 @@ final class ChatNativeAgentUserMenuOverlay: UIView {
 // MARK: - Agent Message Views
 
 private final class ChatNativeAgentPlainTextView: UIView {
+  // Progress row path (isProgress=true)
   private let baseLabel = ChatNativeStreamingTextLabel()
   private let shimmerLabel = ChatNativeStreamingTextLabel()
   private let shimmerGradient = CAGradientLayer()
-  private var cachedFrame: CGRect = .zero
   private var isShimmering = false
+
+  // Block-render path (isProgress=false)
+  private var blockViews: [UIView] = []
+  private var blockFrames: [CGRect] = []
+  private var lastBlockSignature: String = ""
+
+  // Shared state
   private var lastText: String?
   private var lastRowKey: String?
+  private var cachedProgressFrame: CGRect = .zero
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -410,19 +418,6 @@ private final class ChatNativeAgentPlainTextView: UIView {
   ) -> CGFloat {
     let isProgress = row.messageType == "agent_progress"
     let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
-    let font =
-      isProgress
-      ? UIFont.systemFont(ofSize: 11.5, weight: .medium)
-      : UIFont.systemFont(ofSize: 18, weight: .regular)
-    let lineHeight: CGFloat = isProgress ? 16.0 : 26.0
-    let baseColor =
-      isProgress
-      ? appearance.timeColorThem.withAlphaComponent(0.35)
-      : appearance.textColorThem
-    let highlightColor =
-      isProgress
-      ? appearance.timeColorThem.withAlphaComponent(0.85)
-      : appearance.textColorThem
 
     let topPadding: CGFloat = isProgress ? 8.0 : 2.0
     let bottomPadding: CGFloat = isProgress ? 6.0 : 10.0
@@ -430,91 +425,143 @@ private final class ChatNativeAgentPlainTextView: UIView {
     let rightPadding: CGFloat = 32.0
     let labelWidth = max(1.0, availableWidth - leftPadding - rightPadding)
 
-    let baseAttributed = ChatNativeAgentTextRenderer.makeAttributedText(
-      text: text,
-      font: font,
-      textColor: baseColor,
-      lineHeight: lineHeight
-    )
-    let highlightAttributed = ChatNativeAgentTextRenderer.makeAttributedText(
-      text: text,
-      font: font,
-      textColor: highlightColor,
-      lineHeight: lineHeight
-    )
-
-    let measuredSize = ChatNativeAgentTextRenderer.measuredSize(for: baseAttributed, width: labelWidth)
-    let textHeight = max(ceil(font.lineHeight), measuredSize.height)
-    let textWidth = min(labelWidth, measuredSize.width)
-
-    baseLabel.textColor = baseColor
-    shimmerLabel.textColor = highlightColor
-
-    let isStreaming = row.isStreamingText && !isProgress
-    let shouldTransition = isProgress && (lastText != text || lastRowKey != row.key)
-
-    if shouldTransition {
-      UIView.transition(
-        with: self,
-        duration: 0.22,
-        options: [.transitionCrossDissolve, .allowUserInteraction]
-      ) {
-        self.performLabelUpdate(
-          baseAttributed: baseAttributed,
-          highlightAttributed: highlightAttributed,
-          text: text,
-          isStreaming: isStreaming
-        )
-      }
-    } else {
-      performLabelUpdate(
-        baseAttributed: baseAttributed,
-        highlightAttributed: highlightAttributed,
-        text: text,
-        isStreaming: isStreaming
-      )
-    }
-
-    lastText = text
-    lastRowKey = row.key
-
-    cachedFrame = CGRect(
-      x: leftPadding,
-      y: topPadding,
-      width: textWidth,
-      height: textHeight
-    )
-
     if isProgress {
+      // --- Progress path: shimmer label pair ---
+      let font = UIFont.systemFont(ofSize: 11.5, weight: .medium)
+      let lineHeight: CGFloat = 16.0
+      let baseColor = appearance.timeColorThem.withAlphaComponent(0.35)
+      let highlightColor = appearance.timeColorThem.withAlphaComponent(0.85)
+
+      let baseAttributed = ChatNativeAgentTextRenderer.makeAttributedText(
+        text: text, font: font, textColor: baseColor, lineHeight: lineHeight)
+      let highlightAttributed = ChatNativeAgentTextRenderer.makeAttributedText(
+        text: text, font: font, textColor: highlightColor, lineHeight: lineHeight)
+
+      let measuredSize = ChatNativeAgentTextRenderer.measuredSize(for: baseAttributed, width: labelWidth)
+      let textHeight = max(ceil(font.lineHeight), measuredSize.height)
+      let textWidth = min(labelWidth, measuredSize.width)
+
+      let shouldTransition = lastText != text || lastRowKey != row.key
+      if shouldTransition {
+        UIView.transition(with: self, duration: 0.22, options: [.transitionCrossDissolve, .allowUserInteraction]) {
+          self.baseLabel.applyStreamingText(baseAttributed, rawText: text, isStreaming: false)
+          self.shimmerLabel.applyStreamingText(highlightAttributed, rawText: text, isStreaming: false)
+        }
+      } else {
+        baseLabel.applyStreamingText(baseAttributed, rawText: text, isStreaming: false)
+        shimmerLabel.applyStreamingText(highlightAttributed, rawText: text, isStreaming: false)
+      }
+
+      lastText = text
+      lastRowKey = row.key
+
+      cachedProgressFrame = CGRect(x: leftPadding, y: topPadding, width: textWidth, height: textHeight)
+
+      // hide block views
+      blockViews.forEach { $0.isHidden = true }
+      baseLabel.isHidden = false
+      shimmerLabel.isHidden = false
+
       shimmerGradient.colors = [
         UIColor.black.withAlphaComponent(0.0).cgColor,
         UIColor.black.cgColor,
         UIColor.black.withAlphaComponent(0.0).cgColor,
       ]
       startShimmerAnimation()
+      setNeedsLayout()
+      return topPadding + textHeight + bottomPadding
+
     } else {
+      // --- Block-render path ---
       stopShimmerAnimation()
+      baseLabel.isHidden = true
+      shimmerLabel.isHidden = true
+
+      let font = UIFont.systemFont(ofSize: 18, weight: .regular)
+      let lineHeight: CGFloat = 26.0
+      let textColor = appearance.textColorThem
+      let isStreaming = row.isStreamingText
+      let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
+
+      // Rebuild subviews only when block structure changes
+      let signature = blocks.map { block -> String in
+        switch block { case .text: return "T"; case .code: return "C" }
+      }.joined()
+
+      if signature != lastBlockSignature {
+        blockViews.forEach { $0.removeFromSuperview() }
+        blockViews = blocks.map { block -> UIView in
+          switch block {
+          case .text:
+            let label = ChatNativeStreamingTextLabel()
+            label.numberOfLines = 0
+            label.backgroundColor = .clear
+            addSubview(label)
+            return label
+          case .code:
+            let card = AgentCodeBlockView()
+            addSubview(card)
+            return card
+          }
+        }
+        lastBlockSignature = signature
+      } else {
+        blockViews.forEach { $0.isHidden = false }
+      }
+
+      // Find index of last text block for streaming animation
+      var lastTextIdx: Int? = nil
+      for (i, block) in blocks.enumerated() {
+        if case .text = block { lastTextIdx = i }
+      }
+
+      // Layout and configure each block
+      var yOffset: CGFloat = topPadding
+      blockFrames = []
+      for (i, block) in blocks.enumerated() {
+        let view = blockViews[i]
+        view.isHidden = false
+        switch block {
+        case .text(let content):
+          let label = view as! ChatNativeStreamingTextLabel
+          let shouldStream = isStreaming && i == lastTextIdx
+          let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
+            text: content, font: font, textColor: textColor, lineHeight: lineHeight)
+          let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: labelWidth)
+          let h = max(ceil(font.lineHeight), measured.height)
+          label.applyStreamingText(attributed, rawText: content, isStreaming: shouldStream)
+          let frame = CGRect(x: leftPadding, y: yOffset, width: labelWidth, height: h)
+          blockFrames.append(frame)
+          yOffset += h + 6.0
+
+        case .code(let content):
+          let card = view as! AgentCodeBlockView
+          let cardHeight = card.configure(
+            code: content, textColor: textColor, baseFont: font, availableWidth: labelWidth)
+          let frame = CGRect(x: leftPadding, y: yOffset, width: labelWidth, height: cardHeight)
+          blockFrames.append(frame)
+          yOffset += cardHeight + 6.0
+        }
+      }
+
+      lastText = text
+      lastRowKey = row.key
+
+      setNeedsLayout()
+      return yOffset + bottomPadding
     }
-
-    setNeedsLayout()
-    return topPadding + textHeight + bottomPadding
-  }
-
-  private func performLabelUpdate(
-    baseAttributed: NSAttributedString,
-    highlightAttributed: NSAttributedString,
-    text: String,
-    isStreaming: Bool
-  ) {
-    baseLabel.applyStreamingText(baseAttributed, rawText: text, isStreaming: isStreaming)
-    shimmerLabel.applyStreamingText(highlightAttributed, rawText: text, isStreaming: isStreaming)
   }
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    baseLabel.frame = cachedFrame
-    shimmerLabel.frame = cachedFrame
+    // Progress path
+    baseLabel.frame = cachedProgressFrame
+    shimmerLabel.frame = cachedProgressFrame
     shimmerGradient.frame = shimmerLabel.bounds
+    // Block path
+    for (i, view) in blockViews.enumerated() where i < blockFrames.count {
+      view.frame = blockFrames[i]
+    }
   }
 
   private func startShimmerAnimation() {

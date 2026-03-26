@@ -8,6 +8,12 @@ protocol ChatNativeStreamingTextLabelDelegate: AnyObject {
   func streamingTextLabel(_ label: ChatNativeStreamingTextLabel, didTap url: URL)
 }
 
+/// Block type emitted by ChatNativeAgentTextRenderer.parseBlocks.
+enum AgentParsedBlock: Equatable {
+  case text(String)
+  case code(String)
+}
+
 enum ChatNativeAgentTextRenderer {
   static func isRTL(_ text: String) -> Bool {
     text.range(of: "[\\u0600-\\u06FF]", options: .regularExpression) != nil
@@ -38,63 +44,31 @@ enum ChatNativeAgentTextRenderer {
       baseAttrs[.baselineOffset] = (lineHeight - font.lineHeight) * 0.25
     }
 
-    // Split text into fenced code blocks and regular text blocks.
-    let blocks = splitFencedCodeBlocks(text)
-
-    guard blocks.count > 1 else {
-      // Fast path: no code fences — process lines directly.
-      if case .normalText(let t) = blocks.first ?? .normalText(text) {
-        return applyLineMarkdown(t, baseAttrs: baseAttrs, font: font, textColor: textColor)
-      }
-      return applyLineMarkdown(text, baseAttrs: baseAttrs, font: font, textColor: textColor)
-    }
-
-    let result = NSMutableAttributedString()
-    for (i, block) in blocks.enumerated() {
-      if i > 0 { result.append(NSAttributedString(string: "\n", attributes: baseAttrs)) }
-      switch block {
-      case .normalText(let t):
-        result.append(applyLineMarkdown(t, baseAttrs: baseAttrs, font: font, textColor: textColor))
-      case .codeBlock(let code):
-        result.append(renderCodeBlock(code, baseFont: font, textColor: textColor))
-      }
-    }
-    return result
+    return applyLineMarkdown(text, baseAttrs: baseAttrs, font: font, textColor: textColor)
   }
 
-  // MARK: - Block-level parsing
+  // MARK: - Block parsing
 
-  private enum MarkdownBlock {
-    case normalText(String)
-    case codeBlock(String)
-  }
-
-  /// Splits raw markdown text into alternating normalText / codeBlock segments
-  /// by detecting fenced code blocks (``` ... ```).
-  private static func splitFencedCodeBlocks(_ text: String) -> [MarkdownBlock] {
-    var blocks: [MarkdownBlock] = []
+  /// Split raw markdown into alternating text and fenced-code blocks.
+  static func parseBlocks(_ text: String) -> [AgentParsedBlock] {
+    var blocks: [AgentParsedBlock] = []
     var normalLines: [String] = []
     var codeLines: [String] = []
     var inCodeBlock = false
-
     for line in text.components(separatedBy: "\n") {
       if line.hasPrefix("```") {
         if inCodeBlock {
-          // End of fenced code block.
-          let codeText = codeLines.joined(separator: "\n")
-          if !codeText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            blocks.append(.codeBlock(codeText))
+          let code = codeLines.joined(separator: "\n")
+          if !code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(.code(code))
           }
-          codeLines = []
-          inCodeBlock = false
+          codeLines = []; inCodeBlock = false
         } else {
-          // Start of fenced code block — flush buffered normal lines first.
-          let normalText = normalLines.joined(separator: "\n")
-          if !normalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            blocks.append(.normalText(normalText))
+          let normal = normalLines.joined(separator: "\n")
+          if !normal.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            blocks.append(.text(normal))
           }
-          normalLines = []
-          inCodeBlock = true
+          normalLines = []; inCodeBlock = true
         }
       } else if inCodeBlock {
         codeLines.append(line)
@@ -102,19 +76,18 @@ enum ChatNativeAgentTextRenderer {
         normalLines.append(line)
       }
     }
-
-    // Flush remaining lines (handles unclosed code blocks during streaming).
     if inCodeBlock, !codeLines.isEmpty {
-      blocks.append(.codeBlock(codeLines.joined(separator: "\n")))
+      blocks.append(.code(codeLines.joined(separator: "\n")))
     } else if !normalLines.isEmpty {
       let t = normalLines.joined(separator: "\n")
-      if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-        blocks.append(.normalText(t))
-      }
+      if !t.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { blocks.append(.text(t)) }
     }
-
-    return blocks.isEmpty ? [.normalText(text)] : blocks
+    return blocks.isEmpty ? [.text(text)] : blocks
   }
+
+  // MARK: - Line-level markdown
+
+  // MARK: - Line-level helpers
 
   /// Processes a normal-text block line by line, handling headings and table
   /// separator rows, then applying inline formatting to each regular line.
@@ -197,14 +170,6 @@ enum ChatNativeAgentTextRenderer {
     return NSAttributedString(string: text, attributes: attrs)
   }
 
-  private static func renderCodeBlock(_ code: String, baseFont: UIFont, textColor: UIColor) -> NSAttributedString {
-    let monoFont = UIFont.monospacedSystemFont(ofSize: max(11.0, baseFont.pointSize - 2.0), weight: .regular)
-    return NSAttributedString(string: code, attributes: [
-      .font: monoFont,
-      .foregroundColor: textColor.withAlphaComponent(0.85),
-    ])
-  }
-
   private static func applyInlineFormatting(
     _ text: String,
     baseAttrs: [NSAttributedString.Key: Any],
@@ -263,13 +228,13 @@ enum ChatNativeAgentTextRenderer {
       mutable.replaceCharacters(in: match.range, with: NSAttributedString(string: codeText, attributes: codeAttrs))
     }
 
-    // 4) Auto-detect bare URLs and style them if not already linked.
+    // 4) Auto-detect bare URLs — show clean hostname+path instead of raw URL.
     if let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) {
       let urlMatches = detector.matches(
         in: mutable.string,
         options: [],
         range: NSRange(mutable.string.startIndex..., in: mutable.string)
-      )
+      ).reversed()
       for m in urlMatches {
         guard let url = m.url else { continue }
         var hasLink = false
@@ -277,14 +242,29 @@ enum ChatNativeAgentTextRenderer {
           if value != nil { hasLink = true; stop.pointee = true }
         }
         if !hasLink {
-          mutable.addAttribute(.link, value: url, range: m.range)
-          mutable.addAttribute(.foregroundColor, value: UIColor.systemBlue, range: m.range)
-          mutable.addAttribute(.underlineStyle, value: NSUnderlineStyle.single.rawValue, range: m.range)
+          let display = cleanURLDisplay(url)
+          var linkAttrs = baseAttrs
+          linkAttrs[.link] = url
+          linkAttrs[.foregroundColor] = UIColor.systemBlue
+          linkAttrs[.underlineStyle] = NSUnderlineStyle.single.rawValue
+          mutable.replaceCharacters(
+            in: m.range,
+            with: NSAttributedString(string: display, attributes: linkAttrs)
+          )
         }
       }
     }
 
     return mutable
+  }
+
+  private static func cleanURLDisplay(_ url: URL) -> String {
+    guard let host = url.host else { return url.absoluteString }
+    let h = host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+    let path = url.path
+    guard !path.isEmpty, path != "/" else { return h }
+    let p = path.count > 28 ? String(path.prefix(28)) + "\u{2026}" : path
+    return h + p
   }
 
   static func measuredHeight(
@@ -321,7 +301,109 @@ enum ChatNativeAgentTextRenderer {
   }
 }
 
-final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
+// MARK: - AgentCodeBlockView
+
+final class AgentCodeBlockView: UIView {
+  private let cardView = UIView()
+  private let topBarView = UIView()
+  private let codeLabel = UILabel()
+  private let copyButton = UIButton(type: .system)
+  private let copiedLabel = UILabel()
+  private var codeContent = ""
+  private var copyFeedbackWork: DispatchWorkItem?
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isOpaque = false
+
+    cardView.layer.cornerRadius = 10.0
+    cardView.layer.cornerCurve = .continuous
+    cardView.clipsToBounds = true
+    cardView.backgroundColor = UIColor(white: 0.5, alpha: 0.10)
+    cardView.layer.borderWidth = 0.5
+    cardView.layer.borderColor = UIColor(white: 0.5, alpha: 0.20).cgColor
+    addSubview(cardView)
+
+    topBarView.backgroundColor = UIColor(white: 0.5, alpha: 0.07)
+    cardView.addSubview(topBarView)
+
+    codeLabel.numberOfLines = 0
+    codeLabel.backgroundColor = .clear
+    cardView.addSubview(codeLabel)
+
+    let cfg = UIImage.SymbolConfiguration(pointSize: 12.0, weight: .medium)
+    copyButton.setImage(UIImage(systemName: "doc.on.doc", withConfiguration: cfg), for: .normal)
+    copyButton.tintColor = UIColor(white: 0.65, alpha: 0.9)
+    copyButton.addTarget(self, action: #selector(handleCopy), for: .touchUpInside)
+    topBarView.addSubview(copyButton)
+
+    copiedLabel.text = "Copied!"
+    copiedLabel.font = .systemFont(ofSize: 11.0, weight: .medium)
+    copiedLabel.textColor = UIColor.systemGreen
+    copiedLabel.alpha = 0
+    topBarView.addSubview(copiedLabel)
+  }
+
+  required init?(coder: NSCoder) { return nil }
+
+  @discardableResult
+  func configure(code: String, textColor: UIColor, baseFont: UIFont, availableWidth: CGFloat) -> CGFloat {
+    codeContent = code
+    let monoFont = UIFont.monospacedSystemFont(ofSize: max(12.5, baseFont.pointSize - 2.5), weight: .regular)
+    let outerH: CGFloat = 6.0
+    let hPad: CGFloat = 12.0
+    let vPad: CGFloat = 10.0
+    let barH: CGFloat = 32.0
+    let copyW: CGFloat = 30.0
+    let cardWidth = max(1.0, availableWidth - outerH * 2)
+    let labelWidth = max(1.0, cardWidth - hPad * 2)
+    let codeAttrs: [NSAttributedString.Key: Any] = [
+      .font: monoFont,
+      .foregroundColor: textColor.withAlphaComponent(0.88),
+    ]
+    let attributed = NSAttributedString(string: code, attributes: codeAttrs)
+    codeLabel.attributedText = attributed
+    let textHeight = ceil(attributed.boundingRect(
+      with: CGSize(width: labelWidth, height: .greatestFiniteMagnitude),
+      options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil
+    ).height)
+    let bodyH = max(ceil(monoFont.lineHeight), textHeight)
+    let cardH = barH + vPad + bodyH + vPad
+    cardView.frame = CGRect(x: outerH, y: 0, width: cardWidth, height: cardH)
+    topBarView.frame = CGRect(x: 0, y: 0, width: cardWidth, height: barH)
+    copyButton.frame = CGRect(
+      x: cardWidth - copyW - 4.0, y: (barH - copyW) * 0.5, width: copyW, height: copyW)
+    copiedLabel.sizeToFit()
+    copiedLabel.frame.origin = CGPoint(
+      x: copyButton.frame.minX - copiedLabel.frame.width - 6.0,
+      y: (barH - copiedLabel.frame.height) * 0.5
+    )
+    codeLabel.frame = CGRect(x: hPad, y: barH + vPad, width: labelWidth, height: bodyH)
+    return outerH + cardH + 8.0
+  }
+
+  @objc private func handleCopy() {
+    UIPasteboard.general.string = codeContent
+    UIImpactFeedbackGenerator(style: .light).impactOccurred()
+    copyFeedbackWork?.cancel()
+    copiedLabel.alpha = 0
+    copyButton.alpha = 0
+    UIView.animate(withDuration: 0.15) { self.copiedLabel.alpha = 1.0 }
+    let work = DispatchWorkItem { [weak self] in
+      UIView.animate(withDuration: 0.25) {
+        self?.copiedLabel.alpha = 0
+        self?.copyButton.alpha = 1.0
+      }
+    }
+    copyFeedbackWork = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+  }
+}
+
+// MARK: - ChatNativeStreamingTextLabel
+
+final class ChatNativeStreamingTextLabel: UITextView {
   private static let revealInterval: CFTimeInterval = 0.01
   private static let tokenRegex = try! NSRegularExpression(pattern: "\\S+|\\s+")
 
@@ -357,11 +439,9 @@ final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
     self.textContainer.lineFragmentPadding = 0
     backgroundColor = .clear
     isUserInteractionEnabled = true
-    linkTextAttributes = [
-      .foregroundColor: UIColor.systemBlue,
-      .underlineStyle: NSUnderlineStyle.single.rawValue,
-    ]
-    delegate = self
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap(_:)))
+    tap.cancelsTouchesInView = false
+    addGestureRecognizer(tap)
   }
 
   deinit {
@@ -388,10 +468,8 @@ final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
     applyVisibleTokenState()
 
     if isStreaming {
-      isSelectable = false
       startStreamingAnimation()
     } else {
-      isSelectable = true
       stopStreamingAnimation()
     }
   }
@@ -403,7 +481,6 @@ final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
     tokenRanges = []
     revealedTokenCount = 0
     attributedText = nil
-    isSelectable = false
   }
 
   private func startStreamingAnimation() {
@@ -448,7 +525,6 @@ final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
 
     if revealedTokenCount >= tokenRanges.count {
       stopStreamingAnimation()
-      isSelectable = true
     }
   }
 
@@ -500,17 +576,30 @@ final class ChatNativeStreamingTextLabel: UITextView, UITextViewDelegate {
     return matches
   }
 
-  // MARK: - UITextViewDelegate
+  // MARK: - Link tap (layout manager hit-test — no cursor, isSelectable stays false)
 
-  func textView(
-    _ textView: UITextView,
-    shouldInteractWith url: URL,
-    in characterRange: NSRange,
-    interaction: UITextItemInteraction
-  ) -> Bool {
-    linkDelegate?.streamingTextLabel(self, didTap: url)
-    handleTappedURL(url)
-    return false
+  @objc private func handleTap(_ gesture: UITapGestureRecognizer) {
+    guard let attributed = attributedText, attributed.length > 0 else { return }
+    let point = gesture.location(in: self)
+    let adjusted = CGPoint(
+      x: point.x - textContainerInset.left,
+      y: point.y - textContainerInset.top
+    )
+    let charIdx = layoutManager.characterIndex(
+      for: adjusted, in: textContainer,
+      fractionOfDistanceBetweenInsertionPoints: nil
+    )
+    guard charIdx < attributed.length else { return }
+    let attrs = attributed.attributes(at: charIdx, effectiveRange: nil)
+    if let linkVal = attrs[.link] {
+      var url: URL?
+      if let u = linkVal as? URL { url = u }
+      else if let s = linkVal as? String { url = URL(string: s) }
+      if let url {
+        linkDelegate?.streamingTextLabel(self, didTap: url)
+        handleTappedURL(url)
+      }
+    }
   }
 
   private func handleTappedURL(_ url: URL) {
