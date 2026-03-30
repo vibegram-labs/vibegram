@@ -373,6 +373,17 @@ const normalizeMessage = (m: any): Message => {
     };
 };
 
+const normalizeOptionalBoolean = (value: unknown): boolean | undefined => {
+    if (typeof value === 'boolean') return value;
+    if (typeof value === 'number') return value === 1 ? true : value === 0 ? false : undefined;
+    if (typeof value === 'string') {
+        const trimmed = value.trim().toLowerCase();
+        if (['1', 'true', 'yes', 'on'].includes(trimmed)) return true;
+        if (['0', 'false', 'no', 'off'].includes(trimmed)) return false;
+    }
+    return undefined;
+};
+
 const decryptMessageContent = async (
     privateKey: string,
     encryptedContent: string,
@@ -2226,6 +2237,11 @@ export const useChatStore = create<ChatState>()(
                                     : undefined,
                                 friendId: c.friendId,
                                 friendName: c.friendName || c.name || c.friendId,
+                                friendIsAgent: normalizeOptionalBoolean(c.friendIsAgent ?? c.friend_is_agent) ?? false,
+                                friendAgentId: c.friendAgentId || c.friend_agent_id || undefined,
+                                acceptsIncomingChat: normalizeOptionalBoolean(
+                                    c.acceptsIncomingChat ?? c.accepts_incoming_chat,
+                                ),
                                 friendImage: c.friendImage || c.avatarUrl || null,
                                 friendKey: extractPublicKey(c) || extractPublicKey(existing),
                                 messages: existingMessages,
@@ -2332,6 +2348,11 @@ export const useChatStore = create<ChatState>()(
                                     : undefined,
                                 friendId: c.friendId,
                                 friendName: c.friendName || c.name || c.friendId,
+                                friendIsAgent: normalizeOptionalBoolean(c.friendIsAgent ?? c.friend_is_agent) ?? false,
+                                friendAgentId: c.friendAgentId || c.friend_agent_id || undefined,
+                                acceptsIncomingChat: normalizeOptionalBoolean(
+                                    c.acceptsIncomingChat ?? c.accepts_incoming_chat,
+                                ),
                                 friendImage: c.friendImage || c.avatarUrl || null,
                                 friendKey: extractPublicKey(c) || extractPublicKey(existing),
                                 messages: mergedMessages,
@@ -4166,16 +4187,12 @@ export const useChatStore = create<ChatState>()(
 
                             // Map server messages by ID
                             messages.forEach((m: any) => {
-                                serverMsgMap.set(m.id, {
-                                    id: m.id,
-                                    fromId: m.fromId || m.from_id,
-                                    chatId: chatId,
-                                    encryptedContent: m.encryptedContent || m.encrypted_content,
-                                    type: m.type || 'text',
-                                    timestamp: m.timestamp,
-                                    plaintext: undefined,
-                                    status: m.status || 'delivered'
+                                const normalized = normalizeMessage({
+                                    ...m,
+                                    chatId,
+                                    chat_id: chatId,
                                 });
+                                serverMsgMap.set(normalized.id, normalized);
                             });
 
                             // Merge: prioritize local messages (they may have plaintext), add new server messages

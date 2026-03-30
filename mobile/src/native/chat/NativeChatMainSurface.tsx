@@ -44,6 +44,7 @@ interface NativeChatMainSurfaceProps {
   chatId?: string;
   myUserId?: string;
   peerUserId?: string;
+  peerAgentId?: string;
   statusAuthorityEnabled?: boolean;
   appearance?: NativeChatAppearance;
   contentPaddingTop?: number;
@@ -87,6 +88,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
     chatId,
     myUserId,
     peerUserId,
+    peerAgentId,
     statusAuthorityEnabled,
     appearance,
     contentPaddingTop,
@@ -205,6 +207,7 @@ export const NativeChatMainSurface = forwardRef<NativeChatMainSurfaceRef, Native
         chatId={chatId}
         myUserId={myUserId}
         peerUserId={peerUserId}
+        peerAgentId={peerAgentId}
         statusAuthorityEnabled={statusAuthorityEnabled}
         appearance={appearance}
         contentPaddingTop={normalizedContentPaddingTop}

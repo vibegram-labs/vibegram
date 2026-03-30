@@ -1,6 +1,22 @@
 {
   "updated_at": "2026-03-30",
   "checks": {
+    "mobile_agent_history_plaintext_merge": {
+      "status": "passed",
+      "details": "Patched `mobile/src/lib/ChatStore.ts` so `loadMessages()` normalizes full server message payloads before merge instead of rebuilding a stripped shape that dropped `plaintext`, `plainContent`, `isAgentMessage`, `agentName`, and `agentId`. `git diff --check` passed for the touched files."
+    },
+    "mobile_standalone_agent_dm_routing": {
+      "status": "passed",
+      "details": "Added `peerAgentId` plumbing through `mobile/app/chat.tsx`, `mobile/app/chatlist.tsx`, `NativeChatMainSurface.tsx`, `NativeChatSurface.tsx`, `ChatNativeMainModule.swift`, `ChatNativeListModule.swift`, `ChatMainView.swift`, `ChatListView.swift`, and `ChatEngine.swift`. The native send path now caches standalone-agent peer ids, bypasses the human-DM friend-key requirement for those chats, and sends `mentionedAgentId` / `agentText` automatically. `xcrun swiftc -parse` passed for the touched Swift files."
+    },
+    "server_agent_incoming_chat_toggle": {
+      "status": "passed",
+      "details": "Added `Vibe.Agents.incoming_chat_enabled?/1`, surfaced `friendIsAgent`, `friendAgentId`, and `acceptsIncomingChat` in DM chat payloads, exposed `acceptsIncomingChat` on user payloads, added `incoming_chat_enabled` to builder agent cards, and made `ChatChannel` reject DM sends when standalone-agent incoming chat is disabled. `mix compile` passed."
+    },
+    "ios_native_agent_incoming_chat_control": {
+      "status": "passed",
+      "details": "Extended `ChatListRow.AgentCard` and `ChatNativeAgentConfigPanel.swift` with an `Incoming Chat` control that updates `approval_rules[\"chat_input\"][\"enabled\"]` while preserving the existing `event_inbox` settings. `xcrun swiftc -parse` passed for the touched Swift files."
+    },
     "server_event_html_normalization": {
       "status": "passed",
       "details": "Patched `server/lib/vibe/ai/agent_event_runtime.ex` so event titles, texts, and attachment captions normalize HTML-like markup (`<B>`, `<br>`, closing block tags, common entities, and numeric entities) into plain text before persistence and posting. Followed up by fixing the numeric-entity decoder to call `Regex.replace/4` with the correct `regex, string, replacement` order after a live `/events` request exposed a `FunctionClauseError` on plain titles like `OPEN EURUSD`. `mix compile` passed after the fix."

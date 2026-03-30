@@ -335,6 +335,7 @@ final class ChatEngine {
     let chatId: String?
     let myUserId: String?
     let peerUserId: String?
+    let peerAgentId: String?
   }
 
   private struct AgentProgressState: Equatable {
@@ -389,6 +390,8 @@ final class ChatEngine {
   private var liveMessageRowsByChat: [String: [String: [String: Any]]] = [:]
   private var deletedMessageIdsByChat: [String: Set<String>] = [:]
   private var chatPeerUserIdsByChatId: [String: String] = [:]
+  private var chatPeerAgentIdsByChatId: [String: String] = [:]
+  private var agentIdsByPeerUserId: [String: String] = [:]
   private var friendPublicKeysByUserId: [String: String] = [:]
   private var pendingFriendKeyChatIdsByUserId: [String: Set<String>] = [:]
   private var friendKeyFetchInFlightUserIds = Set<String>()
@@ -898,6 +901,8 @@ final class ChatEngine {
     let chatId = normalizedString(payload["chatId"])
     let myUserId = normalizedUpper(payload["myUserId"])
     let peerUserId = normalizedUpper(payload["peerUserId"])
+    let peerAgentId =
+      normalizedString(payload["peerAgentId"] ?? payload["peer_agent_id"])
     guard !surfaceId.isEmpty else { return getStatus() }
 
     let snapshot = queue.sync {
@@ -905,10 +910,15 @@ final class ChatEngine {
         surfaceId: surfaceId,
         chatId: chatId,
         myUserId: myUserId,
-        peerUserId: peerUserId
+        peerUserId: peerUserId,
+        peerAgentId: peerAgentId
       )
       if let chatId, !chatId.isEmpty, let peerUserId, !peerUserId.isEmpty {
         chatPeerUserIdsByChatId[chatId] = peerUserId
+        if let peerAgentId, !peerAgentId.isEmpty {
+          chatPeerAgentIdsByChatId[chatId] = peerAgentId
+          agentIdsByPeerUserId[peerUserId] = peerAgentId
+        }
         scheduleFriendPublicKeyFetchLocked(
           chatId: chatId,
           peerUserIdHint: peerUserId,
@@ -923,6 +933,7 @@ final class ChatEngine {
           "surfaceId": surfaceId,
           "chatId": chatId as Any,
           "peerUserId": peerUserId as Any,
+          "peerAgentId": peerAgentId as Any,
         ])
       let snapshot = statusSnapshotLocked()
       postChangeLocked(reason: "surfaceBindingChanged", userInfo: ["surfaceId": surfaceId])
@@ -1351,6 +1362,10 @@ final class ChatEngine {
       normalizedString(payload["replyToId"] ?? payload["reply_to_id"])
       ?? normalizedString(metadata["replyToId"] ?? metadata["reply_to_id"])
     let peerUserIdHint = normalizedUpper(payload["peerUserId"] ?? payload["peer_user_id"])
+    let explicitPeerAgentId =
+      normalizedString(
+        payload["peerAgentId"] ?? payload["peer_agent_id"] ?? payload["mentionedAgentId"]
+          ?? payload["mentioned_agent_id"])
 
     return queue.sync {
       canceledOutboundMessageIds.remove(messageId)
@@ -1364,7 +1379,15 @@ final class ChatEngine {
       if let peerUserIdHint {
         chatPeerUserIdsByChatId[chatId] = peerUserIdHint
       }
+      if let explicitPeerAgentId, !explicitPeerAgentId.isEmpty {
+        chatPeerAgentIdsByChatId[chatId] = explicitPeerAgentId
+        if let peerUserIdHint {
+          agentIdsByPeerUserId[peerUserIdHint] = explicitPeerAgentId
+        }
+      }
       let peerUserId = peerUserIdHint ?? chatPeerUserIdsByChatId[chatId]
+      let peerAgentId = explicitPeerAgentId ?? resolvePeerAgentIdLocked(
+        chatId: chatId, peerUserIdHint: peerUserId)
 
       // ── Build + emit optimistic row FIRST so message bubble appears instantly ──
       let optimisticStartMs = nowMs()
@@ -1423,6 +1446,8 @@ final class ChatEngine {
       let isSavedMessagesChat = chatId == "saved_messages"
       let friendPublicKey: String?
       if isGroup || isSavedMessagesChat {
+        friendPublicKey = nil
+      } else if let peerAgentId, !peerAgentId.isEmpty {
         friendPublicKey = nil
       } else {
         guard
@@ -1876,6 +1901,10 @@ final class ChatEngine {
         }
         if let fromId = userId {
           wirePayload["fromId"] = fromId
+        }
+        if let peerAgentId, !peerAgentId.isEmpty {
+          wirePayload["mentionedAgentId"] = peerAgentId
+          wirePayload["agentText"] = text
         }
         if let agentMention = payload["agentMention"] as? Bool, agentMention {
           wirePayload["agentMention"] = true
@@ -3986,6 +4015,10 @@ final class ChatEngine {
   private func cacheChatPeerInfoLocked(chatId: String, chatObject: [String: Any]) {
     if let friendId = normalizedUpper(chatObject["friendId"] ?? chatObject["friend_id"]) {
       chatPeerUserIdsByChatId[chatId] = friendId
+      if let agentId = normalizedString(chatObject["friendAgentId"] ?? chatObject["friend_agent_id"]) {
+        chatPeerAgentIdsByChatId[chatId] = agentId
+        agentIdsByPeerUserId[friendId] = agentId
+      }
       if let key = extractPublicKeyValue(from: chatObject) {
         friendPublicKeysByUserId[friendId] = key
       } else {
@@ -4007,6 +4040,15 @@ final class ChatEngine {
       return cached
     }
     return nil
+  }
+
+  private func resolvePeerAgentIdLocked(chatId: String, peerUserIdHint: String?) -> String? {
+    if let cached = chatPeerAgentIdsByChatId[chatId], !cached.isEmpty {
+      return cached
+    }
+    let resolvedPeerId = peerUserIdHint ?? chatPeerUserIdsByChatId[chatId]
+    guard let resolvedPeerId else { return nil }
+    return agentIdsByPeerUserId[resolvedPeerId]
   }
 
   private func scheduleFriendPublicKeyRetryLocked(peerId: String, reason: String) {
@@ -4088,13 +4130,16 @@ final class ChatEngine {
         self.friendKeyFetchInFlightUserIds.remove(peerId)
 
         let statusCode = (response as? HTTPURLResponse)?.statusCode
-        let resolvedKey: String? = {
+        let parsedObject: [String: Any]? = {
           guard error == nil,
             let statusCode,
             (200...299).contains(statusCode),
-            let data,
-            let obj = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            let data
           else { return nil }
+          return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        }()
+        let resolvedKey: String? = {
+          guard let obj = parsedObject else { return nil }
           return
             self.normalizedString(obj["publicKey"])
             ?? self.normalizedString(obj["friendKey"])
@@ -4102,8 +4147,25 @@ final class ChatEngine {
             ?? self.normalizedString(obj["public_key"])
             ?? ((obj["data"] as? [String: Any]).flatMap(self.extractPublicKeyValue(from:)))
         }()
+        let resolvedAgentId: String? = {
+          guard let obj = parsedObject else { return nil }
+          let nested = obj["data"] as? [String: Any]
+          let isAgent =
+            (obj["isAgent"] as? Bool == true)
+            || (nested?["isAgent"] as? Bool == true)
+          guard isAgent else { return nil }
+          return
+            self.normalizedString(obj["agentId"] ?? obj["agent_id"])
+            ?? self.normalizedString(nested?["agentId"] ?? nested?["agent_id"])
+        }()
 
         let waitingChatIds = Array(self.pendingFriendKeyChatIdsByUserId[peerId] ?? [])
+        if let resolvedAgentId, !resolvedAgentId.isEmpty {
+          self.agentIdsByPeerUserId[peerId] = resolvedAgentId
+          for waitingChatId in waitingChatIds {
+            self.chatPeerAgentIdsByChatId[waitingChatId] = resolvedAgentId
+          }
+        }
         if let resolvedKey {
           self.friendPublicKeysByUserId[peerId] = resolvedKey
           for waitingChatId in waitingChatIds {
@@ -4119,6 +4181,25 @@ final class ChatEngine {
           for waitingChatId in waitingChatIds {
             self.scheduleReplayQueuedOutboundLocked(
               chatId: waitingChatId, trigger: "friend_key_loaded")
+          }
+          return
+        }
+
+        if let resolvedAgentId, !resolvedAgentId.isEmpty {
+          self.pendingFriendKeyChatIdsByUserId.removeValue(forKey: peerId)
+          self.friendKeyRetryWorkItemsByUserId[peerId]?.cancel()
+          self.friendKeyRetryWorkItemsByUserId.removeValue(forKey: peerId)
+          self.appendJournalLocked(
+            event: "friend-key-fetch-agent-ok",
+            payload: [
+              "peerUserId": peerId,
+              "chatCount": waitingChatIds.count,
+              "agentId": resolvedAgentId,
+            ]
+          )
+          for waitingChatId in waitingChatIds {
+            self.scheduleReplayQueuedOutboundLocked(
+              chatId: waitingChatId, trigger: "peer_agent_loaded")
           }
           return
         }
@@ -4534,11 +4615,16 @@ final class ChatEngine {
     // Detect agent messages by fromId or explicit flag
     let isAgentMessage =
       (payload["isAgentMessage"] as? Bool == true)
+      || (payload["is_agent_message"] as? Bool == true)
       || (normalizedString(fromId)?.lowercased() == Self.agentUserId)
+      || normalizedString(payload["agentId"] ?? payload["agent_id"]) != nil
+      || normalizedString(payload["agentName"] ?? payload["agent_name"]) != nil
       || (rawMediaUrl?.lowercased().contains("/uploads/agent-docs/") == true)
       || (rawMediaUrl?.lowercased().contains("/api/agent/document/") == true)
-    let plainContent = normalizedString(payload["plainContent"] ?? payload["plain_content"])
+    let plainContent =
+      normalizedString(payload["plainContent"] ?? payload["plain_content"] ?? payload["plaintext"])
     let agentName = normalizedString(payload["agentName"] ?? payload["agent_name"])
+    let agentId = normalizedString(payload["agentId"] ?? payload["agent_id"])
 
     let hadEncryptedContent = encryptedContent != nil && !encryptedContent!.isEmpty
     let decryptedText: String = {
@@ -4588,6 +4674,7 @@ final class ChatEngine {
       message["isAgentMessage"] = true
       message["isMe"] = false
       if let agentName { message["agentName"] = agentName }
+      if let agentId { message["agentId"] = agentId }
       if let plainContent { message["plainContent"] = plainContent }
       // Use plainContent as the display text for agent messages
       if let plainContent, !plainContent.isEmpty { message["text"] = plainContent }
@@ -5785,11 +5872,15 @@ final class ChatEngine {
       let encryptedLooksHybrid = isLikelyHybridCiphertext(encryptedContent)
       let historyIsAgent =
         (raw["isAgentMessage"] as? Bool == true)
+        || (raw["is_agent_message"] as? Bool == true)
         || (normalizedString(fromId)?.lowercased() == Self.agentUserId)
+        || normalizedString(raw["agentId"] ?? raw["agent_id"]) != nil
+        || normalizedString(raw["agentName"] ?? raw["agent_name"]) != nil
         || (rawMediaUrl?.lowercased().contains("/uploads/agent-docs/") == true)
         || (rawMediaUrl?.lowercased().contains("/api/agent/document/") == true)
       let agentPlainContent =
         normalizedString(raw["plainContent"] ?? raw["plain_content"])
+        ?? normalizedString(raw["plaintext"])
         ?? encryptedContent
       let hadEncryptedContent = encryptedContent != nil && !encryptedContent!.isEmpty
       var historyDecryptionFailed = false
@@ -5854,6 +5945,9 @@ final class ChatEngine {
       if historyIsAgent, var message = row["message"] as? [String: Any] {
         message["isAgentMessage"] = true
         message["isMe"] = false
+        if let agentId = normalizedString(raw["agentId"] ?? raw["agent_id"]) {
+          message["agentId"] = agentId
+        }
         if let name = normalizedString(raw["agentName"] ?? raw["agent_name"]) {
           message["agentName"] = name
         }

@@ -78,6 +78,10 @@ public class ChatNativeMainModule: Module {
         view.setEnginePeerUserId(value ?? "")
       }
 
+      Prop("peerAgentId") { (view: ChatMainView, value: String?) in
+        view.setEnginePeerAgentId(value ?? "")
+      }
+
       Prop("statusAuthorityEnabled") { (view: ChatMainView, enabled: Bool) in
         view.setStatusAuthorityEnabled(enabled)
       }

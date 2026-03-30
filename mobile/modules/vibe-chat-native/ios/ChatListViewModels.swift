@@ -127,6 +127,7 @@ struct ChatListRow {
     let attachedChats: [AgentCardDestination]
     let eventInboxMode: String
     let summaryWindowHours: Int
+    let incomingChatEnabled: Bool
     let canDelete: Bool
 
     static func parse(_ raw: [String: Any]) -> AgentCard? {
@@ -175,6 +176,8 @@ struct ChatListRow {
         attachedChats: attachedChats,
         eventInboxMode: eventInboxMode,
         summaryWindowHours: summaryWindowHours,
+        incomingChatEnabled:
+          parseBool(raw["incoming_chat_enabled"] ?? raw["incomingChatEnabled"]) ?? true,
         canDelete:
           (raw["can_delete"] as? Bool)
           ?? ((raw["canDelete"] as? Bool) ?? true)
@@ -210,6 +213,7 @@ struct ChatListRow {
       if let defaultDestinationChat { raw["default_destination_chat"] = defaultDestinationChat.rawValue }
       raw["event_inbox_mode"] = eventInboxMode
       raw["summary_window_hours"] = summaryWindowHours
+      raw["incoming_chat_enabled"] = incomingChatEnabled
       return raw
     }
 
@@ -999,6 +1003,26 @@ private func parseStringArray(_ raw: Any?) -> [String] {
   }
 
   return []
+}
+
+private func parseBool(_ raw: Any?) -> Bool? {
+  if let value = raw as? Bool {
+    return value
+  }
+  if let value = raw as? NSNumber {
+    return value.boolValue
+  }
+  if let value = parseNonEmptyString(raw)?.lowercased() {
+    switch value {
+    case "1", "true", "yes", "on":
+      return true
+    case "0", "false", "no", "off":
+      return false
+    default:
+      return nil
+    }
+  }
+  return nil
 }
 
 private func parseAgentCardEventInbox(_ raw: [String: Any]) -> (mode: String, summaryWindowHours: Int) {

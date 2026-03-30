@@ -72,6 +72,10 @@ public class ChatNativeListModule: Module {
         view.setEnginePeerUserId(value ?? "")
       }
 
+      Prop("peerAgentId") { (view: ChatListView, value: String?) in
+        view.setEnginePeerAgentId(value ?? "")
+      }
+
       Prop("peerDisplayName") { (view: ChatListView, value: String?) in
         view.setEnginePeerDisplayName(value ?? "")
       }

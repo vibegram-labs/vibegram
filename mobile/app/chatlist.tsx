@@ -211,6 +211,7 @@ export default function ChatListRoute() {
       chatId: effectiveChatId,
       myUserId: user?.userId || undefined,
       peerUserId: activeChat?.friendId || undefined,
+      peerAgentId: activeChat?.friendAgentId || undefined,
       isGroup: activeChat?.type === 'group' || activeChat?.type === 'channel',
     };
 
@@ -403,11 +404,16 @@ export default function ChatListRoute() {
         chatId={effectiveChatId}
         myUserId={user?.userId || undefined}
         peerUserId={activeChat?.friendId || undefined}
+        peerAgentId={activeChat?.friendAgentId || undefined}
         statusAuthorityEnabled
         contentPaddingTop={insets.top + 8}
         contentPaddingBottom={Math.max(14, insets.bottom + 8)}
-        inputBarEnabled
-        inputPlaceholder="Message"
+        inputBarEnabled={!activeChat?.friendIsAgent || activeChat?.acceptsIncomingChat !== false}
+        inputPlaceholder={
+          activeChat?.friendIsAgent && activeChat?.acceptsIncomingChat === false
+            ? 'Messaging disabled for this agent'
+            : 'Message'
+        }
         nativeSendEnabled
         onNativeEvent={handleNativeEvent}
         onNativeError={(error, context) => {

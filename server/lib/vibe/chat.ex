@@ -123,7 +123,14 @@ defmodule Vibe.Chat do
           else
             from(a in Agent,
               where: a.agent_user_id in ^agent_friend_user_ids,
-              select: {a.agent_user_id, %{display_name: a.display_name, avatar_url: a.avatar_url}}
+              select:
+                {a.agent_user_id,
+                 %{
+                   agent_id: a.id,
+                   display_name: a.display_name,
+                   avatar_url: a.avatar_url,
+                   approval_rules: a.approval_rules
+                 }}
             )
             |> Repo.all()
             |> Map.new()
@@ -246,6 +253,10 @@ defmodule Vibe.Chat do
                 if(friend_p, do: friend_p.user, else: nil),
                 friend_agent
               ),
+            friendIsAgent: !!friend_agent,
+            friendAgentId: if(friend_agent, do: friend_agent.agent_id, else: nil),
+            acceptsIncomingChat:
+              if(friend_agent, do: friend_agent_accepts_incoming_chat(friend_agent), else: nil),
             friendImage:
               present_chat_friend_image(
                 if(friend_p, do: friend_p.user, else: nil),
@@ -1254,6 +1265,23 @@ defmodule Vibe.Chat do
     case {Ecto.UUID.cast(from_id), Ecto.UUID.cast(@agent_user_id)} do
       {{:ok, a}, {:ok, b}} -> a == b
       _ -> false
+    end
+  end
+
+  defp friend_agent_accepts_incoming_chat(nil), do: true
+
+  defp friend_agent_accepts_incoming_chat(friend_agent) when is_map(friend_agent) do
+    chat_rules =
+      get_in(friend_agent, [:approval_rules, "chat_input"])
+      || get_in(friend_agent, [:approval_rules, :chat_input])
+      || %{}
+
+    case chat_rules["enabled"] || chat_rules[:enabled] do
+      false -> false
+      "false" -> false
+      "0" -> false
+      0 -> false
+      _ -> true
     end
   end
 

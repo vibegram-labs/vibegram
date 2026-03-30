@@ -89,6 +89,10 @@ private func chatNativeAgentEventInboxTitle(mode: String, summaryWindowHours: In
   return "Event bubbles"
 }
 
+private func chatNativeAgentIncomingChatTitle(_ enabled: Bool) -> String {
+  enabled ? "Accepted" : "Disabled"
+}
+
 private func chatNativeAgentInteger(_ value: Any?) -> Int? {
   if let number = value as? NSNumber {
     return number.intValue
@@ -108,6 +112,26 @@ private func chatNativeAgentInteger(_ value: Any?) -> Int? {
       return 24
     default:
       return Int(trimmed)
+    }
+  }
+  return nil
+}
+
+private func chatNativeAgentBoolean(_ value: Any?) -> Bool? {
+  if let value = value as? Bool {
+    return value
+  }
+  if let value = value as? NSNumber {
+    return value.boolValue
+  }
+  if let value = value as? String {
+    switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+    case "1", "true", "yes", "on":
+      return true
+    case "0", "false", "no", "off":
+      return false
+    default:
+      return nil
     }
   }
   return nil
@@ -1049,6 +1073,18 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
       self?.promptEventInboxMode()
     }
     deliverySection.contentStack.addArrangedSubview(inboxModeRow)
+    let incomingChatRow = ChatNativeAgentConfigRow(
+      title: "Incoming Chat",
+      value: chatNativeAgentIncomingChatTitle(card.incomingChatEnabled),
+      theme: theme,
+      symbolName: "bubble.left.and.bubble.right",
+      showsChevron: true,
+      showsDivider: false
+    )
+    incomingChatRow.onTap = { [weak self] in
+      self?.promptIncomingChatMode()
+    }
+    deliverySection.contentStack.addArrangedSubview(incomingChatRow)
     stackView.addArrangedSubview(deliverySection)
 
     let behaviorSection = ChatNativeAgentConfigSectionView(title: "Behavior", theme: theme)
@@ -1207,7 +1243,8 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     secret: String? = nil,
     secretHint: String? = nil,
     eventInboxMode: String? = nil,
-    summaryWindowHours: Int? = nil
+    summaryWindowHours: Int? = nil,
+    incomingChatEnabled: Bool? = nil
   ) {
     card = ChatListRow.AgentCard(
       id: card.id,
@@ -1237,6 +1274,7 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
         chatNativeAgentNormalizeEventInboxMode(eventInboxMode ?? card.eventInboxMode),
       summaryWindowHours:
         chatNativeAgentNormalizeSummaryWindowHours(summaryWindowHours ?? card.summaryWindowHours),
+      incomingChatEnabled: incomingChatEnabled ?? card.incomingChatEnabled,
       canDelete: card.canDelete
     )
   }
@@ -1369,7 +1407,10 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
         "event_inbox": [
           "mode": normalizedMode,
           "summary_window_hours": normalizedHours,
-        ]
+        ],
+        "chat_input": [
+          "enabled": card.incomingChatEnabled
+        ],
       ]
     ]
 
@@ -1417,11 +1458,136 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
               ?? chatNativeAgentInteger(eventInbox?["cadence"])
               ?? normalizedHours
           )
+        let chatInput =
+          (approvalRules?["chat_input"] as? [String: Any])
+          ?? (approvalRules?["chatInput"] as? [String: Any])
+        let resolvedIncomingChat =
+          chatNativeAgentBoolean(chatInput?["enabled"])
+          ?? self.card.incomingChatEnabled
 
-        self.updateCard(eventInboxMode: resolvedMode, summaryWindowHours: resolvedHours)
+        self.updateCard(
+          eventInboxMode: resolvedMode,
+          summaryWindowHours: resolvedHours,
+          incomingChatEnabled: resolvedIncomingChat
+        )
         self.rebuildContent()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         self.onToast?("Updated inbox mode")
+      }
+    }
+
+    task.resume()
+  }
+
+  private func promptIncomingChatMode() {
+    let alert = UIAlertController(
+      title: "Incoming Chat",
+      message: "Choose whether this agent accepts direct chat messages in its main Vibe chat.",
+      preferredStyle: .actionSheet
+    )
+
+    alert.addAction(UIAlertAction(title: "Accept messages", style: .default) { [weak self] _ in
+      self?.updateIncomingChatMode(enabled: true)
+    })
+    alert.addAction(UIAlertAction(title: "Disable messages", style: .default) { [weak self] _ in
+      self?.updateIncomingChatMode(enabled: false)
+    })
+    alert.addAction(UIAlertAction(title: "Cancel", style: .cancel))
+
+    if let popover = alert.popoverPresentationController {
+      popover.sourceView = view
+      popover.sourceRect = CGRect(
+        x: view.bounds.midX,
+        y: view.bounds.midY,
+        width: 1.0,
+        height: 1.0
+      )
+    }
+
+    present(alert, animated: true)
+  }
+
+  private func updateIncomingChatMode(enabled: Bool) {
+    guard enabled != card.incomingChatEnabled else {
+      onToast?("Incoming chat unchanged")
+      return
+    }
+
+    guard let url = apiRequestURL(path: "/api/agents/{agent_id}") else {
+      onToast?("Missing API session")
+      return
+    }
+
+    let payload: [String: Any] = [
+      "approval_rules": [
+        "event_inbox": [
+          "mode": card.eventInboxMode,
+          "summary_window_hours": card.summaryWindowHours,
+        ],
+        "chat_input": [
+          "enabled": enabled
+        ],
+      ]
+    ]
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "PUT"
+    apiHeaders(&request)
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: payload)
+
+    let task = ChatPhoenixClient.makePinnedURLSession().dataTask(with: request) {
+      [weak self] data, response, error in
+      DispatchQueue.main.async {
+        guard let self else { return }
+
+        if let error {
+          NSLog("[ChatNativeAgentConfig] update incoming chat failed %@", error.localizedDescription)
+          self.onToast?("Could not update incoming chat")
+          return
+        }
+
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(statusCode), let data else {
+          self.onToast?("Could not update incoming chat")
+          return
+        }
+
+        let responsePayload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let approvalRules =
+          (responsePayload?["approvalRules"] as? [String: Any])
+          ?? (responsePayload?["approval_rules"] as? [String: Any])
+        let chatInput =
+          (approvalRules?["chat_input"] as? [String: Any])
+          ?? (approvalRules?["chatInput"] as? [String: Any])
+        let eventInbox =
+          (approvalRules?["event_inbox"] as? [String: Any])
+          ?? (approvalRules?["eventInbox"] as? [String: Any])
+
+        let resolvedMode =
+          chatNativeAgentNormalizeEventInboxMode(
+            chatNativeAgentNormalizedString(eventInbox?["mode"])
+              ?? chatNativeAgentNormalizedString(eventInbox?["event_inbox_mode"])
+              ?? self.card.eventInboxMode
+          )
+        let resolvedHours =
+          chatNativeAgentNormalizeSummaryWindowHours(
+            chatNativeAgentInteger(eventInbox?["summary_window_hours"])
+              ?? chatNativeAgentInteger(eventInbox?["summaryWindowHours"])
+              ?? self.card.summaryWindowHours
+          )
+        let resolvedIncomingChat =
+          chatNativeAgentBoolean(chatInput?["enabled"])
+          ?? enabled
+
+        self.updateCard(
+          eventInboxMode: resolvedMode,
+          summaryWindowHours: resolvedHours,
+          incomingChatEnabled: resolvedIncomingChat
+        )
+        self.rebuildContent()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        self.onToast?("Updated incoming chat")
       }
     }
 

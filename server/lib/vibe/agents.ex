@@ -639,6 +639,21 @@ defmodule Vibe.Agents do
     if quota, do: Map.put(payload, :quota, quota), else: payload
   end
 
+  def incoming_chat_enabled?(%Agent{} = agent) do
+    chat_rules =
+      get_in(agent.approval_rules || %{}, ["chat_input"])
+      || get_in(agent.approval_rules || %{}, [:chat_input])
+      || %{}
+
+    case chat_rules["enabled"] || chat_rules[:enabled] do
+      false -> false
+      "false" -> false
+      "0" -> false
+      0 -> false
+      _ -> true
+    end
+  end
+
   def agent_id_for_user(user_id) when is_binary(user_id) do
     case get_agent_by_shadow_user(user_id) do
       %Agent{id: id} -> id

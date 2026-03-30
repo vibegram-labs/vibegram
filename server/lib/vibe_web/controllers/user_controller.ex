@@ -281,6 +281,8 @@ defmodule VibeWeb.UserController do
       username: user.username,
       isAgent: user.is_agent || false,
       agentId: agent_id,
+      acceptsIncomingChat:
+        if(user.is_agent && agent_id, do: agent_accepts_incoming_chat(agent_id, viewer), else: nil),
       name: user.name,
       phoneNumber: phone_number,
       publicKey: user.public_key,
@@ -310,7 +312,7 @@ defmodule VibeWeb.UserController do
 
   defp user_online?(_), do: false
 
-  defp render_contact_match(user, _viewer) do
+  defp render_contact_match(user, viewer) do
     agent_id = if user.is_agent, do: Agents.agent_id_for_user(user.id), else: nil
 
     %{
@@ -318,6 +320,8 @@ defmodule VibeWeb.UserController do
       username: user.username,
       isAgent: user.is_agent || false,
       agentId: agent_id,
+      acceptsIncomingChat:
+        if(user.is_agent && agent_id, do: agent_accepts_incoming_chat(agent_id, viewer), else: nil),
       name: user.name,
       phoneNumber: if(user.privacy_phone_number == "everybody", do: user.phone_number, else: nil),
       publicKey: user.public_key,
@@ -347,6 +351,19 @@ defmodule VibeWeb.UserController do
       end
     else
       {:ok, %{}}
+    end
+  end
+
+  defp agent_accepts_incoming_chat(agent_id, viewer) do
+    viewer_id =
+      case viewer do
+        %{id: id} -> id
+        _ -> nil
+      end
+
+    case viewer_id && Agents.get_agent(agent_id, viewer_id) do
+      %{} = agent -> Agents.incoming_chat_enabled?(agent)
+      _ -> true
     end
   end
 end

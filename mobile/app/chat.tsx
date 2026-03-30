@@ -452,6 +452,7 @@ export default function ChatScreen() {
       chatId: effectiveChatId,
       myUserId: user?.userId || undefined,
       peerUserId: activeChat?.friendId || undefined,
+      peerAgentId: activeChat?.friendAgentId || undefined,
       isGroup: isGroupOrChannel,
     };
 
@@ -726,6 +727,7 @@ export default function ChatScreen() {
         chatId={effectiveChatId}
         myUserId={user?.userId || undefined}
         peerUserId={isGroupOrChannel ? undefined : (activeChat?.friendId || undefined)}
+        peerAgentId={isGroupOrChannel ? undefined : (activeChat?.friendAgentId || undefined)}
         statusAuthorityEnabled
         appearance={{
           backgroundMode: 'gradient',
@@ -750,8 +752,12 @@ export default function ChatScreen() {
           timeColorThem: colors.textSecondary,
         }}
         contentPaddingBottom={Math.max(14, insets.bottom + 8)}
-        inputBarEnabled
-        inputPlaceholder="Message"
+        inputBarEnabled={!activeChat?.friendIsAgent || activeChat?.acceptsIncomingChat !== false}
+        inputPlaceholder={
+          activeChat?.friendIsAgent && activeChat?.acceptsIncomingChat === false
+            ? 'Messaging disabled for this agent'
+            : 'Message'
+        }
         nativeSendEnabled
         headerTitle={displayName}
         headerSubtitle={subtitle}

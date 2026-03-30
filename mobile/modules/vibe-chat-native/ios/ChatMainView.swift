@@ -371,6 +371,10 @@ public final class ChatMainView: ExpoView,
     updateAvatarViews()
   }
 
+  func setEnginePeerAgentId(_ value: String) {
+    chatListView.setEnginePeerAgentId(value)
+  }
+
   func setStatusAuthorityEnabled(_ enabled: Bool) {
     chatListView.setStatusAuthorityEnabled(enabled)
   }

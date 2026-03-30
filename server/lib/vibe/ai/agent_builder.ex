@@ -1915,6 +1915,7 @@ defmodule Vibe.AI.AgentBuilder do
         get_in(payload.approvalRules || %{}, ["event_inbox", "mode"]) || "per_event",
       "summary_window_hours" =>
         get_in(payload.approvalRules || %{}, ["event_inbox", "summary_window_hours"]) || 24,
+      "incoming_chat_enabled" => Agents.incoming_chat_enabled?(agent),
       "secret_hint" => payload.secretHint,
       "latest_secret" => latest_secret,
       "can_delete" => true

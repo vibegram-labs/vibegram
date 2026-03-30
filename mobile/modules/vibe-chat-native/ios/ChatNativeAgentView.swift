@@ -1378,6 +1378,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
         attachedChats: card.attachedChats,
         eventInboxMode: card.eventInboxMode,
         summaryWindowHours: card.summaryWindowHours,
+        incomingChatEnabled: card.incomingChatEnabled,
         canDelete: card.canDelete
       )
     }
@@ -1419,6 +1420,7 @@ public final class ChatNativeAgentView: ExpoView, UITableViewDataSource, UITable
       attachedChats: card.attachedChats,
       eventInboxMode: card.eventInboxMode,
       summaryWindowHours: card.summaryWindowHours,
+      incomingChatEnabled: card.incomingChatEnabled,
       canDelete: card.canDelete
     )
   }

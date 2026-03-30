@@ -533,6 +533,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
   private var engineChatId: String = ""
   private var engineMyUserId: String = ""
   private var enginePeerUserId: String = ""
+  private var enginePeerAgentId: String = ""
   private var enginePeerDisplayName: String = ""
   private var engineOpenedChatId: String = ""
   private var statusAuthorityEnabled = false
@@ -1643,6 +1644,13 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     refreshVisibleStatuses(reason: "peerUserId")
   }
 
+  func setEnginePeerAgentId(_ value: String) {
+    let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    if enginePeerAgentId == next { return }
+    enginePeerAgentId = next
+    updateChatEngineBinding()
+  }
+
   func setEnginePeerDisplayName(_ value: String) {
     let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
     if enginePeerDisplayName == next { return }
@@ -2260,6 +2268,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       "chatId": engineChatId,
       "myUserId": engineMyUserId,
       "peerUserId": enginePeerUserId,
+      "peerAgentId": enginePeerAgentId,
     ])
   }
 
@@ -3847,6 +3856,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
       let myUserId = engineMyUserId.trimmingCharacters(in: .whitespacesAndNewlines)
       let peerUserId = enginePeerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+      let peerAgentId = enginePeerAgentId.trimmingCharacters(in: .whitespacesAndNewlines)
       if chatId.isEmpty {
         NSLog(
           "[ChatListView] native ChatEngine send blocked: empty chatId (messageId=%@, myUserId=%@, peerUserId=%@)",
@@ -3866,6 +3876,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         "replyToId": replyToMessageId as Any,
         "myUserId": myUserId,
         "peerUserId": peerUserId,
+        "peerAgentId": peerAgentId,
         "isGroup": isGroupOrChannel,
       ]
       if agentMention, let agentText {
@@ -4036,6 +4047,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
     let myUserId = engineMyUserId.trimmingCharacters(in: .whitespacesAndNewlines)
     let peerUserId = enginePeerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let peerAgentId = enginePeerAgentId.trimmingCharacters(in: .whitespacesAndNewlines)
     if chatId.isEmpty {
       setNativeOutgoingMessageStatus(messageId, status: "error")
       return
@@ -4063,6 +4075,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       "metadata": metadata,
       "myUserId": myUserId,
       "peerUserId": peerUserId,
+      "peerAgentId": peerAgentId,
       "isGroup": isGroupOrChannel,
     ]
 
@@ -4124,6 +4137,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
     let chatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
     let myUserId = engineMyUserId.trimmingCharacters(in: .whitespacesAndNewlines)
     let peerUserId = enginePeerUserId.trimmingCharacters(in: .whitespacesAndNewlines)
+    let peerAgentId = enginePeerAgentId.trimmingCharacters(in: .whitespacesAndNewlines)
     if chatId.isEmpty {
       setNativeOutgoingMessageStatus(messageId, status: "error")
       return
@@ -4147,6 +4161,7 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       "metadata": metadata,
       "myUserId": myUserId,
       "peerUserId": peerUserId,
+      "peerAgentId": peerAgentId,
       "isGroup": isGroupOrChannel,
     ]
 

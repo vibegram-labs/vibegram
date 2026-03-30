@@ -62,6 +62,9 @@ export interface Chat {
     members?: ChatMember[];
     friendId: string;
     friendName: string;
+    friendIsAgent?: boolean;
+    friendAgentId?: string;
+    acceptsIncomingChat?: boolean;
     messages: Message[];
     lastMessage?: Message;
     unreadCount?: number;

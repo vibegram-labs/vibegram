@@ -37,6 +37,21 @@ defmodule VibeWeb.ChatChannel do
     if not can_send do
       {:reply, {:error, %{reason: "not_allowed", message: "You cannot send messages here"}}, socket}
     else
+      standalone_agent =
+        case socket.assigns.room_type do
+          "dm" ->
+            chat_id
+            |> Chat.get_participant_ids()
+            |> Enum.reject(&(&1 == user_id))
+            |> Enum.find_value(&Agents.get_agent_by_shadow_user/1)
+
+          _ ->
+            nil
+        end
+
+      if standalone_agent && !Agents.incoming_chat_enabled?(standalone_agent) do
+        {:reply, {:error, %{reason: "agent_chat_disabled", message: "Incoming chat is disabled for this agent"}}, socket}
+      else
       data = deobfuscate(payload)
       broadcast_payload = enforce_sender_identity(data, user_id)
 
@@ -112,6 +127,7 @@ defmodule VibeWeb.ChatChannel do
 
       # Reply immediately - don't wait for DB
       {:reply, :ok, socket}
+      end
     end
   end
 
