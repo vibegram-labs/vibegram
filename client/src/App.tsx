@@ -4,6 +4,8 @@ import Chat from './components/Chat';
 import Home from './pages/Home';
 import AgentDocs from './pages/AgentDocs';
 import AgentConfigDocs from './pages/AgentConfigDocs';
+import AgentExamplesDocs from './pages/AgentExamplesDocs';
+import AgentEnvDocs from './pages/AgentEnvDocs';
 
 // App Wrapper to handle PWA vs Landing logic
 const App = () => {
@@ -25,6 +27,8 @@ const App = () => {
         <Route path="/" element={<Home />} />
         <Route path="/docs/agents" element={<AgentDocs />} />
         <Route path="/docs/agents/config" element={<AgentConfigDocs />} />
+        <Route path="/docs/agents/examples" element={<AgentExamplesDocs />} />
+        <Route path="/docs/agents/env" element={<AgentEnvDocs />} />
         <Route path="/app" element={<Chat />} />
         {/* Catch-all redirect to Home or App depending on preference, default to Home for now */}
         <Route path="*" element={<Navigate to="/" replace />} />

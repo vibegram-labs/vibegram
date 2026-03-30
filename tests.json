@@ -89,9 +89,13 @@
       "status": "passed",
       "details": "Added a dedicated web doc page at `client/src/pages/AgentConfigDocs.tsx`, routed it through `client/src/App.tsx` at `/docs/agents/config`, updated the shared docs header to handle config-doc anchors, and linked the main agent docs page into the new config reference."
     },
+    "web_agent_docs_sidebar_suite": {
+      "status": "passed",
+      "details": "Reworked the standalone agent docs into a sidebar-driven docs shell with focused pages for overview, config, examples, and env/setup. Added `client/src/components/docs/DocsShell.tsx`, `client/src/pages/AgentExamplesDocs.tsx`, `client/src/pages/AgentEnvDocs.tsx`, `client/src/pages/agentDocsShared.ts`, rewired `client/src/App.tsx`, and replaced `client/src/pages/AgentDocs.css` with the new sidebar/scroll layout."
+    },
     "web_client_bundle_for_phoenix_root": {
       "status": "passed",
-      "details": "Updated the root `Dockerfile` to build the React client in a Node stage and copy `client/dist` into `server/priv/static` before the Phoenix release build. Also ran `npm run build -- --outDir ../server/priv/static` from `client/`, which successfully generated `server/priv/static/index.html` and hashed assets for the landing/docs bundle."
+      "details": "Updated the root `Dockerfile` to build the React client in a Node stage and copy `client/dist` into `server/priv/static` before the Phoenix release build. Re-ran `npm run build` and `npm run build -- --outDir ../server/priv/static` from `client/`, both of which succeeded and regenerated the landing/docs bundle for the Phoenix-served root."
     },
     "mobile_chatstore_realtime_reload_logging": {
       "status": "passed",

@@ -7,22 +7,8 @@ export const Header = () => {
     const location = useLocation();
     const [mobileMenuOpen, setMobileMenuOpen] = React.useState(false);
     const isDocsPage = location.pathname.startsWith('/docs');
-    const isAgentConfigDocs = location.pathname.startsWith('/docs/agents/config');
-
     const navLinks = isDocsPage
-        ? isAgentConfigDocs
-            ? [
-                { label: 'Overview', href: '#overview' },
-                { label: 'Identity', href: '#identity' },
-                { label: 'Delivery', href: '#delivery' },
-                { label: 'Automation', href: '#automation' },
-            ]
-            : [
-                { label: 'Overview', href: '#overview' },
-                { label: 'Integrate', href: '#integrate' },
-                { label: 'Customize', href: '#customize' },
-                { label: 'Callbacks', href: '#callbacks' },
-            ]
+        ? []
         : [
             { label: 'Features', href: '#features' },
             { label: 'Network', href: '#network' },
@@ -38,7 +24,7 @@ export const Header = () => {
             return;
         }
 
-        const pageRoot = isAgentConfigDocs ? '/docs/agents/config' : isDocsPage ? '/docs/agents' : '/';
+        const pageRoot = isDocsPage ? location.pathname : '/';
 
         if (location.pathname !== pageRoot) {
             navigate(`${pageRoot}${href}`);
@@ -62,29 +48,38 @@ export const Header = () => {
                 </div>
 
                 <div className="nav-center">
-                    <div className={`nav-links ${mobileMenuOpen ? 'open' : ''}`}>
-                        {navLinks.map((link) => (
-                            <button
-                                key={link.label}
-                                type="button"
-                                onClick={() => handleLinkClick(link.href)}
-                            >
-                                {link.label}
-                            </button>
-                        ))}
-                    </div>
+                    {!isDocsPage && (
+                        <div className={`nav-links ${mobileMenuOpen ? 'open' : ''}`}>
+                            {navLinks.map((link) => (
+                                <button
+                                    key={link.label}
+                                    type="button"
+                                    onClick={() => handleLinkClick(link.href)}
+                                >
+                                    {link.label}
+                                </button>
+                            ))}
+                        </div>
+                    )}
                 </div>
 
                 <div className="nav-actions">
-                    {!isDocsPage && (
-                        <button className="btn-text" onClick={() => navigate('/docs/agents')}>Docs</button>
-                    )}
-                    <button className="btn-text" onClick={() => navigate('/app')}>Sign In</button>
-                    <button className="btn-primary" onClick={() => navigate('/app')}>Join</button>
+                    {isDocsPage ? (
+                        <>
+                            <button className="btn-text" onClick={() => navigate('/')}>Home</button>
+                            <button className="btn-primary" onClick={() => navigate('/app')}>Open Vibe</button>
+                        </>
+                    ) : (
+                        <>
+                            <button className="btn-text" onClick={() => navigate('/docs/agents')}>Docs</button>
+                            <button className="btn-text" onClick={() => navigate('/app')}>Sign In</button>
+                            <button className="btn-primary" onClick={() => navigate('/app')}>Join</button>
 
-                    <div className="mobile-toggle" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
-                        {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
-                    </div>
+                            <div className="mobile-toggle" onClick={() => setMobileMenuOpen(!mobileMenuOpen)}>
+                                {mobileMenuOpen ? <X size={20} /> : <Menu size={20} />}
+                            </div>
+                        </>
+                    )}
                 </div>
             </div>
         </nav>
