@@ -3,7 +3,7 @@
   "checks": {
     "server_event_html_normalization": {
       "status": "passed",
-      "details": "Patched `server/lib/vibe/ai/agent_event_runtime.ex` so event titles, texts, and attachment captions normalize HTML-like markup (`<B>`, `<br>`, closing block tags, common entities, and numeric entities) into plain text before persistence and posting. `mix compile` passed after the change."
+      "details": "Patched `server/lib/vibe/ai/agent_event_runtime.ex` so event titles, texts, and attachment captions normalize HTML-like markup (`<B>`, `<br>`, closing block tags, common entities, and numeric entities) into plain text before persistence and posting. Followed up by fixing the numeric-entity decoder to call `Regex.replace/4` with the correct `regex, string, replacement` order after a live `/events` request exposed a `FunctionClauseError` on plain titles like `OPEN EURUSD`. `mix compile` passed after the fix."
     },
     "server_event_inbox_tools_and_batch_mode": {
       "status": "passed",

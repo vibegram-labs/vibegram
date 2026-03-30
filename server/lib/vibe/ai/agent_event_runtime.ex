@@ -1284,8 +1284,12 @@ defmodule Vibe.AI.AgentEventRuntime do
     |> String.replace("&quot;", "\"")
     |> String.replace("&apos;", "'")
     |> String.replace("&#39;", "'")
-    |> Regex.replace(~r/&#x([0-9a-fA-F]+);/u, fn _, hex -> decode_codepoint(hex, 16) end)
-    |> Regex.replace(~r/&#([0-9]+);/u, fn _, digits -> decode_codepoint(digits, 10) end)
+    |> then(fn current ->
+      Regex.replace(~r/&#x([0-9a-fA-F]+);/u, current, fn _, hex -> decode_codepoint(hex, 16) end)
+    end)
+    |> then(fn current ->
+      Regex.replace(~r/&#([0-9]+);/u, current, fn _, digits -> decode_codepoint(digits, 10) end)
+    end)
   end
 
   defp decode_codepoint(raw, base) do
