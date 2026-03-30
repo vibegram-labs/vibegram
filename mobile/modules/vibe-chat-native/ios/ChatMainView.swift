@@ -720,11 +720,12 @@ public final class ChatMainView: ExpoView,
     headerMaskView.addSubview(headerMaskBlurView)
     headerMaskBlurView.contentView.addSubview(headerMaskOverlayView)
     headerMaskGradientLayer.colors = [
-      UIColor.black.withAlphaComponent(0.95).cgColor,
-      UIColor.black.withAlphaComponent(0.72).cgColor,
+      UIColor.black.withAlphaComponent(0.98).cgColor,
+      UIColor.black.withAlphaComponent(0.86).cgColor,
+      UIColor.black.withAlphaComponent(0.38).cgColor,
       UIColor.clear.cgColor,
     ]
-    headerMaskGradientLayer.locations = [0.0, 0.58, 1.0]
+    headerMaskGradientLayer.locations = [0.0, 0.34, 0.76, 1.0]
     headerMaskView.layer.mask = headerMaskGradientLayer
     headerContainer.addSubview(headerContentView)
     headerContainer.layer.zPosition = 50.0
@@ -2747,13 +2748,10 @@ public final class ChatMainView: ExpoView,
       ? UIColor(white: 1.0, alpha: 0.06) : UIColor(white: 0.0, alpha: 0.04)
 
     backgroundColor = .clear
-    var white: CGFloat = 0
-    if text.getWhite(&white, alpha: nil) {
-      headerMaskBlurView.effect = UIBlurEffect(style: white > 0.5 ? .dark : .light)
-    } else {
-      headerMaskBlurView.effect = UIBlurEffect(style: .regular)
-    }
-    headerMaskOverlayView.backgroundColor = chatBackground.withAlphaComponent(0.88)
+    headerMaskBlurView.effect =
+      UIBlurEffect(style: isDarkTheme ? .systemMaterialDark : .systemMaterialLight)
+    headerMaskOverlayView.backgroundColor =
+      chatBackground.withAlphaComponent(isDarkTheme ? 0.74 : 0.66)
     rootWallpaperLayer.isHidden = true
     backGlassView.contentView.backgroundColor = chatBackground.withAlphaComponent(0.10)
     titleGlassView.contentView.backgroundColor = chatBackground.withAlphaComponent(0.10)

@@ -79,6 +79,7 @@ export interface NativeChatAppearance {
   wallpaperPatternOpacity?: number;
   wallpaperMaskKey?: string;
   bubbleMeGradient?: string[];
+  bubbleThemGradient?: string[];
   bubbleThemColor?: string;
   textColorMe?: string;
   textColorThem?: string;

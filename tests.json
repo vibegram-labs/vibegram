@@ -120,6 +120,14 @@
     "mobile_chatstore_cached_start_reconcile": {
       "status": "passed",
       "details": "When cached chats already exist, `loadChats()` now schedules one short background remote reconciliation instead of only returning the hydrated list forever. Starting any real remote reload clears the pending timer and refresh cooldown to avoid duplicate fetches. `git diff --check -- mobile/src/lib/ChatStore.ts` passed, and `./node_modules/.bin/tsc --noEmit -p tsconfig.json --pretty false` still fails only with pre-existing repo-wide errors outside `ChatStore.ts`."
+    },
+    "mobile_saved_messages_media_placeholder_labels": {
+      "status": "passed",
+      "details": "Patched `mobile/app/saved-messages.tsx` so saved image/video/voice/location rows no longer inject placeholder text like `Image` or `Video`, existing saved-media placeholders are suppressed in the row mapper/render path, and `mobile/src/native/chat/types.ts` now declares `bubbleThemGradient` to match existing chat appearance usage. `get_errors` reported no errors in the touched files after the change."
+    },
+    "ios_native_chat_timestamp_parser_scroll_polish": {
+      "status": "passed",
+      "details": "Patched `mobile/src/native/chat/mapper.ts` to normalize native row timestamps back to `HH:mm`, updated `ChatListViewCells.swift` to use `ChatNativeAgentTextRenderer` for agent and mention bubble text, softened the main header blur/mask in `ChatMainView.swift`, forced bottom scroll for pending sends plus resize-safe inset ordering in `ChatListView.swift`, and skipped redundant inset rewrites in `ChatNativeHomeListView.swift`. `xcrun swiftc -parse` passed for the touched Swift files, `get_errors` reported no file-level errors, and `git diff --check` passed for the touched files."
     }
   }
 }

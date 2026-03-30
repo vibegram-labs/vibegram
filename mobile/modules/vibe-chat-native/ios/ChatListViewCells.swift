@@ -8,7 +8,7 @@ private let chatCellHoldDebugLogs = false
 private let chatCellReactionDebugLogs = false
 private let chatCellMediaDebugLogs = false
 private let chatCellInlineVideoDebugLogs = false
-private let agentBoldRegex = try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
+private let bubbleBoldRegex = try! NSRegularExpression(pattern: "\\*\\*(.+?)\\*\\*")
 private let chatMediaImageCache = NSCache<NSString, UIImage>()
 private let chatMediaNaturalSizeCache = NSCache<NSString, NSValue>()
 private let chatMediaAudioAvailabilityCache = NSCache<NSString, NSNumber>()
@@ -1127,9 +1127,22 @@ private func effectiveMetaTopSpacing(for row: ChatListRow) -> CGFloat {
   isTransparentStickerMessage(row) ? stickerMetaTopSpacing : bubbleMetaTopSpacing
 }
 
-private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? = nil)
+private func parseBubbleMarkdown(
+  text: String,
+  font: UIFont,
+  textColor: UIColor? = nil,
+  useSharedAgentRenderer: Bool = false
+)
   -> NSAttributedString
 {
+  if useSharedAgentRenderer {
+    return ChatNativeAgentTextRenderer.makeAttributedText(
+      text: text,
+      font: font,
+      textColor: textColor ?? .label
+    )
+  }
+
   let isRtl = isRTL(text)
   let paragraphStyle = NSMutableParagraphStyle()
   paragraphStyle.alignment = isRtl ? .right : .natural
@@ -1145,7 +1158,7 @@ private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? 
 
   let attrString = NSMutableAttributedString(string: text, attributes: attrs)
 
-  let matches = agentBoldRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+  let matches = bubbleBoldRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
   for match in matches.reversed() {
     if let range = Range(match.range(at: 1), in: text) {
       let boldContent = String(text[range])
@@ -1157,6 +1170,20 @@ private func parseAgentMarkdown(text: String, font: UIFont, textColor: UIColor? 
       }
       let replacement = NSAttributedString(string: boldContent, attributes: boldAttrs)
       attrString.replaceCharacters(in: match.range, with: replacement)
+    }
+  }
+
+  // Add URL links for non-agent messages
+  if !useSharedAgentRenderer {
+    let urlRegex = try! NSRegularExpression(pattern: "https?://[\\w\\d\\-._~:/?#\\[\\]@!$&'()*+,;=%]+", options: .caseInsensitive)
+    let urlMatches = urlRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
+    for match in urlMatches.reversed() {
+      if let urlRange = Range(match.range, in: text) {
+        let urlString = String(text[urlRange])
+        if let url = URL(string: urlString) {
+          attrString.addAttribute(.link, value: url, range: match.range)
+        }
+      }
     }
   }
 
@@ -1183,7 +1210,12 @@ private func bubbleDisplayAttributedString(
     t = t.isEmpty ? prefix : prefix + t
   }
 
-  return parseAgentMarkdown(text: t, font: font, textColor: textColor)
+  return parseBubbleMarkdown(
+    text: t,
+    font: font,
+    textColor: textColor,
+    useSharedAgentRenderer: row.isAgentMessage || row.isAgentMention
+  )
 }
 
 private typealias AgentStreamingLabel = ChatNativeStreamingTextLabel
@@ -1351,6 +1383,7 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     break
   }
 
+  let usesBlockRendering = row.isAgentMessage && !usesTransparentAgentStreamingLayout(row) && row.messageType != "typing"
   let showsInlineAttachment = hasInlineAttachment(row)
   let textMaxWidth =
     showsInlineAttachment
@@ -1359,14 +1392,42 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   let font =
     row.messageType == "typing"
     ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
-  let displayText = bubbleDisplayAttributedString(for: row, font: font)
-  let textRect = displayText.boundingRect(
-    with: CGSize(width: textMaxWidth, height: .greatestFiniteMagnitude),
-    options: [.usesLineFragmentOrigin, .usesFontLeading],
-    context: nil
-  )
-  let textWidth = min(textMaxWidth, ceil(textRect.width))
-  let textHeight = ceil(textRect.height)
+  let textHeight: CGFloat
+  let textWidth: CGFloat
+  if usesBlockRendering {
+    // Calculate height for block rendering
+    let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
+    let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
+    var totalHeight: CGFloat = 0.0
+    var maxWidth: CGFloat = 0.0
+    for block in blocks {
+      switch block {
+      case .text(let content):
+        let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
+          text: content, font: font, textColor: .label, lineHeight: font.lineHeight + 4.0)
+        let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: textMaxWidth)
+        totalHeight += max(ceil(font.lineHeight), measured.height) + 6.0
+        maxWidth = max(maxWidth, measured.width)
+      case .code(let content, let lang):
+        // Approximate code block height
+        let lines = content.components(separatedBy: "\n").count
+        let codeHeight = CGFloat(lines) * (font.lineHeight + 4.0) + 20.0 // padding
+        totalHeight += codeHeight + 6.0
+        maxWidth = max(maxWidth, textMaxWidth)
+      }
+    }
+    textHeight = totalHeight - 6.0 // remove last spacing
+    textWidth = min(textMaxWidth, ceil(maxWidth))
+  } else {
+    let displayText = bubbleDisplayAttributedString(for: row, font: font)
+    let textRect = displayText.boundingRect(
+      with: CGSize(width: textMaxWidth, height: .greatestFiniteMagnitude),
+      options: [.usesLineFragmentOrigin, .usesFontLeading],
+      context: nil
+    )
+    textWidth = min(textMaxWidth, ceil(textRect.width))
+    textHeight = ceil(textRect.height)
+  }
   let attachmentBodyHeight: CGFloat = showsInlineAttachment ? inlineAttachmentHeight : 0.0
   let desiredContentWidth: CGFloat
   if showsInlineAttachment {
@@ -4194,6 +4255,19 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   var onInlineAttachmentTap: ((ChatListRow) -> Void)?
   var onMediaNaturalSizeResolved: ((String?, String, CGSize) -> Void)?
 
+  // Block rendering for agent messages
+  private var blockViews: [UIView] = []
+  private var blockFrames: [CGRect] = []
+  private var lastBlockSignature: String = ""
+  private var lastText: String = ""
+  private var lastRowKey: String = ""
+
+  // Link preview
+  private let linkPreviewView = UIView()
+  private let linkPreviewImageView = UIImageView()
+  private let linkPreviewTitleLabel = UILabel()
+  private let linkPreviewSiteLabel = UILabel()
+
   override init(frame: CGRect) {
     super.init(frame: frame)
 
@@ -4386,6 +4460,25 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     reactionLabel.font = UIFont.systemFont(ofSize: 14)
     reactionLabel.textAlignment = .center
 
+    // Link preview setup
+    contentView.addSubview(linkPreviewView)
+    linkPreviewView.addSubview(linkPreviewImageView)
+    linkPreviewView.addSubview(linkPreviewTitleLabel)
+    linkPreviewView.addSubview(linkPreviewSiteLabel)
+    linkPreviewView.backgroundColor = UIColor(white: 0.0, alpha: 0.1)
+    linkPreviewView.layer.cornerRadius = 8
+    linkPreviewView.layer.cornerCurve = .continuous
+    linkPreviewView.clipsToBounds = true
+    linkPreviewView.isHidden = true
+    linkPreviewImageView.contentMode = .scaleAspectFill
+    linkPreviewImageView.clipsToBounds = true
+    linkPreviewTitleLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+    linkPreviewTitleLabel.textColor = .white
+    linkPreviewTitleLabel.numberOfLines = 2
+    linkPreviewSiteLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
+    linkPreviewSiteLabel.textColor = UIColor(white: 1.0, alpha: 0.7)
+    linkPreviewSiteLabel.numberOfLines = 1
+
     bubbleView.isHidden = true
     tailView.isHidden = true
     // agentSenderLabel removed
@@ -4522,11 +4615,12 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     case .message:
       let isGhostHidden = hiddenMessageId == row.messageId
       let usesTransparentAgentStreaming = usesTransparentAgentStreamingLayout(row)
+      let usesBlockRendering = row.isAgentMessage && !usesTransparentAgentStreaming && row.messageType != "typing"
       self.isGhostHidden = isGhostHidden
       dayLabel.isHidden = true
       bubbleView.isHidden = false
       tailView.isHidden = isGhostHidden || !row.shape.showTail
-      messageLabel.isHidden = isGhostHidden || !(row.visualKind == .text || hasMediaCaptionLayout(row))
+      messageLabel.isHidden = isGhostHidden || !(row.visualKind == .text || hasMediaCaptionLayout(row)) || usesBlockRendering
       if row.messageType == "typing" {
         startTypingShimmer()
         messageLabel.font = UIFont.systemFont(ofSize: 13, weight: .regular)
@@ -4538,18 +4632,63 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       inlineAttachmentView.isHidden = isGhostHidden || !hasInlineAttachment(row)
       metaContainerView.isHidden = isGhostHidden || usesTransparentAgentStreaming
 
-      // Agent/Mention labeling
-      let isTyping = row.messageType == "typing"
-      let messageFont =
-        isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
-      let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
-      let displayText = bubbleDisplayAttributedString(
-        for: row, font: messageFont, textColor: resolveTextColor)
-      messageLabel.applyStreamingText(
-        displayText,
-        rawText: displayText.string,
-        isStreaming: row.isAgentMessage && row.isStreamingText && row.messageType != "typing"
-      )
+      if usesBlockRendering {
+        // Block rendering for agent messages
+        let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
+        let font = bubbleMessageFont
+        let textColor = appearance.textColorThem
+        let isStreaming = row.isStreamingText
+        let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
+
+        // Rebuild subviews only when block structure changes
+        let signature = blocks.map { block -> String in
+          switch block { case .text: return "T"; case .code: return "C" }
+        }.joined()
+
+        if signature != lastBlockSignature {
+          blockViews.forEach { $0.removeFromSuperview() }
+          blockViews = blocks.map { block -> UIView in
+            switch block {
+            case .text:
+              let label = ChatNativeStreamingTextLabel()
+              label.numberOfLines = 0
+              label.backgroundColor = .clear
+              addSubview(label)
+              return label
+            case .code:
+              let card = AgentCodeBlockView()
+              addSubview(card)
+              return card
+            }
+          }
+          lastBlockSignature = signature
+        } else {
+          blockViews.forEach { $0.isHidden = false }
+        }
+
+        // Find index of last text block for streaming animation
+        var lastTextIdx: Int? = nil
+        for (i, block) in blocks.enumerated() {
+          if case .text = block { lastTextIdx = i }
+        }
+
+        // Layout will be done in layoutSubviews
+        lastText = text
+        lastRowKey = row.key
+      } else {
+        // Agent/Mention labeling
+        let isTyping = row.messageType == "typing"
+        let messageFont =
+          isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
+        let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
+        let displayText = bubbleDisplayAttributedString(
+          for: row, font: messageFont, textColor: resolveTextColor)
+        messageLabel.applyStreamingText(
+          displayText,
+          rawText: displayText.string,
+          isStreaming: row.isAgentMessage && row.isStreamingText && row.messageType != "typing"
+        )
+      }
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
       editedLabel.isHidden = !row.isEdited
@@ -4983,22 +5122,76 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
         )
       } else {
         inlineAttachmentView.frame = .zero
-        messageLabel.frame = pixelAlignedRect(
-          CGRect(
-            x: bubbleFrame.minX + bubbleHorizontalPadding,
-            y: bubbleFrame.minY + bubbleTopPadding
-              + max(0.0, metrics.bodyHeight - metrics.textHeight),
-            width: metrics.messageWidth,
-            height: metrics.textHeight
-          ))
-        metaContainerView.frame = pixelAlignedRect(
-          CGRect(
-            x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
-            y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
-            width: metrics.metaWidth,
-            height: bubbleMetaHeight
-          ))
-      }
+        let usesBlockRendering = row.isAgentMessage && !usesTransparentAgentStreaming && row.messageType != "typing"
+        if usesBlockRendering {
+          // Layout block views for agent messages
+          let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
+          let font = bubbleMessageFont
+          let textColor = appearance.textColorThem
+          let isStreaming = row.isStreamingText
+          let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
+
+          // Find index of last text block for streaming animation
+          var lastTextIdx: Int? = nil
+          for (i, block) in blocks.enumerated() {
+            if case .text = block { lastTextIdx = i }
+          }
+
+          var yOffset: CGFloat = bubbleFrame.minY + bubbleTopPadding
+          blockFrames = []
+          for (i, block) in blocks.enumerated() {
+            let view = blockViews[i]
+            view.isHidden = false
+            switch block {
+            case .text(let content):
+              let label = view as! ChatNativeStreamingTextLabel
+              let shouldStream = isStreaming && i == lastTextIdx
+              let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
+                text: content, font: font, textColor: textColor, lineHeight: font.lineHeight + 4.0)
+              let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: metrics.messageWidth)
+              let h = max(ceil(font.lineHeight), measured.height)
+              label.applyStreamingText(attributed, rawText: content, isStreaming: shouldStream)
+              let frame = CGRect(x: bubbleFrame.minX + bubbleHorizontalPadding, y: yOffset, width: metrics.messageWidth, height: h)
+              view.frame = pixelAlignedRect(frame)
+              blockFrames.append(frame)
+              yOffset += h + 6.0
+
+            case .code(let content, let lang):
+              let card = view as! AgentCodeBlockView
+              let cardAvailableWidth = metrics.messageWidth
+              let cardHeight = card.configure(
+                code: content, language: lang, textColor: textColor, baseFont: font, availableWidth: cardAvailableWidth)
+              let frame = CGRect(x: bubbleFrame.minX + bubbleHorizontalPadding, y: yOffset, width: cardAvailableWidth, height: cardHeight)
+              view.frame = pixelAlignedRect(frame)
+              blockFrames.append(frame)
+              yOffset += cardHeight + 6.0
+            }
+          }
+          messageLabel.frame = .zero
+          metaContainerView.frame = pixelAlignedRect(
+            CGRect(
+              x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
+              y: yOffset - bubbleMetaHeight,
+              width: metrics.metaWidth,
+              height: bubbleMetaHeight
+            ))
+        } else {
+          messageLabel.frame = pixelAlignedRect(
+            CGRect(
+              x: bubbleFrame.minX + bubbleHorizontalPadding,
+              y: bubbleFrame.minY + bubbleTopPadding
+                + max(0.0, metrics.bodyHeight - metrics.textHeight),
+              width: metrics.messageWidth,
+              height: metrics.textHeight
+            ))
+          metaContainerView.frame = pixelAlignedRect(
+            CGRect(
+              x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
+              y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
+              width: metrics.metaWidth,
+              height: bubbleMetaHeight
+            ))
+        }
     }
 
     updateStickerAnimationPlayback()

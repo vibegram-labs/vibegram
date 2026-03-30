@@ -51,6 +51,38 @@ const formatTimeLabel = (timestampMs: number) => {
   return new Date(timestampMs).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false });
 };
 
+const TIME_ONLY_TIMESTAMP_RE = /^(\d{1,2}):(\d{2})(?::\d{2})?$/;
+const DATE_PREFIX_TIMESTAMP_RE = /^\d{4}-\d{2}-\d{2}(?:[T\s].*)?$/;
+
+const normalizeTimestampLabel = (timestamp: string | undefined, timestampMs: number) => {
+  const fallback = formatTimeLabel(timestampMs);
+
+  if (typeof timestamp !== 'string') {
+    return fallback;
+  }
+
+  const trimmed = timestamp.trim();
+  if (!trimmed) {
+    return fallback;
+  }
+
+  const timeOnlyMatch = trimmed.match(TIME_ONLY_TIMESTAMP_RE);
+  if (timeOnlyMatch) {
+    return `${timeOnlyMatch[1].padStart(2, '0')}:${timeOnlyMatch[2]}`;
+  }
+
+  if (DATE_PREFIX_TIMESTAMP_RE.test(trimmed) || trimmed.includes('T')) {
+    return fallback;
+  }
+
+  const parsed = Date.parse(trimmed);
+  if (Number.isFinite(parsed)) {
+    return formatTimeLabel(parsed);
+  }
+
+  return trimmed;
+};
+
 const normalizeRuntimeMessageId = (value: unknown): string | null => {
   if (typeof value === 'string') {
     const trimmed = value.trim();
@@ -134,7 +166,7 @@ export const mapMessagesToNativeRows = (messages: RuntimeChatMessage[]): NativeC
       chatId: current.chatId,
       fromId: current.fromId,
       timestampMs: current.timestampMs,
-      timestamp: current.timestamp || formatTimeLabel(current.timestampMs),
+      timestamp: normalizeTimestampLabel(current.timestamp, current.timestampMs),
       text: isAgentMessage ? (current.plainContent || current.text) : current.text,
       type: current.type,
       status: current.status,

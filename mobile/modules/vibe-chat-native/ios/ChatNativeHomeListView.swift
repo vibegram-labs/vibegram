@@ -225,6 +225,14 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
   }
 
   private func applyContentInsets() {
+    let topUnchanged = abs(tableView.contentInset.top - contentTopInset) <= 0.5
+    let bottomUnchanged = abs(tableView.contentInset.bottom - contentBottomInset) <= 0.5
+    let indicatorTopUnchanged = abs(tableView.verticalScrollIndicatorInsets.top - contentTopInset) <= 0.5
+    let indicatorBottomUnchanged = abs(tableView.verticalScrollIndicatorInsets.bottom - contentBottomInset) <= 0.5
+    if topUnchanged && bottomUnchanged && indicatorTopUnchanged && indicatorBottomUnchanged {
+      return
+    }
+
     let previousTopInset = tableView.contentInset.top
     let normalizedOffsetY = max(0, tableView.contentOffset.y + previousTopInset)
     tableView.contentInset = UIEdgeInsets(

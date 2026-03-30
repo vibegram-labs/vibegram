@@ -81,12 +81,34 @@ const extractNativeSavedMessages = (result: unknown): any[] => {
     return [];
 };
 
+const normalizeSavedMessageText = (message: any) => {
+    const rawText =
+        (typeof message?.plaintext === 'string' && message.plaintext)
+        || (typeof message?.text === 'string' && message.text)
+        || (typeof message?.caption === 'string' && message.caption)
+        || '';
+    const trimmed = rawText.trim();
+    if (!trimmed) return '';
+
+    const type = typeof message?.type === 'string' ? message.type : '';
+    const normalized = trimmed.toLowerCase();
+    const hasMediaUrl = typeof message?.mediaUrl === 'string' && message.mediaUrl.trim().length > 0;
+    const hasLocation =
+        toNumber(message?.latitude ?? message?.extra?.latitude) != null
+        && toNumber(message?.longitude ?? message?.extra?.longitude) != null;
+    const isGenericMediaLabel =
+        (type === 'image' && normalized === 'image' && hasMediaUrl)
+        || (type === 'video' && (normalized === 'video' || normalized === 'video note') && hasMediaUrl)
+        || (type === 'voice' && normalized === 'voice message' && hasMediaUrl)
+        || (type === 'location' && normalized === 'location' && hasLocation);
+
+    return isGenericMediaLabel ? '' : rawText;
+};
+
 const buildNativeSavedRetryPayload = (message: any) => ({
     messageId: typeof message?.id === 'string' ? message.id : undefined,
     type: typeof message?.type === 'string' ? message.type : 'text',
-    text: (typeof message?.plaintext === 'string' && message.plaintext)
-        || (typeof message?.text === 'string' && message.text)
-        || '',
+    text: normalizeSavedMessageText(message),
     metadata: {
         mediaUrl: typeof message?.mediaUrl === 'string' ? message.mediaUrl : undefined,
         fileName: typeof message?.fileName === 'string' ? message.fileName : undefined,
@@ -309,15 +331,29 @@ export default function SavedMessagesScreen() {
 
     const handleAttach = (data: any) => {
         if (data.type === 'location') {
-            sendMessage(`Location`, 'location', { latitude: data.latitude, longitude: data.longitude });
+            sendMessage('', 'location', { latitude: data.latitude, longitude: data.longitude });
         } else if (data.type === 'image') {
-            sendMessage(`Image`, 'image', { mediaUrl: data.uri, width: data.width, height: data.height });
+            const caption = typeof data.caption === 'string' ? data.caption.trim() : '';
+            const mimeType = typeof data.mimeType === 'string' ? data.mimeType.trim() : '';
+            const explicitVideo = data.isVideo === true || /^video\//i.test(mimeType);
+            const attachmentType: 'video' | 'image' =
+                explicitVideo || /\.(mp4|mov|m4v|avi|mkv|webm)(?:$|[?#])/i.test(data.uri)
+                    ? 'video'
+                    : 'image';
+            sendMessage(caption, attachmentType, {
+                mediaUrl: data.uri,
+                width: data.width,
+                height: data.height,
+                mimeType: mimeType || undefined,
+                duration: toNumber(data.duration),
+                fileName: typeof data.name === 'string' ? data.name : undefined,
+            });
         } else if (data.type === 'contact') {
             sendMessage('Contact', 'contact', { contact: data.contact });
         } else if (data.type === 'file') {
             const isVoice = data.name.toLowerCase().endsWith('.m4a') && (data.duration !== undefined);
             if (isVoice) {
-                sendMessage('Voice Message', 'voice', {
+                sendMessage('', 'voice', {
                     mediaUrl: data.uri,
                     fileName: data.name,
                     duration: data.duration
@@ -498,10 +534,7 @@ export default function SavedMessagesScreen() {
                 timestamp: typeof message?.timestamp === 'number'
                     ? new Date(message.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
                     : undefined,
-                text: (typeof message?.plaintext === 'string' && message.plaintext)
-                    || (typeof message?.caption === 'string' && message.caption)
-                    || (typeof message?.fileName === 'string' && message.fileName)
-                    || '',
+                text: normalizeSavedMessageText(message),
                 type: typeof message?.type === 'string' ? message.type : 'text',
                 status: typeof message?.status === 'string' ? message.status : undefined,
                 mediaUrl: typeof message?.mediaUrl === 'string' ? message.mediaUrl : undefined,
@@ -599,7 +632,6 @@ export default function SavedMessagesScreen() {
             const explicitVideo = payload.isVideo === true || /^video\//i.test(mimeType);
             const attachmentType: 'video' | 'image' =
                 explicitVideo || /\.(mp4|mov|m4v|avi|mkv|webm)(?:$|[?#])/i.test(uri) ? 'video' : 'image';
-            const fallbackText = attachmentType === 'video' ? 'Video' : 'Image';
             const metadata: Record<string, any> = {
                 mediaUrl: uri,
                 width: toNumber(payload.width),
@@ -629,11 +661,11 @@ export default function SavedMessagesScreen() {
             if (nativeSavedMessagesEnabled) {
                 void submitNativeSavedMessage({
                     type: attachmentType,
-                    text: caption || fallbackText,
+                    text: caption,
                     metadata,
                 });
             } else {
-                void sendMessage(caption || fallbackText, attachmentType, metadata).finally(scheduleNativeScrollToBottom);
+                void sendMessage(caption, attachmentType, metadata).finally(scheduleNativeScrollToBottom);
             }
             return;
         }
@@ -706,7 +738,7 @@ export default function SavedMessagesScreen() {
                 if (nativeSavedMessagesEnabled) {
                     void submitNativeSavedMessage({
                         type: 'voice',
-                        text: 'Voice Message',
+                        text: '',
                         metadata: {
                             mediaUrl: uri,
                             fileName,
@@ -715,7 +747,7 @@ export default function SavedMessagesScreen() {
                         },
                     });
                 } else {
-                    void sendMessage('Voice Message', 'voice', {
+                    void sendMessage('', 'voice', {
                         mediaUrl: uri,
                         fileName,
                         duration,
@@ -752,14 +784,14 @@ export default function SavedMessagesScreen() {
             if (nativeSavedMessagesEnabled) {
                 void submitNativeSavedMessage({
                     type: 'location',
-                    text: 'Location',
+                    text: '',
                     metadata: {
                         latitude,
                         longitude,
                     },
                 });
             } else {
-                void sendMessage('Location', 'location', {
+                void sendMessage('', 'location', {
                     latitude,
                     longitude,
                 }).finally(scheduleNativeScrollToBottom);
@@ -773,7 +805,7 @@ export default function SavedMessagesScreen() {
             if (nativeSavedMessagesEnabled) {
                 void submitNativeSavedMessage({
                     type: 'voice',
-                    text: 'Voice Message',
+                    text: '',
                     metadata: {
                         mediaUrl: uri,
                         fileName: typeof payload.name === 'string' ? payload.name : 'voice-message.m4a',
@@ -784,7 +816,7 @@ export default function SavedMessagesScreen() {
                     },
                 });
             } else {
-                void sendMessage('Voice Message', 'voice', {
+                void sendMessage('', 'voice', {
                     mediaUrl: uri,
                     fileName: typeof payload.name === 'string' ? payload.name : 'voice-message.m4a',
                     duration: toNumber(payload.duration),
@@ -799,7 +831,7 @@ export default function SavedMessagesScreen() {
             if (nativeSavedMessagesEnabled) {
                 void submitNativeSavedMessage({
                     type: 'video',
-                    text: 'Video Note',
+                    text: '',
                     metadata: {
                         mediaUrl: uri,
                         fileName: typeof payload.name === 'string' ? payload.name : 'video-note.mov',
@@ -808,7 +840,7 @@ export default function SavedMessagesScreen() {
                     },
                 });
             } else {
-                void sendMessage('Video Note', 'video', {
+                void sendMessage('', 'video', {
                     mediaUrl: uri,
                     fileName: typeof payload.name === 'string' ? payload.name : 'video-note.mov',
                     duration: toNumber(payload.duration),
@@ -1062,6 +1094,7 @@ export default function SavedMessagesScreen() {
                     keyExtractor={item => item.id}
                     renderItem={({ item, index }) => {
                         const isMe = item.fromId === user?.userId;
+                        const displayText = normalizeSavedMessageText(item);
                         return (
                             <Animated.View entering={FadeIn.duration(200)} style={{ marginBottom: 2 }}>
                                 {item.showDateHeader && (
@@ -1078,8 +1111,8 @@ export default function SavedMessagesScreen() {
                                         end={{ x: 1, y: 1 }}
                                         style={[
                                             {
-                                                padding: (item.type === 'image' || item.type === 'sticker') && !item.plaintext ? 0 : 8,
-                                                paddingHorizontal: (item.type === 'image' || item.type === 'sticker') && !item.plaintext ? 0 : 12,
+                                                padding: (item.type === 'image' || item.type === 'sticker') && !displayText ? 0 : 8,
+                                                paddingHorizontal: (item.type === 'image' || item.type === 'sticker') && !displayText ? 0 : 12,
                                                 borderRadius: 18,
                                                 maxWidth: '85%',
                                             },
@@ -1089,7 +1122,8 @@ export default function SavedMessagesScreen() {
                                         <MessageBubbleBody item={{
                                             ...item,
                                             isMe,
-                                            text: item.plaintext || '',
+                                            caption: displayText,
+                                            text: displayText,
                                             timestamp: new Date(item.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false })
                                         } as any} />
                                     </LinearGradient>

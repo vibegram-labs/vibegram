@@ -830,12 +830,14 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     let distanceBeforeResize = max(
       0.0, collectionView.contentSize.height - (collectionView.contentOffset.y + previousHeight))
-    if distanceBeforeResize <= listBottomThreshold || shouldAutoScroll {
+    updateBottomAnchorInset()
+    if distanceBeforeResize <= listBottomThreshold || shouldAutoScroll
+      || pendingSendTransition != nil || activeSendTransition != nil || hiddenMessageId != nil
+    {
       scrollToBottom(animated: false)
     } else {
       restoreStationaryDistance(distanceBeforeResize)
     }
-    updateBottomAnchorInset()
     previousOffsetY = collectionView.contentOffset.y
     emitViewport(force: true)
     maybeStartPendingSendTransition()
@@ -926,6 +928,9 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       guard let self else {
         return
       }
+      let shouldForceBottomForPendingSend =
+        self.pendingSendTransition != nil || self.activeSendTransition != nil
+        || self.hiddenMessageId != nil
       let preInsetContentH = self.collectionView.contentSize.height
       let preInsetOffset = self.collectionView.contentOffset.y
       self.collectionView.layoutIfNeeded()
@@ -942,8 +947,8 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
         preInsetOffset, postInsetOffset, preInsetContentH, postInsetContentH,
         self.collectionView.bounds.height, parsed.count,
         self.pendingRowsPayload != nil ? "Y" : "N")
-      if wasNearBottom {
-        self.scrollToBottom(animated: animated)
+      if wasNearBottom || shouldForceBottomForPendingSend {
+        self.scrollToBottom(animated: shouldForceBottomForPendingSend ? false : animated)
       } else if let anchor = stationaryAnchor,
         let newIndex = parsed.firstIndex(where: { $0.key == anchor.key })
       {
