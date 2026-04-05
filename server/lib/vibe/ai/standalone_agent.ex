@@ -78,6 +78,10 @@ defmodule Vibe.AI.StandaloneAgent do
       |> Enum.filter(&(&1.type == "image"))
       |> Enum.map(& &1.url)
 
+    message_with_attachment_context =
+      message
+      |> append_attachment_context(build_attachment_context(attachments))
+
     conversation_history =
       recent_chat_history(vibe_chat_id, requester_user_id, agent.agent_user_id)
 
@@ -113,7 +117,7 @@ defmodule Vibe.AI.StandaloneAgent do
     try do
       with {:ok, final_text} <-
              stream_agent_text(
-               message,
+               message_with_attachment_context,
                callback,
                image_urls,
                vibe_chat_id,
@@ -238,6 +242,8 @@ defmodule Vibe.AI.StandaloneAgent do
       "You are #{agent.display_name}, a custom AI agent inside the Vibe app.",
       "Respond clearly and practically.",
       "Do not introduce yourself again, restate your capabilities, or repeat onboarding copy in an ongoing chat unless the user explicitly asks for it.",
+      "If the user sends a voice, audio, file, or image attachment, the current message may include a short attachment summary. Use that context directly instead of pretending the attachment is missing.",
+      "If a voice attachment arrives without a transcript, acknowledge the voice note naturally and continue from the attachment summary or ask one short follow-up only if needed.",
       "If the user asks about received notifications, past event counts, times, related messages, or inbox mode, use the live inbox tools before answering.",
       "If the user wants to switch between normal event bubbles and batched summaries, use the inbox configuration tool instead of guessing.",
       if("call_connected_app" in (agent.enabled_tools || []),
@@ -314,6 +320,42 @@ defmodule Vibe.AI.StandaloneAgent do
 
       other ->
         other
+    end
+  end
+
+  defp build_attachment_context(attachments) when is_list(attachments) do
+    lines =
+      Enum.flat_map(attachments, fn attachment ->
+        case {normalize_string(attachment.type), normalize_string(attachment.url)} do
+          {"image", url} when is_binary(url) -> ["- image: #{url}"]
+          {"voice", url} when is_binary(url) -> ["- voice: #{url}"]
+          {"audio", url} when is_binary(url) -> ["- audio: #{url}"]
+          {"music", url} when is_binary(url) -> ["- audio: #{url}"]
+          {"file", url} when is_binary(url) -> ["- file: #{url}"]
+          {"document", url} when is_binary(url) -> ["- document: #{url}"]
+          {type, url} when is_binary(type) and is_binary(url) -> ["- #{type}: #{url}"]
+          _ -> []
+        end
+      end)
+      |> Enum.uniq()
+
+    if lines == [], do: "", else: "Attached context:\n" <> Enum.join(lines, "\n")
+  end
+
+  defp build_attachment_context(_), do: ""
+
+  defp append_attachment_context(message, attachment_context) do
+    base =
+      message
+      |> to_string()
+      |> String.trim()
+
+    if attachment_context == "" do
+      base
+    else
+      [base, attachment_context]
+      |> Enum.reject(&(&1 == ""))
+      |> Enum.join("\n\n")
     end
   end
 

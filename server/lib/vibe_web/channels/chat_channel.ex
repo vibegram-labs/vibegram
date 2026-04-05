@@ -342,6 +342,7 @@ defmodule VibeWeb.ChatChannel do
         metadata = %{
           "image_urls" => attachment_context.image_urls,
           "document_urls" => attachment_context.document_urls,
+          "audio_urls" => attachment_context.audio_urls,
           "reply_to_id" => data["id"],
           "message_id" => data["id"],
           "trigger_type" => trigger_type
@@ -488,15 +489,21 @@ defmodule VibeWeb.ChatChannel do
     })
   end
 
-  defp attachment_context_to_attachments(%{image_urls: image_urls, document_urls: document_urls}) do
+  defp attachment_context_to_attachments(%{
+         image_urls: image_urls,
+         document_urls: document_urls,
+         audio_urls: audio_urls
+       }) do
     image_urls
     |> Enum.map(&%{type: "image", url: &1})
     |> Kernel.++(Enum.map(document_urls, &%{type: "file", url: &1}))
+    |> Kernel.++(Enum.map(audio_urls, &%{type: "voice", url: &1}))
   end
 
   defp extract_agent_attachment_context(chat_id, data, user_id) do
     seeded_images = normalize_urls(data["agentImageUrls"] || data["agent_image_urls"])
     seeded_documents = normalize_urls(data["agentDocumentUrls"] || data["agent_document_urls"])
+    seeded_audio = normalize_urls(data["agentAudioUrls"] || data["agent_audio_urls"])
 
     from_current =
       classify_attachment(
@@ -528,7 +535,13 @@ defmodule VibeWeb.ChatChannel do
       |> maybe_add_classified_attachment(reply_media, :document)
       |> Enum.uniq()
 
-    %{image_urls: image_urls, document_urls: document_urls}
+    audio_urls =
+      seeded_audio
+      |> maybe_add_classified_attachment(from_current, :audio)
+      |> maybe_add_classified_attachment(reply_media, :audio)
+      |> Enum.uniq()
+
+    %{image_urls: image_urls, document_urls: document_urls, audio_urls: audio_urls}
   end
 
   defp normalize_urls(values) when is_list(values) do
@@ -543,6 +556,7 @@ defmodule VibeWeb.ChatChannel do
 
   defp maybe_add_classified_attachment(urls, {:image, url}, :image), do: [url | urls]
   defp maybe_add_classified_attachment(urls, {:document, url}, :document), do: [url | urls]
+  defp maybe_add_classified_attachment(urls, {:audio, url}, :audio), do: [url | urls]
   defp maybe_add_classified_attachment(urls, _attachment, _kind), do: urls
 
   defp classify_attachment(raw_type, raw_url) do
@@ -559,11 +573,17 @@ defmodule VibeWeb.ChatChannel do
       type in ["file", "document", "pdf"] ->
         {:document, url}
 
+      type in ["voice", "audio", "music"] ->
+        {:audio, url}
+
       image_url?(url) ->
         {:image, url}
 
       document_url?(url) ->
         {:document, url}
+
+      audio_url?(url) ->
+        {:audio, url}
 
       true ->
         nil
@@ -598,6 +618,15 @@ defmodule VibeWeb.ChatChannel do
 
     Enum.any?(
       [".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".txt", ".rtf", ".md"],
+      &String.contains?(lower, &1)
+    )
+  end
+
+  defp audio_url?(url) when is_binary(url) do
+    lower = String.downcase(url)
+
+    Enum.any?(
+      [".mp3", ".m4a", ".aac", ".wav", ".ogg", ".oga", ".opus", ".flac"],
       &String.contains?(lower, &1)
     )
   end

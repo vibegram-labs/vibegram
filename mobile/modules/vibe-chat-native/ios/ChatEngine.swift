@@ -1904,7 +1904,13 @@ final class ChatEngine {
         }
         if let peerAgentId, !peerAgentId.isEmpty {
           wirePayload["mentionedAgentId"] = peerAgentId
-          wirePayload["agentText"] = text
+          if let agentText = payload["agentText"] as? String,
+            !agentText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+          {
+            wirePayload["agentText"] = agentText
+          } else {
+            wirePayload["agentText"] = text
+          }
         }
         if let agentMention = payload["agentMention"] as? Bool, agentMention {
           wirePayload["agentMention"] = true

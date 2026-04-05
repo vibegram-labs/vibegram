@@ -633,6 +633,7 @@ export default function ChatScreen() {
       const uri = typeof payload.uri === 'string' ? payload.uri.trim() : '';
       if (!uri) return;
       const duration = toNumber(payload.duration) ?? 0;
+      const roundedDuration = duration > 0 ? Math.max(1, Math.round(duration)) : 0;
       const waveform = Array.isArray(payload.waveform)
         ? payload.waveform.filter((n: unknown) => typeof n === 'number')
         : undefined;
@@ -640,6 +641,10 @@ export default function ChatScreen() {
         ...basePayload,
         type: 'voice',
         text: '',
+        agentText:
+          roundedDuration > 0
+            ? `User sent a ${roundedDuration}-second voice message.`
+            : 'User sent a voice message.',
         metadata: {
           mediaUrl: uri,
           duration,

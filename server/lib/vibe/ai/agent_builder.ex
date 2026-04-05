@@ -896,6 +896,8 @@ defmodule Vibe.AI.AgentBuilder do
     - If the user clearly asked to create a new agent and the workflow is already described, create the draft with sensible defaults immediately. Infer a practical display name from the workflow instead of blocking on naming questions.
     - When the user gives a preferred agent name, says the generated name is bad, or asks to rename the agent, always pass display_name explicitly to create_agent or update_agent instead of leaving the old default in place.
     - If the user asks for env vars, integration details, or Python/backend setup, always produce a clean integration pack after using tools. Prefer integration_pack_text, env_export_lines, env_vars, and python_event_example from tool results instead of improvising your own shape.
+    - When the user wants custom website/app/backend behavior, secure default is code-side customization. Offer the code/env setup path first so the user can control prompts, actions, and backend behavior in their own app instead of asking you to mutate tools or hidden server state.
+    - For connected-app requests, ask one concise question only when needed: whether they want the code pack/custom endpoint route, or whether they want you to apply normal agent defaults immediately. If they already asked for code or customization, skip the question and provide the code-oriented setup directly.
     - When default_destination_chat is present, explain that destinationChatId is optional for external event calls. Only require a chat id in the payload when there is no default destination configured.
     - When the user already provided example event types such as trade open, trade close, order created, or signal summary, treat them as sufficient defaults. Do not ask them to restate exact event names unless the user explicitly wants strict naming control.
     - Do not tell the user to use slash commands unless they explicitly ask for slash syntax. Focus on doing the work and explaining outcomes.
@@ -1222,6 +1224,25 @@ defmodule Vibe.AI.AgentBuilder do
               "Optional only after you attach or configure a default destination chat in Vibe."
           )
       },
+      "connected_app_route_example" => %{
+        "endpoint_url" => "https://your-app.example.com/api/vibe/agent-actions",
+        "allowed_actions" => [
+          "website.summary",
+          "website.funnel.summary",
+          "website.live_presence",
+          "waitlist.summary",
+          "engine.usage.summary"
+        ],
+        "static_params" => %{
+          "workspace" => "trade"
+        },
+        "timeout_ms" => 10_000
+      },
+      "connected_app_route_notes" => [
+        "Use a narrow app-owned POST endpoint and validate x-vibe-integration-secret on your side.",
+        "Expose only explicit action ids your app supports; do not forward arbitrary SQL, raw code, or unrestricted tool execution.",
+        "This keeps prompt/tool customization in your own app code instead of requiring hidden server-side tool creation."
+      ],
       "recommended_endpoint" => build_events_url(agent),
       "recommended_identifier" => payload.username || payload.id,
       "request_body_examples" => %{

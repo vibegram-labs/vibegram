@@ -5,9 +5,17 @@
       "status": "passed",
       "details": "Added `server/lib/vibe/ai/tools/connected_app.ex` plus `call_connected_app` wiring in `server/lib/vibe/ai/agent.ex`, `server/lib/vibe/ai/tool_registry.ex`, `server/lib/vibe/ai/standalone_agent.ex`, and `server/lib/vibe/agents.ex`. Standalone agents can now call a configured app-owned HTTPS endpoint using the integration's existing encrypted secret, with allowed actions sourced from `agent_integrations.routing_rules.connected_app`. `mix compile` passed outside the sandbox and `python3 scripts/test_vibe_trade_notification.py --dry-run` still passed."
     },
+    "server_builder_code_first_connected_app_guidance": {
+      "status": "passed",
+      "details": "Patched `server/lib/vibe/ai/agent_builder.ex` so custom website/app/backend requests now default to a code-side customization path instead of hidden server-side tool mutation. The builder prompt now explicitly offers the code/env setup route first, and the integration payload includes a concrete `connected_app_route_example` plus route/security notes for allowed action ids and `x-vibe-integration-secret` validation."
+    },
     "server_standalone_agent_safe_text_delivery": {
       "status": "passed",
       "details": "Patched `server/lib/vibe/ai/standalone_agent.ex` so standalone-agent chat delivery no longer dereferences `output.mediaUrl` directly on plain text outputs. The DM delivery path now resolves output fields defensively and `mix compile` passed after the change."
+    },
+    "server_standalone_agent_attachment_context": {
+      "status": "passed",
+      "details": "Patched `server/lib/vibe_web/channels/chat_channel.ex` and `server/lib/vibe/ai/standalone_agent.ex` so standalone-agent DMs now preserve image/document/audio attachment urls, classify common audio formats as `voice`, and append a compact attachment summary to the current user turn before calling the model. `mix compile` passed after the change and `git diff --check` passed for the touched files."
     },
     "server_standalone_agent_dm_context_history": {
       "status": "passed",
@@ -20,6 +28,10 @@
     "mobile_standalone_agent_dm_routing": {
       "status": "passed",
       "details": "Added `peerAgentId` plumbing through `mobile/app/chat.tsx`, `mobile/app/chatlist.tsx`, `NativeChatMainSurface.tsx`, `NativeChatSurface.tsx`, `ChatNativeMainModule.swift`, `ChatNativeListModule.swift`, `ChatMainView.swift`, `ChatListView.swift`, and `ChatEngine.swift`. The native send path now caches standalone-agent peer ids, bypasses the human-DM friend-key requirement for those chats, and sends `mentionedAgentId` / `agentText` automatically. `xcrun swiftc -parse` passed for the touched Swift files."
+    },
+    "mobile_standalone_agent_voice_note_routing": {
+      "status": "passed",
+      "details": "Patched `mobile/app/chat.tsx`, `mobile/app/chatlist.tsx`, and `mobile/modules/vibe-chat-native/ios/ChatEngine.swift` so voice bubbles sent in standalone-agent DMs keep the exact native voice UI but also include a short `agentText` summary like `User sent a 12-second voice message.` whenever a peer agent id is present. `xcrun swiftc -parse mobile/modules/vibe-chat-native/ios/ChatEngine.swift` passed."
     },
     "server_agent_incoming_chat_toggle": {
       "status": "passed",
@@ -44,6 +56,18 @@
     "external_trade_runtime_vibe_notifications": {
       "status": "passed",
       "details": "Patched `/Users/mohammadshayani/tradeai/trading_robot/config/settings.py` to include `vibe` in `notification_channels`, and patched `/Users/mohammadshayani/tradeai/trading_robot/utils/notifications.py` so `VibeNotifier` defaults to `https://api.vibegram.io`, normalizes a full `/api/agents/...` URL back to the API base, and sends the same `User-Agent` and JSON headers as the working smoke test. `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile ...` passed."
+    },
+    "trade_connected_app_actions_endpoint": {
+      "status": "passed",
+      "details": "Added `/Users/mohammadshayani/Desktop/trade/client/app/api/vibe/agent-actions/route.ts`, which validates `x-vibe-integration-secret` and serves the explicit safe actions `app.describe`, `website.summary`, `website.funnel.summary`, `website.live_presence`, `waitlist.summary`, and `engine.usage.summary` using Supabase admin reads with existing in-memory-store fallback. `./node_modules/.bin/eslint app/api/vibe/agent-actions/route.ts` passed in `/Users/mohammadshayani/Desktop/trade/client`."
+    },
+    "trade_signal_only_vibe_agent_routing": {
+      "status": "passed",
+      "details": "Patched `/Users/mohammadshayani/Desktop/trade/utils/notification_integration.py` so signal generation now emits a compact `signals` notification batch through the Vibe channel, routing signal-only flows through the same agent destination instead of relying on Telegram-only behavior. `git diff --check` passed for the touched trade files and `PYTHONPYCACHEPREFIX=/tmp/pycache python3 -m py_compile ...` passed."
+    },
+    "trade_vibe_plaintext_notification_rendering": {
+      "status": "passed",
+      "details": "Patched `/Users/mohammadshayani/Desktop/trade/utils/comprehensive_notifications.py` so the Vibe channel strips HTML tags, converts `<br>` and block tags into newlines, unescapes entities, and posts plain text to Vibe. `git diff --check` passed and the patched Python files compiled successfully."
     },
     "server_chat_list_agent_display_name": {
       "status": "passed",
