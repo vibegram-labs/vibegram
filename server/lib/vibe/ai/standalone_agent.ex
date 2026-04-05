@@ -240,6 +240,10 @@ defmodule Vibe.AI.StandaloneAgent do
       "Do not introduce yourself again, restate your capabilities, or repeat onboarding copy in an ongoing chat unless the user explicitly asks for it.",
       "If the user asks about received notifications, past event counts, times, related messages, or inbox mode, use the live inbox tools before answering.",
       "If the user wants to switch between normal event bubbles and batched summaries, use the inbox configuration tool instead of guessing.",
+      if("call_connected_app" in (agent.enabled_tools || []),
+        do: Vibe.AI.Tools.ConnectedApp.prompt_guidance(agent),
+        else: nil
+      ),
       if(agent.persona, do: "Persona: #{agent.persona}", else: nil),
       if(agent.welcome_message && !has_prior_messages,
         do:

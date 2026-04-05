@@ -153,6 +153,34 @@ defmodule Vibe.AI.Agent do
       }
     },
     %{
+      name: "call_connected_app",
+      description:
+        "Call a configured connected app action for website, business, admin, or app-side data and changes. Only use actions that the agent's connected app explicitly exposes.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          action: %{
+            type: "string",
+            description: "The connected app action id, such as website.summary or waitlist.summary"
+          },
+          params: %{
+            type: "object",
+            description: "Action parameters to send to the connected app",
+            additionalProperties: true
+          },
+          integration_id: %{
+            type: "string",
+            description: "Optional specific integration id when multiple connected apps are configured"
+          },
+          integration_name: %{
+            type: "string",
+            description: "Optional specific integration name when multiple connected apps are configured"
+          }
+        },
+        required: ["action"]
+      }
+    },
+    %{
       name: "delegate_to_subagent",
       description:
         "Delegate a task to one of Vibe AI's internal subagents when the request is about agent setup, existing agents, integrations, prompts, publication state, agent deletion, or needs a specialized worker. This tool gives you access to those specialist capabilities; do not claim you lack access before using it.",
@@ -240,7 +268,13 @@ defmodule Vibe.AI.Agent do
       - `per_event` means each event posts as a chat bubble.
       - `batched_summary` means events are stored and summarized on the selected cadence.
 
-  11. delegate_to_subagent: Use when the request is better handled by an internal specialist.
+  11. call_connected_app: Use when the user asks about a connected website, admin dashboard, waitlist, business metrics, catalog, orders, or wants the connected app/backend to do something.
+      - ALWAYS provide the `action` parameter.
+      - Put request arguments inside `params` as a JSON object.
+      - Only use actions explicitly listed in the connected-app section of the system prompt or returned by the tool itself.
+      - If the user asks for website traffic, conversions, waitlist numbers, product counts, or to change something in the connected app, prefer this tool over guessing.
+
+  12. delegate_to_subagent: Use when the request is better handled by an internal specialist.
      - builder_assistant: creating, editing, deleting, publishing, or configuring Vibe agents.
      - integration_advisor: invoke URLs, events URLs, secrets, attached vibe chat ids, and backend integration questions.
      - music_specialist: focused music help when the request is mostly about discovery/playback.
@@ -410,6 +444,7 @@ defmodule Vibe.AI.Agent do
         "schedule_channel_post" -> "Scheduling post..."
         "query_event_inbox" -> "Reviewing the inbox..."
         "configure_event_inbox" -> "Updating inbox mode..."
+        "call_connected_app" -> "Checking the connected app..."
         "delegate_to_subagent" ->
           SubagentRegistry.progress_label(
             tool_input["subagent_id"] || "",
@@ -475,6 +510,9 @@ defmodule Vibe.AI.Agent do
 
         tool_name == "configure_event_inbox" ->
           configure_event_inbox(tool_input, agent_id, requester_user_id)
+
+        tool_name == "call_connected_app" ->
+          Vibe.AI.Tools.ConnectedApp.invoke(tool_input, agent_id, requester_user_id)
 
         tool_name == "delegate_to_subagent" ->
           case SubagentRegistry.run(

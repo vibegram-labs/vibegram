@@ -1,6 +1,10 @@
 {
-  "updated_at": "2026-04-01",
+  "updated_at": "2026-04-05",
   "checks": {
+    "server_connected_app_bridge_tool": {
+      "status": "passed",
+      "details": "Added `server/lib/vibe/ai/tools/connected_app.ex` plus `call_connected_app` wiring in `server/lib/vibe/ai/agent.ex`, `server/lib/vibe/ai/tool_registry.ex`, `server/lib/vibe/ai/standalone_agent.ex`, and `server/lib/vibe/agents.ex`. Standalone agents can now call a configured app-owned HTTPS endpoint using the integration's existing encrypted secret, with allowed actions sourced from `agent_integrations.routing_rules.connected_app`. `mix compile` passed outside the sandbox and `python3 scripts/test_vibe_trade_notification.py --dry-run` still passed."
+    },
     "server_standalone_agent_safe_text_delivery": {
       "status": "passed",
       "details": "Patched `server/lib/vibe/ai/standalone_agent.ex` so standalone-agent chat delivery no longer dereferences `output.mediaUrl` directly on plain text outputs. The DM delivery path now resolves output fields defensively and `mix compile` passed after the change."
@@ -51,7 +55,7 @@
     },
     "server_mix_compile": {
       "status": "passed",
-      "details": "Compiled successfully after adding the builder destination-chat tool and shared DM ensure helper; only pre-existing warnings were reported."
+      "details": "Compiled successfully after the connected-app bridge patch; only pre-existing warnings were reported."
     },
     "server_builder_destination_chat_tool": {
       "status": "passed",

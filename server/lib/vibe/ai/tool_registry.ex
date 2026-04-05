@@ -44,6 +44,11 @@ defmodule Vibe.AI.ToolRegistry do
       id: "delete_document",
       name: "Delete Document",
       description: "Delete the active generated document."
+    },
+    %{
+      id: "call_connected_app",
+      name: "Connected App Action",
+      description: "Call a configured app endpoint for business data or app-side actions."
     }
   ]
 

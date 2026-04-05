@@ -257,6 +257,12 @@ defmodule Vibe.Agents do
 
   def callback_signing_secret(_agent), do: {:error, :missing_encrypted_secret}
 
+  def integration_secret(%AgentIntegration{secret_encrypted: encrypted}) when is_binary(encrypted) do
+    decrypt_secret(encrypted)
+  end
+
+  def integration_secret(_integration), do: {:error, :missing_encrypted_secret}
+
   def record_invocation(%Agent{} = agent, attrs) do
     result =
       %AgentInvocation{}
