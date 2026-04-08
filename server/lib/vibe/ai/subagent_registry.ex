@@ -65,7 +65,10 @@ defmodule Vibe.AI.SubagentRegistry do
 
     callback = Keyword.get(opts, :callback)
     user_id = Keyword.get(opts, :user_id)
+    requester_user_id = Keyword.get(opts, :requester_user_id)
     chat_id = Keyword.get(opts, :chat_id)
+    active_agent_id = Keyword.get(opts, :active_agent_id)
+    delegate_user_id = requester_user_id || user_id
 
     with %{} = spec <- get(id),
          true <- request != "" do
@@ -92,12 +95,18 @@ defmodule Vibe.AI.SubagentRegistry do
       result =
         case id do
           "builder_assistant" ->
-            AgentBuilder.delegate_task(user_id, request, callback: wrap_callback(spec, callback))
+            AgentBuilder.delegate_task(
+              delegate_user_id,
+              request,
+              active_agent_id: active_agent_id,
+              callback: wrap_callback(spec, callback)
+            )
 
           "integration_advisor" ->
             AgentBuilder.delegate_task(
-              user_id,
+              delegate_user_id,
               "Help with agent integration details, endpoints, ids, auth, and attached vibe chat ids. #{request}",
+              active_agent_id: active_agent_id,
               callback: wrap_callback(spec, callback)
             )
 

@@ -19,6 +19,12 @@ defmodule Vibe.AI.Agent do
 
   @claude_api "https://api.anthropic.com/v1/messages"
   @claude_model "claude-haiku-4-5-20251001"
+  @always_available_tool_names ~w[
+    query_event_inbox
+    configure_event_inbox
+    get_current_agent_config
+    update_current_agent_config
+  ]
 
   # Tool definitions for Claude
   @tools [
@@ -181,6 +187,40 @@ defmodule Vibe.AI.Agent do
       }
     },
     %{
+      name: "get_current_agent_config",
+      description:
+        "Read the current standalone agent's live config for the owner, including prompt, ids, status, tools, output modes, destination chats, and endpoints. Prefer this for simple questions about the agent you are already talking to.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          include_prompt: %{
+            type: "boolean",
+            description: "When true, include the full saved system prompt. Defaults to true."
+          }
+        }
+      }
+    },
+    %{
+      name: "update_current_agent_config",
+      description:
+        "Update the current standalone agent directly for simple one-agent changes such as prompt, name, persona, welcome message, voice profile, or status. Prefer this over delegate_to_subagent when the user is changing the agent they are already chatting with.",
+      input_schema: %{
+        type: "object",
+        properties: %{
+          display_name: %{type: "string", description: "Updated display name."},
+          system_prompt: %{type: "string", description: "Updated system prompt."},
+          persona: %{type: "string", description: "Updated persona."},
+          welcome_message: %{type: "string", description: "Updated welcome message."},
+          voice_profile: %{type: "string", description: "Updated voice profile."},
+          status: %{
+            type: "string",
+            enum: ["draft", "published", "disabled"],
+            description: "Optional status change for the current agent."
+          }
+        }
+      }
+    },
+    %{
       name: "delegate_to_subagent",
       description:
         "Delegate a task to one of Vibe AI's internal subagents when the request is about agent setup, existing agents, integrations, prompts, publication state, agent deletion, or needs a specialized worker. This tool gives you access to those specialist capabilities; do not claim you lack access before using it.",
@@ -274,12 +314,28 @@ defmodule Vibe.AI.Agent do
       - Only use actions explicitly listed in the connected-app section of the system prompt or returned by the tool itself.
       - If the user asks for website traffic, conversions, waitlist numbers, product counts, or to change something in the connected app, prefer this tool over guessing.
 
-  12. delegate_to_subagent: Use when the request is better handled by an internal specialist.
-     - builder_assistant: creating, editing, deleting, publishing, or configuring Vibe agents.
-     - integration_advisor: invoke URLs, events URLs, secrets, attached vibe chat ids, and backend integration questions.
+  12. get_current_agent_config: Use for simple live questions about the agent you are already talking to.
+      - Use this for requests like:
+        * "what is my current prompt?"
+        * "what tools do you have enabled?"
+        * "what is this agent's id or invoke url?"
+        * "is incoming chat enabled?"
+      - Prefer this over delegate_to_subagent when the request is only about the current agent's existing state.
+
+  13. update_current_agent_config: Use for simple direct edits to the agent you are already talking to.
+      - Use this for requests like:
+        * "change your prompt to ..."
+        * "rename yourself to ..."
+        * "update your welcome message"
+        * "switch your status to draft/published/disabled"
+      - Prefer this over delegate_to_subagent when the request is a one-agent edit and you already have enough information.
+
+  14. delegate_to_subagent: Use when the request is better handled by an internal specialist.
+     - builder_assistant: multi-step agent creation, complex reconfiguration, agent deletion, or builder-style workflows spanning more than one step.
+     - integration_advisor: invoke URLs, events URLs, secrets, attached vibe chat ids, and backend integration questions when the direct current-agent config tools are not enough.
      - music_specialist: focused music help when the request is mostly about discovery/playback.
      - document_specialist: focused research, web lookup, image analysis, or document analysis.
-     - Requests about existing agents, draft/published status, prompts, secrets, usernames, ids, integrations, or deletion MUST delegate first.
+     - Do not delegate simple current-agent reads or one-field edits that `get_current_agent_config` or `update_current_agent_config` can handle directly.
      - If the user already gave a clear agent workflow and asks for setup or integration details, delegate with an execution-oriented task. Do not keep the conversation stuck on naming, formatting, or cosmetic choices.
      - Ask follow-up questions only when a real blocker remains, such as create-vs-existing ambiguity, missing destination chat requirements, or unavailable secrets.
      - ALWAYS provide both "subagent_id" and "task".
@@ -292,6 +348,7 @@ defmodule Vibe.AI.Agent do
   - NEVER write text before a tool call.
   - For music results: NEVER include URLs, track names, or album names in your response text.
   - If a user asks for live agent configuration, current inbox mode, or historical notification facts, use the live lookup/config tools first.
+  - For simple current-agent prompt or name changes, use `update_current_agent_config` instead of delegating.
   - For simple greetings, respond naturally WITHOUT tools.
   - Keep responses VERY short (1-2 sentences max) - this is mobile chat.
   """
@@ -445,6 +502,8 @@ defmodule Vibe.AI.Agent do
         "query_event_inbox" -> "Reviewing the inbox..."
         "configure_event_inbox" -> "Updating inbox mode..."
         "call_connected_app" -> "Checking the connected app..."
+        "get_current_agent_config" -> "Reading this agent's config..."
+        "update_current_agent_config" -> "Updating this agent..."
         "delegate_to_subagent" ->
           SubagentRegistry.progress_label(
             tool_input["subagent_id"] || "",
@@ -514,12 +573,20 @@ defmodule Vibe.AI.Agent do
         tool_name == "call_connected_app" ->
           Vibe.AI.Tools.ConnectedApp.invoke(tool_input, agent_id, requester_user_id)
 
+        tool_name == "get_current_agent_config" ->
+          get_current_agent_config(tool_input, agent_id, requester_user_id)
+
+        tool_name == "update_current_agent_config" ->
+          update_current_agent_config(tool_input, agent_id, requester_user_id)
+
         tool_name == "delegate_to_subagent" ->
           case SubagentRegistry.run(
                  tool_input["subagent_id"],
                  tool_input["task"],
                  user_id: user_id,
+                 requester_user_id: requester_user_id,
                  chat_id: chat_id,
+                 active_agent_id: agent_id,
                  callback: callback
                ) do
             {:ok, payload} -> payload
@@ -658,6 +725,215 @@ defmodule Vibe.AI.Agent do
     else
       {:error, reason} ->
         %{"ok" => false, "error" => inbox_error_message(reason)}
+    end
+  end
+
+  defp get_current_agent_config(input, agent_id, requester_user_id) do
+    include_prompt =
+      case Map.get(input, "include_prompt") do
+        false -> false
+        "false" -> false
+        "0" -> false
+        0 -> false
+        _ -> true
+      end
+
+    with {:ok, agent} <- resolve_owned_agent(agent_id, requester_user_id) do
+      %{"ok" => true, "agent" => current_agent_config_payload(agent, include_prompt)}
+    else
+      {:error, reason} ->
+        %{"ok" => false, "error" => inbox_error_message(reason)}
+    end
+  end
+
+  defp update_current_agent_config(input, agent_id, requester_user_id) do
+    with {:ok, agent} <- resolve_owned_agent(agent_id, requester_user_id),
+         {:ok, attrs} <- current_agent_update_attrs(input),
+         {:ok, updated_agent} <- persist_current_agent_update(agent, attrs, requester_user_id) do
+      %{
+        "ok" => true,
+        "message" => "Agent updated.",
+        "agent" => current_agent_config_payload(updated_agent, true)
+      }
+    else
+      {:error, :no_changes_requested} ->
+        %{"ok" => false, "error" => "No agent changes were requested."}
+
+      {:error, :empty_system_prompt} ->
+        %{"ok" => false, "error" => "System prompt cannot be empty."}
+
+      {:error, reason} ->
+        %{"ok" => false, "error" => inbox_error_message(reason)}
+    end
+  end
+
+  defp persist_current_agent_update(agent, attrs, requester_user_id) do
+    status = Map.get(attrs, "status")
+    update_attrs = Map.delete(attrs, "status")
+
+    with {:ok, updated_agent} <-
+           if(map_size(update_attrs) > 0,
+             do: Agents.update_agent(agent, update_attrs, requester_user_id),
+             else: {:ok, agent}
+           ) do
+      case status do
+        nil ->
+          {:ok, updated_agent}
+
+        "published" ->
+          Agents.publish_agent(updated_agent, requester_user_id)
+
+        "draft" ->
+          Agents.update_agent(updated_agent, %{"status" => "draft"}, requester_user_id)
+
+        "disabled" ->
+          Agents.update_agent(updated_agent, %{"status" => "disabled"}, requester_user_id)
+
+        _ ->
+          {:error, :invalid_status}
+      end
+    end
+  end
+
+  defp current_agent_update_attrs(input) when is_map(input) do
+    attrs =
+      %{}
+      |> maybe_put_trimmed(input, "display_name")
+      |> maybe_put_trimmed(input, "persona")
+      |> maybe_put_trimmed(input, "welcome_message")
+      |> maybe_put_trimmed(input, "voice_profile")
+      |> maybe_put_status(input)
+
+    case Map.fetch(input, "system_prompt") do
+      {:ok, prompt} when is_binary(prompt) ->
+        case String.trim(prompt) do
+          "" -> {:error, :empty_system_prompt}
+          trimmed -> {:ok, Map.put(attrs, "system_prompt", trimmed)}
+        end
+
+      {:ok, _other} ->
+        {:error, :empty_system_prompt}
+
+      :error ->
+        if map_size(attrs) == 0, do: {:error, :no_changes_requested}, else: {:ok, attrs}
+    end
+  end
+
+  defp current_agent_update_attrs(_input), do: {:error, :no_changes_requested}
+
+  defp maybe_put_trimmed(attrs, input, key) do
+    case Map.fetch(input, key) do
+      {:ok, value} when is_binary(value) ->
+        case String.trim(value) do
+          "" -> attrs
+          trimmed -> Map.put(attrs, key, trimmed)
+        end
+
+      _ ->
+        attrs
+    end
+  end
+
+  defp maybe_put_status(attrs, input) do
+    case Map.get(input, "status") do
+      value when value in ["draft", "published", "disabled"] -> Map.put(attrs, "status", value)
+      _ -> attrs
+    end
+  end
+
+  defp current_agent_config_payload(agent, include_prompt) do
+    payload = Agents.agent_payload(agent)
+    attached_chats = Enum.map(payload.attachedChats || [], &chat_payload/1)
+
+    default_destination_chat =
+      attached_chats
+      |> Enum.find(fn chat -> chat["chat_id"] == payload.defaultDestinationChatId end)
+      |> case do
+        nil when is_binary(payload.defaultDestinationChatId) ->
+          %{"chat_id" => payload.defaultDestinationChatId}
+
+        found ->
+          found
+      end
+
+    %{
+      "id" => payload.id,
+      "display_name" => payload.displayName,
+      "username" => payload.username,
+      "identifier" => payload.username || payload.id,
+      "status" => payload.status,
+      "persona" => payload.persona,
+      "welcome_message" => payload.welcomeMessage,
+      "enabled_tools" => payload.enabledTools || [],
+      "output_modes" => payload.outputModes || [],
+      "voice_profile" => payload.voiceProfile,
+      "callback_url" => payload.callbackUrl,
+      "api_base_url" => public_base_url(),
+      "invoke_url" => build_invoke_url(agent),
+      "events_url" => build_events_url(agent),
+      "default_destination_chat_id" => payload.defaultDestinationChatId,
+      "default_destination_chat" => default_destination_chat,
+      "attached_chats" => attached_chats,
+      "incoming_chat_enabled" => Agents.incoming_chat_enabled?(agent),
+      "event_inbox_mode" => current_event_inbox_mode(agent),
+      "summary_window_hours" => current_event_inbox_window_hours(agent),
+      "prompt_status" => if(String.trim(agent.system_prompt || "") == "", do: "Missing", else: "Custom"),
+      "prompt_preview" => condensed_prompt_preview(agent.system_prompt)
+    }
+    |> maybe_put("system_prompt", if(include_prompt, do: agent.system_prompt, else: nil))
+  end
+
+  defp chat_payload(%{} = chat) do
+    %{}
+    |> maybe_put("chat_id", Map.get(chat, :chatId) || Map.get(chat, "chatId"))
+    |> maybe_put("type", Map.get(chat, :type) || Map.get(chat, "type"))
+    |> maybe_put("name", Map.get(chat, :name) || Map.get(chat, "name"))
+    |> maybe_put("avatar_url", Map.get(chat, :avatarUrl) || Map.get(chat, "avatarUrl"))
+  end
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  defp condensed_prompt_preview(prompt) when is_binary(prompt) do
+    prompt
+    |> String.trim()
+    |> String.replace(~r/\s+/, " ")
+    |> case do
+      "" -> nil
+      text -> String.slice(text, 0, 180)
+    end
+  end
+
+  defp condensed_prompt_preview(_prompt), do: nil
+
+  defp build_invoke_url(%AgentSchema{id: id}) do
+    path = "/api/agents/#{id}/invoke"
+    append_public_path(path)
+  end
+
+  defp build_events_url(%AgentSchema{id: id}) do
+    path = "/api/agents/#{id}/events"
+    append_public_path(path)
+  end
+
+  defp append_public_path(path) do
+    case public_base_url() do
+      "" -> path
+      base -> String.trim_trailing(base, "/") <> path
+    end
+  end
+
+  defp public_base_url do
+    System.get_env("PUBLIC_BASE_URL") ||
+      System.get_env("API_BASE_URL") ||
+      endpoint_url()
+  end
+
+  defp endpoint_url do
+    try do
+      VibeWeb.Endpoint.url()
+    rescue
+      _ -> ""
     end
   end
 
@@ -871,6 +1147,9 @@ defmodule Vibe.AI.Agent do
 
   defp filter_tools(enabled_tools) do
     allowed = MapSet.new(List.wrap(enabled_tools) |> Enum.map(&to_string/1))
-    Enum.filter(available_tools(), fn tool -> MapSet.member?(allowed, tool.name) end)
+
+    Enum.filter(available_tools(), fn tool ->
+      MapSet.member?(allowed, tool.name) or tool.name in @always_available_tool_names
+    end)
   end
 end

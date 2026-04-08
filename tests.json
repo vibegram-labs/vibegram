@@ -5,6 +5,14 @@
       "status": "passed",
       "details": "Added `server/lib/vibe/ai/tools/connected_app.ex` plus `call_connected_app` wiring in `server/lib/vibe/ai/agent.ex`, `server/lib/vibe/ai/tool_registry.ex`, `server/lib/vibe/ai/standalone_agent.ex`, and `server/lib/vibe/agents.ex`. Standalone agents can now call a configured app-owned HTTPS endpoint using the integration's existing encrypted secret, with allowed actions sourced from `agent_integrations.routing_rules.connected_app`. `mix compile` passed outside the sandbox and `python3 scripts/test_vibe_trade_notification.py --dry-run` still passed."
     },
+    "server_standalone_agent_direct_config_tools": {
+      "status": "passed",
+      "details": "Patched `server/lib/vibe/ai/agent.ex` with direct `get_current_agent_config` and `update_current_agent_config` tools for prompt/name/status/config reads and edits on the current standalone agent, made those tools always available regardless of `enabled_tools`, and updated the base agent tool guidance to prefer them over `delegate_to_subagent` for one-agent config work. `mix compile` passed and `git diff --check` passed for the touched files."
+    },
+    "server_subagent_ephemeral_builder_fast_path": {
+      "status": "passed",
+      "details": "Patched `server/lib/vibe/ai/agent_builder.ex` so internal `delegate_task/3` requests bypass the persisted builder session and run an ephemeral builder execution with empty history when there is no builder UI response, and reduced `subagent_mode` runtime budgets to `max_tokens=900` and `max_depth=3`. Also patched `server/lib/vibe/ai/subagent_registry.ex` so delegated builder/integration calls receive `requester_user_id` and the active agent id, avoiding unnecessary rediscovery of the current agent context. `mix compile` passed."
+    },
     "server_live_shop_agent_capability_probe": {
       "status": "failed",
       "details": "On 2026-04-08, live `POST https://api.vibegram.io/api/agents/bd35d022-ad48-461a-ac44-f09d165a4232/invoke` probes with the provided secret succeeded at the HTTP layer but the agent replied that it does not have a connected-app tool or store analytics/product-management actions. A second probe for monthly visitors/orders produced the same result, confirming the published agent is still running the old trade/general toolset instead of the new shop-connected configuration."

@@ -291,15 +291,7 @@ defmodule Vibe.AI.AgentBuilder do
     trimmed_message = normalize_optional_string(message)
 
     with true <- is_binary(trimmed_message) or is_map(ui_response),
-         {:ok, result} <-
-           process_message(
-             user_id,
-             trimmed_message,
-             active_agent_id,
-             ui_response,
-             callback,
-             subagent_mode: true
-           ) do
+         {:ok, result} <- delegate_builder_request(user_id, trimmed_message, active_agent_id, ui_response, callback) do
       selected_agent_id = result[:active_agent_id] || result[:activeAgentId]
       latest_secret = result[:latest_secret] || result[:latestSecret]
       selected_agent = resolve_owned_agent(user_id, nil, selected_agent_id)
@@ -327,6 +319,26 @@ defmodule Vibe.AI.AgentBuilder do
     else
       false -> {:error, "message is required"}
       error -> error
+    end
+  end
+
+  defp delegate_builder_request(user_id, trimmed_message, active_agent_id, ui_response, callback) do
+    cond do
+      is_map(ui_response) ->
+        process_message(
+          user_id,
+          trimmed_message,
+          active_agent_id,
+          ui_response,
+          callback,
+          subagent_mode: true
+        )
+
+      is_binary(trimmed_message) ->
+        run_builder_agent(user_id, [], trimmed_message, active_agent_id, callback, true)
+
+      true ->
+        {:error, "message is required"}
     end
   end
 
@@ -497,8 +509,8 @@ defmodule Vibe.AI.AgentBuilder do
   defp builder_runtime_config(state, callback) do
     %AgentRuntime.Config{
       model: @claude_model,
-      max_tokens: 1600,
-      max_depth: @max_tool_depth,
+      max_tokens: if(Map.get(state, :subagent_mode), do: 900, else: 1600),
+      max_depth: if(Map.get(state, :subagent_mode), do: 3, else: @max_tool_depth),
       system_prompt: &builder_system_prompt/1,
       tools: @builder_tools,
       state: state,
