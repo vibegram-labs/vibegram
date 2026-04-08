@@ -1,9 +1,13 @@
 {
-  "updated_at": "2026-04-05",
+  "updated_at": "2026-04-08",
   "checks": {
     "server_connected_app_bridge_tool": {
       "status": "passed",
       "details": "Added `server/lib/vibe/ai/tools/connected_app.ex` plus `call_connected_app` wiring in `server/lib/vibe/ai/agent.ex`, `server/lib/vibe/ai/tool_registry.ex`, `server/lib/vibe/ai/standalone_agent.ex`, and `server/lib/vibe/agents.ex`. Standalone agents can now call a configured app-owned HTTPS endpoint using the integration's existing encrypted secret, with allowed actions sourced from `agent_integrations.routing_rules.connected_app`. `mix compile` passed outside the sandbox and `python3 scripts/test_vibe_trade_notification.py --dry-run` still passed."
+    },
+    "server_live_shop_agent_capability_probe": {
+      "status": "failed",
+      "details": "On 2026-04-08, live `POST https://api.vibegram.io/api/agents/bd35d022-ad48-461a-ac44-f09d165a4232/invoke` probes with the provided secret succeeded at the HTTP layer but the agent replied that it does not have a connected-app tool or store analytics/product-management actions. A second probe for monthly visitors/orders produced the same result, confirming the published agent is still running the old trade/general toolset instead of the new shop-connected configuration."
     },
     "server_builder_code_first_connected_app_guidance": {
       "status": "passed",
@@ -132,6 +136,10 @@
     "ios_native_agent_config_rename": {
       "status": "passed",
       "details": "The native standalone agent config panel now exposes a `Name` row that opens a native rename alert and saves through `PUT /api/agents/:id`. `xcrun swiftc -parse mobile/modules/vibe-chat-native/ios/ChatNativeAgentConfigPanel.swift mobile/modules/vibe-chat-native/ios/ChatListViewModels.swift` passed."
+    },
+    "ios_native_agent_prompt_edit_control": {
+      "status": "passed",
+      "details": "Patched `mobile/modules/vibe-chat-native/ios/ChatNativeAgentConfigPanel.swift` so the `Prompt` row always appears, shows a condensed preview, opens an editable native prompt editor, and saves `system_prompt` through `PUT /api/agents/:id`. `xcrun swiftc -parse mobile/modules/vibe-chat-native/ios/ChatNativeAgentConfigPanel.swift mobile/modules/vibe-chat-native/ios/ChatListViewModels.swift` passed, and `git diff --check -- mobile/modules/vibe-chat-native/ios/ChatNativeAgentConfigPanel.swift` passed."
     },
     "ios_native_agent_inbox_mode_control": {
       "status": "passed",

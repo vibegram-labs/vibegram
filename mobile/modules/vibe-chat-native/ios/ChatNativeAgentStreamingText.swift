@@ -310,6 +310,9 @@ enum ChatNativeAgentTextRenderer {
 // MARK: - AgentCodeBlockView
 
 final class AgentCodeBlockView: UIView {
+  private static let collapsedLineLimit = 12
+  private static var expandedStorageKeys = Set<String>()
+
   private let cardView = UIView()
   private let topBarView = UIView()
   private let langLabel = UILabel()
@@ -319,13 +322,27 @@ final class AgentCodeBlockView: UIView {
   private let copiedLabel = UILabel()
   private var codeContent = ""
   private var codeLang: String?
+  private var originalBaseFont = UIFont.systemFont(ofSize: 17.0, weight: .regular)
   private var codeFont = UIFont.monospacedSystemFont(ofSize: 13, weight: .regular)
   private var baseTextColor = UIColor.white
   private var isExpanded = false
-  private var maxCollapsedLines = 12
+  private let maxCollapsedLines = AgentCodeBlockView.collapsedLineLimit
   private var totalLineCount = 0
   private var copyFeedbackWork: DispatchWorkItem?
   private var currentAvailableWidth: CGFloat = 0
+  private var expansionStorageKey = ""
+
+  static func storageKey(code: String, language: String? = nil, override: String? = nil) -> String {
+    let trimmedOverride = override?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if !trimmedOverride.isEmpty {
+      return trimmedOverride
+    }
+    return (language ?? "") + "\n" + code
+  }
+
+  static func isExpanded(code: String, language: String? = nil, storageKey: String? = nil) -> Bool {
+    expandedStorageKeys.contains(Self.storageKey(code: code, language: language, override: storageKey))
+  }
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -369,11 +386,21 @@ final class AgentCodeBlockView: UIView {
   required init?(coder: NSCoder) { return nil }
 
   @discardableResult
-  func configure(code: String, language: String? = nil, textColor: UIColor, baseFont: UIFont, availableWidth: CGFloat) -> CGFloat {
+  func configure(
+    code: String,
+    language: String? = nil,
+    textColor: UIColor,
+    baseFont: UIFont,
+    availableWidth: CGFloat,
+    storageKey: String? = nil
+  ) -> CGFloat {
     codeContent = code
     codeLang = language
     baseTextColor = textColor
     currentAvailableWidth = availableWidth
+    originalBaseFont = baseFont
+    expansionStorageKey = Self.storageKey(code: code, language: language, override: storageKey)
+    isExpanded = Self.expandedStorageKeys.contains(expansionStorageKey)
     codeFont = UIFont.monospacedSystemFont(ofSize: max(12.5, baseFont.pointSize - 2.5), weight: .regular)
 
     let outerH: CGFloat = 0.0
@@ -501,7 +528,19 @@ final class AgentCodeBlockView: UIView {
 
   @objc private func handleExpand() {
     isExpanded.toggle()
-    _ = configure(code: codeContent, language: codeLang, textColor: baseTextColor, baseFont: codeFont, availableWidth: currentAvailableWidth)
+    if isExpanded {
+      Self.expandedStorageKeys.insert(expansionStorageKey)
+    } else {
+      Self.expandedStorageKeys.remove(expansionStorageKey)
+    }
+    _ = configure(
+      code: codeContent,
+      language: codeLang,
+      textColor: baseTextColor,
+      baseFont: originalBaseFont,
+      availableWidth: currentAvailableWidth,
+      storageKey: expansionStorageKey
+    )
 
     // Trigger parent re-layout
     if let sv = superview {

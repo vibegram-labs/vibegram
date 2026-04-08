@@ -1,0 +1,28 @@
+{
+    "name": "Vibe",
+    "short_name": "Vibe",
+    "description": "E2EE Secure Messenger with Video Calls",
+    "theme_color": "#18181b",
+    "background_color": "#18181b",
+    "display": "standalone",
+    "orientation": "portrait",
+    "start_url": "/",
+    "scope": "/",
+    "icons": [
+        {
+            "src": "/logo.png",
+            "sizes": "1024x1024",
+            "type": "image/png"
+        },
+        {
+            "src": "/logo.png",
+            "sizes": "192x192",
+            "type": "image/png"
+        },
+        {
+            "src": "/logo.png",
+            "sizes": "512x512",
+            "type": "image/png"
+        }
+    ]
+}

@@ -35,6 +35,25 @@ private func chatNativeAgentStatusTitle(_ status: String) -> String {
     .joined(separator: " ")
 }
 
+private func chatNativeAgentPromptPreview(_ prompt: String?) -> String? {
+  guard let prompt else { return nil }
+  let condensed =
+    prompt
+    .replacingOccurrences(of: "\n", with: " ")
+    .replacingOccurrences(of: "\r", with: " ")
+    .split(whereSeparator: \.isWhitespace)
+    .joined(separator: " ")
+    .trimmingCharacters(in: .whitespacesAndNewlines)
+
+  guard !condensed.isEmpty else { return nil }
+  if condensed.count <= 72 {
+    return condensed
+  }
+
+  let cutoffIndex = condensed.index(condensed.startIndex, offsetBy: 72)
+  return String(condensed[..<cutoffIndex]).trimmingCharacters(in: .whitespacesAndNewlines) + "…"
+}
+
 private func chatNativeAgentInitials(_ value: String) -> String {
   let words =
     value
@@ -742,13 +761,23 @@ private final class ChatNativeAgentSecretCardView: UIView {
 }
 
 private final class ChatNativeAgentPromptViewController: UIViewController {
-  private let prompt: String
+  private let originalPrompt: String
   private let theme: ChatNativeAgentConfigTheme
+  private let allowsEditing: Bool
+  private let onSave: ((String, @escaping (Bool) -> Void) -> Void)?
   private let textView = UITextView()
+  private var isSaving = false
 
-  init(prompt: String, theme: ChatNativeAgentConfigTheme) {
-    self.prompt = prompt
+  init(
+    prompt: String,
+    theme: ChatNativeAgentConfigTheme,
+    allowsEditing: Bool = false,
+    onSave: ((String, @escaping (Bool) -> Void) -> Void)? = nil
+  ) {
+    self.originalPrompt = prompt
     self.theme = theme
+    self.allowsEditing = allowsEditing
+    self.onSave = onSave
     super.init(nibName: nil, bundle: nil)
   }
 
@@ -759,7 +788,16 @@ private final class ChatNativeAgentPromptViewController: UIViewController {
   override func viewDidLoad() {
     super.viewDidLoad()
     view.backgroundColor = theme.backgroundColor
-    title = "Prompt"
+    title = allowsEditing ? "Edit Prompt" : "Prompt"
+
+    if allowsEditing {
+      navigationItem.rightBarButtonItem = UIBarButtonItem(
+        title: "Save",
+        style: .done,
+        target: self,
+        action: #selector(handleSave)
+      )
+    }
 
     textView.translatesAutoresizingMaskIntoConstraints = false
     textView.backgroundColor = theme.inputColor
@@ -767,8 +805,9 @@ private final class ChatNativeAgentPromptViewController: UIViewController {
     textView.font = .systemFont(ofSize: 15.0, weight: .regular)
     textView.layer.cornerRadius = 16.0
     textView.layer.cornerCurve = .continuous
-    textView.isEditable = false
-    textView.text = prompt
+    textView.isEditable = allowsEditing
+    textView.text = originalPrompt
+    textView.delegate = self
     textView.textContainerInset = UIEdgeInsets(top: 16.0, left: 14.0, bottom: 16.0, right: 14.0)
     view.addSubview(textView)
 
@@ -778,6 +817,50 @@ private final class ChatNativeAgentPromptViewController: UIViewController {
       textView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16.0),
       textView.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16.0),
     ])
+
+    updateSaveButtonState()
+  }
+
+  @objc private func handleSave() {
+    guard allowsEditing, !isSaving else { return }
+    let normalizedPrompt = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedPrompt.isEmpty else { return }
+
+    if normalizedPrompt == originalPrompt.trimmingCharacters(in: .whitespacesAndNewlines) {
+      navigationController?.popViewController(animated: true)
+      return
+    }
+
+    guard let onSave else { return }
+
+    isSaving = true
+    updateSaveButtonState()
+
+    onSave(normalizedPrompt) { [weak self] success in
+      DispatchQueue.main.async {
+        guard let self else { return }
+        self.isSaving = false
+        self.updateSaveButtonState()
+        if success {
+          self.navigationController?.popViewController(animated: true)
+        }
+      }
+    }
+  }
+
+  private func updateSaveButtonState() {
+    guard allowsEditing else { return }
+    let normalizedPrompt = textView.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    navigationItem.rightBarButtonItem?.isEnabled =
+      !isSaving
+      && !normalizedPrompt.isEmpty
+      && normalizedPrompt != originalPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+  }
+}
+
+extension ChatNativeAgentPromptViewController: UITextViewDelegate {
+  func textViewDidChange(_ textView: UITextView) {
+    updateSaveButtonState()
   }
 }
 
@@ -1124,24 +1207,18 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
           symbolName: "text.badge.checkmark"
         ))
     }
-    if let systemPrompt = card.systemPrompt,
-      !systemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    {
-      let row = ChatNativeAgentConfigRow(
-        title: "Prompt",
-        value: "View full prompt",
-        theme: theme,
-        symbolName: "text.quote",
-        showsChevron: true,
-        showsDivider: false
-      )
-      row.onTap = { [weak self] in
-        guard let self else { return }
-        let controller = ChatNativeAgentPromptViewController(prompt: systemPrompt, theme: self.theme)
-        self.navigationController?.pushViewController(controller, animated: true)
-      }
-      behaviorSection.contentStack.addArrangedSubview(row)
+    let promptRow = ChatNativeAgentConfigRow(
+      title: "Prompt",
+      value: chatNativeAgentPromptPreview(card.systemPrompt) ?? card.promptPreview ?? "Add custom prompt",
+      theme: theme,
+      symbolName: "text.quote",
+      showsChevron: true,
+      showsDivider: false
+    )
+    promptRow.onTap = { [weak self] in
+      self?.promptEditSystemPrompt()
     }
+    behaviorSection.contentStack.addArrangedSubview(promptRow)
     stackView.addArrangedSubview(behaviorSection)
 
     if card.canDelete {
@@ -1242,6 +1319,9 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
     displayName: String? = nil,
     secret: String? = nil,
     secretHint: String? = nil,
+    promptStatus: String? = nil,
+    promptPreview: String? = nil,
+    systemPrompt: String? = nil,
     eventInboxMode: String? = nil,
     summaryWindowHours: Int? = nil,
     incomingChatEnabled: Bool? = nil
@@ -1254,9 +1334,9 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
       username: card.username,
       identifier: card.identifier,
       status: card.status,
-      promptStatus: card.promptStatus,
-      promptPreview: card.promptPreview,
-      systemPrompt: card.systemPrompt,
+      promptStatus: promptStatus ?? card.promptStatus,
+      promptPreview: promptPreview ?? card.promptPreview,
+      systemPrompt: systemPrompt ?? card.systemPrompt,
       enabledTools: card.enabledTools,
       outputModes: card.outputModes,
       voiceProfile: card.voiceProfile,
@@ -1299,6 +1379,17 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
       self.renameAgent(to: proposedName)
     })
     present(alert, animated: true)
+  }
+
+  private func promptEditSystemPrompt() {
+    let controller = ChatNativeAgentPromptViewController(
+      prompt: card.systemPrompt ?? "",
+      theme: theme,
+      allowsEditing: true
+    ) { [weak self] updatedPrompt, completion in
+      self?.saveSystemPrompt(updatedPrompt, completion: completion)
+    }
+    navigationController?.pushViewController(controller, animated: true)
   }
 
   private func renameAgent(to proposedName: String) {
@@ -1349,6 +1440,73 @@ final class ChatNativeAgentConfigPanelController: UIViewController {
         self.rebuildContent()
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
         self.onToast?("Renamed agent")
+      }
+    }
+
+    task.resume()
+  }
+
+  private func saveSystemPrompt(_ proposedPrompt: String, completion: @escaping (Bool) -> Void) {
+    let normalizedPrompt = proposedPrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !normalizedPrompt.isEmpty else {
+      onToast?("Prompt cannot be empty")
+      completion(false)
+      return
+    }
+    guard normalizedPrompt != (card.systemPrompt ?? "").trimmingCharacters(in: .whitespacesAndNewlines) else {
+      onToast?("Prompt unchanged")
+      completion(true)
+      return
+    }
+    guard let url = apiRequestURL(path: "/api/agents/{agent_id}") else {
+      onToast?("Missing API session")
+      completion(false)
+      return
+    }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "PUT"
+    apiHeaders(&request)
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: ["system_prompt": normalizedPrompt])
+
+    let task = ChatPhoenixClient.makePinnedURLSession().dataTask(with: request) {
+      [weak self] data, response, error in
+      DispatchQueue.main.async {
+        guard let self else {
+          completion(false)
+          return
+        }
+
+        if let error {
+          NSLog("[ChatNativeAgentConfig] update prompt failed %@", error.localizedDescription)
+          self.onToast?("Could not update prompt")
+          completion(false)
+          return
+        }
+
+        let statusCode = (response as? HTTPURLResponse)?.statusCode ?? 0
+        guard (200..<300).contains(statusCode), let data else {
+          self.onToast?("Could not update prompt")
+          completion(false)
+          return
+        }
+
+        let payload = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+        let updatedPrompt =
+          chatNativeAgentNormalizedString(payload?["systemPrompt"])
+          ?? chatNativeAgentNormalizedString(payload?["system_prompt"])
+          ?? normalizedPrompt
+
+        self.updateCard(
+          promptStatus: "Custom",
+          promptPreview: chatNativeAgentPromptPreview(updatedPrompt),
+          systemPrompt: updatedPrompt
+        )
+        self.rebuildContent()
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        self.onToast?("Updated prompt")
+        completion(true)
       }
     }
 

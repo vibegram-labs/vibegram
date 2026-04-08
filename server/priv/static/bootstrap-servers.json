@@ -1,0 +1,22 @@
+{
+    "version": 2,
+    "updatedAt": 1738067400000,
+    "bootstrapUrls": [
+        "https://gist.githubusercontent.com/Vibe-source/37d1709f5dbacb24a669ac0c04f4929d/raw/servers.json"
+    ],
+    "servers": [
+        {
+            "url": "https://api.vibegram.io",
+            "name": "Vibegram API",
+            "type": "cloud",
+            "priority": 100
+        },
+        {
+            "url": "https://vibe.ngrok.io",
+            "name": "Local Ngrok (Dev)",
+            "type": "tunnel",
+            "priority": 10
+        }
+    ],
+    "note": "Primary API domain"
+}

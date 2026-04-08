@@ -1,5 +1,6 @@
 import AVFoundation
 import ImageIO
+import LinkPresentation
 import Lottie
 import MediaPlayer
 import UIKit
@@ -732,6 +733,10 @@ struct ChatMessageBubbleLayoutMetrics {
   let isMediaLayout: Bool
   let inlineAttachmentHeight: CGFloat
   let hasInlineAttachment: Bool
+  let previewHeight: CGFloat
+  let hasLinkPreview: Bool
+  let usesBottomMetaLayout: Bool
+  let usesRichTextLayout: Bool
 }
 
 private struct ChatBubbleMetaWidths {
@@ -1127,6 +1132,239 @@ private func effectiveMetaTopSpacing(for row: ChatListRow) -> CGFloat {
   isTransparentStickerMessage(row) ? stickerMetaTopSpacing : bubbleMetaTopSpacing
 }
 
+private let bubbleLinkPreviewHeight: CGFloat = 78.0
+private let bubbleLinkPreviewSpacing: CGFloat = 8.0
+private let bubbleLinkPreviewMinWidth: CGFloat = 220.0
+private let bubbleRichTextBlockSpacing: CGFloat = 6.0
+private let bubbleURLDetector = try! NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue)
+private let bubbleInternalChatIdRegex = try! NSRegularExpression(
+  pattern: "[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"
+)
+
+private struct BubbleRichTextMeasurement {
+  let height: CGFloat
+  let maxWidth: CGFloat
+}
+
+private struct BubbleLinkPreviewData {
+  let url: URL
+  let title: String
+  let site: String
+  let icon: UIImage?
+}
+
+private func bubbleBaseText(for row: ChatListRow) -> (text: String, addPrefix: Bool) {
+  if row.isAgentMessage {
+    return (row.plainContent ?? row.text, true)
+  }
+  if row.isAgentMention {
+    return (row.textWithoutMention, true)
+  }
+  return (row.text, false)
+}
+
+private func bubbleDisplayText(for row: ChatListRow) -> String {
+  let payload = bubbleBaseText(for: row)
+  guard payload.addPrefix else { return payload.text }
+  let prefix = isRTL(payload.text) ? "\u{200F}✦ " : "✦ "
+  return payload.text.isEmpty ? prefix : prefix + payload.text
+}
+
+private func bubbleParsedBlocks(for row: ChatListRow) -> [AgentParsedBlock] {
+  let payload = bubbleBaseText(for: row)
+  var blocks = ChatNativeAgentTextRenderer.parseBlocks(payload.text)
+  guard payload.addPrefix else { return blocks }
+
+  let prefix = isRTL(payload.text) ? "\u{200F}✦ " : "✦ "
+  if blocks.isEmpty {
+    return [.text(prefix)]
+  }
+
+  switch blocks[0] {
+  case .text(let content):
+    blocks[0] = .text(content.isEmpty ? prefix : prefix + content)
+  case .code:
+    blocks.insert(.text(prefix.trimmingCharacters(in: .whitespacesAndNewlines)), at: 0)
+  }
+  return blocks
+}
+
+private func bubbleUsesBlockLayout(_ row: ChatListRow) -> Bool {
+  guard row.kind == .message, row.visualKind == .text, row.messageType != "typing", row.isAgentMessage
+  else {
+    return false
+  }
+  let blocks = bubbleParsedBlocks(for: row)
+  return blocks.contains { block in
+    if case .code = block {
+      return true
+    }
+    return false
+  } || blocks.count > 1
+}
+
+private func bubbleRichTextStorageKey(for row: ChatListRow, blockIndex: Int) -> String {
+  "\(row.key)#\(blockIndex)"
+}
+
+private func bubbleInternalChatId(from url: URL) -> String? {
+  let host = url.host?.lowercased() ?? ""
+  guard host.contains("vibe") || host.contains("vibegram") || url.scheme == "vibe" else {
+    return nil
+  }
+
+  let path = url.path
+  let nsPath = path as NSString
+  let pathRange = NSRange(location: 0, length: nsPath.length)
+  if let match = bubbleInternalChatIdRegex.firstMatch(in: path, range: pathRange) {
+    return nsPath.substring(with: match.range)
+  }
+
+  if let components = URLComponents(url: url, resolvingAgainstBaseURL: false),
+    let items = components.queryItems
+  {
+    for item in items {
+      let lowercasedName = item.name.lowercased()
+      if (lowercasedName.contains("chat") || lowercasedName.contains("id")),
+        let value = item.value,
+        !value.isEmpty
+      {
+        return value
+      }
+    }
+  }
+
+  return nil
+}
+
+private func bubbleCanPreviewURL(_ url: URL) -> Bool {
+  guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+    return false
+  }
+  return bubbleInternalChatId(from: url) == nil
+}
+
+private func bubblePreviewURL(for row: ChatListRow) -> URL? {
+  guard row.kind == .message, row.visualKind == .text, row.messageType != "typing",
+    !hasInlineAttachment(row)
+  else {
+    return nil
+  }
+
+  let sourceText = bubbleBaseText(for: row).text
+  guard !sourceText.isEmpty else { return nil }
+
+  let range = NSRange(sourceText.startIndex..., in: sourceText)
+  let matches = bubbleURLDetector.matches(in: sourceText, options: [], range: range)
+  for match in matches {
+    guard let url = match.url, bubbleCanPreviewURL(url) else { continue }
+    return url
+  }
+  return nil
+}
+
+private func bubblePreviewSiteLabel(for url: URL) -> String {
+  guard let host = url.host?.lowercased(), !host.isEmpty else {
+    return url.absoluteString
+  }
+  return host.hasPrefix("www.") ? String(host.dropFirst(4)) : host
+}
+
+private func bubblePreviewTitleFallback(for url: URL) -> String {
+  let site = bubblePreviewSiteLabel(for: url)
+  let trimmedPath = url.path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+  guard !trimmedPath.isEmpty else { return site }
+  let compactPath = trimmedPath.count > 32 ? String(trimmedPath.prefix(32)) + "..." : trimmedPath
+  return site + "/" + compactPath
+}
+
+private func measureBubbleCodeBlockHeight(
+  code: String,
+  language: String?,
+  baseFont: UIFont,
+  availableWidth: CGFloat,
+  storageKey: String
+) -> CGFloat {
+  let codeFont = UIFont.monospacedSystemFont(
+    ofSize: max(12.5, baseFont.pointSize - 2.5),
+    weight: .regular
+  )
+  let hPad: CGFloat = 12.0
+  let vPad: CGFloat = 10.0
+  let barHeight: CGFloat = 32.0
+  let labelWidth = max(1.0, availableWidth - (hPad * 2.0))
+  let totalLineCount = code.components(separatedBy: "\n").count
+  let isExpanded = AgentCodeBlockView.isExpanded(
+    code: code,
+    language: language,
+    storageKey: storageKey
+  )
+  let visibleCode: String
+  if !isExpanded && totalLineCount > 12 {
+    visibleCode = code.components(separatedBy: "\n").prefix(12).joined(separator: "\n")
+  } else {
+    visibleCode = code
+  }
+
+  let attributed = NSAttributedString(
+    string: visibleCode,
+    attributes: [
+      .font: codeFont,
+      .foregroundColor: UIColor.white.withAlphaComponent(0.88),
+    ]
+  )
+  let textHeight = ceil(
+    attributed.boundingRect(
+      with: CGSize(width: labelWidth, height: .greatestFiniteMagnitude),
+      options: [.usesLineFragmentOrigin, .usesFontLeading],
+      context: nil
+    ).height
+  )
+  let bodyHeight = max(ceil(codeFont.lineHeight), textHeight)
+  return barHeight + vPad + bodyHeight + vPad + 8.0
+}
+
+private func measureBubbleRichText(for row: ChatListRow, availableWidth: CGFloat) -> BubbleRichTextMeasurement {
+  let blocks = bubbleParsedBlocks(for: row)
+  guard !blocks.isEmpty else {
+    return BubbleRichTextMeasurement(height: 0.0, maxWidth: 0.0)
+  }
+
+  let font = bubbleMessageFont
+  let textColor = row.isMe ? UIColor.white : UIColor.label
+  var totalHeight: CGFloat = 0.0
+  var maxWidth: CGFloat = 0.0
+
+  for (index, block) in blocks.enumerated() {
+    switch block {
+    case .text(let content):
+      let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
+        text: content,
+        font: font,
+        textColor: textColor
+      )
+      let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: availableWidth)
+      totalHeight += max(ceil(font.lineHeight), measured.height)
+      maxWidth = max(maxWidth, min(availableWidth, measured.width))
+    case .code(let content, let language):
+      totalHeight += measureBubbleCodeBlockHeight(
+        code: content,
+        language: language,
+        baseFont: font,
+        availableWidth: availableWidth,
+        storageKey: bubbleRichTextStorageKey(for: row, blockIndex: index)
+      )
+      maxWidth = max(maxWidth, availableWidth)
+    }
+
+    if index < blocks.count - 1 {
+      totalHeight += bubbleRichTextBlockSpacing
+    }
+  }
+
+  return BubbleRichTextMeasurement(height: totalHeight, maxWidth: maxWidth)
+}
+
 private func parseBubbleMarkdown(
   text: String,
   font: UIFont,
@@ -1135,83 +1373,19 @@ private func parseBubbleMarkdown(
 )
   -> NSAttributedString
 {
-  if useSharedAgentRenderer {
-    return ChatNativeAgentTextRenderer.makeAttributedText(
-      text: text,
-      font: font,
-      textColor: textColor ?? .label
-    )
-  }
-
-  let isRtl = isRTL(text)
-  let paragraphStyle = NSMutableParagraphStyle()
-  paragraphStyle.alignment = isRtl ? .right : .natural
-  paragraphStyle.baseWritingDirection = isRtl ? .rightToLeft : .natural
-
-  var attrs: [NSAttributedString.Key: Any] = [
-    .font: font,
-    .paragraphStyle: paragraphStyle,
-  ]
-  if let c = textColor {
-    attrs[.foregroundColor] = c
-  }
-
-  let attrString = NSMutableAttributedString(string: text, attributes: attrs)
-
-  let matches = bubbleBoldRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-  for match in matches.reversed() {
-    if let range = Range(match.range(at: 1), in: text) {
-      let boldContent = String(text[range])
-      var boldAttrs = attrs
-      if let descriptor = font.fontDescriptor.withSymbolicTraits(.traitBold) {
-        boldAttrs[.font] = UIFont(descriptor: descriptor, size: font.pointSize)
-      } else {
-        boldAttrs[.font] = UIFont.boldSystemFont(ofSize: font.pointSize)
-      }
-      let replacement = NSAttributedString(string: boldContent, attributes: boldAttrs)
-      attrString.replaceCharacters(in: match.range, with: replacement)
-    }
-  }
-
-  // Add URL links for non-agent messages
-  if !useSharedAgentRenderer {
-    let urlRegex = try! NSRegularExpression(pattern: "https?://[\\w\\d\\-._~:/?#\\[\\]@!$&'()*+,;=%]+", options: .caseInsensitive)
-    let urlMatches = urlRegex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-    for match in urlMatches.reversed() {
-      if let urlRange = Range(match.range, in: text) {
-        let urlString = String(text[urlRange])
-        if let url = URL(string: urlString) {
-          attrString.addAttribute(.link, value: url, range: match.range)
-        }
-      }
-    }
-  }
-
-  return attrString
+  _ = useSharedAgentRenderer
+  return ChatNativeAgentTextRenderer.makeAttributedText(
+    text: text,
+    font: font,
+    textColor: textColor ?? .label
+  )
 }
 
 private func bubbleDisplayAttributedString(
   for row: ChatListRow, font: UIFont, textColor: UIColor? = nil
 ) -> NSAttributedString {
-  var t: String
-  var addPrefix = false
-  if row.isAgentMessage {
-    t = row.plainContent ?? row.text
-    addPrefix = true
-  } else if row.isAgentMention {
-    t = row.textWithoutMention
-    addPrefix = true
-  } else {
-    t = row.text
-  }
-
-  if addPrefix {
-    let prefix = isRTL(t) ? "\u{200F}✦ " : "✦ "
-    t = t.isEmpty ? prefix : prefix + t
-  }
-
   return parseBubbleMarkdown(
-    text: t,
+    text: bubbleDisplayText(for: row),
     font: font,
     textColor: textColor,
     useSharedAgentRenderer: row.isAgentMessage || row.isAgentMention
@@ -1219,6 +1393,329 @@ private func bubbleDisplayAttributedString(
 }
 
 private typealias AgentStreamingLabel = ChatNativeStreamingTextLabel
+
+private final class BubbleRichTextView: UIView {
+  private var blockViews: [UIView] = []
+  private var blockFrames: [CGRect] = []
+  private var lastSignature = ""
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isOpaque = false
+  }
+
+  required init?(coder: NSCoder) {
+    return nil
+  }
+
+  func reset() {
+    blockViews.forEach { $0.removeFromSuperview() }
+    blockViews = []
+    blockFrames = []
+    lastSignature = ""
+  }
+
+  @discardableResult
+  func configure(row: ChatListRow, textColor: UIColor, availableWidth: CGFloat) -> CGFloat {
+    let blocks = bubbleParsedBlocks(for: row)
+    guard !blocks.isEmpty else {
+      reset()
+      return 0.0
+    }
+
+    let signature = blocks.enumerated().map { index, block in
+      switch block {
+      case .text:
+        return "T\(index)"
+      case .code:
+        return "C\(index)"
+      }
+    }.joined(separator: "-")
+
+    if signature != lastSignature || blockViews.count != blocks.count {
+      reset()
+      blockViews = blocks.map { block in
+        switch block {
+        case .text:
+          let label = ChatNativeStreamingTextLabel()
+          label.numberOfLines = 0
+          label.backgroundColor = .clear
+          addSubview(label)
+          return label
+        case .code:
+          let card = AgentCodeBlockView()
+          addSubview(card)
+          return card
+        }
+      }
+      lastSignature = signature
+    }
+
+    let baseFont = bubbleMessageFont
+    var yOffset: CGFloat = 0.0
+    blockFrames = []
+
+    var lastTextIndex: Int?
+    for (index, block) in blocks.enumerated() {
+      if case .text = block {
+        lastTextIndex = index
+      }
+    }
+
+    for (index, block) in blocks.enumerated() {
+      let view = blockViews[index]
+      switch block {
+      case .text(let content):
+        let label = view as! ChatNativeStreamingTextLabel
+        let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
+          text: content,
+          font: baseFont,
+          textColor: textColor
+        )
+        let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: availableWidth)
+        let height = max(ceil(baseFont.lineHeight), measured.height)
+        label.applyStreamingText(
+          attributed,
+          rawText: content,
+          isStreaming: row.isStreamingText && index == lastTextIndex
+        )
+        blockFrames.append(CGRect(x: 0.0, y: yOffset, width: availableWidth, height: height))
+        yOffset += height
+      case .code(let content, let language):
+        let card = view as! AgentCodeBlockView
+        let cardHeight = card.configure(
+          code: content,
+          language: language,
+          textColor: textColor,
+          baseFont: baseFont,
+          availableWidth: availableWidth,
+          storageKey: bubbleRichTextStorageKey(for: row, blockIndex: index)
+        )
+        blockFrames.append(CGRect(x: 0.0, y: yOffset, width: availableWidth, height: cardHeight))
+        yOffset += cardHeight
+      }
+
+      if index < blocks.count - 1 {
+        yOffset += bubbleRichTextBlockSpacing
+      }
+    }
+
+    setNeedsLayout()
+    return yOffset
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    for (index, blockView) in blockViews.enumerated() where index < blockFrames.count {
+      blockView.frame = blockFrames[index]
+    }
+  }
+}
+
+private final class BubbleLinkPreviewStore {
+  static let shared = BubbleLinkPreviewStore()
+
+  private var cached: [String: BubbleLinkPreviewData] = [:]
+  private var inFlight: [String: [(BubbleLinkPreviewData) -> Void]] = [:]
+  private var activeProviders: [String: LPMetadataProvider] = [:]
+
+  private init() {}
+
+  func fetch(url: URL, completion: @escaping (BubbleLinkPreviewData) -> Void) {
+    let key = url.absoluteString
+    if let cachedData = cached[key] {
+      DispatchQueue.main.async {
+        completion(cachedData)
+      }
+      return
+    }
+
+    inFlight[key, default: []].append(completion)
+    guard inFlight[key]?.count == 1 else { return }
+
+    let provider = LPMetadataProvider()
+  activeProviders[key] = provider
+    provider.startFetchingMetadata(for: url) { [weak self] metadata, _ in
+      guard let self else { return }
+      let resolvedURL = metadata?.originalURL ?? metadata?.url ?? url
+      let trimmedTitle = metadata?.title?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+      let fallback = BubbleLinkPreviewData(
+        url: resolvedURL,
+        title: trimmedTitle.isEmpty ? bubblePreviewTitleFallback(for: resolvedURL) : trimmedTitle,
+        site: bubblePreviewSiteLabel(for: resolvedURL),
+        icon: nil
+      )
+
+      self.loadPreviewImage(from: metadata) { image in
+        self.finish(
+          key: key,
+          data: BubbleLinkPreviewData(
+            url: fallback.url,
+            title: fallback.title,
+            site: fallback.site,
+            icon: image
+          )
+        )
+      }
+    }
+  }
+
+  private func loadPreviewImage(
+    from metadata: LPLinkMetadata?,
+    completion: @escaping (UIImage?) -> Void
+  ) {
+    let providers = [metadata?.iconProvider, metadata?.imageProvider].compactMap { $0 }
+    guard let provider = providers.first(where: { $0.canLoadObject(ofClass: UIImage.self) }) else {
+      DispatchQueue.main.async {
+        completion(nil)
+      }
+      return
+    }
+
+    provider.loadObject(ofClass: UIImage.self) { object, _ in
+      DispatchQueue.main.async {
+        completion(object as? UIImage)
+      }
+    }
+  }
+
+  private func finish(key: String, data: BubbleLinkPreviewData) {
+    DispatchQueue.main.async {
+      self.cached[key] = data
+      self.activeProviders.removeValue(forKey: key)
+      let callbacks = self.inFlight.removeValue(forKey: key) ?? []
+      callbacks.forEach { $0(data) }
+    }
+  }
+}
+
+private final class BubbleLinkPreviewView: UIView {
+  private let accentView = UIView()
+  private let iconView = UIImageView()
+  private let siteLabel = UILabel()
+  private let titleLabel = UILabel()
+  private var currentURL: URL?
+  private var currentAppearance = ChatListAppearance.fallback
+  private var currentIsMe = false
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    layer.cornerRadius = 14.0
+    layer.cornerCurve = .continuous
+    layer.borderWidth = 1.0 / UIScreen.main.scale
+    clipsToBounds = true
+
+    accentView.isUserInteractionEnabled = false
+    addSubview(accentView)
+
+    iconView.contentMode = .scaleAspectFit
+    iconView.clipsToBounds = true
+    iconView.layer.cornerRadius = 8.0
+    addSubview(iconView)
+
+    siteLabel.font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+    siteLabel.numberOfLines = 1
+    addSubview(siteLabel)
+
+    titleLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
+    titleLabel.numberOfLines = 2
+    addSubview(titleLabel)
+
+    let tap = UITapGestureRecognizer(target: self, action: #selector(handleTap))
+    addGestureRecognizer(tap)
+  }
+
+  required init?(coder: NSCoder) {
+    return nil
+  }
+
+  func reset() {
+    currentURL = nil
+    siteLabel.text = nil
+    titleLabel.text = nil
+    iconView.image = UIImage(systemName: "globe")
+    iconView.contentMode = .scaleAspectFit
+  }
+
+  func applyAppearance(_ appearance: ChatListAppearance, isMe: Bool) {
+    currentAppearance = appearance
+    currentIsMe = isMe
+
+    let accentColor = isMe
+      ? (appearance.bubbleMeGradient.first ?? appearance.bubbleThemColor)
+      : appearance.bubbleThemColor
+    accentView.backgroundColor = accentColor.withAlphaComponent(0.94)
+    layer.borderColor = accentColor.withAlphaComponent(appearance.isDark ? 0.34 : 0.20).cgColor
+    backgroundColor = isMe
+      ? UIColor.white.withAlphaComponent(appearance.isDark ? 0.14 : 0.22)
+      : UIColor(white: appearance.isDark ? 1.0 : 0.0, alpha: appearance.isDark ? 0.08 : 0.05)
+    siteLabel.textColor = accentColor.withAlphaComponent(0.96)
+    titleLabel.textColor = isMe ? appearance.textColorMe : appearance.textColorThem
+    if iconView.image == nil || iconView.contentMode != .scaleAspectFill {
+      iconView.image = UIImage(systemName: "globe")
+      iconView.tintColor = accentColor.withAlphaComponent(0.96)
+      iconView.backgroundColor = accentColor.withAlphaComponent(appearance.isDark ? 0.14 : 0.10)
+      iconView.contentMode = .scaleAspectFit
+    }
+  }
+
+  func configure(url: URL, appearance: ChatListAppearance, isMe: Bool) {
+    currentURL = url
+    applyAppearance(appearance, isMe: isMe)
+
+    siteLabel.text = bubblePreviewSiteLabel(for: url)
+    titleLabel.text = bubblePreviewTitleFallback(for: url)
+    iconView.image = UIImage(systemName: "globe")
+    iconView.tintColor = (isMe
+      ? (appearance.bubbleMeGradient.first ?? appearance.bubbleThemColor)
+      : appearance.bubbleThemColor).withAlphaComponent(0.96)
+    iconView.backgroundColor = iconView.tintColor.withAlphaComponent(appearance.isDark ? 0.14 : 0.10)
+    iconView.contentMode = .scaleAspectFit
+
+    BubbleLinkPreviewStore.shared.fetch(url: url) { [weak self] data in
+      guard let self, self.currentURL?.absoluteString == url.absoluteString else { return }
+      self.siteLabel.text = data.site
+      self.titleLabel.text = data.title
+      if let icon = data.icon {
+        self.iconView.image = icon
+        self.iconView.backgroundColor = .clear
+        self.iconView.contentMode = .scaleAspectFill
+      }
+    }
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+
+    accentView.frame = CGRect(x: 0.0, y: 0.0, width: 3.0, height: bounds.height)
+
+    let leadingInset: CGFloat = 14.0
+    let iconSize: CGFloat = 24.0
+    iconView.frame = CGRect(
+      x: leadingInset,
+      y: floor((bounds.height - iconSize) * 0.5),
+      width: iconSize,
+      height: iconSize
+    )
+
+    let textX = iconView.frame.maxX + 10.0
+    let textWidth = max(1.0, bounds.width - textX - 14.0)
+    siteLabel.frame = CGRect(x: textX, y: 12.0, width: textWidth, height: 14.0)
+    titleLabel.frame = CGRect(
+      x: textX,
+      y: siteLabel.frame.maxY + 4.0,
+      width: textWidth,
+      height: bounds.height - siteLabel.frame.maxY - 16.0
+    )
+  }
+
+  @objc private func handleTap() {
+    guard let currentURL else { return }
+    InAppBrowserViewController.present(url: currentURL)
+  }
+}
 
 func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   -> ChatMessageBubbleLayoutMetrics
@@ -1230,26 +1727,38 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
   if usesTransparentAgentStreamingLayout(row) {
     let bubbleWidth = max(1.0, rowWidth - (bubbleSideMargin * 2.0))
     let messageWidth = max(1.0, bubbleWidth - (bubbleHorizontalPadding * 2.0))
-    let displayText = bubbleDisplayAttributedString(for: row, font: bubbleMessageFont)
-    let textRect = displayText.boundingRect(
-      with: CGSize(width: messageWidth, height: .greatestFiniteMagnitude),
-      options: [.usesLineFragmentOrigin, .usesFontLeading],
-      context: nil
-    )
-    let textHeight = ceil(textRect.height)
-    let bubbleHeight = max(36.0, textHeight + bubbleTopPadding + bubbleBottomPadding)
+    let usesRichTextLayout = bubbleUsesBlockLayout(row)
+    let previewHeight = bubblePreviewURL(for: row) == nil ? 0.0 : bubbleLinkPreviewHeight
+    let textHeight: CGFloat
+    if usesRichTextLayout {
+      textHeight = measureBubbleRichText(for: row, availableWidth: messageWidth).height
+    } else {
+      let displayText = bubbleDisplayAttributedString(for: row, font: bubbleMessageFont)
+      let textRect = displayText.boundingRect(
+        with: CGSize(width: messageWidth, height: .greatestFiniteMagnitude),
+        options: [.usesLineFragmentOrigin, .usesFontLeading],
+        context: nil
+      )
+      textHeight = ceil(textRect.height)
+    }
+    let bodyHeight = textHeight + (previewHeight > 0.0 ? (bubbleLinkPreviewSpacing + previewHeight) : 0.0)
+    let bubbleHeight = max(36.0, bodyHeight + bubbleTopPadding + bubbleBottomPadding)
     return ChatMessageBubbleLayoutMetrics(
       bubbleWidth: bubbleWidth,
       bubbleHeight: bubbleHeight,
       messageWidth: messageWidth,
       textHeight: textHeight,
-      bodyHeight: textHeight,
+      bodyHeight: bodyHeight,
       metaWidth: 0.0,
       contentWidth: messageWidth,
       mediaHeight: 0.0,
       isMediaLayout: false,
       inlineAttachmentHeight: 0.0,
-      hasInlineAttachment: false
+      hasInlineAttachment: false,
+      previewHeight: previewHeight,
+      hasLinkPreview: previewHeight > 0.0,
+      usesBottomMetaLayout: previewHeight > 0.0 || usesRichTextLayout,
+      usesRichTextLayout: usesRichTextLayout
     )
   }
 
@@ -1376,48 +1885,34 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
       mediaHeight: mediaHeight,
       isMediaLayout: true,
       inlineAttachmentHeight: 0.0,
-      hasInlineAttachment: false
+      hasInlineAttachment: false,
+      previewHeight: 0.0,
+      hasLinkPreview: false,
+      usesBottomMetaLayout: false,
+      usesRichTextLayout: false
     )
 
   case .text:
     break
   }
 
-  let usesBlockRendering = row.isAgentMessage && !usesTransparentAgentStreamingLayout(row) && row.messageType != "typing"
   let showsInlineAttachment = hasInlineAttachment(row)
-  let textMaxWidth =
-    showsInlineAttachment
+  let usesRichTextLayout = bubbleUsesBlockLayout(row)
+  let previewHeight = bubblePreviewURL(for: row) == nil ? 0.0 : bubbleLinkPreviewHeight
+  let usesBottomMetaLayout = usesRichTextLayout || previewHeight > 0.0
+  let textMaxWidth: CGFloat =
+    showsInlineAttachment || usesBottomMetaLayout
     ? maxContentWidth
     : max(1.0, maxContentWidth - meta.total - bubbleMetaInlineSpacing)
   let font =
     row.messageType == "typing"
     ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
-  let textHeight: CGFloat
   let textWidth: CGFloat
-  if usesBlockRendering {
-    // Calculate height for block rendering
-    let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
-    let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
-    var totalHeight: CGFloat = 0.0
-    var maxWidth: CGFloat = 0.0
-    for block in blocks {
-      switch block {
-      case .text(let content):
-        let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
-          text: content, font: font, textColor: .label, lineHeight: font.lineHeight + 4.0)
-        let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: textMaxWidth)
-        totalHeight += max(ceil(font.lineHeight), measured.height) + 6.0
-        maxWidth = max(maxWidth, measured.width)
-      case .code(let content, let lang):
-        // Approximate code block height
-        let lines = content.components(separatedBy: "\n").count
-        let codeHeight = CGFloat(lines) * (font.lineHeight + 4.0) + 20.0 // padding
-        totalHeight += codeHeight + 6.0
-        maxWidth = max(maxWidth, textMaxWidth)
-      }
-    }
-    textHeight = totalHeight - 6.0 // remove last spacing
-    textWidth = min(textMaxWidth, ceil(maxWidth))
+  let textHeight: CGFloat
+  if usesRichTextLayout {
+    let measured = measureBubbleRichText(for: row, availableWidth: textMaxWidth)
+    textWidth = min(textMaxWidth, max(measured.maxWidth, previewHeight > 0.0 ? bubbleLinkPreviewMinWidth : 0.0))
+    textHeight = measured.height
   } else {
     let displayText = bubbleDisplayAttributedString(for: row, font: font)
     let textRect = displayText.boundingRect(
@@ -1441,18 +1936,24 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
             + 62.0)
       )
     desiredContentWidth = max(textWidth, attachmentWidth)
+  } else if usesBottomMetaLayout {
+    desiredContentWidth = max(textWidth, previewHeight > 0.0 ? bubbleLinkPreviewMinWidth : 0.0)
   } else {
     desiredContentWidth = textWidth + bubbleMetaInlineSpacing + meta.total
   }
   let contentWidth = max(meta.total, min(maxContentWidth, desiredContentWidth))
   let messageWidth =
-    showsInlineAttachment
+    showsInlineAttachment || usesBottomMetaLayout
     ? contentWidth
     : max(1.0, contentWidth - meta.total - bubbleMetaInlineSpacing)
   let bodyHeight =
     showsInlineAttachment
     ? max(textHeight, 0.0) + inlineAttachmentSpacing + attachmentBodyHeight + bubbleMetaTopSpacing
       + bubbleMetaHeight
+    : usesBottomMetaLayout
+    ? max(textHeight, 0.0)
+      + (previewHeight > 0.0 ? (bubbleLinkPreviewSpacing + previewHeight) : 0.0)
+      + bubbleMetaTopSpacing + bubbleMetaHeight
     : max(textHeight, bubbleMetaHeight)
   let hasReaction = row.reactionEmoji != nil && row.reactionEmoji?.isEmpty == false
   let reactionHeightOffset: CGFloat = hasReaction ? 28.0 : 0.0
@@ -1470,7 +1971,11 @@ func measureMessageBubbleLayout(row: ChatListRow, rowWidth: CGFloat)
     mediaHeight: 0.0,
     isMediaLayout: false,
     inlineAttachmentHeight: attachmentBodyHeight,
-    hasInlineAttachment: showsInlineAttachment
+    hasInlineAttachment: showsInlineAttachment,
+    previewHeight: previewHeight,
+    hasLinkPreview: previewHeight > 0.0,
+    usesBottomMetaLayout: usesBottomMetaLayout,
+    usesRichTextLayout: usesRichTextLayout
   )
 }
 
@@ -4172,6 +4677,8 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   let tailView = BubbleTailView()
 
   private let messageLabel = AgentStreamingLabel()
+  private let richTextView = BubbleRichTextView()
+  private let linkPreviewView = BubbleLinkPreviewView()
   private let mediaContainerView = UIView()
   private let mediaPlaceholderBlurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemThinMaterialDark))
   private let mediaPlaceholderTintView = UIView()
@@ -4214,6 +4721,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   private var savedTailHiddenBeforeExtraction = false
   private var savedReactionHiddenBeforeExtraction = false
   private var savedMessageAlphaBeforeExtraction: CGFloat = 1.0
+  private var savedRichTextAlphaBeforeExtraction: CGFloat = 1.0
+  private var savedLinkPreviewAlphaBeforeExtraction: CGFloat = 1.0
+  private var savedInlineAttachmentAlphaBeforeExtraction: CGFloat = 1.0
   private var savedMediaAlphaBeforeExtraction: CGFloat = 1.0
   private var savedMetaAlphaBeforeExtraction: CGFloat = 0.72
   private var hasSavedExtractionState = false
@@ -4255,19 +4765,6 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   var onInlineAttachmentTap: ((ChatListRow) -> Void)?
   var onMediaNaturalSizeResolved: ((String?, String, CGSize) -> Void)?
 
-  // Block rendering for agent messages
-  private var blockViews: [UIView] = []
-  private var blockFrames: [CGRect] = []
-  private var lastBlockSignature: String = ""
-  private var lastText: String = ""
-  private var lastRowKey: String = ""
-
-  // Link preview
-  private let linkPreviewView = UIView()
-  private let linkPreviewImageView = UIImageView()
-  private let linkPreviewTitleLabel = UILabel()
-  private let linkPreviewSiteLabel = UILabel()
-
   override init(frame: CGRect) {
     super.init(frame: frame)
 
@@ -4278,6 +4775,8 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     contentView.addSubview(tailView)
 
     contentView.addSubview(messageLabel)
+    contentView.addSubview(richTextView)
+    contentView.addSubview(linkPreviewView)
     contentView.addSubview(mediaContainerView)
     mediaContainerView.addSubview(mediaPlaceholderBlurView)
     mediaPlaceholderBlurView.contentView.addSubview(mediaPlaceholderTintView)
@@ -4460,29 +4959,12 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     reactionLabel.font = UIFont.systemFont(ofSize: 14)
     reactionLabel.textAlignment = .center
 
-    // Link preview setup
-    contentView.addSubview(linkPreviewView)
-    linkPreviewView.addSubview(linkPreviewImageView)
-    linkPreviewView.addSubview(linkPreviewTitleLabel)
-    linkPreviewView.addSubview(linkPreviewSiteLabel)
-    linkPreviewView.backgroundColor = UIColor(white: 0.0, alpha: 0.1)
-    linkPreviewView.layer.cornerRadius = 8
-    linkPreviewView.layer.cornerCurve = .continuous
-    linkPreviewView.clipsToBounds = true
-    linkPreviewView.isHidden = true
-    linkPreviewImageView.contentMode = .scaleAspectFill
-    linkPreviewImageView.clipsToBounds = true
-    linkPreviewTitleLabel.font = UIFont.systemFont(ofSize: 14, weight: .semibold)
-    linkPreviewTitleLabel.textColor = .white
-    linkPreviewTitleLabel.numberOfLines = 2
-    linkPreviewSiteLabel.font = UIFont.systemFont(ofSize: 12, weight: .regular)
-    linkPreviewSiteLabel.textColor = UIColor(white: 1.0, alpha: 0.7)
-    linkPreviewSiteLabel.numberOfLines = 1
-
     bubbleView.isHidden = true
     tailView.isHidden = true
     // agentSenderLabel removed
     messageLabel.isHidden = true
+    richTextView.isHidden = true
+    linkPreviewView.isHidden = true
     mediaContainerView.isHidden = true
     mediaPrimaryIconView.isHidden = true
     mediaVoiceButtonView.isHidden = true
@@ -4560,6 +5042,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       white: appearance.isDark ? 0.02 : 0.98,
       alpha: appearance.isDark ? 0.18 : 0.10
     )
+    linkPreviewView.applyAppearance(appearance, isMe: isCurrentRowMe)
     updateInlineVideoAudioIcon()
     updateMediaPlaceholderVisibility()
     setNeedsLayout()
@@ -4600,11 +5083,15 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     case .day:
       isGhostHidden = false
       resetStickerAnimation()
+      richTextView.reset()
+      linkPreviewView.reset()
       dayLabel.text = row.label
       dayLabel.isHidden = false
       bubbleView.isHidden = true
       tailView.isHidden = true
       messageLabel.isHidden = true
+      richTextView.isHidden = true
+      linkPreviewView.isHidden = true
       mediaContainerView.isHidden = true
       inlineAttachmentView.isHidden = true
       metaContainerView.isHidden = true
@@ -4615,12 +5102,15 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     case .message:
       let isGhostHidden = hiddenMessageId == row.messageId
       let usesTransparentAgentStreaming = usesTransparentAgentStreamingLayout(row)
-      let usesBlockRendering = row.isAgentMessage && !usesTransparentAgentStreaming && row.messageType != "typing"
+      let usesBlockLayout = bubbleUsesBlockLayout(row)
+      let previewURL = bubblePreviewURL(for: row)
       self.isGhostHidden = isGhostHidden
       dayLabel.isHidden = true
       bubbleView.isHidden = false
       tailView.isHidden = isGhostHidden || !row.shape.showTail
-      messageLabel.isHidden = isGhostHidden || !(row.visualKind == .text || hasMediaCaptionLayout(row)) || usesBlockRendering
+      messageLabel.isHidden = isGhostHidden || !(row.visualKind == .text || hasMediaCaptionLayout(row)) || usesBlockLayout
+      richTextView.isHidden = isGhostHidden || !usesBlockLayout
+      linkPreviewView.isHidden = isGhostHidden || previewURL == nil
       if row.messageType == "typing" {
         startTypingShimmer()
         messageLabel.font = UIFont.systemFont(ofSize: 13, weight: .regular)
@@ -4632,62 +5122,22 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       inlineAttachmentView.isHidden = isGhostHidden || !hasInlineAttachment(row)
       metaContainerView.isHidden = isGhostHidden || usesTransparentAgentStreaming
 
-      if usesBlockRendering {
-        // Block rendering for agent messages
-        let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
-        let font = bubbleMessageFont
-        let textColor = appearance.textColorThem
-        let isStreaming = row.isStreamingText
-        let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
-
-        // Rebuild subviews only when block structure changes
-        let signature = blocks.map { block -> String in
-          switch block { case .text: return "T"; case .code: return "C" }
-        }.joined()
-
-        if signature != lastBlockSignature {
-          blockViews.forEach { $0.removeFromSuperview() }
-          blockViews = blocks.map { block -> UIView in
-            switch block {
-            case .text:
-              let label = ChatNativeStreamingTextLabel()
-              label.numberOfLines = 0
-              label.backgroundColor = .clear
-              addSubview(label)
-              return label
-            case .code:
-              let card = AgentCodeBlockView()
-              addSubview(card)
-              return card
-            }
-          }
-          lastBlockSignature = signature
-        } else {
-          blockViews.forEach { $0.isHidden = false }
-        }
-
-        // Find index of last text block for streaming animation
-        var lastTextIdx: Int? = nil
-        for (i, block) in blocks.enumerated() {
-          if case .text = block { lastTextIdx = i }
-        }
-
-        // Layout will be done in layoutSubviews
-        lastText = text
-        lastRowKey = row.key
+      // Agent/Mention labeling
+      let isTyping = row.messageType == "typing"
+      let messageFont =
+        isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
+      let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
+      let displayText = bubbleDisplayAttributedString(
+        for: row, font: messageFont, textColor: resolveTextColor)
+      messageLabel.applyStreamingText(
+        displayText,
+        rawText: displayText.string,
+        isStreaming: row.isAgentMessage && row.isStreamingText && row.messageType != "typing"
+      )
+      if let previewURL, !linkPreviewView.isHidden {
+        linkPreviewView.configure(url: previewURL, appearance: appearance, isMe: row.isMe)
       } else {
-        // Agent/Mention labeling
-        let isTyping = row.messageType == "typing"
-        let messageFont =
-          isTyping ? UIFont.systemFont(ofSize: 13, weight: .regular) : bubbleMessageFont
-        let resolveTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
-        let displayText = bubbleDisplayAttributedString(
-          for: row, font: messageFont, textColor: resolveTextColor)
-        messageLabel.applyStreamingText(
-          displayText,
-          rawText: displayText.string,
-          isStreaming: row.isAgentMessage && row.isStreamingText && row.messageType != "typing"
-        )
+        linkPreviewView.reset()
       }
       editedLabel.text = "edited"
       pinnedLabel.text = "pinned"
@@ -4802,6 +5252,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       // Use full opacity — visibility is controlled by isHidden, not alpha.
       // This eliminates the 0→1 opacity flicker that plagued updates.
       messageLabel.alpha = 1.0
+      richTextView.alpha = 1.0
+      linkPreviewView.alpha = 1.0
+      inlineAttachmentView.alpha = 1.0
       mediaContainerView.alpha = 1.0
       metaContainerView.alpha = 0.72
       reactionPillView.alpha = 1.0
@@ -4812,6 +5265,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       savedTailHiddenBeforeExtraction = tailView.isHidden
       savedReactionHiddenBeforeExtraction = reactionPillView.isHidden
       savedMessageAlphaBeforeExtraction = messageLabel.alpha
+      savedRichTextAlphaBeforeExtraction = richTextView.alpha
+      savedLinkPreviewAlphaBeforeExtraction = linkPreviewView.alpha
+      savedInlineAttachmentAlphaBeforeExtraction = inlineAttachmentView.alpha
       savedMediaAlphaBeforeExtraction = mediaContainerView.alpha
       savedMetaAlphaBeforeExtraction = metaContainerView.alpha
     }
@@ -4838,6 +5294,10 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     mediaProgressRingView.setDownloadState(needsDownload: false, isDownloading: false, progress: nil)
     mediaProgressSizeLabel.isHidden = true
     mediaProgressSizeLabel.text = nil
+    richTextView.reset()
+    richTextView.isHidden = true
+    linkPreviewView.reset()
+    linkPreviewView.isHidden = true
     mediaVideoInfoBadgeView.isHidden = true
     mediaVideoAudioIconView.isHidden = true
     mediaVideoAudioIconView.image = nil
@@ -4937,7 +5397,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     }
 
     let metrics: ChatMessageBubbleLayoutMetrics
-    if let cached = cachedLayoutMetrics, cachedLayoutWidth == bounds.width {
+    if let cached = cachedLayoutMetrics, cachedLayoutWidth == bounds.width, !cached.usesRichTextLayout {
       metrics = cached
     } else {
       metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
@@ -4994,6 +5454,8 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
 
     if metrics.isMediaLayout {
       let hasMediaCaption = hasMediaCaptionLayout(row) && metrics.textHeight > 0.0 && !isFullBleed
+      richTextView.frame = .zero
+      linkPreviewView.frame = .zero
       let mediaFrame: CGRect
       if isFullBleed {
         mediaFrame = pixelAlignedRect(bubbleFrame.insetBy(dx: -0.6, dy: -0.6))
@@ -5082,7 +5544,10 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       inlineAttachmentView.frame = .zero
     } else {
       mediaContainerView.frame = .zero
+      let bubbleTextColor = row.isMe ? appearance.textColorMe : appearance.textColorThem
       if metrics.hasInlineAttachment {
+        richTextView.frame = .zero
+        linkPreviewView.frame = .zero
         messageLabel.frame = pixelAlignedRect(
           CGRect(
             x: bubbleFrame.minX + bubbleHorizontalPadding,
@@ -5120,78 +5585,85 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
           width: inlineAttachmentTitleLabel.frame.width,
           height: 15.0
         )
-      } else {
+      } else if metrics.usesBottomMetaLayout {
+        let contentX = bubbleFrame.minX + bubbleHorizontalPadding
+        let contentY = bubbleFrame.minY + bubbleTopPadding
+
         inlineAttachmentView.frame = .zero
-        let usesBlockRendering = row.isAgentMessage && !usesTransparentAgentStreaming && row.messageType != "typing"
-        if usesBlockRendering {
-          // Layout block views for agent messages
-          let text = (row.plainContent ?? row.text).trimmingCharacters(in: .whitespacesAndNewlines)
-          let font = bubbleMessageFont
-          let textColor = appearance.textColorThem
-          let isStreaming = row.isStreamingText
-          let blocks = ChatNativeAgentTextRenderer.parseBlocks(text)
-
-          // Find index of last text block for streaming animation
-          var lastTextIdx: Int? = nil
-          for (i, block) in blocks.enumerated() {
-            if case .text = block { lastTextIdx = i }
-          }
-
-          var yOffset: CGFloat = bubbleFrame.minY + bubbleTopPadding
-          blockFrames = []
-          for (i, block) in blocks.enumerated() {
-            let view = blockViews[i]
-            view.isHidden = false
-            switch block {
-            case .text(let content):
-              let label = view as! ChatNativeStreamingTextLabel
-              let shouldStream = isStreaming && i == lastTextIdx
-              let attributed = ChatNativeAgentTextRenderer.makeAttributedText(
-                text: content, font: font, textColor: textColor, lineHeight: font.lineHeight + 4.0)
-              let measured = ChatNativeAgentTextRenderer.measuredSize(for: attributed, width: metrics.messageWidth)
-              let h = max(ceil(font.lineHeight), measured.height)
-              label.applyStreamingText(attributed, rawText: content, isStreaming: shouldStream)
-              let frame = CGRect(x: bubbleFrame.minX + bubbleHorizontalPadding, y: yOffset, width: metrics.messageWidth, height: h)
-              view.frame = pixelAlignedRect(frame)
-              blockFrames.append(frame)
-              yOffset += h + 6.0
-
-            case .code(let content, let lang):
-              let card = view as! AgentCodeBlockView
-              let cardAvailableWidth = metrics.messageWidth
-              let cardHeight = card.configure(
-                code: content, language: lang, textColor: textColor, baseFont: font, availableWidth: cardAvailableWidth)
-              let frame = CGRect(x: bubbleFrame.minX + bubbleHorizontalPadding, y: yOffset, width: cardAvailableWidth, height: cardHeight)
-              view.frame = pixelAlignedRect(frame)
-              blockFrames.append(frame)
-              yOffset += cardHeight + 6.0
-            }
-          }
+        if metrics.usesRichTextLayout {
           messageLabel.frame = .zero
-          metaContainerView.frame = pixelAlignedRect(
+          let richTextHeight = richTextView.configure(
+            row: row,
+            textColor: bubbleTextColor,
+            availableWidth: metrics.messageWidth
+          )
+          richTextView.frame = pixelAlignedRect(
             CGRect(
-              x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
-              y: yOffset - bubbleMetaHeight,
-              width: metrics.metaWidth,
-              height: bubbleMetaHeight
-            ))
+              x: contentX,
+              y: contentY,
+              width: metrics.messageWidth,
+              height: max(metrics.textHeight, richTextHeight)
+            )
+          )
         } else {
+          richTextView.frame = .zero
           messageLabel.frame = pixelAlignedRect(
             CGRect(
-              x: bubbleFrame.minX + bubbleHorizontalPadding,
-              y: bubbleFrame.minY + bubbleTopPadding
-                + max(0.0, metrics.bodyHeight - metrics.textHeight),
+              x: contentX,
+              y: contentY,
               width: metrics.messageWidth,
               height: metrics.textHeight
-            ))
-          metaContainerView.frame = pixelAlignedRect(
-            CGRect(
-              x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
-              y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
-              width: metrics.metaWidth,
-              height: bubbleMetaHeight
-            ))
+            )
+          )
         }
+
+        let textBottom = metrics.usesRichTextLayout ? richTextView.frame.maxY : messageLabel.frame.maxY
+
+        if metrics.hasLinkPreview {
+          let previewTop = textBottom + bubbleLinkPreviewSpacing
+          linkPreviewView.frame = pixelAlignedRect(
+            CGRect(
+              x: contentX,
+              y: previewTop,
+              width: metrics.contentWidth,
+              height: metrics.previewHeight
+            )
+          )
+        } else {
+          linkPreviewView.frame = .zero
+        }
+
+        let metaTop = metrics.hasLinkPreview
+          ? linkPreviewView.frame.maxY + bubbleMetaTopSpacing
+          : textBottom + bubbleMetaTopSpacing
+        metaContainerView.frame = pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.maxX - bubbleHorizontalPadding - metrics.metaWidth,
+            y: metaTop,
+            width: metrics.metaWidth,
+            height: bubbleMetaHeight
+          )
+        )
+      } else {
+        richTextView.frame = .zero
+        linkPreviewView.frame = .zero
+        inlineAttachmentView.frame = .zero
+        messageLabel.frame = pixelAlignedRect(
+          CGRect(
+            x: bubbleFrame.minX + bubbleHorizontalPadding,
+            y: bubbleFrame.minY + bubbleTopPadding
+              + max(0.0, metrics.bodyHeight - metrics.textHeight),
+            width: metrics.messageWidth,
+            height: metrics.textHeight
+          ))
+        metaContainerView.frame = pixelAlignedRect(
+          CGRect(
+            x: messageLabel.frame.maxX + bubbleMetaInlineSpacing,
+            y: bubbleFrame.minY + bubbleTopPadding + metrics.bodyHeight - bubbleMetaHeight,
+            width: metrics.metaWidth,
+            height: bubbleMetaHeight
+          ))
+      }
     }
 
     updateStickerAnimationPlayback()
@@ -6828,6 +7300,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
         savedTailHiddenBeforeExtraction = tailView.isHidden
         savedReactionHiddenBeforeExtraction = reactionPillView.isHidden
         savedMessageAlphaBeforeExtraction = messageLabel.alpha
+        savedRichTextAlphaBeforeExtraction = richTextView.alpha
+        savedLinkPreviewAlphaBeforeExtraction = linkPreviewView.alpha
+        savedInlineAttachmentAlphaBeforeExtraction = inlineAttachmentView.alpha
         savedMediaAlphaBeforeExtraction = mediaContainerView.alpha
         savedMetaAlphaBeforeExtraction = metaContainerView.alpha
         hasSavedExtractionState = true
@@ -6837,6 +7312,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       reactionPillView.isHidden = true
       // Keep text/media/meta rendering alive for snapshot correctness, but hide them.
       messageLabel.alpha = 0.0
+      richTextView.alpha = 0.0
+      linkPreviewView.alpha = 0.0
+      inlineAttachmentView.alpha = 0.0
       mediaContainerView.alpha = 0.0
       metaContainerView.alpha = 0.0
       updateStickerAnimationPlayback()
@@ -6849,6 +7327,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     tailView.isHidden = savedTailHiddenBeforeExtraction
     reactionPillView.isHidden = savedReactionHiddenBeforeExtraction
     messageLabel.alpha = savedMessageAlphaBeforeExtraction
+    richTextView.alpha = savedRichTextAlphaBeforeExtraction
+    linkPreviewView.alpha = savedLinkPreviewAlphaBeforeExtraction
+    inlineAttachmentView.alpha = savedInlineAttachmentAlphaBeforeExtraction
     mediaContainerView.alpha = savedMediaAlphaBeforeExtraction
     metaContainerView.alpha = savedMetaAlphaBeforeExtraction
     hasSavedExtractionState = false
@@ -7124,8 +7605,17 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     if !messageLabel.isHidden {
       contentRect = contentRect.union(messageLabel.frame)
     }
+    if !richTextView.isHidden {
+      contentRect = contentRect.union(richTextView.frame)
+    }
+    if !linkPreviewView.isHidden {
+      contentRect = contentRect.union(linkPreviewView.frame)
+    }
     if !mediaContainerView.isHidden {
       contentRect = contentRect.union(mediaContainerView.frame)
+    }
+    if !inlineAttachmentView.isHidden {
+      contentRect = contentRect.union(inlineAttachmentView.frame)
     }
     if !metaContainerView.isHidden {
       contentRect = contentRect.union(metaContainerView.frame)
@@ -7153,12 +7643,18 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     }
 
     let messageWasHidden = messageLabel.isHidden
+    let richTextWasHidden = richTextView.isHidden
+    let previewWasHidden = linkPreviewView.isHidden
     let mediaWasHidden = mediaContainerView.isHidden
+    let attachmentWasHidden = inlineAttachmentView.isHidden
 
     CATransaction.begin()
     CATransaction.setDisableActions(true)
     messageLabel.isHidden = true
+    richTextView.isHidden = true
+    linkPreviewView.isHidden = true
     mediaContainerView.isHidden = true
+    inlineAttachmentView.isHidden = true
     contentView.layoutIfNeeded()
     CATransaction.commit()
 
@@ -7166,7 +7662,10 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       CATransaction.begin()
       CATransaction.setDisableActions(true)
       messageLabel.isHidden = messageWasHidden
+      richTextView.isHidden = richTextWasHidden
+      linkPreviewView.isHidden = previewWasHidden
       mediaContainerView.isHidden = mediaWasHidden
+      inlineAttachmentView.isHidden = attachmentWasHidden
       contentView.layoutIfNeeded()
       CATransaction.commit()
     }

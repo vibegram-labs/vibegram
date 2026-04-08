@@ -727,6 +727,12 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
       name: .voiceBubblePlaybackDidChange,
       object: VoiceBubblePlaybackCoordinator.shared
     )
+    NotificationCenter.default.addObserver(
+      self,
+      selector: #selector(handleAgentCodeBlockExpanded(_:)),
+      name: Notification.Name("AgentCodeBlockExpanded"),
+      object: nil
+    )
 
   }
 
@@ -4217,6 +4223,19 @@ public final class ChatListView: ExpoView, UICollectionViewDataSource,
 
     flowLayout.invalidateLayout()
     collectionView.performBatchUpdates(nil)
+  }
+
+  @objc private func handleAgentCodeBlockExpanded(_ notification: Notification) {
+    guard window != nil else {
+      flowLayout.invalidateLayout()
+      return
+    }
+
+    let distanceFromBottom = currentDistanceFromBottom()
+    flowLayout.invalidateLayout()
+    collectionView.performBatchUpdates(nil) { [weak self] _ in
+      self?.restoreStationaryDistance(distanceFromBottom)
+    }
   }
 
   private func resolvedMediaPreviewHeaderTitle(for row: ChatListRow?) -> String {
