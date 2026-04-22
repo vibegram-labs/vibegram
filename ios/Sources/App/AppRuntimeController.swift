@@ -62,6 +62,62 @@ enum AppAppearanceController {
   }
 }
 
+enum AppPrivacyChoice: String, CaseIterable, Identifiable {
+  case everybody
+  case contacts
+  case nobody
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .everybody:
+      return "Everybody"
+    case .contacts:
+      return "My Contacts"
+    case .nobody:
+      return "Nobody"
+    }
+  }
+}
+
+enum AppThemePlateOption: String, CaseIterable, Identifiable {
+  case glacier
+  case zen
+  case ocean
+  case obsidian
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .glacier:
+      return "Glacier"
+    case .zen:
+      return "Zen"
+    case .ocean:
+      return "Ocean"
+    case .obsidian:
+      return "Obsidian"
+    }
+  }
+}
+
+enum AppThemePlateController {
+  static let storageKey = "vibe.app.themePlate"
+
+  static var currentOption: AppThemePlateOption {
+    let rawValue =
+      UserDefaults.standard.string(forKey: storageKey)
+      ?? AppThemePlateOption.glacier.rawValue
+    return AppThemePlateOption(rawValue: rawValue) ?? .glacier
+  }
+
+  static func setOption(_ option: AppThemePlateOption) {
+    UserDefaults.standard.set(option.rawValue, forKey: storageKey)
+  }
+}
+
 struct AppThemePalette {
   let backgroundUIColor: UIColor
   let secondaryBackgroundUIColor: UIColor
@@ -105,57 +161,99 @@ struct AppThemePalette {
   var warning: Color { Color(uiColor: warningUIColor) }
   var danger: Color { Color(uiColor: dangerUIColor) }
 
-  static func resolve(for colorScheme: ColorScheme) -> AppThemePalette {
-    switch colorScheme {
-    case .dark:
-      return AppThemePalette(
-        backgroundUIColor: hex(0x121212),
-        secondaryBackgroundUIColor: hex(0x151515),
-        cardUIColor: hex(0x242424),
-        inputUIColor: hex(0x222222),
-        elevatedUIColor: hex(0x252530),
-        textUIColor: hex(0xE8E6F0),
-        secondaryTextUIColor: hex(0x9896A8),
-        tertiaryTextUIColor: hex(0x5D5B6B),
-        accentUIColor: hex(0x7CB8B8),
-        accentMutedUIColor: rgba(124, 184, 184, 0.6),
-        buttonUIColor: hex(0x6B9E9F),
-        buttonTextUIColor: hex(0xFAFBFC),
-        bubbleMeUIColor: hex(0x3D6E70),
-        bubbleThemUIColor: hex(0x24242C),
-        borderUIColor: rgba(248, 246, 252, 0.09),
-        dividerUIColor: rgba(248, 246, 252, 0.05),
-        overlayUIColor: rgba(13, 13, 18, 0.88),
-        successUIColor: hex(0x5ABF8F),
-        warningUIColor: hex(0xC9A33D),
-        dangerUIColor: hex(0xD45A5A)
-      )
-    case .light:
-      return AppThemePalette(
-        backgroundUIColor: hex(0xF5F4F1),
-        secondaryBackgroundUIColor: hex(0xF5F4F1),
-        cardUIColor: hex(0xFFFFFF),
-        inputUIColor: hex(0xF2F2F2),
-        elevatedUIColor: hex(0xFFFFFF),
-        textUIColor: hex(0x1A1A1F),
-        secondaryTextUIColor: hex(0x5A5A66),
-        tertiaryTextUIColor: hex(0x9A9AA3),
-        accentUIColor: hex(0x4A8D8E),
-        accentMutedUIColor: rgba(74, 141, 142, 0.6),
-        buttonUIColor: hex(0x4A8D8E),
-        buttonTextUIColor: hex(0xFEFEFE),
-        bubbleMeUIColor: hex(0x007A7C),
-        bubbleThemUIColor: hex(0xE0F2F1),
-        borderUIColor: rgba(26, 26, 31, 0.07),
-        dividerUIColor: rgba(26, 26, 31, 0.035),
-        overlayUIColor: rgba(250, 249, 247, 0.90),
-        successUIColor: hex(0x428A6A),
-        warningUIColor: hex(0xB89338),
-        dangerUIColor: hex(0xC44A4A)
-      )
-    @unknown default:
-      return resolve(for: .dark)
+  static func resolve(
+    for colorScheme: ColorScheme,
+    plate: AppThemePlateOption = AppThemePlateController.currentOption
+  ) -> AppThemePalette {
+    let isDark = colorScheme == .dark
+    let baseBackground = isDark ? hex(0x121212) : hex(0xF5F4F1)
+    let baseSecondaryBackground = isDark ? hex(0x151515) : hex(0xF5F4F1)
+    let baseCard = isDark ? hex(0x242424) : hex(0xFFFFFF)
+    let baseInput = isDark ? hex(0x222222) : hex(0xF2F2F2)
+    let baseElevated = isDark ? hex(0x252530) : hex(0xFFFFFF)
+    let text = isDark ? hex(0xE8E6F0) : hex(0x1A1A1F)
+    let secondaryText = isDark ? hex(0x9896A8) : hex(0x5A5A66)
+    let tertiaryText = isDark ? hex(0x5D5B6B) : hex(0x9A9AA3)
+
+    let accent: UIColor
+    let accentMuted: UIColor
+    let button: UIColor
+    let bubbleMe: UIColor
+    let bubbleThem: UIColor
+
+    switch (plate, isDark) {
+    case (.glacier, true):
+      accent = hex(0x2A8585)
+      accentMuted = rgba(42, 133, 133, 0.6)
+      button = hex(0x2A8585)
+      bubbleMe = hex(0x2A8585)
+      bubbleThem = hex(0x24242C)
+    case (.glacier, false):
+      accent = hex(0x00838F)
+      accentMuted = rgba(0, 131, 143, 0.6)
+      button = hex(0x00838F)
+      bubbleMe = hex(0x00838F)
+      bubbleThem = hex(0xFFFFFF)
+    case (.zen, true):
+      accent = hex(0x7C3AED)
+      accentMuted = rgba(124, 58, 237, 0.6)
+      button = hex(0x7C3AED)
+      bubbleMe = hex(0x7C3AED)
+      bubbleThem = hex(0x2B2335)
+    case (.zen, false):
+      accent = hex(0x3F51B5)
+      accentMuted = rgba(63, 81, 181, 0.6)
+      button = hex(0x3F51B5)
+      bubbleMe = hex(0x3F51B5)
+      bubbleThem = hex(0xF3F4FB)
+    case (.ocean, true):
+      accent = hex(0x3A7DA8)
+      accentMuted = rgba(58, 125, 168, 0.6)
+      button = hex(0x3A7DA8)
+      bubbleMe = hex(0x3A7DA8)
+      bubbleThem = hex(0x23313A)
+    case (.ocean, false):
+      accent = hex(0x0277BD)
+      accentMuted = rgba(2, 119, 189, 0.6)
+      button = hex(0x0277BD)
+      bubbleMe = hex(0x0277BD)
+      bubbleThem = hex(0xFFFFFF)
+    case (.obsidian, true):
+      accent = hex(0x1565C0)
+      accentMuted = rgba(21, 101, 192, 0.6)
+      button = hex(0x1565C0)
+      bubbleMe = hex(0x1565C0)
+      bubbleThem = hex(0x24242C)
+    case (.obsidian, false):
+      accent = hex(0x1565C0)
+      accentMuted = rgba(21, 101, 192, 0.6)
+      button = hex(0x1565C0)
+      bubbleMe = hex(0x1565C0)
+      bubbleThem = hex(0xFFFFFF)
     }
+
+    return AppThemePalette(
+      backgroundUIColor: baseBackground,
+      secondaryBackgroundUIColor: baseSecondaryBackground,
+      cardUIColor: baseCard,
+      inputUIColor: baseInput,
+      elevatedUIColor: baseElevated,
+      textUIColor: text,
+      secondaryTextUIColor: secondaryText,
+      tertiaryTextUIColor: tertiaryText,
+      accentUIColor: accent,
+      accentMutedUIColor: accentMuted,
+      buttonUIColor: button,
+      buttonTextUIColor: isDark ? hex(0xFAFBFC) : hex(0xFEFEFE),
+      bubbleMeUIColor: bubbleMe,
+      bubbleThemUIColor: bubbleThem,
+      borderUIColor: isDark ? rgba(248, 246, 252, 0.09) : rgba(26, 26, 31, 0.07),
+      dividerUIColor: isDark ? rgba(248, 246, 252, 0.05) : rgba(26, 26, 31, 0.035),
+      overlayUIColor: isDark ? rgba(13, 13, 18, 0.88) : rgba(250, 249, 247, 0.90),
+      successUIColor: isDark ? hex(0x5ABF8F) : hex(0x428A6A),
+      warningUIColor: isDark ? hex(0xC9A33D) : hex(0xB89338),
+      dangerUIColor: isDark ? hex(0xD45A5A) : hex(0xC44A4A)
+    )
   }
 
   private static func hex(_ value: UInt, alpha: CGFloat = 1.0) -> UIColor {
@@ -216,6 +314,18 @@ struct AppUserProfile: Equatable {
   let bio: String?
   let dateOfBirth: String?
   let profileImage: String?
+  let showLastSeen: Bool
+  let showOnlineStatus: Bool
+  let autoDeleteTimer: Int?
+  let privacyLastSeen: AppPrivacyChoice
+  let privacyForward: AppPrivacyChoice
+  let privacyCalls: AppPrivacyChoice
+  let privacyPhoneNumber: AppPrivacyChoice
+  let privacyProfilePhotos: AppPrivacyChoice
+  let privacyBio: AppPrivacyChoice
+  let privacyGifts: AppPrivacyChoice
+  let privacyBirthday: AppPrivacyChoice
+  let privacySavedMusic: AppPrivacyChoice
 
   var displayName: String {
     name?.nilIfBlank ?? username
@@ -235,7 +345,19 @@ struct AppUserProfile: Equatable {
     phoneNumber: String? = nil,
     bio: String? = nil,
     dateOfBirth: String? = nil,
-    profileImage: String? = nil
+    profileImage: String? = nil,
+    showLastSeen: Bool = true,
+    showOnlineStatus: Bool = true,
+    autoDeleteTimer: Int? = nil,
+    privacyLastSeen: AppPrivacyChoice = .everybody,
+    privacyForward: AppPrivacyChoice = .everybody,
+    privacyCalls: AppPrivacyChoice = .everybody,
+    privacyPhoneNumber: AppPrivacyChoice = .everybody,
+    privacyProfilePhotos: AppPrivacyChoice = .everybody,
+    privacyBio: AppPrivacyChoice = .everybody,
+    privacyGifts: AppPrivacyChoice = .everybody,
+    privacyBirthday: AppPrivacyChoice = .everybody,
+    privacySavedMusic: AppPrivacyChoice = .everybody
   ) {
     let resolvedUserID = userID.trimmingCharacters(in: .whitespacesAndNewlines)
     let resolvedUsername = username.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -248,6 +370,18 @@ struct AppUserProfile: Equatable {
     self.bio = bio?.nilIfBlank
     self.dateOfBirth = dateOfBirth?.nilIfBlank
     self.profileImage = profileImage?.nilIfBlank
+    self.showLastSeen = showLastSeen
+    self.showOnlineStatus = showOnlineStatus
+    self.autoDeleteTimer = autoDeleteTimer
+    self.privacyLastSeen = privacyLastSeen
+    self.privacyForward = privacyForward
+    self.privacyCalls = privacyCalls
+    self.privacyPhoneNumber = privacyPhoneNumber
+    self.privacyProfilePhotos = privacyProfilePhotos
+    self.privacyBio = privacyBio
+    self.privacyGifts = privacyGifts
+    self.privacyBirthday = privacyBirthday
+    self.privacySavedMusic = privacySavedMusic
   }
 
   init?(payload: [String: Any], fallbackConfig: AppSessionConfig? = nil) {
@@ -268,7 +402,31 @@ struct AppUserProfile: Equatable {
       bio: Self.normalizedString(payload["bio"]) ?? fallbackConfig?.bio,
       dateOfBirth: Self.normalizedString(payload["dateOfBirth"]) ?? fallbackConfig?.dateOfBirth,
       profileImage: Self.normalizedString(payload["profileImage"] ?? payload["profile_image"])
-        ?? fallbackConfig?.profileImage
+        ?? fallbackConfig?.profileImage,
+      showLastSeen: Self.normalizedBool(payload["showLastSeen"]) ?? fallbackConfig?.showLastSeen
+        ?? true,
+      showOnlineStatus: Self.normalizedBool(payload["showOnlineStatus"])
+        ?? fallbackConfig?.showOnlineStatus ?? true,
+      autoDeleteTimer: Self.normalizedInt(payload["autoDeleteTimer"])
+        ?? fallbackConfig?.autoDeleteTimer,
+      privacyLastSeen: Self.normalizedPrivacyChoice(payload["privacyLastSeen"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyLastSeen) ?? .everybody,
+      privacyForward: Self.normalizedPrivacyChoice(payload["privacyForward"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyForward) ?? .everybody,
+      privacyCalls: Self.normalizedPrivacyChoice(payload["privacyCalls"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyCalls) ?? .everybody,
+      privacyPhoneNumber: Self.normalizedPrivacyChoice(payload["privacyPhoneNumber"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyPhoneNumber) ?? .everybody,
+      privacyProfilePhotos: Self.normalizedPrivacyChoice(payload["privacyProfilePhotos"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyProfilePhotos) ?? .everybody,
+      privacyBio: Self.normalizedPrivacyChoice(payload["privacyBio"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyBio) ?? .everybody,
+      privacyGifts: Self.normalizedPrivacyChoice(payload["privacyGifts"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyGifts) ?? .everybody,
+      privacyBirthday: Self.normalizedPrivacyChoice(payload["privacyBirthday"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacyBirthday) ?? .everybody,
+      privacySavedMusic: Self.normalizedPrivacyChoice(payload["privacySavedMusic"])
+        ?? Self.normalizedPrivacyChoice(fallbackConfig?.privacySavedMusic) ?? .everybody
     ) else {
       return nil
     }
@@ -285,6 +443,44 @@ struct AppUserProfile: Equatable {
       return value.stringValue
     }
     return nil
+  }
+
+  private static func normalizedBool(_ value: Any?) -> Bool? {
+    if let value = value as? Bool {
+      return value
+    }
+    if let value = value as? NSNumber {
+      return value.boolValue
+    }
+    if let value = value as? String {
+      switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+      case "1", "true", "yes", "on":
+        return true
+      case "0", "false", "no", "off":
+        return false
+      default:
+        return nil
+      }
+    }
+    return nil
+  }
+
+  private static func normalizedInt(_ value: Any?) -> Int? {
+    if let value = value as? Int {
+      return value
+    }
+    if let value = value as? NSNumber {
+      return value.intValue
+    }
+    if let value = value as? String {
+      return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
+    }
+    return nil
+  }
+
+  private static func normalizedPrivacyChoice(_ value: Any?) -> AppPrivacyChoice? {
+    guard let value = normalizedString(value) else { return nil }
+    return AppPrivacyChoice(rawValue: value)
   }
 }
 
@@ -379,6 +575,26 @@ final class AppProfileController: ObservableObject {
     }
   }
 
+  func updateFields(_ fields: [String: Any]) async throws {
+    guard let config = AppSessionConfig.current else {
+      throw AppProfileServiceError.invalidConfiguration
+    }
+
+    isLoading = true
+    errorMessage = nil
+    defer { isLoading = false }
+
+    do {
+      let updatedProfile = try await AppProfileService.updateFields(config: config, fields: fields)
+      profile = updatedProfile
+      hasLoaded = true
+      persistProfileToSession(updatedProfile)
+    } catch {
+      errorMessage = error.localizedDescription
+      throw error
+    }
+  }
+
   func reset() {
     profile = nil
     isLoading = false
@@ -396,7 +612,21 @@ final class AppProfileController: ObservableObject {
         phoneNumber: config.phoneNumber,
         bio: config.bio,
         dateOfBirth: config.dateOfBirth,
-        profileImage: config.profileImage
+        profileImage: config.profileImage,
+        showLastSeen: config.showLastSeen ?? true,
+        showOnlineStatus: config.showOnlineStatus ?? true,
+        autoDeleteTimer: config.autoDeleteTimer,
+        privacyLastSeen: AppPrivacyChoice(rawValue: config.privacyLastSeen ?? "") ?? .everybody,
+        privacyForward: AppPrivacyChoice(rawValue: config.privacyForward ?? "") ?? .everybody,
+        privacyCalls: AppPrivacyChoice(rawValue: config.privacyCalls ?? "") ?? .everybody,
+        privacyPhoneNumber: AppPrivacyChoice(rawValue: config.privacyPhoneNumber ?? "") ?? .everybody,
+        privacyProfilePhotos: AppPrivacyChoice(rawValue: config.privacyProfilePhotos ?? "")
+          ?? .everybody,
+        privacyBio: AppPrivacyChoice(rawValue: config.privacyBio ?? "") ?? .everybody,
+        privacyGifts: AppPrivacyChoice(rawValue: config.privacyGifts ?? "") ?? .everybody,
+        privacyBirthday: AppPrivacyChoice(rawValue: config.privacyBirthday ?? "") ?? .everybody,
+        privacySavedMusic: AppPrivacyChoice(rawValue: config.privacySavedMusic ?? "")
+          ?? .everybody
       )
   }
 
@@ -408,6 +638,18 @@ final class AppProfileController: ObservableObject {
       "bio": profile.bio,
       "dateOfBirth": profile.dateOfBirth,
       "profileImage": profile.profileImage,
+      "showLastSeen": profile.showLastSeen,
+      "showOnlineStatus": profile.showOnlineStatus,
+      "autoDeleteTimer": profile.autoDeleteTimer,
+      "privacyLastSeen": profile.privacyLastSeen.rawValue,
+      "privacyForward": profile.privacyForward.rawValue,
+      "privacyCalls": profile.privacyCalls.rawValue,
+      "privacyPhoneNumber": profile.privacyPhoneNumber.rawValue,
+      "privacyProfilePhotos": profile.privacyProfilePhotos.rawValue,
+      "privacyBio": profile.privacyBio.rawValue,
+      "privacyGifts": profile.privacyGifts.rawValue,
+      "privacyBirthday": profile.privacyBirthday.rawValue,
+      "privacySavedMusic": profile.privacySavedMusic.rawValue,
     ])
   }
 }
@@ -447,12 +689,25 @@ private enum AppProfileService {
   static func updateProfile(config: AppSessionConfig, draft: AppUserProfileDraft) async throws
     -> AppUserProfile
   {
+    var body = draft.trimmedPayload
+    body["userId"] = config.userID
+    return try await sendProfileUpdate(config: config, body: body)
+  }
+
+  static func updateFields(config: AppSessionConfig, fields: [String: Any]) async throws
+    -> AppUserProfile
+  {
+    var body = fields
+    body["userId"] = config.userID
+    return try await sendProfileUpdate(config: config, body: body)
+  }
+
+  private static func sendProfileUpdate(config: AppSessionConfig, body: [String: Any]) async throws
+    -> AppUserProfile
+  {
     guard let url = apiURL(base: config.apiBaseURLString, path: "/user/profile") else {
       throw AppProfileServiceError.invalidConfiguration
     }
-
-    var body = draft.trimmedPayload
-    body["userId"] = config.userID
 
     var request = URLRequest(url: url)
     request.httpMethod = "POST"

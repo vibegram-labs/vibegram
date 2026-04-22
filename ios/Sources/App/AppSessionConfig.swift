@@ -19,6 +19,18 @@ struct AppSessionConfig {
   let bio: String?
   let profileImage: String?
   let dateOfBirth: String?
+  let showLastSeen: Bool?
+  let showOnlineStatus: Bool?
+  let autoDeleteTimer: Int?
+  let privacyLastSeen: String?
+  let privacyForward: String?
+  let privacyCalls: String?
+  let privacyPhoneNumber: String?
+  let privacyProfilePhotos: String?
+  let privacyBio: String?
+  let privacyGifts: String?
+  let privacyBirthday: String?
+  let privacySavedMusic: String?
 
   static var defaultAPIBaseURLString: String {
     ChatAvatarURLResolver.resolvedAPIBaseURL()?.absoluteString ?? "https://api.vibegram.io"
@@ -62,6 +74,18 @@ struct AppSessionConfig {
     self.bio = Self.normalizedString(payload["bio"])
     self.profileImage = Self.normalizedString(payload["profileImage"] ?? payload["profile_image"])
     self.dateOfBirth = Self.normalizedString(payload["dateOfBirth"])
+    self.showLastSeen = Self.normalizedBool(payload["showLastSeen"])
+    self.showOnlineStatus = Self.normalizedBool(payload["showOnlineStatus"])
+    self.autoDeleteTimer = Self.normalizedInt(payload["autoDeleteTimer"])
+    self.privacyLastSeen = Self.normalizedString(payload["privacyLastSeen"])
+    self.privacyForward = Self.normalizedString(payload["privacyForward"])
+    self.privacyCalls = Self.normalizedString(payload["privacyCalls"])
+    self.privacyPhoneNumber = Self.normalizedString(payload["privacyPhoneNumber"])
+    self.privacyProfilePhotos = Self.normalizedString(payload["privacyProfilePhotos"])
+    self.privacyBio = Self.normalizedString(payload["privacyBio"])
+    self.privacyGifts = Self.normalizedString(payload["privacyGifts"])
+    self.privacyBirthday = Self.normalizedString(payload["privacyBirthday"])
+    self.privacySavedMusic = Self.normalizedString(payload["privacySavedMusic"])
   }
 
   init(
@@ -81,7 +105,19 @@ struct AppSessionConfig {
     phoneNumber: String? = nil,
     bio: String? = nil,
     profileImage: String? = nil,
-    dateOfBirth: String? = nil
+    dateOfBirth: String? = nil,
+    showLastSeen: Bool? = nil,
+    showOnlineStatus: Bool? = nil,
+    autoDeleteTimer: Int? = nil,
+    privacyLastSeen: String? = nil,
+    privacyForward: String? = nil,
+    privacyCalls: String? = nil,
+    privacyPhoneNumber: String? = nil,
+    privacyProfilePhotos: String? = nil,
+    privacyBio: String? = nil,
+    privacyGifts: String? = nil,
+    privacyBirthday: String? = nil,
+    privacySavedMusic: String? = nil
   ) {
     let normalizedAPI =
       apiBaseURLString.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -106,6 +142,18 @@ struct AppSessionConfig {
     self.bio = Self.normalizedString(bio)
     self.profileImage = Self.normalizedString(profileImage)
     self.dateOfBirth = Self.normalizedString(dateOfBirth)
+    self.showLastSeen = showLastSeen
+    self.showOnlineStatus = showOnlineStatus
+    self.autoDeleteTimer = autoDeleteTimer
+    self.privacyLastSeen = Self.normalizedString(privacyLastSeen)
+    self.privacyForward = Self.normalizedString(privacyForward)
+    self.privacyCalls = Self.normalizedString(privacyCalls)
+    self.privacyPhoneNumber = Self.normalizedString(privacyPhoneNumber)
+    self.privacyProfilePhotos = Self.normalizedString(privacyProfilePhotos)
+    self.privacyBio = Self.normalizedString(privacyBio)
+    self.privacyGifts = Self.normalizedString(privacyGifts)
+    self.privacyBirthday = Self.normalizedString(privacyBirthday)
+    self.privacySavedMusic = Self.normalizedString(privacySavedMusic)
   }
 
   var payload: [String: Any] {
@@ -139,6 +187,18 @@ struct AppSessionConfig {
     if let bio { value["bio"] = bio }
     if let profileImage { value["profileImage"] = profileImage }
     if let dateOfBirth { value["dateOfBirth"] = dateOfBirth }
+    if let showLastSeen { value["showLastSeen"] = showLastSeen }
+    if let showOnlineStatus { value["showOnlineStatus"] = showOnlineStatus }
+    if let autoDeleteTimer { value["autoDeleteTimer"] = autoDeleteTimer }
+    if let privacyLastSeen { value["privacyLastSeen"] = privacyLastSeen }
+    if let privacyForward { value["privacyForward"] = privacyForward }
+    if let privacyCalls { value["privacyCalls"] = privacyCalls }
+    if let privacyPhoneNumber { value["privacyPhoneNumber"] = privacyPhoneNumber }
+    if let privacyProfilePhotos { value["privacyProfilePhotos"] = privacyProfilePhotos }
+    if let privacyBio { value["privacyBio"] = privacyBio }
+    if let privacyGifts { value["privacyGifts"] = privacyGifts }
+    if let privacyBirthday { value["privacyBirthday"] = privacyBirthday }
+    if let privacySavedMusic { value["privacySavedMusic"] = privacySavedMusic }
     return value
   }
 
@@ -162,6 +222,39 @@ struct AppSessionConfig {
     }
     if let value = value as? NSNumber {
       return value.stringValue
+    }
+    return nil
+  }
+
+  private static func normalizedBool(_ value: Any?) -> Bool? {
+    if let value = value as? Bool {
+      return value
+    }
+    if let value = value as? NSNumber {
+      return value.boolValue
+    }
+    if let value = value as? String {
+      switch value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+      case "1", "true", "yes", "on":
+        return true
+      case "0", "false", "no", "off":
+        return false
+      default:
+        return nil
+      }
+    }
+    return nil
+  }
+
+  private static func normalizedInt(_ value: Any?) -> Int? {
+    if let value = value as? Int {
+      return value
+    }
+    if let value = value as? NSNumber {
+      return value.intValue
+    }
+    if let value = value as? String {
+      return Int(value.trimmingCharacters(in: .whitespacesAndNewlines))
     }
     return nil
   }

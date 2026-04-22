@@ -1,6 +1,14 @@
 {
   "updated_at": "2026-04-22",
   "checks": {
+    "ios_settings_followup_avatar_row_alignment": {
+      "status": "passed",
+      "details": "Fixed the latest standalone iOS settings follow-up issues. `ios/Sources/App/SettingsNativeComponents.swift` now hosts the UIKit row inside a full-width container and applies stronger trailing-edge hugging/compression priorities so the chevron and toggle stay aligned on the right edge, while `ios/Sources/App/SettingsView.swift` now overlays the reused morphing avatar above the scroll view with a hero spacer underneath so the avatar responds to scroll like the old native settings host. The `Saved Messages` row now routes back to the main Chats page instead of pushing the placeholder conversation screen. Revalidated with `xcodebuild -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO -derivedDataPath /tmp/vibe-settings-fix-2` from `ios/`."
+    },
+    "ios_settings_rows_avatar_morph_fix": {
+      "status": "passed",
+      "details": "Fixed the standalone iOS settings regression where section cards could render as empty space. `ios/Sources/App/SettingsNativeComponents.swift` now gives the native settings row wrapper an intrinsic height plus `sizeThatFits`, applies a stable minimum row height inside the card, and swaps the simplified avatar header for the reused legacy morphing avatar implementation driven by the settings scroll offset. Revalidated with `xcodebuild -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO -derivedDataPath /tmp/vibe-context-resume` from `ios/`."
+    },
     "ios_shell_settings_home_parity_pass": {
       "status": "passed",
       "details": "Patched the standalone iOS shell to match the old native/RN structure more closely. `ios/Sources/App/AuthViewController.swift` now saves the login key silently and posts a short in-app toast instead of showing the key during auth, `ios/Sources/App/SettingsView.swift` now uses the old settings row model with profile editing, QR/key views, appearance, media cache, and no root subtitles, and `ios/Sources/App/AppRootView.swift` plus `AppRuntimeController.swift` now use the legacy light/dark palette, shared inline top headers, reusable new-chat flow, and empty/list states for chats, contacts, and calls. Revalidated with `xcodebuild -quiet -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO -derivedDataPath /tmp/vibe-ios-shell-parity-2` from `ios/`."

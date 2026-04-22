@@ -101,11 +101,16 @@ private final class ChatsViewModel: ObservableObject {
 
 struct AppRootView: View {
   @Environment(\.colorScheme) private var colorScheme
+  @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
+    AppThemePlateOption.glacier.rawValue
   @StateObject private var coordinator = AppShellCoordinator()
   @StateObject private var toastController = AppToastController.shared
 
   private var palette: AppThemePalette {
-    AppThemePalette.resolve(for: colorScheme)
+    AppThemePalette.resolve(
+      for: colorScheme,
+      plate: AppThemePlateOption(rawValue: themePlateRaw) ?? .glacier
+    )
   }
 
   var body: some View {
@@ -139,10 +144,6 @@ struct AppRootView: View {
     .environmentObject(coordinator)
     .onAppear {
       AppAppearanceController.applyStoredPreference()
-      applyChrome()
-    }
-    .onChange(of: colorScheme) { _ in
-      applyChrome()
     }
     .overlay(alignment: .bottom) {
       if let message = toastController.message {
@@ -153,39 +154,6 @@ struct AppRootView: View {
       }
     }
     .animation(.spring(response: 0.3, dampingFraction: 0.82), value: toastController.message)
-  }
-
-  private func applyChrome() {
-    let navigationAppearance = UINavigationBarAppearance()
-    navigationAppearance.configureWithOpaqueBackground()
-    navigationAppearance.backgroundColor = palette.backgroundUIColor
-    navigationAppearance.shadowColor = .clear
-    navigationAppearance.titleTextAttributes = [.foregroundColor: palette.textUIColor]
-    navigationAppearance.largeTitleTextAttributes = [.foregroundColor: palette.textUIColor]
-
-    let tabAppearance = UITabBarAppearance()
-    tabAppearance.configureWithOpaqueBackground()
-    tabAppearance.backgroundColor = palette.backgroundUIColor
-    tabAppearance.shadowColor = .clear
-
-    let itemAppearance = tabAppearance.stackedLayoutAppearance
-    itemAppearance.selected.iconColor = palette.accentUIColor
-    itemAppearance.selected.titleTextAttributes = [.foregroundColor: palette.accentUIColor]
-    itemAppearance.normal.iconColor = palette.secondaryTextUIColor
-    itemAppearance.normal.titleTextAttributes = [.foregroundColor: palette.secondaryTextUIColor]
-    tabAppearance.stackedLayoutAppearance = itemAppearance
-    tabAppearance.inlineLayoutAppearance = itemAppearance
-    tabAppearance.compactInlineLayoutAppearance = itemAppearance
-
-    UINavigationBar.appearance().standardAppearance = navigationAppearance
-    UINavigationBar.appearance().scrollEdgeAppearance = navigationAppearance
-    UINavigationBar.appearance().compactAppearance = navigationAppearance
-    UINavigationBar.appearance().tintColor = palette.textUIColor
-
-    UITabBar.appearance().standardAppearance = tabAppearance
-    if #available(iOS 15.0, *) {
-      UITabBar.appearance().scrollEdgeAppearance = tabAppearance
-    }
   }
 }
 
@@ -256,6 +224,25 @@ private struct ChatsRootView: View {
     AppThemePalette.resolve(for: colorScheme)
   }
 
+  private var headerState: AppHomeHeaderState {
+    if isStartingChat {
+      return .updating
+    }
+    if errorMessage != nil || model.errorMessage != nil {
+      return .connecting
+    }
+    if model.isLoading && model.rows.isEmpty {
+      return .connecting
+    }
+    if model.isLoading {
+      return .updating
+    }
+    if model.rows.isEmpty && (errorMessage != nil || model.errorMessage != nil) {
+      return .connecting
+    }
+    return .ready
+  }
+
   var body: some View {
     NavigationStack(path: $path) {
       Group {
@@ -266,8 +253,8 @@ private struct ChatsRootView: View {
         } else if model.rows.isEmpty {
           AppShellEmptyStateView(
             icon: "message",
-            title: "No Chats Yet",
-            message: errorMessage ?? model.errorMessage ?? "Start a new chat to begin.",
+            title: "No Messages Yet",
+            message: errorMessage ?? model.errorMessage ?? "Start a conversation to catch the vibe.",
             buttonTitle: "New Chat",
             palette: palette
           ) {
@@ -303,23 +290,21 @@ private struct ChatsRootView: View {
             .disabled(model.rows.isEmpty)
         }
         ToolbarItem(placement: .principal) {
-          AppInlineHeaderTitleView(
-            title: "Chats",
-            subtitle: model.isLoading ? "Updating" : "Connected",
-            palette: palette
-          )
+          AppHomeStatusHeaderView(state: headerState, palette: palette)
         }
         ToolbarItemGroup(placement: .topBarTrailing) {
           Button {
             isShowingStorySheet = true
           } label: {
-            Image(systemName: "circle.grid.2x2.fill")
+            AppVectorIcon(glyph: .story, tint: palette.secondaryText)
+              .frame(width: 22, height: 22)
           }
 
           Button {
             isShowingSearch = true
           } label: {
-            Image(systemName: "plus")
+            AppVectorIcon(glyph: .compose, tint: palette.secondaryText)
+              .frame(width: 22, height: 22)
           }
         }
       }
@@ -480,16 +465,15 @@ private struct ContactsPageView: View {
       }
     }
     .background(palette.background.ignoresSafeArea())
+    .navigationTitle("Contacts")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
-      ToolbarItem(placement: .principal) {
-        AppInlineHeaderTitleView(title: "Contacts", subtitle: "People", palette: palette)
-      }
       ToolbarItem(placement: .topBarTrailing) {
         Button {
           isShowingSearch = true
         } label: {
-          Image(systemName: "plus")
+          AppVectorIcon(glyph: .compose, tint: palette.secondaryText)
+            .frame(width: 22, height: 22)
         }
       }
     }
@@ -588,12 +572,8 @@ private struct CallsPageView: View {
       action: nil
     )
     .background(palette.background.ignoresSafeArea())
+    .navigationTitle("Calls")
     .navigationBarTitleDisplayMode(.inline)
-    .toolbar {
-      ToolbarItem(placement: .principal) {
-        AppInlineHeaderTitleView(title: "Calls", subtitle: "Recent", palette: palette)
-      }
-    }
   }
 }
 
@@ -834,17 +814,62 @@ private struct ChatAvatarView: View {
   }
 }
 
-private struct AppInlineHeaderTitleView: View {
-  let title: String
-  let subtitle: String
+private enum AppHomeHeaderState {
+  case connecting
+  case updating
+  case ready
+
+  var title: String {
+    switch self {
+    case .connecting:
+      return "Connecting"
+    case .updating:
+      return "Updating"
+    case .ready:
+      return "Chats"
+    }
+  }
+
+  var subtitle: String {
+    switch self {
+    case .connecting:
+      return "Waiting for the secure link"
+    case .updating:
+      return "Syncing recent messages"
+    case .ready:
+      return "Secure messages"
+    }
+  }
+
+  var showsProgress: Bool {
+    switch self {
+    case .connecting, .updating:
+      return true
+    case .ready:
+      return false
+    }
+  }
+}
+
+private struct AppHomeStatusHeaderView: View {
+  let state: AppHomeHeaderState
   let palette: AppThemePalette
 
   var body: some View {
-    VStack(spacing: 1) {
-      Text(title)
-        .font(.system(size: 17, weight: .semibold))
-        .foregroundStyle(palette.text)
-      Text(subtitle)
+    VStack(spacing: 2) {
+      HStack(spacing: 6) {
+        if state.showsProgress {
+          ProgressView()
+            .controlSize(.small)
+            .tint(palette.secondaryText)
+        }
+
+        Text(state.title)
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundStyle(palette.text)
+      }
+
+      Text(state.subtitle)
         .font(.system(size: 11, weight: .medium))
         .foregroundStyle(palette.secondaryText)
     }
@@ -957,6 +982,7 @@ private struct StorySheetPlaceholderView: View {
 
 private struct ContactSearchView: View {
   @Environment(\.dismiss) private var dismiss
+  @Environment(\.colorScheme) private var colorScheme
 
   let config: AppSessionConfig
   let onResult: ([String: Any]) -> Void
@@ -964,6 +990,10 @@ private struct ContactSearchView: View {
   @State private var results: [ContactSearchUser] = []
   @State private var isLoading = false
   @State private var statusText = "Find by username, phone, or user ID"
+
+  private var palette: AppThemePalette {
+    AppThemePalette.resolve(for: colorScheme)
+  }
 
   var body: some View {
     List {
@@ -978,6 +1008,7 @@ private struct ContactSearchView: View {
             }
           }
       }
+      .listRowBackground(palette.card)
 
       if isLoading {
         Section {
@@ -987,6 +1018,7 @@ private struct ContactSearchView: View {
               .foregroundStyle(.secondary)
           }
         }
+        .listRowBackground(palette.card)
       } else if !results.isEmpty {
         Section("Results") {
           ForEach(results) { user in
@@ -1004,15 +1036,19 @@ private struct ContactSearchView: View {
             }
           }
         }
+        .listRowBackground(palette.card)
       } else {
         Section {
           Text(statusText)
             .font(.footnote)
             .foregroundStyle(.secondary)
         }
+        .listRowBackground(palette.card)
       }
     }
     .listStyle(.insetGrouped)
+    .scrollContentBackground(.hidden)
+    .background(palette.background.ignoresSafeArea())
     .navigationTitle("New Chat")
     .navigationBarTitleDisplayMode(.inline)
     .toolbar {
