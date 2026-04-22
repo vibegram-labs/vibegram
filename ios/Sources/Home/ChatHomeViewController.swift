@@ -1,3 +1,4 @@
+import Foundation
 import UIKit
 
 final class ChatHomeViewController: UIViewController, UITableViewDataSource, UITableViewDelegate,
@@ -38,6 +39,11 @@ final class ChatHomeViewController: UIViewController, UITableViewDataSource, UIT
     ])
 
     loadChats()
+  }
+
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    navigationController?.setNavigationBarHidden(false, animated: false)
   }
 
   deinit {
@@ -91,7 +97,10 @@ final class ChatHomeViewController: UIViewController, UITableViewDataSource, UIT
       self?.loadChats()
     })
     alert.addAction(UIAlertAction(title: "Auth", style: .default) { [weak self] _ in
-      self?.navigationController?.pushViewController(AuthViewController(), animated: true)
+      guard let self else { return }
+      AuthViewController.present(from: self, mode: .signIn) { [weak self] in
+        self?.navigationController?.setViewControllers([ChatHomeViewController()], animated: true)
+      }
     })
     present(alert, animated: true)
   }

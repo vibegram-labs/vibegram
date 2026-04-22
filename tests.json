@@ -1,6 +1,10 @@
 {
   "updated_at": "2026-04-22",
   "checks": {
+    "mobile_welcome_auth_refresh": {
+      "status": "passed",
+      "details": "Refreshed the native welcome/auth entry flow on both platforms. On iOS, `ios/Sources/App/AuthViewController.swift` now hosts the sign-in/sign-up flow in a Resolo-style SwiftUI sheet with a standard navigation bar, floating inputs, stock close control, and default sheet chrome, while `ios/Sources/App/WelcomeViewController.swift` removes footer blur, shortens the welcome copy, darkens the background toward near-black, and tightens the metal light beam. `ios/Sources/Home/ChatHomeViewController.swift` now reuses the same modal API for auth recovery. On Android, `android/app/src/main/java/com/mohammadshayani/vibe/ui/AuthActivity.kt`, `WelcomeActivity.kt`, and `ChatHomeActivity.kt` share the same bottom-sheet auth presenter and welcome flow. Revalidated with `xcodebuild -project Vibe.xcodeproj -scheme Vibe -configuration Debug -sdk iphonesimulator -derivedDataPath /tmp/vibe-welcome-refresh-3 CODE_SIGNING_ALLOWED=NO build` from `ios/` and `/Users/mohammadshayani/.gradle/wrapper/dists/gradle-8.14.3-bin/cv11ve7ro1n3o1j4so8xd9n66/gradle-8.14.3/bin/gradle -p android :app:assembleDebug --offline`."
+    },
     "mobile_native_repo_split": {
       "status": "passed",
       "details": "Moved the remaining native implementation out of `mobile/modules/vibe-chat-native/`. Reusable Swift source/resources now live under `ios/ChatModule/`, reusable Kotlin source/resources now live under `android/chat-module/`, and the Expo bridge wrappers/package metadata now live under `legacy/mobile-rn/modules/vibe-chat-native/`."

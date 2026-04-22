@@ -55,7 +55,11 @@ class ChatHomeActivity : AppCompatActivity() {
   override fun onOptionsItemSelected(item: MenuItem): Boolean {
     return when (item.itemId) {
       1 -> {
-        startActivity(Intent(this, AuthActivity::class.java))
+        AuthSheetPresenter.show(
+          activity = this,
+          mode = AuthActivity.Mode.SIGN_IN,
+          onAuthenticated = { loadChats() },
+        )
         true
       }
       2 -> {
