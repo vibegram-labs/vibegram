@@ -1,6 +1,4 @@
 import React, { useState } from 'react';
-import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
-import { prism } from 'react-syntax-highlighter/dist/esm/styles/prism';
 
 /* ─────────────────────────────────────────────────────────────
    DocSection — wraps each id-anchored section
@@ -84,19 +82,7 @@ export function DocCodeBlock({ lang, code }: { lang: string; code: string }) {
                     {copied ? '✓ Copied' : 'Copy'}
                 </button>
             </div>
-            <SyntaxHighlighter
-                language={lang}
-                style={prism}
-                customStyle={{
-                    margin: 0,
-                    padding: '20px',
-                    fontSize: '13.5px',
-                    lineHeight: '1.65',
-                    background: '#ffffff',
-                }}
-            >
-                {code}
-            </SyntaxHighlighter>
+            {renderCodeBlock(code)}
         </div>
     );
 }
@@ -150,22 +136,30 @@ export function DocCodeTabs({ tabs }: { tabs: CodeTab[] }) {
                     >
                         {copied && active === i ? '✓ Copied' : 'Copy'}
                     </button>
-                    <SyntaxHighlighter
-                        language={tab.lang}
-                        style={prism}
-                        customStyle={{
-                            margin: 0,
-                            padding: '20px',
-                            fontSize: '13.5px',
-                            lineHeight: '1.65',
-                            background: '#ffffff',
-                        }}
-                    >
-                        {tab.code}
-                    </SyntaxHighlighter>
+                    {renderCodeBlock(tab.code)}
                 </div>
             ))}
         </div>
+    );
+}
+
+function renderCodeBlock(code: string) {
+    return (
+        <pre
+            className="docs-code-pre"
+            style={{
+                margin: 0,
+                padding: '20px',
+                fontSize: '13.5px',
+                lineHeight: '1.65',
+                background: '#ffffff',
+                overflowX: 'auto',
+                whiteSpace: 'pre-wrap',
+                wordBreak: 'break-word',
+            }}
+        >
+            <code>{code}</code>
+        </pre>
     );
 }
 

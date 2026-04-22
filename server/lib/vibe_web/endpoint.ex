@@ -15,15 +15,8 @@ defmodule VibeWeb.Endpoint do
     signing_salt: "VA520x4+"
   ]
 
-  @socket_check_origin Keyword.get(
-                         Application.compile_env(:vibe, VibeWeb.Endpoint, []),
-                         :check_origin,
-                         false
-                       )
-
   socket "/socket", VibeWeb.UserSocket,
     websocket: [
-      check_origin: @socket_check_origin,
       # Forward HTTP headers to UserSocket.connect/3 so the mobile clients'
       # Authorization: Bearer token is available during WebSocket upgrade.
       connect_info: [:x_headers]

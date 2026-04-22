@@ -73,12 +73,12 @@ final class WelcomeViewController: UIViewController {
     titleLabel.font = .systemFont(ofSize: 60, weight: .black)
 
     subtitleLabel.translatesAutoresizingMaskIntoConstraints = false
-    subtitleLabel.text = "Private chat, clear focus."
+    subtitleLabel.text = "Private chat, lit with focus."
     subtitleLabel.font = .systemFont(ofSize: 30, weight: .semibold)
     subtitleLabel.numberOfLines = 0
 
     detailsLabel.translatesAutoresizingMaskIntoConstraints = false
-    detailsLabel.text = "Return with your secret key or create a new identity."
+    detailsLabel.text = "Return with your secret key or start a new identity."
     detailsLabel.font = .systemFont(ofSize: 17, weight: .medium)
     detailsLabel.numberOfLines = 0
     detailsLabel.lineBreakMode = .byWordWrapping
@@ -282,40 +282,49 @@ private final class WelcomeMetalBackgroundView: UIView, MTKViewDelegate {
         x: size.width * (0.94 + 0.01 * sin(time * 0.21)),
         y: size.height * (0.06 + 0.01 * cos(time * 0.17))
       ),
-      radius: max(size.width, size.height) * 0.28,
+      radius: max(size.width, size.height) * 0.24,
       color: palette.sourceGlowColor
     )
     let beamMid = radialGlow(
       center: CGPoint(
         x: size.width * (0.72 + 0.02 * cos(time * 0.19)),
-        y: size.height * (0.13 + 0.012 * sin(time * 0.16))
+        y: size.height * (0.14 + 0.014 * sin(time * 0.16))
       ),
-      radius: max(size.width, size.height) * 0.30,
+      radius: max(size.width, size.height) * 0.34,
       color: palette.beamGlowColor
     )
     let beamNearText = radialGlow(
       center: CGPoint(
         x: size.width * (0.44 + 0.02 * sin(time * 0.15)),
-        y: size.height * (0.18 + 0.012 * cos(time * 0.11))
+        y: size.height * (0.20 + 0.014 * cos(time * 0.11))
       ),
-      radius: max(size.width, size.height) * 0.18,
+      radius: max(size.width, size.height) * 0.22,
       color: palette.textGlowColor
+    )
+    let warmLift = radialGlow(
+      center: CGPoint(
+        x: size.width * (0.26 + 0.03 * sin(time * 0.08)),
+        y: size.height * (0.36 + 0.02 * cos(time * 0.07))
+      ),
+      radius: max(size.width, size.height) * 0.54,
+      color: palette.secondaryAmbientGlowColor
     )
     let ambient = radialGlow(
       center: CGPoint(
-        x: size.width * (0.18 + 0.04 * cos(time * 0.09)),
+        x: size.width * (0.56 + 0.03 * cos(time * 0.09)),
         y: size.height * (0.78 + 0.03 * sin(time * 0.13))
       ),
-      radius: max(size.width, size.height) * 0.96,
+      radius: max(size.width, size.height) * 0.82,
       color: palette.ambientGlowColor
     )
 
     let image = beamNearText
       .composited(over: beamMid)
       .composited(over: source)
+      .composited(over: warmLift)
       .composited(over: ambient)
       .composited(over: base)
-      .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 24.0])
+      .applyingFilter("CIGaussianBlur", parameters: ["inputRadius": 20.0])
       .cropped(to: bounds)
 
     ciContext.render(image, to: drawable.texture, commandBuffer: nil, bounds: bounds, colorSpace: colorSpace)
@@ -373,39 +382,39 @@ private struct WelcomePalette {
     let isDark = traits.userInterfaceStyle == .dark
     prefersDarkStatusBar = !isDark
     backgroundColor = isDark
-      ? UIColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1)
-      : UIColor(red: 0.94, green: 0.96, blue: 0.99, alpha: 1)
+      ? UIColor(red: 0.15, green: 0.13, blue: 0.12, alpha: 1)
+      : UIColor(red: 0.97, green: 0.95, blue: 0.93, alpha: 1)
     eyebrowTextColor = isDark
-      ? UIColor.white.withAlphaComponent(0.76)
-      : UIColor(red: 0.22, green: 0.28, blue: 0.36, alpha: 0.78)
+      ? UIColor(red: 0.97, green: 0.94, blue: 0.91, alpha: 0.78)
+      : UIColor(red: 0.37, green: 0.31, blue: 0.29, alpha: 0.78)
     primaryTextColor = isDark
-      ? UIColor.white
-      : UIColor(red: 0.09, green: 0.12, blue: 0.18, alpha: 1)
+      ? UIColor(red: 0.99, green: 0.96, blue: 0.92, alpha: 1)
+      : UIColor(red: 0.17, green: 0.14, blue: 0.13, alpha: 1)
     secondaryTextColor = isDark
-      ? UIColor(red: 0.85, green: 0.89, blue: 0.95, alpha: 0.8)
-      : UIColor(red: 0.22, green: 0.28, blue: 0.36, alpha: 0.72)
+      ? UIColor(red: 0.88, green: 0.82, blue: 0.76, alpha: 0.82)
+      : UIColor(red: 0.39, green: 0.32, blue: 0.29, alpha: 0.76)
     footerTintColor = isDark
-      ? UIColor(red: 0.08, green: 0.11, blue: 0.17, alpha: 0.62)
-      : UIColor(red: 0.97, green: 0.98, blue: 1.0, alpha: 0.66)
+      ? UIColor(red: 0.26, green: 0.21, blue: 0.19, alpha: 0.62)
+      : UIColor(red: 0.98, green: 0.96, blue: 0.94, alpha: 0.66)
     footerBorderColor = isDark
       ? UIColor.white.withAlphaComponent(0.14)
       : UIColor.white.withAlphaComponent(0.72)
     primaryButtonBackgroundColor = isDark
-      ? UIColor(red: 0.90, green: 0.93, blue: 0.99, alpha: 0.94)
-      : UIColor(red: 0.10, green: 0.13, blue: 0.19, alpha: 0.96)
+      ? UIColor(red: 0.97, green: 0.96, blue: 0.95, alpha: 0.94)
+      : UIColor(red: 0.11, green: 0.10, blue: 0.11, alpha: 0.96)
     primaryButtonForegroundColor = isDark
-      ? UIColor(red: 0.08, green: 0.10, blue: 0.16, alpha: 1)
+      ? UIColor(red: 0.13, green: 0.11, blue: 0.10, alpha: 1)
       : UIColor.white
     primaryButtonStrokeColor = isDark
       ? UIColor.white.withAlphaComponent(0.18)
       : UIColor.white.withAlphaComponent(0.28)
     secondaryButtonBackgroundColor = isDark
-      ? UIColor.white.withAlphaComponent(0.06)
-      : UIColor.white.withAlphaComponent(0.56)
+      ? UIColor.white.withAlphaComponent(0.12)
+      : UIColor.white.withAlphaComponent(0.58)
     secondaryButtonForegroundColor = primaryTextColor
     secondaryButtonStrokeColor = isDark
-      ? UIColor.white.withAlphaComponent(0.18)
-      : UIColor(red: 0.70, green: 0.78, blue: 0.88, alpha: 0.92)
+      ? UIColor(red: 0.79, green: 0.72, blue: 0.66, alpha: 0.34)
+      : UIColor(red: 0.83, green: 0.77, blue: 0.72, alpha: 0.92)
   }
 }
 
@@ -418,35 +427,38 @@ private struct WelcomeMetalPalette {
   let beamGlowColor: CIColor
   let textGlowColor: CIColor
   let ambientGlowColor: CIColor
+  let secondaryAmbientGlowColor: CIColor
 
   init(style: UIUserInterfaceStyle) {
     let isDark = style != .light
     if isDark {
       fallbackColors = [
-        UIColor(red: 0.01, green: 0.01, blue: 0.02, alpha: 1).cgColor,
-        UIColor(red: 0.02, green: 0.02, blue: 0.03, alpha: 1).cgColor,
-        UIColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1).cgColor,
+        UIColor(red: 0.16, green: 0.14, blue: 0.13, alpha: 1).cgColor,
+        UIColor(red: 0.12, green: 0.11, blue: 0.10, alpha: 1).cgColor,
+        UIColor(red: 0.09, green: 0.08, blue: 0.08, alpha: 1).cgColor,
       ]
-      clearColor = MTLClearColorMake(0.01, 0.01, 0.02, 1)
-      baseTopColor = CIColor(red: 0.01, green: 0.01, blue: 0.02, alpha: 1)
-      baseBottomColor = CIColor(red: 0.0, green: 0.0, blue: 0.0, alpha: 1)
-      sourceGlowColor = CIColor(red: 1.0, green: 0.93, blue: 0.70, alpha: 1.0)
-      beamGlowColor = CIColor(red: 0.90, green: 0.93, blue: 0.97, alpha: 0.36)
-      textGlowColor = CIColor(red: 0.98, green: 0.99, blue: 1.0, alpha: 0.32)
-      ambientGlowColor = CIColor(red: 0.03, green: 0.03, blue: 0.05, alpha: 0.16)
+      clearColor = MTLClearColorMake(0.16, 0.14, 0.13, 1)
+      baseTopColor = CIColor(red: 0.14, green: 0.13, blue: 0.12, alpha: 1)
+      baseBottomColor = CIColor(red: 0.10, green: 0.09, blue: 0.09, alpha: 1)
+      sourceGlowColor = CIColor(red: 0.98, green: 0.85, blue: 0.67, alpha: 0.92)
+      beamGlowColor = CIColor(red: 0.99, green: 0.95, blue: 0.89, alpha: 0.42)
+      textGlowColor = CIColor(red: 0.98, green: 0.92, blue: 0.84, alpha: 0.34)
+      ambientGlowColor = CIColor(red: 0.46, green: 0.34, blue: 0.31, alpha: 0.28)
+      secondaryAmbientGlowColor = CIColor(red: 0.64, green: 0.50, blue: 0.42, alpha: 0.34)
     } else {
       fallbackColors = [
-        UIColor(red: 0.95, green: 0.97, blue: 1.0, alpha: 1).cgColor,
-        UIColor(red: 0.89, green: 0.93, blue: 0.98, alpha: 1).cgColor,
-        UIColor(red: 0.84, green: 0.89, blue: 0.96, alpha: 1).cgColor,
+        UIColor(red: 0.98, green: 0.97, blue: 0.95, alpha: 1).cgColor,
+        UIColor(red: 0.93, green: 0.90, blue: 0.86, alpha: 1).cgColor,
+        UIColor(red: 0.89, green: 0.84, blue: 0.80, alpha: 1).cgColor,
       ]
-      clearColor = MTLClearColorMake(0.95, 0.97, 1.0, 1)
-      baseTopColor = CIColor(red: 0.95, green: 0.97, blue: 1.0, alpha: 1)
-      baseBottomColor = CIColor(red: 0.85, green: 0.90, blue: 0.97, alpha: 1)
-      sourceGlowColor = CIColor(red: 0.98, green: 0.80, blue: 0.48, alpha: 0.48)
-      beamGlowColor = CIColor(red: 0.45, green: 0.68, blue: 0.98, alpha: 0.22)
-      textGlowColor = CIColor(red: 1.0, green: 1.0, blue: 1.0, alpha: 0.12)
-      ambientGlowColor = CIColor(red: 0.55, green: 0.70, blue: 0.92, alpha: 0.22)
+      clearColor = MTLClearColorMake(0.98, 0.97, 0.95, 1)
+      baseTopColor = CIColor(red: 0.98, green: 0.97, blue: 0.95, alpha: 1)
+      baseBottomColor = CIColor(red: 0.91, green: 0.88, blue: 0.84, alpha: 1)
+      sourceGlowColor = CIColor(red: 0.92, green: 0.75, blue: 0.58, alpha: 0.58)
+      beamGlowColor = CIColor(red: 0.94, green: 0.87, blue: 0.81, alpha: 0.32)
+      textGlowColor = CIColor(red: 0.99, green: 0.97, blue: 0.93, alpha: 0.26)
+      ambientGlowColor = CIColor(red: 0.86, green: 0.76, blue: 0.70, alpha: 0.28)
+      secondaryAmbientGlowColor = CIColor(red: 0.83, green: 0.67, blue: 0.56, alpha: 0.32)
     }
   }
 }

@@ -61,7 +61,7 @@ final class AuthViewController: UIHostingController<NativeAuthSheetView> {
     viewModel.setDismissHandler { [weak self] completion in
       self?.dismiss(animated: true, completion: completion)
     }
-    modalPresentationStyle = .pageSheet
+    modalPresentationStyle = .automatic
   }
 
   required init?(coder: NSCoder) {
@@ -71,14 +71,15 @@ final class AuthViewController: UIHostingController<NativeAuthSheetView> {
   override func viewDidLoad() {
     super.viewDidLoad()
     configureSheet()
-    view.backgroundColor = .systemBackground
+    view.backgroundColor = NativeAuthSheetTheme.sheetBackgroundUIColor
   }
 
   private func configureSheet() {
     if let sheet = sheetPresentationController {
-      sheet.detents = [.medium(), .large()]
-      sheet.prefersGrabberVisible = true
-      sheet.selectedDetentIdentifier = .medium
+      sheet.detents = [.large()]
+      sheet.prefersGrabberVisible = false
+      sheet.selectedDetentIdentifier = .large
+      sheet.preferredCornerRadius = 24
     }
   }
 }
@@ -299,44 +300,55 @@ struct NativeAuthSheetView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.bottom, 8)
 
-            if model.mode == .signUp {
-              NativeFloatingAuthField(
-                label: "Username",
-                text: $model.username,
-                isSecure: false,
-                textContentType: .username,
-                submitLabel: .go,
-                onSubmit: model.submit
-              )
-            } else {
-              NativeFloatingAuthField(
-                label: "Secret Key",
-                text: $model.secret,
-                isSecure: true,
-                textContentType: .password,
-                submitLabel: .go,
-                onSubmit: model.submit
-              )
+            VStack(spacing: 16) {
+              if model.mode == .signUp {
+                NativeFloatingAuthField(
+                  label: "Username",
+                  text: $model.username,
+                  isSecure: false,
+                  textContentType: .username,
+                  submitLabel: .go,
+                  onSubmit: model.submit
+                )
+              } else {
+                NativeFloatingAuthField(
+                  label: "Secret Key",
+                  text: $model.secret,
+                  isSecure: true,
+                  textContentType: .password,
+                  submitLabel: .go,
+                  onSubmit: model.submit
+                )
+              }
             }
 
-            if let statusText = model.statusText {
-              HStack(spacing: 10) {
-                if model.isLoading {
-                  ProgressView()
-                    .tint(NativeAuthSheetTheme.text)
+            VStack {
+              if let statusText = model.statusText {
+                HStack(spacing: 10) {
+                  if model.isLoading {
+                    ProgressView()
+                      .tint(NativeAuthSheetTheme.text)
+                      .scaleEffect(0.9)
+                  }
+                  Text(statusText)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(NativeAuthSheetTheme.muted)
+                  Spacer()
                 }
-                Text(statusText)
-                  .font(.footnote.weight(.medium))
-                  .foregroundStyle(NativeAuthSheetTheme.muted)
+                .padding(12)
+                .background(NativeAuthSheetTheme.statusFill)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
               }
-              .frame(maxWidth: .infinity, alignment: .leading)
             }
+            .frame(height: 48)
+            .animation(.spring(response: 0.3, dampingFraction: 0.7), value: model.statusText)
 
             Button(action: model.submit) {
               HStack(spacing: 10) {
                 if model.isLoading {
                   ProgressView()
                     .tint(NativeAuthSheetTheme.primaryForeground)
+                    .scaleEffect(0.9)
                 }
                 Text(model.mode.buttonTitle)
                   .font(.system(size: 16, weight: .semibold))
@@ -350,7 +362,7 @@ struct NativeAuthSheetView: View {
           .padding(.vertical, 24)
         }
       }
-      .background(NativeAuthSheetTheme.background.ignoresSafeArea())
+      .background(NativeAuthSheetTheme.pageBackground.ignoresSafeArea())
       .navigationTitle(model.mode.titleText)
       .navigationBarTitleDisplayMode(.inline)
       .toolbar {
@@ -365,6 +377,7 @@ struct NativeAuthSheetView: View {
           .disabled(model.isLoading)
         }
       }
+      .modifier(NativeAuthNavigationChrome())
     }
     .navigationViewStyle(.stack)
     .interactiveDismissDisabled(model.isLoading)
@@ -437,13 +450,13 @@ private struct NativeFloatingAuthField: View {
       }
     }
     .padding(.horizontal, 16)
-    .frame(height: 56)
-    .background(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
-        .fill(NativeAuthSheetTheme.controlFill)
-    )
+    .frame(height: NativeAuthSheetTheme.controlHeight)
+    .background(Color.clear)
     .overlay(
-      RoundedRectangle(cornerRadius: 16, style: .continuous)
+      RoundedRectangle(
+        cornerRadius: NativeAuthSheetTheme.controlCornerRadius,
+        style: .continuous
+      )
         .stroke(
           isFocused ? NativeAuthSheetTheme.borderFocused : NativeAuthSheetTheme.border,
           lineWidth: isFocused ? 1.2 : 1
@@ -460,17 +473,28 @@ private struct NativeAuthPrimaryButtonStyle: ButtonStyle {
       .font(.system(size: 16, weight: .semibold))
       .foregroundStyle(NativeAuthSheetTheme.primaryForeground)
       .frame(maxWidth: .infinity)
-      .frame(height: 56)
-      .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+      .frame(height: NativeAuthSheetTheme.controlHeight)
+      .contentShape(
+        RoundedRectangle(
+          cornerRadius: NativeAuthSheetTheme.controlCornerRadius,
+          style: .continuous
+        )
+      )
       .background(
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
+        RoundedRectangle(
+          cornerRadius: NativeAuthSheetTheme.controlCornerRadius,
+          style: .continuous
+        )
           .fill(configuration.isPressed ? NativeAuthSheetTheme.primaryFillPressed : NativeAuthSheetTheme.primaryFill)
+          .overlay(
+            RoundedRectangle(
+              cornerRadius: NativeAuthSheetTheme.controlCornerRadius,
+              style: .continuous
+            )
+              .stroke(NativeAuthSheetTheme.border.opacity(0.45), lineWidth: 1)
+          )
       )
-      .overlay(
-        RoundedRectangle(cornerRadius: 16, style: .continuous)
-          .stroke(NativeAuthSheetTheme.primaryBorder, lineWidth: 1)
-      )
-      .opacity(isEnabled ? 1.0 : 0.72)
+      .opacity(isEnabled ? 1.0 : 0.78)
       .scaleEffect(configuration.isPressed && isEnabled ? 0.985 : 1.0)
       .animation(.easeOut(duration: 0.14), value: configuration.isPressed)
   }
@@ -489,18 +513,55 @@ private struct NativeAuthDismissButtonStyle: ButtonStyle {
   }
 }
 
+private struct NativeAuthNavigationChrome: ViewModifier {
+  func body(content: Content) -> some View {
+    if #available(iOS 16.0, *) {
+      content
+        .toolbarBackground(NativeAuthSheetTheme.sheetBackground, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+    } else {
+      content
+    }
+  }
+}
+
 private enum NativeAuthSheetTheme {
-  static var background: Color { Color(uiColor: .systemBackground) }
-  static var text: Color { Color(uiColor: .label) }
-  static var muted: Color { Color(uiColor: .secondaryLabel) }
-  static var fieldText: Color { Color(uiColor: .label) }
-  static var controlFill: Color { Color(uiColor: .secondarySystemBackground) }
-  static var border: Color { Color(uiColor: .separator).opacity(0.72) }
-  static var borderFocused: Color { Color(uiColor: .label).opacity(0.62) }
-  static var primaryFill: Color { Color(uiColor: .label) }
-  static var primaryFillPressed: Color { Color(uiColor: .label).opacity(0.82) }
-  static var primaryForeground: Color { Color(uiColor: .systemBackground) }
-  static var primaryBorder: Color { Color(uiColor: .separator).opacity(0.3) }
+  static let controlHeight: CGFloat = 52
+  static let controlCornerRadius: CGFloat = 26
+
+  static let pageBackgroundUIColor = dynamicUIColor(light: hex(0xFFFFFF), dark: hex(0x1E1E1E))
+  static let sheetBackgroundUIColor = dynamicUIColor(light: hex(0xFFFFFF), dark: hex(0x1C1C1E))
+
+  static var pageBackground: Color { Color(uiColor: pageBackgroundUIColor) }
+  static var sheetBackground: Color { Color(uiColor: sheetBackgroundUIColor) }
+  static var text: Color { dynamicColor(light: hex(0x000000), dark: hex(0xF5F5F7)) }
+  static var muted: Color { dynamicColor(light: hex(0x8E8E93), dark: hex(0x8E8E93)) }
+  static var fieldText: Color { dynamicColor(light: hex(0x000000), dark: hex(0xF5F5F7)) }
+  static var border: Color { dynamicColor(light: hex(0xD1D1D6), dark: hex(0x38383A)) }
+  static var borderFocused: Color { dynamicColor(light: hex(0x8E8E93), dark: hex(0x545458)) }
+  static var primaryFill: Color { dynamicColor(light: hex(0x1D1D1F), dark: hex(0xF5F5F7)) }
+  static var primaryFillPressed: Color { dynamicColor(light: hex(0x000000), dark: hex(0xD1D1D6)) }
+  static var primaryForeground: Color { dynamicColor(light: hex(0xFFFFFF), dark: hex(0x000000)) }
+  static var statusFill: Color { dynamicColor(light: hex(0xF2F2F7), dark: hex(0x2C2C2E)) }
+
+  private static func dynamicColor(light: UIColor, dark: UIColor) -> Color {
+    Color(uiColor: dynamicUIColor(light: light, dark: dark))
+  }
+
+  private static func dynamicUIColor(light: UIColor, dark: UIColor) -> UIColor {
+    UIColor { traits in
+      traits.userInterfaceStyle == .dark ? dark : light
+    }
+  }
+
+  private static func hex(_ value: UInt, alpha: CGFloat = 1.0) -> UIColor {
+    UIColor(
+      red: CGFloat((value >> 16) & 0xFF) / 255.0,
+      green: CGFloat((value >> 8) & 0xFF) / 255.0,
+      blue: CGFloat(value & 0xFF) / 255.0,
+      alpha: alpha
+    )
+  }
 }
 
 private struct NativeAuthResponse: Decodable {

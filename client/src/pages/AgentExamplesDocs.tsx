@@ -8,7 +8,6 @@ import {
     DocCallout,
     DocCodeBlock,
     DocCodeTabs,
-    DocParamTable,
     DocList,
     DocSteps,
 } from '../components/docs/DocComponents';
