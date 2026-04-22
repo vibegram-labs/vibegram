@@ -12,8 +12,11 @@
 		1EA97DF15AD85BA18CDC817C /* ChatHomeCardCell.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7650C36AD9B2E9A56F397226 /* ChatHomeCardCell.swift */; };
 		225B44916B95562AE2745D41 /* ChatEngineStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8B45884E90DF4893406313CF /* ChatEngineStore.swift */; };
 		2BFC94AE09D4AC88B6B56F51 /* AuthViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = AA7CDE7484C711D2F7EDEAEA /* AuthViewController.swift */; };
+		4786B53574D013A068719A5A /* PacketRuntime.swift in Sources */ = {isa = PBXBuildFile; fileRef = B038D41F0322F2B2DE42260F /* PacketRuntime.swift */; };
 		55D2BB40370468CB242333E9 /* WelcomeViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 65EA3037B88F594799DC5DE5 /* WelcomeViewController.swift */; };
 		64C59B622685F652AAA63712 /* ChatHomeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = DE295B6B9A24463008A3BDD7 /* ChatHomeService.swift */; };
+		7730224BACF4052A8D8931FE /* PacketBootstrapService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5313D3693EED4E59300EF584 /* PacketBootstrapService.swift */; };
+		9699723DB4851556C614BB55 /* PacketModels.swift in Sources */ = {isa = PBXBuildFile; fileRef = 105F417B0F0E94309D44BABA /* PacketModels.swift */; };
 		C6389EFB3A26025807BB829E /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = C849E2FC04325A33DBD9A9D5 /* AppDelegate.swift */; };
 		D615AA9C6418E0DF034F350D /* ChatHomeUndoBannerView.swift in Sources */ = {isa = PBXBuildFile; fileRef = D32E4E831DD2A0B3CAEF1A82 /* ChatHomeUndoBannerView.swift */; };
 		DBEDD11EA19CBB1755CD6083 /* AppSessionConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = 30C7C11C298B1C883985B199 /* AppSessionConfig.swift */; };
@@ -21,14 +24,18 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		105F417B0F0E94309D44BABA /* PacketModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketModels.swift; sourceTree = "<group>"; };
 		1E631A9B333888CF20B307A9 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist; path = Info.plist; sourceTree = "<group>"; };
 		30C7C11C298B1C883985B199 /* AppSessionConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppSessionConfig.swift; sourceTree = "<group>"; };
+		4589748480CA580517B41F11 /* Packet-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Packet-Bridging-Header.h"; sourceTree = "<group>"; };
+		5313D3693EED4E59300EF584 /* PacketBootstrapService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketBootstrapService.swift; sourceTree = "<group>"; };
 		65D6DA373DCCA10C201041BF /* ChatHomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatHomeViewController.swift; sourceTree = "<group>"; };
 		65EA3037B88F594799DC5DE5 /* WelcomeViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeViewController.swift; sourceTree = "<group>"; };
 		7650C36AD9B2E9A56F397226 /* ChatHomeCardCell.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatHomeCardCell.swift; sourceTree = "<group>"; };
 		8B45884E90DF4893406313CF /* ChatEngineStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatEngineStore.swift; sourceTree = "<group>"; };
-		8DB8DC56085482FCD2C13CA8 /* Vibe.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = Vibe.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		8DB8DC56085482FCD2C13CA8 /* Vibe.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Vibe.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		AA7CDE7484C711D2F7EDEAEA /* AuthViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AuthViewController.swift; sourceTree = "<group>"; };
+		B038D41F0322F2B2DE42260F /* PacketRuntime.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PacketRuntime.swift; sourceTree = "<group>"; };
 		C847DD6581E6CD2A2D167BEC /* SecureKeyStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SecureKeyStore.swift; sourceTree = "<group>"; };
 		C849E2FC04325A33DBD9A9D5 /* AppDelegate.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		CBB417167A12CD8F67C5EE13 /* ChatHomeListModels.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ChatHomeListModels.swift; sourceTree = "<group>"; };
@@ -44,6 +51,17 @@
 				C847DD6581E6CD2A2D167BEC /* SecureKeyStore.swift */,
 			);
 			path = Storage;
+			sourceTree = "<group>";
+		};
+		23CD2D1AC6BE0930014ED444 /* Packet */ = {
+			isa = PBXGroup;
+			children = (
+				4589748480CA580517B41F11 /* Packet-Bridging-Header.h */,
+				5313D3693EED4E59300EF584 /* PacketBootstrapService.swift */,
+				105F417B0F0E94309D44BABA /* PacketModels.swift */,
+				B038D41F0322F2B2DE42260F /* PacketRuntime.swift */,
+			);
+			path = Packet;
 			sourceTree = "<group>";
 		};
 		2BC3B52EEDA7A3851A526011 /* Home */ = {
@@ -90,6 +108,7 @@
 			children = (
 				7260F98D9294A438FBC151ED /* App */,
 				2BC3B52EEDA7A3851A526011 /* Home */,
+				23CD2D1AC6BE0930014ED444 /* Packet */,
 				18D62045E8840B67F88B915A /* Storage */,
 			);
 			path = Sources;
@@ -132,8 +151,6 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = YES;
 				LastUpgradeCheck = 1430;
-				TargetAttributes = {
-				};
 			};
 			buildConfigurationList = 786451589CA6F2DAC0B262E7 /* Build configuration list for PBXProject "Vibe" */;
 			developmentRegion = en;
@@ -168,6 +185,9 @@
 				64C59B622685F652AAA63712 /* ChatHomeService.swift in Sources */,
 				D615AA9C6418E0DF034F350D /* ChatHomeUndoBannerView.swift in Sources */,
 				F1B70FB8A309F1E21B77D0E6 /* ChatHomeViewController.swift in Sources */,
+				7730224BACF4052A8D8931FE /* PacketBootstrapService.swift in Sources */,
+				9699723DB4851556C614BB55 /* PacketModels.swift in Sources */,
+				4786B53574D013A068719A5A /* PacketRuntime.swift in Sources */,
 				1286509FDB5E7C5CA1CB198B /* SecureKeyStore.swift in Sources */,
 				55D2BB40370468CB242333E9 /* WelcomeViewController.swift in Sources */,
 			);
@@ -228,15 +248,28 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
 				MTL_FAST_MATH = YES;
 				ONLY_ACTIVE_ARCH = YES;
+				"OTHER_LDFLAGS[sdk=iphoneos*][arch=arm64]" = (
+					"$(SRCROOT)/Vendor/Packet/ios-arm64/libphantom_client.a",
+					"-lresolv",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*][arch=arm64]" = (
+					"$(SRCROOT)/Vendor/Packet/ios-sim-arm64/libphantom_client.a",
+					"-lresolv",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*][arch=x86_64]" = (
+					"$(SRCROOT)/Vendor/Packet/ios-sim-x86_64/libphantom_client.a",
+					"-lresolv",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.mohammadshayani.vibe.native;
 				PRODUCT_NAME = Vibe;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Packet/Packet-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
 				SWIFT_VERSION = 5.1;
 			};
@@ -247,8 +280,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = BXY4DH6H7D;
 				INFOPLIST_FILE = App/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
@@ -304,14 +338,27 @@
 				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
 				GCC_WARN_UNUSED_FUNCTION = YES;
 				GCC_WARN_UNUSED_VARIABLE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				MARKETING_VERSION = 1.0.0;
 				MTL_ENABLE_DEBUG_INFO = NO;
 				MTL_FAST_MATH = YES;
+				"OTHER_LDFLAGS[sdk=iphoneos*][arch=arm64]" = (
+					"$(SRCROOT)/Vendor/Packet/ios-arm64/libphantom_client.a",
+					"-lresolv",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*][arch=arm64]" = (
+					"$(SRCROOT)/Vendor/Packet/ios-sim-arm64/libphantom_client.a",
+					"-lresolv",
+				);
+				"OTHER_LDFLAGS[sdk=iphonesimulator*][arch=x86_64]" = (
+					"$(SRCROOT)/Vendor/Packet/ios-sim-x86_64/libphantom_client.a",
+					"-lresolv",
+				);
 				PRODUCT_BUNDLE_IDENTIFIER = com.mohammadshayani.vibe.native;
 				PRODUCT_NAME = Vibe;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OBJC_BRIDGING_HEADER = "Sources/Packet/Packet-Bridging-Header.h";
 				SWIFT_OPTIMIZATION_LEVEL = "-O";
 				SWIFT_VERSION = 5.1;
 			};
@@ -322,8 +369,9 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_IDENTITY = "iPhone Developer";
+				DEVELOPMENT_TEAM = BXY4DH6H7D;
 				INFOPLIST_FILE = App/Info.plist;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				IPHONEOS_DEPLOYMENT_TARGET = 26.0;
 				LD_RUNPATH_SEARCH_PATHS = (
 					"$(inherited)",
 					"@executable_path/Frameworks",
