@@ -66,8 +66,15 @@ enum ChatHomeService {
   }
 
   private static func shouldAttemptPacketFallback(for error: Error) -> Bool {
-    if case let ChatHomeServiceError.http(statusCode, _) = error as? ChatHomeServiceError {
-      return statusCode >= 500
+    if let homeError = error as? ChatHomeServiceError {
+      switch homeError {
+      case let .http(statusCode, _):
+        return statusCode >= 500
+      case .transportUnavailable:
+        return false
+      default:
+        return true
+      }
     }
     return true
   }

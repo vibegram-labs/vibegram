@@ -1300,8 +1300,12 @@ final class ChatEngine {
     guard supportedTypes.contains(type) else {
       return ["accepted": false, "reason": "unsupported_type", "type": type]
     }
-    if syncOnQueue({ isBridgeTextModeLocked() && type != "text" }) {
+    let transportMode = syncOnQueue { transportModeLocked() }
+    if transportMode == "bridge_text" && type != "text" {
       return ["accepted": false, "reason": "media_disabled_in_blackout", "type": type]
+    }
+    if transportMode == "packet_mesh", !["text", "voice", "image"].contains(type) {
+      return ["accepted": false, "reason": "type_disabled_in_packet_mesh", "type": type]
     }
 
     let metadataValue: (String, [String]) -> Any? = { key, aliases in
@@ -3962,9 +3966,9 @@ final class ChatEngine {
       ).lowercased()
     switch mode {
     case "packet_mesh", "bridge_text", "offline":
-      return mode ?? "direct"
+      return mode ?? "packet_mesh"
     default:
-      return "direct"
+      return "packet_mesh"
     }
   }
 
@@ -3997,7 +4001,7 @@ final class ChatEngine {
   private func disableCallsLocked(config: [String: Any]? = nil) -> Bool {
     let resolvedConfig = config ?? store.getConfig()
     return parseBooleanLike(resolvedConfig["disableCalls"])
-      ?? isBridgeTextModeLocked(config: resolvedConfig)
+      ?? ["bridge_text", "packet_mesh"].contains(transportModeLocked(config: resolvedConfig))
   }
 
   private func disableRemoteAvatarsLocked(config: [String: Any]? = nil) -> Bool {
@@ -5322,8 +5326,129 @@ final class ChatEngine {
     let reason: String?
   }
 
+  private struct PreparedLocalMediaUpload {
+    let fileData: Data
+    let fileName: String
+    let mimeType: String
+
+    var fileSize: Int64 {
+      Int64(fileData.count)
+    }
+  }
+
+  private let packetMeshMaxVoiceUploadBytes = 2 * 1024 * 1024
+  private let packetMeshMaxImageUploadBytes = 384 * 1024
+  private let packetMeshImageMaxDimensions: [CGFloat] = [1440, 1280, 960, 768]
+  private let packetMeshImageQualities: [CGFloat] = [0.82, 0.72, 0.62, 0.52, 0.45]
+
   private func isLocalMediaURI(_ raw: String) -> Bool {
     raw.hasPrefix("file://") || raw.hasPrefix("/") || raw.hasPrefix("content://")
+  }
+
+  private func prepareLocalMediaUploadLocked(
+    fileData: Data,
+    normalizedURL: URL,
+    messageType: String,
+    fileNameHint: String?
+  ) -> Result<PreparedLocalMediaUpload, String> {
+    let resolvedFileName = fileNameHint ?? normalizedURL.lastPathComponent
+    let transportMode = syncOnQueue { transportModeLocked() }
+
+    if transportMode != "packet_mesh" {
+      return .success(
+        PreparedLocalMediaUpload(
+          fileData: fileData,
+          fileName: resolvedFileName,
+          mimeType: mediaMimeType(fileName: resolvedFileName, fallbackType: messageType)
+        )
+      )
+    }
+
+    switch messageType {
+    case "voice":
+      guard fileData.count <= packetMeshMaxVoiceUploadBytes else {
+        return .failure("packet_mesh_voice_too_large")
+      }
+      return .success(
+        PreparedLocalMediaUpload(
+          fileData: fileData,
+          fileName: resolvedFileName,
+          mimeType: mediaMimeType(fileName: resolvedFileName, fallbackType: messageType)
+        )
+      )
+    case "image":
+      return preparePacketMeshImageUploadLocked(
+        fileData: fileData,
+        normalizedURL: normalizedURL,
+        fileNameHint: fileNameHint
+      )
+    default:
+      return .failure("packet_mesh_type_blocked")
+    }
+  }
+
+  private func preparePacketMeshImageUploadLocked(
+    fileData: Data,
+    normalizedURL: URL,
+    fileNameHint: String?
+  ) -> Result<PreparedLocalMediaUpload, String> {
+    guard let image = UIImage(data: fileData) else {
+      return .failure("packet_mesh_image_decode_failed")
+    }
+
+    let rawBaseName = (
+      fileNameHint?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+      ? fileNameHint!
+      : normalizedURL.deletingPathExtension().lastPathComponent
+    ).trimmingCharacters(in: .whitespacesAndNewlines)
+    let strippedBaseName = (rawBaseName as NSString).deletingPathExtension
+    let baseName = strippedBaseName.isEmpty ? "packet-image" : strippedBaseName
+
+    for maxDimension in packetMeshImageMaxDimensions {
+      guard let renderedImage = packetMeshRenderedImage(image, maxDimension: maxDimension) else {
+        continue
+      }
+      for quality in packetMeshImageQualities {
+        guard let jpegData = renderedImage.jpegData(compressionQuality: quality) else {
+          continue
+        }
+        if jpegData.count <= packetMeshMaxImageUploadBytes {
+          return .success(
+            PreparedLocalMediaUpload(
+              fileData: jpegData,
+              fileName: "\(baseName).jpg",
+              mimeType: "image/jpeg"
+            )
+          )
+        }
+      }
+    }
+
+    return .failure("packet_mesh_image_too_large")
+  }
+
+  private func packetMeshRenderedImage(_ image: UIImage, maxDimension: CGFloat) -> UIImage? {
+    let sourceSize = image.size
+    guard sourceSize.width > 0, sourceSize.height > 0 else {
+      return nil
+    }
+
+    let longestSide = max(sourceSize.width, sourceSize.height)
+    let scale = min(1.0, maxDimension / longestSide)
+    let targetSize = CGSize(
+      width: max(1.0, floor(sourceSize.width * scale)),
+      height: max(1.0, floor(sourceSize.height * scale))
+    )
+
+    let format = UIGraphicsImageRendererFormat.default()
+    format.scale = 1
+    format.opaque = true
+
+    return UIGraphicsImageRenderer(size: targetSize, format: format).image { context in
+      UIColor.white.setFill()
+      context.fill(CGRect(origin: .zero, size: targetSize))
+      image.draw(in: CGRect(origin: .zero, size: targetSize))
+    }
   }
 
   private func uploadCategory(for messageType: String) -> String {
@@ -5480,9 +5605,21 @@ final class ChatEngine {
     } catch {
       return LocalMediaUploadOutcome(result: nil, reason: "media_file_read_failed")
     }
-    let originalFileSize = Int64(fileData.count)
-    let resolvedFileName = fileNameHint ?? normalizedURL.lastPathComponent
-    let resolvedMimeType = mediaMimeType(fileName: resolvedFileName, fallbackType: messageType)
+    let preparedUpload: PreparedLocalMediaUpload
+    switch prepareLocalMediaUploadLocked(
+      fileData: fileData,
+      normalizedURL: normalizedURL,
+      messageType: messageType,
+      fileNameHint: fileNameHint
+    ) {
+    case .success(let value):
+      preparedUpload = value
+    case .failure(let reason):
+      return LocalMediaUploadOutcome(result: nil, reason: reason)
+    }
+    let preparedFileSize = preparedUpload.fileSize
+    let resolvedFileName = preparedUpload.fileName
+    let resolvedMimeType = preparedUpload.mimeType
     let uploadType = uploadCategory(for: messageType)
     guard let uploadURL = resolveUploadURL(apiBase: apiBase) else {
       return LocalMediaUploadOutcome(result: nil, reason: "invalid_upload_url")
@@ -5491,14 +5628,14 @@ final class ChatEngine {
     let mediaKey: String?
     if shouldEncryptUploadedMediaType(messageType) {
       do {
-        let encrypted = try chatEngineEncryptMediaData(fileData)
+        let encrypted = try chatEngineEncryptMediaData(preparedUpload.fileData)
         uploadFileData = encrypted.encryptedData
         mediaKey = encrypted.keyBase64
       } catch {
         return LocalMediaUploadOutcome(result: nil, reason: "media_encrypt_failed")
       }
     } else {
-      uploadFileData = fileData
+      uploadFileData = preparedUpload.fileData
       mediaKey = nil
     }
 
@@ -5589,7 +5726,7 @@ final class ChatEngine {
       result: LocalMediaUploadResult(
         remoteUrl: remoteUrl,
         fileName: resolvedFileName,
-        fileSize: originalFileSize,
+        fileSize: preparedFileSize,
         mediaKey: mediaKey),
       reason: nil
     )
@@ -6368,6 +6505,7 @@ final class ChatEngine {
 
       let type = normalizedString(payload["type"])?.lowercased() ?? "text"
       let text = normalizedString(payload["text"]) ?? ""
+      let transportMode = transportModeLocked()
       let messageId =
         normalizedString(payload["messageId"] ?? payload["message_id"] ?? payload["id"])
         ?? UUID().uuidString.lowercased()
@@ -6408,6 +6546,18 @@ final class ChatEngine {
 
       if type == "text" && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         DispatchQueue.main.async { completion(["success": false, "reason": "empty_text"]) }
+        return
+      }
+      if transportMode == "bridge_text" && type != "text" {
+        DispatchQueue.main.async {
+          completion(["success": false, "reason": "media_disabled_in_blackout", "type": type])
+        }
+        return
+      }
+      if transportMode == "packet_mesh" && !["text", "voice", "image"].contains(type) {
+        DispatchQueue.main.async {
+          completion(["success": false, "reason": "type_disabled_in_packet_mesh", "type": type])
+        }
         return
       }
 

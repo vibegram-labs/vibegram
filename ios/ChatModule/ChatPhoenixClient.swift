@@ -382,7 +382,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   static func makeURLSessionConfiguration(proxyConfig: ChatProxyConfiguration? = nil) -> URLSessionConfiguration {
     let config = URLSessionConfiguration.default
     config.tlsMinimumSupportedProtocolVersion = .TLSv12
-    if let proxyConfig {
+    if let proxyConfig = resolvedProxyConfiguration(from: proxyConfig) {
       config.connectionProxyDictionary = [
         kCFNetworkProxiesSOCKSEnable as String: 1,
         kCFNetworkProxiesSOCKSProxy as String: proxyConfig.host,
@@ -390,6 +390,40 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
       ]
     }
     return config
+  }
+
+  private static func resolvedProxyConfiguration(
+    from explicitProxyConfig: ChatProxyConfiguration?
+  ) -> ChatProxyConfiguration? {
+    if let explicitProxyConfig {
+      return explicitProxyConfig
+    }
+
+    let config = ChatEngineStore.shared.getConfig()
+    let transportMode =
+      (config["transportMode"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .lowercased()
+      ?? PacketTransportMode.packetMesh.rawValue
+    guard transportMode == PacketTransportMode.packetMesh.rawValue else {
+      return nil
+    }
+
+    let rawHost = (config["packetProxyHost"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    let host = (rawHost?.isEmpty == false) ? rawHost! : "127.0.0.1"
+
+    if let port = (config["packetProxyPort"] as? NSNumber)?.intValue, port > 0 {
+      return ChatProxyConfiguration(host: host, port: port)
+    }
+    if let rawPort = (config["packetProxyPort"] as? String)?
+      .trimmingCharacters(in: .whitespacesAndNewlines),
+      let port = Int(rawPort),
+      port > 0
+    {
+      return ChatProxyConfiguration(host: host, port: port)
+    }
+    return nil
   }
 }
 

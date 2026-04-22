@@ -58,12 +58,27 @@ coverage/
 
 # Android Build Artifacts
 .gradle-local/
+android/.gradle/
 mobile/.local-build-artifacts/
+legacy/mobile-rn/.local-build-artifacts/
+legacy/mobile-rn/modules/vibe-chat-native/android/.gradle/
 *.apk
 *.aab
 *.apks
 *.jar
 *.keystore
+
+# Xcode user state
+*.xcuserstate
+ios/Vibe.xcodeproj/project.xcworkspace/xcuserdata/
+ios/Vibe.xcodeproj/xcuserdata/
+
+# Elixir build outputs
+server/_build/
+
+# Local patch scratch files
+tmp_trade_agent_bridge.patch
+tmp_trade_patch/
 
 # Misc
 *.tgz

@@ -8,7 +8,7 @@ enum PacketTransportMode: String {
 
   init(_ rawValue: Any?) {
     let normalized = (rawValue as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-    self = PacketTransportMode(rawValue: normalized ?? "") ?? .direct
+    self = PacketTransportMode(rawValue: normalized ?? "") ?? .packetMesh
   }
 }
 

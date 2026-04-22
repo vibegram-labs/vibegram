@@ -113,7 +113,7 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
   /// happen asynchronously inside chatMediaPrefetch.
   private func prefetchMediaForRows(start: Int, end: Int) {
     let transportStatus = ChatEngine.shared.getTransportStatus()
-    let transportMode = (transportStatus["transportMode"] as? String) ?? "direct"
+    let transportMode = (transportStatus["transportMode"] as? String) ?? "packet_mesh"
     let disableMedia = (transportStatus["disableMedia"] as? Bool) ?? false
     if transportMode == "bridge_text" || disableMedia {
       return
@@ -137,7 +137,7 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
 
   private func prefetchAvatars() {
     let transportStatus = ChatEngine.shared.getTransportStatus()
-    let transportMode = (transportStatus["transportMode"] as? String) ?? "direct"
+    let transportMode = (transportStatus["transportMode"] as? String) ?? "packet_mesh"
     let disableRemoteAvatars = (transportStatus["disableRemoteAvatars"] as? Bool) ?? false
     if transportMode == "bridge_text" || disableRemoteAvatars {
       return

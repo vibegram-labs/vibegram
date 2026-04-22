@@ -242,7 +242,7 @@ final class ChatNativeNewChatViewController: UIViewController,
     super.viewDidLoad()
     configureLayout()
     configureAppearance()
-    if ((ChatEngine.shared.getTransportStatus()["transportMode"] as? String) ?? "direct")
+    if ((ChatEngine.shared.getTransportStatus()["transportMode"] as? String) ?? "packet_mesh")
       == "bridge_text"
     {
       searchBar.isUserInteractionEnabled = false
@@ -255,7 +255,7 @@ final class ChatNativeNewChatViewController: UIViewController,
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
-    if ((ChatEngine.shared.getTransportStatus()["transportMode"] as? String) ?? "direct")
+    if ((ChatEngine.shared.getTransportStatus()["transportMode"] as? String) ?? "packet_mesh")
       == "bridge_text"
     {
       return

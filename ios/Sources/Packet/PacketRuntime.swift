@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import Security
 
@@ -50,9 +49,9 @@ final class PacketRuntime {
     let configuration = URLSessionConfiguration.default
     configuration.timeoutIntervalForRequest = 30
     configuration.connectionProxyDictionary = [
-      kCFNetworkProxiesSOCKSEnable as String: 1,
-      kCFNetworkProxiesSOCKSProxy as String: snapshot.proxyHost,
-      kCFNetworkProxiesSOCKSPort as String: snapshot.proxyPort,
+      "SOCKSEnable": 1,
+      "SOCKSProxy": snapshot.proxyHost,
+      "SOCKSPort": snapshot.proxyPort,
     ]
     return URLSession(
       configuration: configuration,

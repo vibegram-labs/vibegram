@@ -3,6 +3,9 @@ package com.mohammadshayani.vibe.home
 import android.content.Context
 import android.os.Handler
 import android.os.Looper
+import com.mohammadshayani.vibe.packet.PacketBootstrapService
+import com.mohammadshayani.vibe.packet.PacketRuntime
+import com.mohammadshayani.vibe.packet.PacketTransportMode
 import com.mohammadshayani.vibe.session.AppSessionConfig
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -32,14 +35,26 @@ object ChatHomeService {
     Thread {
       val result = runCatching {
         val request = buildRequest(config)
-        httpClient.newCall(request).execute().use { response ->
-          if (!response.isSuccessful) {
-            throw IOException(
-              "Request failed with status ${response.code}: ${response.body?.string().orEmpty().take(160)}"
-            )
+        when (config.transportMode) {
+          PacketTransportMode.OFFLINE ->
+            throw IOException("Transport mode offline is not available in the standalone native app.")
+          PacketTransportMode.BRIDGE_TEXT ->
+            throw IOException("Transport mode bridge_text is not available in the standalone native app.")
+          PacketTransportMode.PACKET_MESH -> {
+            val snapshot = PacketRuntime.ensureStarted(context, config)
+            execute(PacketRuntime.buildHttpClient(snapshot), request, context)
           }
-          val body = response.body?.string().orEmpty()
-          parseChatHomeRows(parsePayload(body), context)
+          PacketTransportMode.DIRECT -> {
+            try {
+              val rows = execute(httpClient, request, context)
+              PacketRuntime.stop(context, resetToDirect = true)
+              PacketBootstrapService.prefetchIfNeeded(context, config)
+              rows
+            } catch (_: Throwable) {
+              val snapshot = PacketRuntime.ensureStarted(context, config)
+              execute(PacketRuntime.buildHttpClient(snapshot), request, context)
+            }
+          }
         }
       }
       mainHandler.post { callback(result) }
@@ -57,6 +72,22 @@ object ChatHomeService {
       .header("ngrok-skip-browser-warning", "true")
       .header("Authorization", "Bearer ${config.authToken}")
       .build()
+  }
+
+  private fun execute(
+    client: OkHttpClient,
+    request: Request,
+    context: Context,
+  ): List<ChatHomeListRow> {
+    client.newCall(request).execute().use { response ->
+      if (!response.isSuccessful) {
+        throw IOException(
+          "Request failed with status ${response.code}: ${response.body?.string().orEmpty().take(160)}"
+        )
+      }
+      val body = response.body?.string().orEmpty()
+      return parseChatHomeRows(parsePayload(body), context)
+    }
   }
 
   private fun parsePayload(body: String): List<Map<String, Any?>> {
