@@ -1,0 +1,368 @@
+package expo.modules.vibechatnative
+
+import android.os.Handler
+import android.os.Looper
+import android.util.Log
+import okhttp3.CertificatePinner
+import okhttp3.ConnectionSpec
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import okhttp3.OkHttpClient
+import okhttp3.Request
+import okhttp3.Response
+import okhttp3.TlsVersion
+import okhttp3.WebSocket
+import okhttp3.WebSocketListener
+import org.json.JSONArray
+import org.json.JSONObject
+import java.net.InetSocketAddress
+import java.net.Proxy
+import java.util.concurrent.atomic.AtomicLong
+
+internal data class ChatProxyConfiguration(
+  val host: String,
+  val port: Int,
+)
+
+internal class ChatPhoenixClient(
+  private val socketUrl: String,
+  private val params: Map<String, String>,
+  private val authToken: String? = null,
+  private val proxyConfig: ChatProxyConfiguration? = null,
+  private val callbacks: ChatTransportCallbacks,
+) : ChatRealtimeTransport {
+
+  companion object {
+    private const val TAG = "ChatPhoenixClient"
+
+    /// SPKI SHA-256 hashes for certificate pinning.
+    /// Add your server's leaf cert + at least one backup/intermediate hash.
+    /// Generate with: openssl x509 -in cert.pem -pubkey -noout | openssl pkey -pubin -outform DER | openssl dgst -sha256 -binary | base64
+    /// Set to empty to disable pinning (e.g. during development).
+    var pinnedSPKIHashes: Map<String, List<String>> = mapOf(
+      // "api.vibegram.io" to listOf(
+      //   "u6dScLDuE2TrAks7ct4HDBekXo9byFES6oApqW/pAjQ=",
+      //   "AlSQhgtJirc8ahLyekmtX+Iw+v46yPYRLJt9Cq1GlB0="
+      // )
+    )
+
+    /// Build a pinned OkHttpClient for reuse (e.g. chat history HTTP requests).
+    fun buildPinnedHttpClient(proxyConfig: ChatProxyConfiguration? = null): OkHttpClient {
+      val builder = OkHttpClient.Builder()
+        .connectionSpecs(listOf(
+          ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+            .tlsVersions(TlsVersion.TLS_1_2, TlsVersion.TLS_1_3)
+            .build(),
+        ))
+      if (proxyConfig != null) {
+        builder.proxy(Proxy(Proxy.Type.SOCKS, InetSocketAddress(proxyConfig.host, proxyConfig.port)))
+      }
+      if (pinnedSPKIHashes.isNotEmpty()) {
+        val pinnerBuilder = CertificatePinner.Builder()
+        pinnedSPKIHashes.forEach { (host, hashes) ->
+          hashes.forEach { hash -> pinnerBuilder.add(host, "sha256/$hash") }
+        }
+        builder.certificatePinner(pinnerBuilder.build())
+      }
+      return builder.build()
+    }
+  }
+
+  private val okHttp = buildPinnedHttpClient(proxyConfig)
+  private val refCounter = AtomicLong(1L)
+  private val mainHandler = Handler(Looper.getMainLooper())
+  @Volatile private var webSocket: WebSocket? = null
+  @Volatile private var isClosing = false
+  private var heartbeatRunnable: Runnable? = null
+
+  override fun connect() {
+    val httpUrl = buildUrl() ?: run {
+      Log.e(TAG, "connect aborted: invalid_socket_url raw=${socketUrl.take(200)}")
+      callbacks.onError("invalid_socket_url")
+      return
+    }
+    disconnect()
+    isClosing = false
+    // Send auth token as Authorization header instead of URL query parameter.
+    val requestBuilder = Request.Builder().url(httpUrl)
+    if (!authToken.isNullOrBlank()) {
+      requestBuilder.header("Authorization", "Bearer $authToken")
+    }
+    val request = requestBuilder.build()
+    Log.i(
+      TAG,
+      "connect start url=${redactedUrl(httpUrl.toString())} hasAuthHeader=${!authToken.isNullOrBlank()} queryKeys=${httpUrl.queryParameterNames.sorted()}",
+    )
+    webSocket = okHttp.newWebSocket(
+      request,
+      object : WebSocketListener() {
+        override fun onOpen(webSocket: WebSocket, response: Response) {
+          Log.i(
+            TAG,
+            "onOpen code=${response.code} message=${response.message} url=${redactedUrl(response.request.url.toString())}",
+          )
+          startHeartbeat()
+          callbacks.onOpen()
+        }
+
+        override fun onMessage(webSocket: WebSocket, text: String) {
+          Log.d(TAG, "onMessage bytes=${text.length} preview=${text.take(220)}")
+          handleMessage(text)
+        }
+
+        override fun onClosing(webSocket: WebSocket, code: Int, reason: String) {
+          Log.w(TAG, "onClosing code=$code reason=$reason")
+          webSocket.close(code, reason)
+        }
+
+        override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
+          Log.w(TAG, "onClosed code=$code reason=$reason isClosing=$isClosing")
+          stopHeartbeat()
+          if (!isClosing) {
+            callbacks.onClosed(code, reason)
+          }
+        }
+
+        override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
+          Log.e(
+            TAG,
+            "onFailure error=${t.message ?: t.javaClass.simpleName} code=${response?.code ?: -1} responseMessage=${response?.message ?: "-"} url=${response?.request?.url?.toString()?.let(::redactedUrl) ?: "-"}",
+            t,
+          )
+          stopHeartbeat()
+          if (!isClosing) {
+            callbacks.onError("ws_failure:${t.message ?: t.javaClass.simpleName}")
+            callbacks.onClosed(-1, t.message)
+          }
+        }
+      },
+    )
+  }
+
+  override fun disconnect() {
+    Log.i(TAG, "disconnect requested hasSocket=${webSocket != null}")
+    isClosing = true
+    stopHeartbeat()
+    webSocket?.close(1000, "client_disconnect")
+    webSocket = null
+  }
+
+  override fun join(topic: String, payload: Map<String, Any?>): String {
+    val ref = nextRef()
+    sendFrame(joinRef = ref, ref = ref, topic = topic, event = "phx_join", payload = payload)
+    return ref
+  }
+
+  override fun leave(topic: String): String {
+    val ref = nextRef()
+    sendFrame(joinRef = ref, ref = ref, topic = topic, event = "phx_leave", payload = emptyMap())
+    return ref
+  }
+
+  override fun push(topic: String, event: String, payload: Map<String, Any?>): String {
+    val ref = nextRef()
+    sendFrame(joinRef = null, ref = ref, topic = topic, event = event, payload = payload)
+    return ref
+  }
+
+  private fun nextRef(): String = refCounter.getAndIncrement().toString()
+
+  private fun buildUrl(): okhttp3.HttpUrl? {
+    val raw = socketUrl.trim()
+    if (raw.isEmpty()) return null
+
+    val normalizedForHttpUrl = when {
+      raw.startsWith("wss://", ignoreCase = true) ->
+        "https://" + raw.substring(6)
+      raw.startsWith("ws://", ignoreCase = true) ->
+        "http://" + raw.substring(5)
+      raw.startsWith("http://", ignoreCase = true) || raw.startsWith("https://", ignoreCase = true) ->
+        raw
+      else ->
+        "https://$raw"
+    }
+
+    val baseUrl = normalizedForHttpUrl.toHttpUrlOrNull() ?: return null
+    return baseUrl.newBuilder().apply {
+      val segments = baseUrl.pathSegments.filter { it.isNotBlank() }
+      if (segments.isEmpty() || !segments.last().equals("websocket", ignoreCase = true)) {
+        addPathSegment("websocket")
+      }
+      params.forEach { (key, value) ->
+        if (key.isNotBlank()) {
+          removeAllQueryParameters(key)
+          addQueryParameter(key, value)
+        }
+      }
+      if (!authToken.isNullOrBlank()) {
+        removeAllQueryParameters("token")
+        addQueryParameter("token", authToken)
+      }
+    }?.build()
+  }
+
+  private fun startHeartbeat() {
+    stopHeartbeat()
+    val runnable = object : Runnable {
+      override fun run() {
+        if (isClosing || webSocket == null) return
+        sendFrame(
+          joinRef = null,
+          ref = nextRef(),
+          topic = "phoenix",
+          event = "heartbeat",
+          payload = emptyMap(),
+        )
+        mainHandler.postDelayed(this, 25_000L)
+      }
+    }
+    heartbeatRunnable = runnable
+    mainHandler.postDelayed(runnable, 25_000L)
+  }
+
+  private fun stopHeartbeat() {
+    heartbeatRunnable?.let { mainHandler.removeCallbacks(it) }
+    heartbeatRunnable = null
+  }
+
+  private fun sendFrame(
+    joinRef: String?,
+    ref: String?,
+    topic: String,
+    event: String,
+    payload: Map<String, Any?>,
+  ) {
+    val ws = webSocket ?: run {
+      Log.w(TAG, "sendFrame dropped reason=no_socket topic=$topic event=$event ref=${ref ?: "-"} joinRef=${joinRef ?: "-"}")
+      return
+    }
+    val obj = JSONObject()
+    obj.put("topic", topic)
+    obj.put("event", event)
+    obj.put("payload", anyToJson(payload))
+    if (joinRef != null) obj.put("join_ref", joinRef)
+    if (ref != null) obj.put("ref", ref)
+    val body = obj.toString()
+    Log.d(
+      TAG,
+      "sendFrame topic=$topic event=$event ref=${ref ?: "-"} joinRef=${joinRef ?: "-"} bytes=${body.length}",
+    )
+    val ok = ws.send(body)
+    if (!ok) {
+      Log.e(TAG, "sendFrame failed topic=$topic event=$event ref=${ref ?: "-"}")
+      callbacks.onError("send_failed:$event")
+    }
+  }
+
+  private fun handleMessage(text: String) {
+    try {
+      if (text.startsWith("{")) {
+        val obj = JSONObject(text)
+        val topic = obj.optString("topic", "")
+        val event = obj.optString("event", "")
+        if (topic.isBlank() || event.isBlank()) return
+        val payload = (jsonToAny(obj.opt("payload")) as? Map<*, *>)?.entries?.associate { (k, v) ->
+          k?.toString().orEmpty() to v
+        }?.filterKeys { it.isNotBlank() } ?: emptyMap()
+        val joinRef = if (!obj.isNull("join_ref")) obj.optString("join_ref") else null
+        val ref = if (!obj.isNull("ref")) obj.optString("ref") else null
+        callbacks.onEvent(
+          ChatTransportEvent(
+            topic = topic,
+            event = event,
+            payload = payload,
+            ref = ref,
+            joinRef = joinRef,
+          ),
+        )
+        return
+      }
+
+      val arr = JSONArray(text)
+      if (arr.length() < 5) return
+      val topic = arr.optString(2)
+      val event = arr.optString(3)
+      if (topic.isBlank() || event.isBlank()) return
+      val payload = (jsonToAny(arr.opt(4)) as? Map<*, *>)?.entries?.associate { (k, v) ->
+        k?.toString().orEmpty() to v
+      }?.filterKeys { it.isNotBlank() } ?: emptyMap()
+      val joinRef = arr.optNullableString(0)
+      val ref = arr.optNullableString(1)
+      callbacks.onEvent(
+        ChatTransportEvent(
+          topic = topic,
+          event = event,
+          payload = payload,
+          ref = ref,
+          joinRef = joinRef,
+        ),
+      )
+    } catch (_: Throwable) {
+      Log.e(TAG, "handleMessage parse_frame_failed preview=${text.take(220)}")
+      callbacks.onError("parse_frame_failed")
+    }
+  }
+
+  private fun redactedUrl(raw: String): String {
+    val parsed = raw.toHttpUrlOrNull() ?: return raw
+    val rebuilt = parsed.newBuilder().apply {
+      if (parsed.queryParameterNames.contains("token")) {
+        removeAllQueryParameters("token")
+        addQueryParameter("token", "<redacted>")
+      }
+    }.build()
+    return rebuilt.toString()
+  }
+
+  private fun JSONArray.optNullableString(index: Int): String? {
+    if (index < 0 || index >= length()) return null
+    val v = opt(index)
+    return when (v) {
+      null, JSONObject.NULL -> null
+      else -> v.toString().takeIf { it.isNotBlank() }
+    }
+  }
+
+  private fun jsonToAny(value: Any?): Any? =
+    when (value) {
+      null, JSONObject.NULL -> null
+      is JSONObject -> {
+        val out = linkedMapOf<String, Any?>()
+        val keys = value.keys()
+        while (keys.hasNext()) {
+          val key = keys.next()
+          out[key] = jsonToAny(value.opt(key))
+        }
+        out
+      }
+      is JSONArray -> {
+        val out = ArrayList<Any?>(value.length())
+        for (i in 0 until value.length()) out.add(jsonToAny(value.opt(i)))
+        out
+      }
+      else -> value
+    }
+
+  private fun anyToJson(value: Any?): Any =
+    when (value) {
+      null -> JSONObject.NULL
+      is JSONObject, is JSONArray, is Number, is Boolean, is String -> value
+      is Map<*, *> -> {
+        val obj = JSONObject()
+        value.forEach { (k, v) ->
+          if (k != null) obj.put(k.toString(), anyToJson(v))
+        }
+        obj
+      }
+      is Iterable<*> -> {
+        val arr = JSONArray()
+        value.forEach { arr.put(anyToJson(it)) }
+        arr
+      }
+      is Array<*> -> {
+        val arr = JSONArray()
+        value.forEach { arr.put(anyToJson(it)) }
+        arr
+      }
+      else -> value.toString()
+    }
+}

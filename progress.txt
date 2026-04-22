@@ -1,3 +1,16 @@
+2026-04-22
+
+Completed:
+- Finished the native repo extraction for the old `vibe-chat-native` module. The remaining reusable Swift source and resources now live under `ios/ChatModule/`, the remaining reusable Kotlin source and Android resources now live under `android/chat-module/`, and the Expo bridge wrappers/package metadata now live under `legacy/mobile-rn/modules/vibe-chat-native/` instead of `mobile/modules/`.
+- Renamed the extracted top-level native filenames to drop `Native` in the active native roots where practical, e.g. `ChatAgentView.swift`, `ChatHomeListView.swift`, `MusicPlayerStore.swift`, `VibeCallStore.swift`, `ChatHomeListView.kt`, `ChatInputBar.kt`, `CallEngine.kt`, and `VibeCallUiActivity.kt`.
+- Updated `mobile/README.md` and `legacy/README.md` so the repo now documents `mobile/` as shared assets only, `ios/` and `android/` as the active native roots, and `legacy/mobile-rn/modules/vibe-chat-native/` as the archived Expo wrapper layer.
+- Fixed the two final Android shell compile errors discovered during assemble verification: `ChatHomeService.fetchChats(...)` is now `internal` to match `ChatHomeListRow`, and `ChatHomeActivity` now uses Kotlin/Android `localizedMessage` instead of the Swift-only `localizedDescription`.
+- Revalidated the native builds without npm. `xcodebuild -project Vibe.xcodeproj -scheme Vibe -configuration Debug -sdk iphonesimulator -derivedDataPath /tmp/vibe-native-ios-final CODE_SIGNING_ALLOWED=NO build` succeeded and produced `/tmp/vibe-native-ios-final/Build/Products/Debug-iphonesimulator/Vibe.app`. `/Users/mohammadshayani/.gradle/wrapper/dists/gradle-8.14.3-bin/cv11ve7ro1n3o1j4so8xd9n66/gradle-8.14.3/bin/gradle -p android :app:assembleDebug` succeeded outside the sandbox and produced `android/app/build/outputs/apk/debug/app-debug.apk`.
+
+Remaining:
+- The extracted `ios/ChatModule/` and `android/chat-module/` trees are now organized under the native roots, but they are not yet wired into the standalone app targets; the current native shell still compiles only the smaller top-level app/auth/home surface.
+- A later pass is still needed if the hybrid Expo/native files left in `legacy/mobile-rn/modules/vibe-chat-native/ios` should be split further and pulled into the standalone targets instead of remaining archived as wrapper-coupled code.
+
 2026-04-05
 
 Completed:

@@ -1,6 +1,18 @@
 {
-  "updated_at": "2026-04-08",
+  "updated_at": "2026-04-22",
   "checks": {
+    "mobile_native_repo_split": {
+      "status": "passed",
+      "details": "Moved the remaining native implementation out of `mobile/modules/vibe-chat-native/`. Reusable Swift source/resources now live under `ios/ChatModule/`, reusable Kotlin source/resources now live under `android/chat-module/`, and the Expo bridge wrappers/package metadata now live under `legacy/mobile-rn/modules/vibe-chat-native/`."
+    },
+    "ios_native_build_no_npm": {
+      "status": "passed",
+      "details": "Ran `xcodebuild -project Vibe.xcodeproj -scheme Vibe -configuration Debug -sdk iphonesimulator -derivedDataPath /tmp/vibe-native-ios-final CODE_SIGNING_ALLOWED=NO build` from `ios/`. The build succeeded after the native repo split and produced `/tmp/vibe-native-ios-final/Build/Products/Debug-iphonesimulator/Vibe.app`. The only notable output was deprecation warnings for `adjustsImageWhenHighlighted` and `showsTouchWhenHighlighted` in `ios/Sources/Home/ChatHomeCardCell.swift`."
+    },
+    "android_native_build_no_npm": {
+      "status": "passed",
+      "details": "Ran `/Users/mohammadshayani/.gradle/wrapper/dists/gradle-8.14.3-bin/cv11ve7ro1n3o1j4so8xd9n66/gradle-8.14.3/bin/gradle -p android :app:assembleDebug` outside the sandbox so Gradle could fetch the missing Android plugin. Fixed Kotlin compile issues in `android/app/src/main/java/com/mohammadshayani/vibe/home/ChatHomeService.kt` and `android/app/src/main/java/com/mohammadshayani/vibe/ui/ChatHomeActivity.kt`, then re-ran successfully and produced `android/app/build/outputs/apk/debug/app-debug.apk`."
+    },
     "server_connected_app_bridge_tool": {
       "status": "passed",
       "details": "Added `server/lib/vibe/ai/tools/connected_app.ex` plus `call_connected_app` wiring in `server/lib/vibe/ai/agent.ex`, `server/lib/vibe/ai/tool_registry.ex`, `server/lib/vibe/ai/standalone_agent.ex`, and `server/lib/vibe/agents.ex`. Standalone agents can now call a configured app-owned HTTPS endpoint using the integration's existing encrypted secret, with allowed actions sourced from `agent_integrations.routing_rules.connected_app`. `mix compile` passed outside the sandbox and `python3 scripts/test_vibe_trade_notification.py --dry-run` still passed."
