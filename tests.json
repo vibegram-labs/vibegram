@@ -1,6 +1,14 @@
 {
   "updated_at": "2026-04-23",
   "checks": {
+    "repo_native_mobile_design_skill": {
+      "status": "passed",
+      "details": "Added repo-scoped skill files under `.agents/skills/native-mobile-design/` using the current OpenAI Codex skill layout (`SKILL.md`, optional `references/`, optional `agents/openai.yaml`). The skill focuses native UI work on SwiftUI / Kotlin-native APIs, system components, restrained typography, and the local trade-tauri visual direction. Revalidated with `git diff --check -- AGENTS.md .agents/skills/native-mobile-design/SKILL.md .agents/skills/native-mobile-design/references/platform-and-style.md .agents/skills/native-mobile-design/agents/openai.yaml`."
+    },
+    "repo_agents_native_mobile_ui_guidance": {
+      "status": "passed",
+      "details": "Root `AGENTS.md` now includes a `Native Mobile UI` section that directs Codex to use the `native-mobile-design` skill, prefer native platform APIs and system components, keep most authored typography restrained, and avoid messy or over-customized native UI by default. Revalidated with `git diff --check -- AGENTS.md`."
+    },
     "ios_root_chat_route_hashable_conformance": {
       "status": "passed",
       "details": "`PresentedChatRoute` still conforms to `Hashable` in `ios/Sources/App/AppRootView.swift` after the root chat presentation refactor, and `xcrun swiftc -parse ios/Sources/App/AppRootView.swift` still passes."
