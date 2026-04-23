@@ -722,12 +722,15 @@ private struct AppStoryAvatarButton: View {
   let fallback: String
   let palette: AppThemePalette
 
+  private var avatarFallbackText: String {
+    let trimmed = fallback.trimmingCharacters(in: .whitespacesAndNewlines)
+    return String((trimmed.isEmpty ? "U" : trimmed).prefix(1)).uppercased()
+  }
+
   private var avatarImage: UIImage {
     AppRootView.renderCircularTabAvatar(
       source: image,
-      fallback: String(
-        (fallback.nilIfBlank ?? "U").prefix(1)
-      ).uppercased(),
+      fallback: avatarFallbackText,
       size: 28
     )
   }
