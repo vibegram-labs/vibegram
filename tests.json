@@ -1,6 +1,10 @@
 {
   "updated_at": "2026-04-23",
   "checks": {
+    "ios_root_chat_route_hashable_conformance": {
+      "status": "passed",
+      "details": "Fixed the immediate SwiftUI compile follow-up from the new root-level chat route by making `PresentedChatRoute` conform to `Hashable` in `ios/Sources/App/AppRootView.swift`, satisfying `navigationDestination(item:)`. Revalidated with `xcrun swiftc -parse ios/Sources/App/AppRootView.swift`."
+    },
     "ios_root_level_chat_route": {
       "status": "passed",
       "details": "Fixed the remaining standalone iOS app-shell chat presentation regression exposed by `Saved Messages` from `Settings`. `ios/Sources/App/AppRootView.swift` still avoids the crashing root `NavigationStack(path:)` approach, but it now uses a root `NavigationStack` with `navigationDestination(item:)` so chat pages open as a dedicated root-level page above the tab shell instead of as a tab switch or modal/overlay layout. `PresentedChatRoute` remains the single app-shell chat route, `ChatsRootView` rows and the settings `Saved Messages` row both still reuse `coordinator.openChat(...)`, and `ChatConversationController` now prefers the injected close callback so the root route binding clears when the native header back action fires. Revalidated with `xcrun swiftc -parse ios/Sources/App/AppRootView.swift`. A follow-up `xcodebuild -destination 'generic/platform=iOS' ...` rerun is currently blocked in this workspace by the local Xcode/CoreSimulator asset-catalog environment (`No available simulator runtimes for platform iphonesimulator`)."

@@ -70,7 +70,7 @@ struct ChatRoute: Identifiable, Hashable {
   }
 }
 
-struct PresentedChatRoute: Identifiable {
+struct PresentedChatRoute: Identifiable, Hashable {
   let requestID: Int
   let route: ChatRoute
 
