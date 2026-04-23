@@ -140,11 +140,20 @@ struct ChatHomeListRow {
       return nil
     }
     let isSavedMessages = chatId == "saved_messages"
+    let serverMessages = parseServerMessages(raw["messages"])
     let title =
-      normalizedString(raw["name"] ?? raw["title"] ?? raw["chatName"] ?? raw["chat_name"])
+      normalizedString(
+        raw["name"] ?? raw["title"] ?? raw["chatName"] ?? raw["chat_name"] ?? raw["friendName"]
+          ?? raw["friend_name"])
       ?? "Unknown"
-    let preview = normalizedString(raw["preview"] ?? raw["subtitle"]) ?? ""
-    let timeLabel = normalizedString(raw["timeLabel"] ?? raw["time_label"] ?? raw["time"]) ?? ""
+    let preview =
+      normalizedString(raw["preview"] ?? raw["subtitle"])
+      ?? serverMessages.last.map(homePreviewText(from:))
+      ?? ""
+    let timeLabel =
+      normalizedString(raw["timeLabel"] ?? raw["time_label"] ?? raw["time"])
+      ?? serverMessages.last.map(homeTimeLabel(from:))
+      ?? ""
     let unreadCount = parseInt(raw["unreadCount"] ?? raw["unread_count"]) ?? 0
     let markedUnread = parseBool(raw["markedUnread"] ?? raw["marked_unread"]) ?? false
     let muted = parseBool(raw["muted"]) ?? false
@@ -206,6 +215,69 @@ struct ChatHomeListRow {
     }
   }
 
+  static func parseServerMessages(_ value: Any?) -> [[String: Any]] {
+    guard let array = value as? [Any], !array.isEmpty else { return [] }
+    return array.compactMap { item in
+      item as? [String: Any]
+    }.sorted { lhs, rhs in
+      parseTimestamp(lhs) < parseTimestamp(rhs)
+    }
+  }
+
+  static func homePreviewText(from raw: [String: Any]) -> String {
+    if let text = normalizedString(
+      raw["preview"] ?? raw["plainContent"] ?? raw["plain_content"] ?? raw["plaintext"]
+        ?? raw["content"] ?? raw["text"]),
+      !text.isEmpty
+    {
+      return text
+    }
+
+    let type = normalizedString(raw["type"])?.lowercased() ?? "text"
+    let fileName =
+      normalizedString(raw["fileName"] ?? raw["file_name"] ?? raw["name"] ?? raw["title"])
+
+    switch type {
+    case "image":
+      return "Photo"
+    case "video":
+      return "Video"
+    case "voice":
+      return "Voice message"
+    case "music":
+      return "Audio"
+    case "file":
+      return fileName ?? "File"
+    case "location":
+      return "Location"
+    case "contact":
+      return "Contact"
+    case "gif":
+      return "GIF"
+    case "sticker":
+      return "Sticker"
+    default:
+      if normalizedString(raw["mediaUrl"] ?? raw["media_url"]) != nil {
+        return fileName ?? "Attachment"
+      }
+      return "Encrypted message"
+    }
+  }
+
+  static func homeTimeLabel(from raw: [String: Any]) -> String {
+    let timestamp = parseTimestamp(raw)
+    guard timestamp > 0 else { return "" }
+    let date = Date(timeIntervalSince1970: TimeInterval(timestamp) / 1000.0)
+    let calendar = Calendar.current
+    if calendar.isDateInToday(date) {
+      return HomeTimeFormatters.time.string(from: date)
+    }
+    if calendar.isDate(date, equalTo: Date(), toGranularity: .year) {
+      return HomeTimeFormatters.day.string(from: date)
+    }
+    return HomeTimeFormatters.shortDate.string(from: date)
+  }
+
   private static func resolveAvatarURI(rawAvatar: String?, friendId: String?, chatId: String)
     -> String?
   {
@@ -238,6 +310,28 @@ struct ChatHomeListRow {
     return nil
   }
 
+  private static func parseTimestamp(_ raw: [String: Any]) -> Int64 {
+    if let value = raw["timestamp"] as? NSNumber {
+      return value.int64Value
+    }
+    if let value = raw["timestamp_ms"] as? NSNumber {
+      return value.int64Value
+    }
+    if let value = raw["timestampMs"] as? NSNumber {
+      return value.int64Value
+    }
+    if let value = raw["timestamp"] as? String {
+      return Int64(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+    if let value = raw["timestamp_ms"] as? String {
+      return Int64(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+    if let value = raw["timestampMs"] as? String {
+      return Int64(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+    return 0
+  }
+
   private static func parseBool(_ value: Any?) -> Bool? {
     if let value = value as? Bool {
       return value
@@ -257,6 +351,28 @@ struct ChatHomeListRow {
     }
     return nil
   }
+}
+
+private enum HomeTimeFormatters {
+  static let time: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.timeStyle = .short
+    formatter.dateStyle = .none
+    return formatter
+  }()
+
+  static let day: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.setLocalizedDateFormatFromTemplate("EEE")
+    return formatter
+  }()
+
+  static let shortDate: DateFormatter = {
+    let formatter = DateFormatter()
+    formatter.dateStyle = .short
+    formatter.timeStyle = .none
+    return formatter
+  }()
 }
 
 enum ChatHomeSwipeEdge {

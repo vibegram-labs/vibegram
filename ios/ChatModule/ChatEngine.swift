@@ -2641,6 +2641,15 @@ final class ChatEngine {
     }
 
     return syncOnQueue {
+      if chatId == "saved_messages" {
+        pinnedMessagesByChatId[chatId] = []
+        NSLog("[ChatEngine][Pin] getPinnedMessages skip saved_messages")
+        return [
+          "chatId": chatId,
+          "loading": false,
+          "data": [],
+        ]
+      }
       let hasCache = pinnedMessagesByChatId[chatId] != nil
       if !hasCache {
         pinnedMessagesByChatId[chatId] = []
@@ -4975,6 +4984,11 @@ final class ChatEngine {
 
   private func fetchPinnedMessagesLocked(chatId: String, trigger: String) {
     guard !chatId.isEmpty else { return }
+    guard chatId != "saved_messages" else {
+      pinnedMessagesByChatId[chatId] = []
+      NSLog("[ChatEngine][Pin] fetchPinnedMessages skip saved_messages trigger=%@", trigger)
+      return
+    }
     guard !pinnedFetchInFlightChatIds.contains(chatId) else {
       NSLog(
         "[ChatEngine][Pin] fetchPinnedMessages skipped (in-flight) chatId=%@ trigger=%@",
@@ -6784,6 +6798,10 @@ final class ChatEngine {
   func fetchAgentConfig(chatId: String, completion: @escaping ([String: Any]?) -> Void) {
     queue.async { [weak self] in
       guard let self else { return }
+      guard chatId != "saved_messages" else {
+        DispatchQueue.main.async { completion(nil) }
+        return
+      }
       guard let (apiBase, token) = self.requestContext else {
         DispatchQueue.main.async { completion(nil) }
         return

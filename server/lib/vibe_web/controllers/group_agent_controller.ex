@@ -49,18 +49,22 @@ defmodule VibeWeb.GroupAgentController do
   def show(conn, %{"id" => chat_id}) do
     user_id = conn.assigns.current_user.id
 
-    unless Chat.is_participant?(chat_id, user_id) do
+    cond do
+      chat_id == "saved_messages" ->
+        conn |> put_status(:not_found) |> json(%{error: "No agent configured"})
+
+      not Chat.is_participant?(chat_id, user_id) ->
       conn |> put_status(:forbidden) |> json(%{error: "Not a participant"})
-    else
-      can_manage = user_can_manage?(chat_id, user_id)
+      true ->
+        can_manage = user_can_manage?(chat_id, user_id)
 
-      case GroupAgent.get_by_chat(chat_id, acting_user_id: user_id) do
-        nil ->
-          conn |> put_status(404) |> json(%{error: "No agent configured"})
+        case GroupAgent.get_by_chat(chat_id, acting_user_id: user_id) do
+          nil ->
+            conn |> put_status(404) |> json(%{error: "No agent configured"})
 
-        agent ->
-          json(conn, agent_payload(agent, can_manage: can_manage))
-      end
+          agent ->
+            json(conn, agent_payload(agent, can_manage: can_manage))
+        end
     end
   end
 

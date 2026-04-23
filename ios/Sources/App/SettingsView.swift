@@ -38,10 +38,6 @@ struct SettingsView: View {
     return AppThemePalette.resolve(for: colorScheme)
   }
 
-  private var isDark: Bool {
-    colorScheme == .dark
-  }
-
   private var currentProfile: AppUserProfile {
     profileController.profile
       ?? AppUserProfile(
@@ -91,173 +87,96 @@ struct SettingsView: View {
     return parts.joined(separator: " • ")
   }
 
-  private var sections: [SettingsNativeSection] {
-    [
-      SettingsNativeSection(
-        title: "ACCOUNT",
-        rows: [
-          SettingsNativeRow(
-            id: "edit-profile",
-            icon: "person.fill",
-            label: "Edit Profile",
-            detailText: nil,
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemBlue,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "saved-messages",
-            icon: "bookmark.fill",
-            label: "Saved Messages",
-            detailText: nil,
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemOrange,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "your-qr",
-            icon: "qrcode",
-            label: "Your QR",
-            detailText: "Show",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemGreen,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "connection-manager",
-            icon: "server.rack",
-            label: "Connection Manager",
-            detailText: connectionModeTitle,
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemBlue,
-            divider: false,
-            destructive: false
-          ),
-        ]
-      ),
-      SettingsNativeSection(
-        title: "PRIVACY & SECURITY",
-        rows: [
-          SettingsNativeRow(
-            id: "privacy",
-            icon: "shield.fill",
-            label: "Privacy",
-            detailText: "Manage",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemGreen,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "secret-key",
-            icon: "key.fill",
-            label: "Secret Key",
-            detailText: nil,
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemPurple,
-            divider: false,
-            destructive: false
-          ),
-        ]
-      ),
-      SettingsNativeSection(
-        title: "NOTIFICATIONS",
-        rows: [
-          SettingsNativeRow(
-            id: "push-notifications",
-            icon: "bell.fill",
-            label: "Push Notifications",
-            detailText: nil,
-            toggleValue: notificationsEnabled,
-            kind: .toggle,
-            iconColor: UIColor.systemRed,
-            divider: false,
-            destructive: false
-          )
-        ]
-      ),
-      SettingsNativeSection(
-        title: "APPEARANCE",
-        rows: [
-          SettingsNativeRow(
-            id: "appearance",
-            icon: "moon.fill",
-            label: "Appearance",
-            detailText: appearanceSummary,
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemIndigo,
-            divider: false,
-            destructive: false
-          )
-        ]
-      ),
-      SettingsNativeSection(
-        title: "MEDIA & STORAGE",
-        rows: [
-          SettingsNativeRow(
-            id: "media-cache",
-            icon: "internaldrive.fill",
-            label: "Media Cache",
-            detailText: "Manage",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemPink,
-            divider: false,
-            destructive: false
-          )
-        ]
-      ),
-    ]
-  }
-
   var body: some View {
-    SettingsNativeMainViewRepresentable(
-      displayName: currentProfile.displayName,
-      subtitle: headerSubtitle,
-      avatarImageURI: currentProfile.profileImage,
-      avatarFallbackText: currentProfile.displayName,
-      footerText: "Vibe Mobile",
-      sections: sections,
-      palette: palette,
-      isDark: isDark,
-      onRowPress: handleRowPress,
-      onRowToggle: handleRowToggle,
-      onSignOut: {
-        AppRootControllerFactory.signOut()
+    List {
+      Section {
+        NavigationLink(value: SettingsRoute.profile) {
+          SettingsProfileSummaryRow(
+            displayName: currentProfile.displayName,
+            subtitle: headerSubtitle,
+            avatarURI: currentProfile.profileImage
+          )
+        }
       }
-    )
-    .ignoresSafeArea(.container, edges: [.top, .bottom])
-    .background(palette.background.ignoresSafeArea())
-    .navigationBarTitleDisplayMode(.inline)
-    .toolbarBackground(.hidden, for: .navigationBar)
-    .toolbar {
-      ToolbarItem(placement: .topBarLeading) {
+
+      Section("Account") {
         Button {
-          activeRoute = .qr
+          openSavedMessages()
         } label: {
-          Image(systemName: "qrcode")
-            .font(.system(size: 17, weight: .medium))
-            .foregroundStyle(palette.text)
+          SettingsActionRow(title: "Saved Messages", systemImage: "bookmark.fill")
+        }
+        .foregroundStyle(.primary)
+
+        NavigationLink(value: SettingsRoute.qr) {
+          SettingsValueNavigationRow(title: "Your QR", systemImage: "qrcode", value: "Show")
+        }
+
+        Button {
+          activeModal = .connectionManager
+        } label: {
+          SettingsActionRow(
+            title: "Connection Manager",
+            systemImage: "server.rack",
+            value: connectionModeTitle
+          )
+        }
+        .foregroundStyle(.primary)
+      }
+
+      Section("Privacy & Security") {
+        NavigationLink(value: SettingsRoute.privacy) {
+          SettingsValueNavigationRow(title: "Privacy", systemImage: "shield.fill", value: "Manage")
+        }
+
+        NavigationLink(value: SettingsRoute.secretKey) {
+          SettingsActionRow(title: "Secret Key", systemImage: "key.fill")
         }
       }
-      ToolbarItem(placement: .topBarTrailing) {
-        Button("Edit") {
-          activeRoute = .profile
+
+      Section("Notifications") {
+        Toggle(isOn: $notificationsEnabled) {
+          Label("Push Notifications", systemImage: "bell.fill")
         }
-        .font(.system(size: 17))
-        .foregroundStyle(palette.accent)
+      }
+
+      Section("Appearance") {
+        NavigationLink(value: SettingsRoute.appearance) {
+          SettingsValueNavigationRow(
+            title: "Appearance",
+            systemImage: "moon.fill",
+            value: appearanceSummary
+          )
+        }
+      }
+
+      Section("Media & Storage") {
+        NavigationLink(value: SettingsRoute.mediaCache) {
+          SettingsValueNavigationRow(
+            title: "Media Cache",
+            systemImage: "internaldrive.fill",
+            value: "Manage"
+          )
+        }
+      }
+
+      Section {
+        Text("Vibe Mobile")
+          .font(.footnote)
+          .foregroundStyle(.secondary)
+          .frame(maxWidth: .infinity, alignment: .center)
+      }
+
+      Section {
+        Button("Sign Out", role: .destructive) {
+          AppRootControllerFactory.signOut()
+        }
       }
     }
+    .listStyle(.insetGrouped)
+    .scrollContentBackground(.hidden)
+    .background(palette.background.ignoresSafeArea())
+    .navigationTitle("Settings")
+    .navigationBarTitleDisplayMode(.inline)
     .task {
       await profileController.loadIfNeeded()
     }
@@ -308,39 +227,8 @@ struct SettingsView: View {
     }
   }
 
-  private func handleRowPress(_ rowID: String) {
-    switch rowID {
-    case "edit-profile":
-      activeRoute = .profile
-    case "saved-messages":
-      openSavedMessages()
-    case "your-qr":
-      activeRoute = .qr
-    case "connection-manager":
-      activeModal = .connectionManager
-    case "privacy":
-      activeRoute = .privacy
-    case "secret-key":
-      activeRoute = .secretKey
-    case "appearance":
-      activeRoute = .appearance
-    case "media-cache":
-      activeRoute = .mediaCache
-    default:
-      break
-    }
-  }
-
-  private func handleRowToggle(_ rowID: String, _ value: Bool) {
-    switch rowID {
-    case "push-notifications":
-      notificationsEnabled = value
-    default:
-      break
-    }
-  }
-
   private func openSavedMessages() {
+    ChatEngine.shared.prefetchChatHistories(chatIds: ["saved_messages"])
     let cachedRows = ChatEngine.shared.getChatRows(["chatId": "saved_messages"])
     NSLog(
       "[AppShellRoute] SettingsView openSavedMessages cachedRows=%d currentTab=%@",
@@ -350,6 +238,102 @@ struct SettingsView: View {
     coordinator.openChat(
       .savedMessages(initialRows: cachedRows)
     )
+  }
+}
+
+private struct SettingsProfileSummaryRow: View {
+  let displayName: String
+  let subtitle: String
+  let avatarURI: String?
+
+  var body: some View {
+    HStack(spacing: 14) {
+      SettingsProfileAvatarView(displayName: displayName, avatarURI: avatarURI)
+
+      VStack(alignment: .leading, spacing: 3) {
+        Text(displayName)
+          .font(.body.weight(.semibold))
+          .foregroundStyle(.primary)
+        if !subtitle.isEmpty {
+          Text(subtitle)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .lineLimit(1)
+        }
+      }
+    }
+    .padding(.vertical, 4)
+  }
+}
+
+private struct SettingsProfileAvatarView: View {
+  let displayName: String
+  let avatarURI: String?
+
+  var body: some View {
+    Group {
+      if let avatarURI,
+        let url = URL(string: avatarURI),
+        let scheme = url.scheme?.lowercased(),
+        scheme == "https" || scheme == "http"
+      {
+        AsyncImage(url: url) { phase in
+          switch phase {
+          case let .success(image):
+            image
+              .resizable()
+              .scaledToFill()
+          default:
+            fallback
+          }
+        }
+      } else {
+        fallback
+      }
+    }
+    .frame(width: 52, height: 52)
+    .clipShape(Circle())
+  }
+
+  private var fallback: some View {
+    Circle()
+      .fill(Color.secondary.opacity(0.16))
+      .overlay(
+        Text(String(displayName.prefix(1)).uppercased())
+          .font(.system(size: 20, weight: .bold))
+      )
+  }
+}
+
+private struct SettingsActionRow: View {
+  let title: String
+  let systemImage: String
+  var value: String? = nil
+
+  var body: some View {
+    LabeledContent {
+      if let value, !value.isEmpty {
+        Text(value)
+          .foregroundStyle(.secondary)
+      }
+    } label: {
+      Label(title, systemImage: systemImage)
+    }
+  }
+}
+
+private struct SettingsValueNavigationRow: View {
+  let title: String
+  let systemImage: String
+  let value: String
+
+  var body: some View {
+    LabeledContent {
+      Text(value)
+        .foregroundStyle(.secondary)
+    } label: {
+      Label(title, systemImage: systemImage)
+    }
   }
 }
 
@@ -395,26 +379,14 @@ private enum PrivacyRoute: Hashable, Identifiable {
 }
 
 private struct PrivacySettingsDetailView: View {
-  @Environment(\.colorScheme) private var colorScheme
   @ObservedObject var profileController: AppProfileController
 
   @AppStorage("vibe.settings.biometricsEnabled") private var biometricsEnabled = false
-  @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
-    AppThemePlateOption.glacier.rawValue
 
   @State private var blockedUsers: [AppBlockedUser] = []
   @State private var route: PrivacyRoute?
   @State private var alertMessage: String?
   @State private var isRunningBiometricsToggle = false
-
-  private var palette: AppThemePalette {
-    _ = themePlateRaw
-    return AppThemePalette.resolve(for: colorScheme)
-  }
-
-  private var isDark: Bool {
-    colorScheme == .dark
-  }
 
   private var profile: AppUserProfile {
     profileController.profile ?? AppUserProfile(
@@ -423,128 +395,146 @@ private struct PrivacySettingsDetailView: View {
     )!
   }
 
-  private var sections: [SettingsNativeSection] {
-    [
-      SettingsNativeSection(
-        title: nil,
-        rows: [
-          SettingsNativeRow(
-            id: "blocked-users",
-            icon: "nosign",
-            label: "Blocked Users",
-            detailText: blockedUsers.isEmpty ? nil : "\(blockedUsers.count)",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemRed,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "passcode-face-id",
-            icon: "faceid",
-            label: "Passcode & Face ID",
-            detailText: biometricsEnabled ? "On" : "Off",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemGreen,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "two-step-verification",
-            icon: "lock.fill",
-            label: "Two-Step Verification",
-            detailText: "Off",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemOrange,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "passkeys",
-            icon: "key.fill",
-            label: "Passkeys",
-            detailText: "Off",
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemIndigo,
-            divider: true,
-            destructive: false
-          ),
-          SettingsNativeRow(
-            id: "auto-delete",
-            icon: "clock.fill",
-            label: "Auto-Delete Messages",
-            detailText: AppAutoDeleteOption.label(for: profile.autoDeleteTimer),
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemPurple,
-            divider: false,
-            destructive: false
-          ),
-        ]
-      ),
-      SettingsNativeSection(
-        title: "PRIVACY",
-        rows: [
-          makeChoiceRow(id: "phone-number", label: "Phone Number", value: profile.privacyPhoneNumber),
-          makeChoiceRow(id: "last-seen", label: "Last Seen & Online", value: profile.privacyLastSeen),
-          makeChoiceRow(
-            id: "profile-photos",
-            label: "Profile Photos",
-            value: profile.privacyProfilePhotos
-          ),
-          makeChoiceRow(id: "bio", label: "Bio", value: profile.privacyBio),
-          makeChoiceRow(id: "gifts", label: "Gifts", value: profile.privacyGifts),
-          makeChoiceRow(id: "birthday", label: "Birthday", value: profile.privacyBirthday),
-          makeChoiceRow(id: "saved-music", label: "Saved Music", value: profile.privacySavedMusic),
-          makeChoiceRow(
-            id: "forwarded-messages",
-            label: "Forwarded Messages",
-            value: profile.privacyForward
-          ),
-          SettingsNativeRow(
-            id: "calls",
-            icon: "phone.fill",
-            label: "Calls",
-            detailText: profile.privacyCalls.title,
-            toggleValue: false,
-            kind: .link,
-            iconColor: UIColor.systemGreen,
-            divider: false,
-            destructive: false
-          ),
-        ]
-      ),
-    ]
-  }
-
   var body: some View {
-    ScrollView(showsIndicators: false) {
-      VStack(spacing: 22) {
-        ForEach(sections) { section in
-          SettingsNativeSectionCard(
-            section: section,
-            palette: palette,
-            isDark: isDark,
-            onPress: handleRowPress,
-            onToggle: { _, _ in }
-          )
+    List {
+      Section {
+        NavigationLink(value: PrivacyRoute.blockedUsers) {
+          LabeledContent {
+            if !blockedUsers.isEmpty {
+              Text("\(blockedUsers.count)")
+                .foregroundStyle(.secondary)
+            }
+          } label: {
+            Label("Blocked Users", systemImage: "nosign")
+          }
         }
 
+        Button {
+          Task { @MainActor in
+            await toggleBiometrics()
+          }
+        } label: {
+          LabeledContent {
+            if isRunningBiometricsToggle {
+              ProgressView()
+            } else {
+              Text(biometricsEnabled ? "On" : "Off")
+                .foregroundStyle(.secondary)
+            }
+          } label: {
+            Label("Passcode & Face ID", systemImage: "faceid")
+          }
+        }
+        .disabled(isRunningBiometricsToggle)
+        .foregroundStyle(.primary)
+
+        Button {
+          alertMessage = "This control is not wired into the standalone app yet."
+        } label: {
+          SettingsActionRow(
+            title: "Two-Step Verification",
+            systemImage: "lock.fill",
+            value: "Off"
+          )
+        }
+        .foregroundStyle(.primary)
+
+        Button {
+          alertMessage = "This control is not wired into the standalone app yet."
+        } label: {
+          SettingsActionRow(title: "Passkeys", systemImage: "key.fill", value: "Off")
+        }
+        .foregroundStyle(.primary)
+
+        NavigationLink(value: PrivacyRoute.autoDelete) {
+          SettingsValueNavigationRow(
+            title: "Auto-Delete Messages",
+            systemImage: "clock.fill",
+            value: AppAutoDeleteOption.label(for: profile.autoDeleteTimer)
+          )
+        }
+      } footer: {
         Text(
           "Automatically delete messages for everyone after a period of time in all new chats you start."
         )
-        .font(.system(size: 13))
-        .foregroundStyle(palette.secondaryText)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 16)
       }
-      .padding(.horizontal, 16)
-      .padding(.vertical, 18)
+
+      Section("Privacy") {
+        NavigationLink(value: PrivacyRoute.phoneNumber) {
+          SettingsValueNavigationRow(
+            title: "Phone Number",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyPhoneNumber.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.lastSeen) {
+          SettingsValueNavigationRow(
+            title: "Last Seen & Online",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyLastSeen.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.profilePhotos) {
+          SettingsValueNavigationRow(
+            title: "Profile Photos",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyProfilePhotos.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.bio) {
+          SettingsValueNavigationRow(
+            title: "Bio",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyBio.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.gifts) {
+          SettingsValueNavigationRow(
+            title: "Gifts",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyGifts.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.birthday) {
+          SettingsValueNavigationRow(
+            title: "Birthday",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyBirthday.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.savedMusic) {
+          SettingsValueNavigationRow(
+            title: "Saved Music",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacySavedMusic.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.forwardedMessages) {
+          SettingsValueNavigationRow(
+            title: "Forwarded Messages",
+            systemImage: "person.crop.circle.fill",
+            value: profile.privacyForward.title
+          )
+        }
+
+        NavigationLink(value: PrivacyRoute.calls) {
+          SettingsValueNavigationRow(
+            title: "Calls",
+            systemImage: "phone.fill",
+            value: profile.privacyCalls.title
+          )
+        }
+      }
     }
-    .background(palette.background.ignoresSafeArea())
+    .listStyle(.insetGrouped)
+    .scrollContentBackground(.hidden)
     .navigationTitle("Privacy")
     .navigationBarTitleDisplayMode(.inline)
     .task {
@@ -627,56 +617,7 @@ private struct PrivacySettingsDetailView: View {
     }
   }
 
-  private func makeChoiceRow(id: String, label: String, value: AppPrivacyChoice) -> SettingsNativeRow
-  {
-    SettingsNativeRow(
-      id: id,
-      icon: "person.crop.circle.fill",
-      label: label,
-      detailText: value.title,
-      toggleValue: false,
-      kind: .link,
-      iconColor: UIColor.systemBlue,
-      divider: true,
-      destructive: false
-    )
-  }
-
-  private func handleRowPress(_ rowID: String) {
-    switch rowID {
-    case "blocked-users":
-      route = .blockedUsers
-    case "passcode-face-id":
-      Task {
-        await toggleBiometrics()
-      }
-    case "two-step-verification", "passkeys":
-      alertMessage = "This control is not wired into the standalone app yet."
-    case "auto-delete":
-      route = .autoDelete
-    case "phone-number":
-      route = .phoneNumber
-    case "last-seen":
-      route = .lastSeen
-    case "profile-photos":
-      route = .profilePhotos
-    case "bio":
-      route = .bio
-    case "gifts":
-      route = .gifts
-    case "birthday":
-      route = .birthday
-    case "saved-music":
-      route = .savedMusic
-    case "forwarded-messages":
-      route = .forwardedMessages
-    case "calls":
-      route = .calls
-    default:
-      break
-    }
-  }
-
+  @MainActor
   private func toggleBiometrics() async {
     guard !isRunningBiometricsToggle else { return }
     isRunningBiometricsToggle = true
@@ -688,9 +629,14 @@ private struct PrivacySettingsDetailView: View {
     }
 
     let context = LAContext()
-    var error: NSError?
-    guard context.canEvaluatePolicy(.deviceOwnerAuthenticationWithBiometrics, error: &error) else {
-      alertMessage = error?.localizedDescription ?? "This device does not support biometrics."
+    var authError: NSError?
+    guard
+      context.canEvaluatePolicy(
+        .deviceOwnerAuthenticationWithBiometrics,
+        error: &authError
+      )
+    else {
+      alertMessage = authError?.localizedDescription ?? "This device does not support biometrics."
       return
     }
 
@@ -700,11 +646,12 @@ private struct PrivacySettingsDetailView: View {
         localizedReason: "Authenticate to enable Face ID / Touch ID"
       )
       biometricsEnabled = result
-    } catch {
-      alertMessage = error.localizedDescription
+    } catch let evaluationError {
+      alertMessage = evaluationError.localizedDescription
     }
   }
 
+  @MainActor
   private func loadBlockedUsers() async {
     guard let config = AppSessionConfig.current else { return }
     do {
@@ -1168,36 +1115,57 @@ private struct UserQRSettingsDetailView: View {
   }
 
   var body: some View {
-    List {
-      Section {
-        VStack(spacing: 20) {
-          QRCodePanel(value: qrCodeValue, palette: palette)
-            .frame(maxWidth: .infinity)
+    VStack(spacing: 0) {
+      ScrollView(showsIndicators: false) {
+        VStack(spacing: 32) {
+          VStack(spacing: 24) {
+            QRCodePanel(value: qrCodeValue, palette: palette)
+              .scaleEffect(1.05)
 
-          Text(profile.displayName)
-            .font(.system(size: 20, weight: .bold))
-            .foregroundStyle(palette.text)
+            VStack(spacing: 8) {
+              Text(profile.displayName)
+                .font(.system(size: 24, weight: .bold))
+                .foregroundStyle(palette.text)
 
-          Text(profile.userID)
-            .font(.system(.body, design: .monospaced))
-            .foregroundStyle(palette.text)
-            .textSelection(.enabled)
-            .multilineTextAlignment(.center)
+              Text("@\(profile.username)")
+                .font(.system(size: 16, weight: .medium))
+                .foregroundStyle(palette.secondaryText)
+            }
+          }
+          .padding(.top, 40)
+
+          VStack(alignment: .leading, spacing: 16) {
+             Text("YOUR UNIQUE ID")
+               .font(.system(size: 11, weight: .bold))
+               .tracking(1.2)
+               .foregroundStyle(palette.secondaryText)
+               .padding(.leading, 4)
+
+             HStack {
+               Text(profile.userID)
+                 .font(.system(.body, design: .monospaced))
+                 .foregroundStyle(palette.text)
+                 .lineLimit(1)
+
+               Spacer()
+
+               Button {
+                 UIPasteboard.general.string = profile.userID
+                 AppToastController.shared.show("ID Copied")
+               } label: {
+                 Image(systemName: "doc.on.doc")
+                   .font(.system(size: 14, weight: .medium))
+                   .foregroundStyle(palette.accent)
+               }
+             }
+             .padding(16)
+             .background(palette.card)
+             .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+          }
+          .padding(.horizontal, 24)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 20)
       }
-      .listRowBackground(palette.card)
-
-      Section {
-        Button("Copy ID") {
-          UIPasteboard.general.string = profile.userID
-        }
-      }
-      .listRowBackground(palette.card)
     }
-    .listStyle(.insetGrouped)
-    .scrollContentBackground(.hidden)
     .background(palette.background.ignoresSafeArea())
     .navigationTitle("Your QR")
     .navigationBarTitleDisplayMode(.inline)
@@ -1218,72 +1186,102 @@ private struct SecretKeySettingsDetailView: View {
   }
 
   var body: some View {
-    List {
-      Section {
-        VStack(spacing: 18) {
+    VStack(spacing: 0) {
+      ScrollView(showsIndicators: false) {
+        VStack(spacing: 32) {
           QRCodePanel(value: secretKey, palette: palette)
-            .frame(maxWidth: .infinity)
+            .padding(.top, 40)
 
-          VStack(alignment: .leading, spacing: 12) {
+          VStack(alignment: .leading, spacing: 16) {
             Text("YOUR SECRET KEY")
               .font(.system(size: 11, weight: .bold))
               .tracking(1.2)
               .foregroundStyle(palette.secondaryText)
+              .padding(.leading, 4)
 
-            Text(secretKey.isEmpty ? "No secret key is stored on this device yet." : displayedSecret)
-              .font(.system(.body, design: .monospaced))
-              .foregroundStyle(secretKey.isEmpty ? palette.secondaryText : palette.text)
-              .textSelection(.enabled)
-              .frame(maxWidth: .infinity, alignment: .leading)
-          }
+            ZStack {
+              // The real key (single line, no wrap)
+              Text(secretKey.isEmpty ? "No secret key stored" : secretKey)
+                .font(.system(.body, design: .monospaced))
+                .foregroundStyle(palette.text)
+                .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 20)
 
-          HStack(spacing: 12) {
-            Button(secretKey.isEmpty ? "Unavailable" : (isRevealed ? "Hide" : "Show")) {
-              guard !secretKey.isEmpty else { return }
-              isRevealed.toggle()
-              copied = false
+              // The Metal Mask
+              if !isRevealed && !secretKey.isEmpty {
+                MetalKeyMaskView(isRevealed: isRevealed, palette: palette)
+                  .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                  .padding(4)
+              }
             }
-            .buttonStyle(.bordered)
-            .tint(palette.text)
+            .background(palette.card)
+            .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+          }
+          .padding(.horizontal, 24)
+
+          HStack(spacing: 16) {
+            Button {
+              guard !secretKey.isEmpty else { return }
+              withAnimation(.spring(response: 0.4, dampingFraction: 0.8)) {
+                isRevealed.toggle()
+              }
+              copied = false
+            } label: {
+              HStack {
+                Image(systemName: isRevealed ? "eye.slash.fill" : "eye.fill")
+                Text(isRevealed ? "Hide Key" : "Reveal Key")
+              }
+              .font(.system(size: 16, weight: .semibold))
+              .frame(maxWidth: .infinity)
+              .frame(height: 54)
+              .background(palette.card)
+              .foregroundStyle(palette.text)
+              .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+              .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                  .stroke(palette.divider, lineWidth: 1)
+              )
+            }
             .disabled(secretKey.isEmpty)
 
-            Button(copied ? "Copied" : "Copy") {
+            Button {
               guard !secretKey.isEmpty else { return }
               UIPasteboard.general.string = secretKey
-              copied = true
+              withAnimation { copied = true }
+              AppToastController.shared.show("Key Copied")
+              DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                withAnimation { copied = false }
+              }
+            } label: {
+              HStack {
+                Image(systemName: copied ? "checkmark" : "doc.on.doc.fill")
+                Text(copied ? "Copied" : "Copy")
+              }
+              .font(.system(size: 16, weight: .semibold))
+              .frame(maxWidth: .infinity)
+              .frame(height: 54)
+              .background(palette.accent)
+              .foregroundStyle(.white)
+              .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
-            .buttonStyle(.borderedProminent)
-            .tint(palette.accent)
             .disabled(secretKey.isEmpty)
           }
-        }
-        .padding(.vertical, 12)
-      }
-      .listRowBackground(palette.card)
+          .padding(.horizontal, 24)
 
-      Section {
-        Text("Do not share this key. Anyone with it can sign in as you on another device.")
-          .font(.footnote)
-          .foregroundStyle(palette.danger)
+          Text("CRITICAL: Never share your secret key. This key provides full access to your identity and encrypted messages.")
+            .font(.system(size: 13))
+            .foregroundStyle(palette.danger.opacity(0.8))
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 32)
+            .padding(.top, 8)
+        }
       }
-      .listRowBackground(palette.card)
     }
-    .listStyle(.insetGrouped)
-    .scrollContentBackground(.hidden)
     .background(palette.background.ignoresSafeArea())
     .navigationTitle("Secret Key")
     .navigationBarTitleDisplayMode(.inline)
-  }
-
-  private var displayedSecret: String {
-    guard !isRevealed else { return secretKey }
-    let characters = Array(secretKey)
-    guard !characters.isEmpty else { return "" }
-    return String(
-      characters.enumerated().map { index, character in
-        index < 6 || index >= max(0, characters.count - 4) ? character : "•"
-      }
-    )
   }
 }
 
@@ -1586,9 +1584,14 @@ private struct QRCodePanel: View {
 
   var body: some View {
     ZStack {
-      RoundedRectangle(cornerRadius: 28, style: .continuous)
+      RoundedRectangle(cornerRadius: 32, style: .continuous)
         .fill(Color.white)
-        .frame(width: 236, height: 236)
+        .frame(width: 240, height: 240)
+        .shadow(color: Color.black.opacity(0.12), radius: 24, x: 0, y: 12)
+        .overlay(
+          RoundedRectangle(cornerRadius: 32, style: .continuous)
+            .stroke(Color.black.opacity(0.04), lineWidth: 1)
+        )
 
       if value.isEmpty {
         Image(systemName: "qrcode")
@@ -1599,10 +1602,9 @@ private struct QRCodePanel: View {
           .interpolation(.none)
           .resizable()
           .scaledToFit()
-          .frame(width: 200, height: 200)
+          .frame(width: 190, height: 190)
       }
     }
-    .shadow(color: Color.black.opacity(0.08), radius: 18, y: 8)
   }
 }
 

@@ -508,20 +508,8 @@ private struct ChatsRootView: View {
   }
 
   private var headerState: AppHomeHeaderState {
-    if isStartingChat {
+    if isStartingChat || model.isLoading {
       return .updating
-    }
-    if errorMessage != nil || model.errorMessage != nil {
-      return .connecting
-    }
-    if model.isLoading && model.rows.isEmpty {
-      return .connecting
-    }
-    if model.isLoading {
-      return .updating
-    }
-    if model.rows.isEmpty && (errorMessage != nil || model.errorMessage != nil) {
-      return .connecting
     }
     return .ready
   }
@@ -1328,22 +1316,26 @@ private struct ChatAvatarView: View {
         )
       )
       .overlay(
-        Text(row.avatarFallback)
-          .font(.system(size: 20, weight: .bold))
-          .foregroundStyle(palette.buttonText)
+        Group {
+          if row.isSavedMessages {
+            Image(systemName: "bookmark.fill")
+              .font(.system(size: 20, weight: .semibold))
+          } else {
+            Text(row.avatarFallback)
+              .font(.system(size: 20, weight: .bold))
+          }
+        }
+        .foregroundStyle(palette.buttonText)
       )
   }
 }
 
 private enum AppHomeHeaderState {
-  case connecting
   case updating
   case ready
 
   var title: String {
     switch self {
-    case .connecting:
-      return "Connecting"
     case .updating:
       return "Updating"
     case .ready:
@@ -1351,24 +1343,8 @@ private enum AppHomeHeaderState {
     }
   }
 
-  var subtitle: String {
-    switch self {
-    case .connecting:
-      return "Waiting for the secure link"
-    case .updating:
-      return "Syncing recent messages"
-    case .ready:
-      return "Secure messages"
-    }
-  }
-
   var showsProgress: Bool {
-    switch self {
-    case .connecting, .updating:
-      return true
-    case .ready:
-      return false
-    }
+    self == .updating
   }
 }
 
@@ -1377,22 +1353,16 @@ private struct AppHomeStatusHeaderView: View {
   let palette: AppThemePalette
 
   var body: some View {
-    VStack(spacing: 2) {
-      HStack(spacing: 6) {
-        if state.showsProgress {
-          ProgressView()
-            .controlSize(.small)
-            .tint(palette.secondaryText)
-        }
-
-        Text(state.title)
-          .font(.system(size: 17, weight: .semibold))
-          .foregroundStyle(palette.text)
+    HStack(spacing: 6) {
+      if state.showsProgress {
+        ProgressView()
+          .controlSize(.small)
+          .tint(palette.secondaryText)
       }
 
-      Text(state.subtitle)
-        .font(.system(size: 11, weight: .medium))
-        .foregroundStyle(palette.secondaryText)
+      Text(state.title)
+        .font(.system(size: 17, weight: .semibold))
+        .foregroundStyle(palette.text)
     }
   }
 }
