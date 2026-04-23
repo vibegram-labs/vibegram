@@ -192,6 +192,14 @@ struct AppRootView: View {
         .id(presented.requestID)
         .zIndex(1)
         .transition(.move(edge: .trailing).combined(with: .opacity))
+        .onAppear {
+          appShellRouteLog(
+            "AppRootView rootChatOverlay appear requestId=\(presented.requestID) chatId=\(presented.route.chatId) title=\(presented.route.title)")
+        }
+        .onDisappear {
+          appShellRouteLog(
+            "AppRootView rootChatOverlay disappear requestId=\(presented.requestID) chatId=\(presented.route.chatId) title=\(presented.route.title)")
+        }
       }
     }
     .onChange(of: coordinator.presentedChat?.requestID) { previousRequestID, _ in
@@ -644,7 +652,7 @@ private struct ChatConversationScreen: UIViewControllerRepresentable {
 
   func updateUIViewController(_ uiViewController: ChatConversationController, context: Context) {
     appShellRouteLog(
-      "updateUIViewController chatId=\(route.chatId) title=\(route.title) dark=\(colorScheme == .dark)")
+      "updateUIViewController chatId=\(route.chatId) title=\(route.title) dark=\(colorScheme == .dark) viewLoaded=\(uiViewController.isViewLoaded) windowAttached=\(uiViewController.viewIfLoaded?.window != nil)")
     uiViewController.update(route: route, isDark: colorScheme == .dark, onClose: onClose)
   }
 }
@@ -663,6 +671,7 @@ private final class ChatConversationController: UIViewController {
   private var currentPage: ChatConversationPage = .chat
   private var openedChatId: String?
   private var didInitialScroll = false
+  private var lastLayoutSignature: String?
 
   init(route: ChatRoute, isDark: Bool, onClose: (() -> Void)?) {
     self.route = route
@@ -705,15 +714,40 @@ private final class ChatConversationController: UIViewController {
     applyRoute(forceChannelRefresh: true)
   }
 
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    logLifecycle("viewWillAppear")
+    logVisualState("viewWillAppear", force: true)
+  }
+
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
     logLifecycle("viewDidAppear")
+    logVisualState("viewDidAppear", force: true)
     guard !didInitialScroll else { return }
     didInitialScroll = true
     DispatchQueue.main.async { [weak self] in
       self?.logLifecycle("initialScrollToBottom")
       self?.mainView.scrollToBottom(animated: false)
+      self?.logVisualState("afterInitialScroll", force: true)
     }
+  }
+
+  override func viewDidLayoutSubviews() {
+    super.viewDidLayoutSubviews()
+    logVisualState("viewDidLayoutSubviews")
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    logLifecycle("viewDidDisappear")
+    logVisualState("viewDidDisappear", force: true)
+  }
+
+  override func didMove(toParent parent: UIViewController?) {
+    super.didMove(toParent: parent)
+    logLifecycle("didMoveToParent")
+    logVisualState("didMoveToParent", force: true)
   }
 
   deinit {
@@ -769,9 +803,12 @@ private final class ChatConversationController: UIViewController {
     mainView.setNativeSendEnabled(true)
     mainView.setStandaloneProfileMode(false)
     mainView.setPage(ChatConversationPage.chat.rawValue, animated: false)
+    appShellRouteLog(
+      "ChatConversationController configuredSurface chatId=\(route.chatId) surfaceId=\(surfaceId) peerUserId=\(route.peerUserId ?? "") isGroup=\(route.isGroup) headerMode=\(route.chatId == "saved_messages" ? "savedmessages" : "default") windowAttached=\(view.window != nil)")
 
     refreshHeaderState()
     refreshRows()
+    logVisualState("afterApplyRoute", force: true)
 
     if forceChannelRefresh {
       closeOpenedChatChannel()
@@ -783,10 +820,12 @@ private final class ChatConversationController: UIViewController {
     guard openedChatId != route.chatId else { return }
     appShellRouteLog(
       "ChatConversationController openChatChannel chatId=\(route.chatId) peerUserId=\(route.peerUserId ?? "")")
-    _ = ChatEngine.shared.openChatChannel([
+    let snapshot = ChatEngine.shared.openChatChannel([
       "chatId": route.chatId,
       "peerUserId": route.peerUserId ?? "",
     ])
+    appShellRouteLog(
+      "ChatConversationController openChatChannelResult chatId=\(route.chatId) snapshotState=\(Self.normalizedString(snapshot["state"]) ?? "nil") connected=\(snapshot["connected"] as? Bool == true) snapshotKeys=\(snapshot.keys.sorted())")
     openedChatId = route.chatId
   }
 
@@ -798,10 +837,13 @@ private final class ChatConversationController: UIViewController {
   }
 
   private func refreshRows() {
-    let rows = Self.resolvedRows(for: route)
+    let nativeRows = ChatEngine.shared.getChatRows(["chatId": route.chatId])
+    let rows = nativeRows.isEmpty ? route.initialRows : nativeRows
+    let firstRowID = Self.normalizedString(rows.first?["id"]) ?? Self.normalizedString(rows.first?["messageId"]) ?? "nil"
     appShellRouteLog(
-      "ChatConversationController refreshRows chatId=\(route.chatId) rows=\(rows.count)")
+      "ChatConversationController refreshRows chatId=\(route.chatId) rows=\(rows.count) nativeRows=\(nativeRows.count) initialRows=\(route.initialRows.count) source=\(nativeRows.isEmpty ? "initial" : "native") firstRowId=\(firstRowID)")
     mainView.setRows(rows)
+    logVisualState("afterRefreshRows")
   }
 
   private func refreshHeaderState() {
@@ -871,14 +913,6 @@ private final class ChatConversationController: UIViewController {
     }
   }
 
-  private static func resolvedRows(for route: ChatRoute) -> [[String: Any]] {
-    let nativeRows = ChatEngine.shared.getChatRows(["chatId": route.chatId])
-    if !nativeRows.isEmpty {
-      return nativeRows
-    }
-    return route.initialRows
-  }
-
   private static func isOnline(for route: ChatRoute) -> Bool {
     ChatEngine.shared.isUserOnline(userId: route.peerUserId)
   }
@@ -914,6 +948,22 @@ private final class ChatConversationController: UIViewController {
     let presentedType = presentingViewController.map { String(describing: type(of: $0)) } ?? "nil"
     appShellRouteLog(
       "ChatConversationController \(event) chatId=\(route.chatId) navCount=\(navCount) nav=\(navTypes) parent=\(parentType) root=\(rootType) presentedBy=\(presentedType)")
+  }
+
+  private func logVisualState(_ event: String, force: Bool = false) {
+    let viewFrame = NSStringFromCGRect(view.frame)
+    let viewBounds = NSStringFromCGRect(view.bounds)
+    let mainFrame = NSStringFromCGRect(mainView.frame)
+    let mainBounds = NSStringFromCGRect(mainView.bounds)
+    let windowBounds = view.window.map { NSStringFromCGRect($0.bounds) } ?? "nil"
+    let signature =
+      "\(viewFrame)|\(viewBounds)|\(mainFrame)|\(mainBounds)|\(windowBounds)|\(view.window != nil)|\(view.isHidden)|\(view.alpha)|\(mainView.isHidden)|\(mainView.alpha)"
+    if !force, signature == lastLayoutSignature {
+      return
+    }
+    lastLayoutSignature = signature
+    appShellRouteLog(
+      "ChatConversationController \(event) chatId=\(route.chatId) viewFrame=\(viewFrame) viewBounds=\(viewBounds) mainFrame=\(mainFrame) mainBounds=\(mainBounds) windowBounds=\(windowBounds) safeInsets=\(NSStringFromUIEdgeInsets(view.safeAreaInsets)) hidden=\(view.isHidden) alpha=\(view.alpha) mainHidden=\(mainView.isHidden) mainAlpha=\(mainView.alpha)")
   }
 
   private static func profileHandle(for route: ChatRoute) -> String {
