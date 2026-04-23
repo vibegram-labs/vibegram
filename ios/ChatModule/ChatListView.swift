@@ -3384,9 +3384,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     let edgeAlpha: CGFloat = {
       guard appearance.backgroundMode != "transparent" else { return 0.0 }
       if hasPattern {
-        return appearance.isDark ? 0.78 : 0.82
+        return appearance.isDark ? 0.04 : 0.03
       } else {
-        return appearance.isDark ? 0.72 : 0.78
+        return appearance.isDark ? 0.03 : 0.02
       }
     }()
 
@@ -3407,7 +3407,7 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       containerSize: wallpaperSnapshotSize,
       sampleRect: topFrame,
       alpha: edgeAlpha,
-      blur: true
+      blur: false
     )
     scrollToneBottomView.updateBackdrop(
       snapshot: wallpaperSnapshot,

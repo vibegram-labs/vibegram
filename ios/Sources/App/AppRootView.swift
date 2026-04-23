@@ -152,8 +152,7 @@ struct AppRootView: View {
     }
     .tint(palette.accent)
     .background(palette.background.ignoresSafeArea())
-    .toolbarBackground(palette.background, for: .tabBar)
-    .toolbarBackground(.visible, for: .tabBar)
+    .toolbarBackground(.hidden, for: .tabBar)
     .environmentObject(coordinator)
     .onAppear {
       AppAppearanceController.applyStoredPreference()

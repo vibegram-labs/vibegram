@@ -653,6 +653,9 @@ final class ChatEngine {
   private func ensureNativeTransport(trigger: String) {
     guard #available(iOS 13.0, *) else { return }
     let shouldConnect = queue.sync {
+      if !hasRealtimeDemandLocked() {
+        return false
+      }
       autoReconnectEnabled = true
       let connected = (state["connected"] as? Bool) == true
       let currentState = normalizedString(state["state"])?.lowercased() ?? ""
@@ -670,10 +673,25 @@ final class ChatEngine {
     _ = connectNativePresence()
   }
 
+  private func chatNeedsRealtimeLocked(_ rawChatId: String?) -> Bool {
+    guard let chatId = normalizedString(rawChatId), !chatId.isEmpty else {
+      return true
+    }
+    return chatId != "saved_messages"
+  }
+
   private func hasRealtimeDemandLocked() -> Bool {
-    if !pendingOutboundQueueByChat.isEmpty { return true }
-    if !openChatChannels.isEmpty { return true }
-    if !surfaceBindings.isEmpty { return true }
+    if pendingOutboundQueueByChat.keys.contains(where: { chatNeedsRealtimeLocked($0) }) {
+      return true
+    }
+    if openChatChannels.keys.contains(where: { chatNeedsRealtimeLocked($0) }) {
+      return true
+    }
+    if surfaceBindings.values.contains(where: { binding in
+      chatNeedsRealtimeLocked(binding.chatId)
+    }) {
+      return true
+    }
     return false
   }
 
@@ -5216,6 +5234,7 @@ final class ChatEngine {
     // Always start HTTP history fetch immediately — do NOT gate behind socket state.
     // This ensures messages load fast even before WebSocket is connected.
     loadChatHistoryIfNeededLocked(chatId: chatId)
+    guard chatId != "saved_messages" else { return }
     guard let client = phoenixClient else {
       scheduleReconnectLocked(reason: "join_chat_no_socket")
       DispatchQueue.global(qos: .utility).async { [weak self] in

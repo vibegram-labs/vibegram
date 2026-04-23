@@ -242,6 +242,7 @@ struct SettingsView: View {
         AppRootControllerFactory.signOut()
       }
     )
+    .ignoresSafeArea(.container, edges: [.top, .bottom])
     .background(palette.background.ignoresSafeArea())
     .toolbar(.hidden, for: .navigationBar)
     .task {
