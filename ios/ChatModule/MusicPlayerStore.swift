@@ -193,6 +193,12 @@ struct NativeMusicPlayerTrack: Codable, Equatable {
   }
 }
 
+struct NativeMusicCacheStats {
+  let trackCount: Int
+  let recentlyPlayedCount: Int
+  let bytesUsed: Int64
+}
+
 final class NativeMusicPlayerStore {
   static let shared = NativeMusicPlayerStore()
 
@@ -306,6 +312,51 @@ final class NativeMusicPlayerStore {
 
   func hasLocalPlaybackFile(for track: NativeMusicPlayerTrack) -> Bool {
     resolvedPlayableLocalURL(for: track) != nil
+  }
+
+  func cacheStats() -> NativeMusicCacheStats {
+    let cachedTracks = tracks.values.filter { resolvedPlayableLocalURL(for: $0) != nil }
+    let recentThreshold = Date().timeIntervalSince1970 * 1000.0 - 86_400_000.0
+
+    var bytesUsed: Int64 = 0
+    var recentlyPlayedCount = 0
+
+    for track in cachedTracks {
+      if let lastPlayedAt = track.lastPlayedAt, lastPlayedAt >= recentThreshold {
+        recentlyPlayedCount += 1
+      }
+
+      guard let url = resolvedPlayableLocalURL(for: track) else { continue }
+      let fileSize = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+      bytesUsed += Int64(fileSize)
+    }
+
+    return NativeMusicCacheStats(
+      trackCount: cachedTracks.count,
+      recentlyPlayedCount: recentlyPlayedCount,
+      bytesUsed: bytesUsed
+    )
+  }
+
+  func clearExpired(olderThanDays days: Int) {
+    let expiryMs = Double(max(days, 1)) * 86_400_000.0
+    let nowMs = Date().timeIntervalSince1970 * 1000.0
+    let recentThreshold = nowMs - 86_400_000.0
+
+    for track in tracks.values {
+      guard let cachedAt = track.cachedAt else { continue }
+      let isExpired = nowMs - cachedAt > expiryMs
+      let playedRecently = (track.lastPlayedAt ?? 0.0) >= recentThreshold
+      if isExpired && !playedRecently {
+        removeTrack(trackId: track.trackId)
+      }
+    }
+  }
+
+  func clearAll() {
+    for trackID in Array(tracks.keys) {
+      removeTrack(trackId: trackID)
+    }
   }
 
   private func loadTracks() -> [String: NativeMusicPlayerTrack] {

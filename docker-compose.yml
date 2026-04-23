@@ -1,4 +1,3 @@
-version: '3.8'
 services:
   securechat:
     build: .
@@ -8,17 +7,21 @@ services:
       - ./server/uploads:/app/uploads
       # - ./server/data:/app/server/data # Not used in Elixir/Supabase setup
     environment:
-      - PORT=4000
-      - SUPABASE_URL=${SUPABASE_URL}
-      - SUPABASE_SERVICE_KEY=${SUPABASE_SERVICE_KEY}
-      - SUPABASE_ANON_KEY=${SUPABASE_ANON_KEY}
-      - SUPABASE_KEY=${SUPABASE_ANON_KEY}
-      - SECRET_KEY_BASE=super_secret_key_base_CHANGE_ME_IN_PROD_BUT_OK_FOR_LOCALDOCKER
-      - PHX_HOST=localhost
-      - PHX_SERVER=true
-      - DATABASE_URL=${DATABASE_URL}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      PORT: 4000
+      SUPABASE_URL: ${SUPABASE_URL}
+      SUPABASE_SERVICE_KEY: ${SUPABASE_SERVICE_KEY}
+      SUPABASE_ANON_KEY: ${SUPABASE_ANON_KEY}
+      SUPABASE_KEY: ${SUPABASE_ANON_KEY}
+      SECRET_KEY_BASE: super_secret_key_base_CHANGE_ME_IN_PROD_BUT_OK_FOR_LOCALDOCKER
+      PHX_HOST: localhost
+      PHX_SERVER: "true"
+      DATABASE_URL: ${DATABASE_URL}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      VIBE_PACKET_SERVER_URL: ${VIBE_PACKET_SERVER_URL:-}
+      VIBE_PACKET_SIGNING_SECRET: ${VIBE_PACKET_SIGNING_SECRET:-}
+      PHANTOM_SERVER_URL: ${PHANTOM_SERVER_URL:-}
+      PHANTOM_SECRET: ${PHANTOM_SECRET:-}
     restart: unless-stopped
 
   tunnels:
@@ -26,10 +29,10 @@ services:
     depends_on:
       - securechat
     environment:
-      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-      - NGROK_DOMAIN=${NGROK_DOMAIN}
-      - GITHUB_TOKEN=${GITHUB_TOKEN}
-      - GIST_ID=${GIST_ID}
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN:-}
+      NGROK_DOMAIN: ${NGROK_DOMAIN:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GIST_ID: ${GIST_ID:-}
     volumes:
       - ./server/uploads:/app/shared
       - ./tunnel_manager.sh:/app/tunnel_manager.sh
