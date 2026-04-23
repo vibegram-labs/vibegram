@@ -235,25 +235,26 @@ final class SettingsNativeRowView: UIControl {
   private func updateHighlightAppearance(animated: Bool) {
     guard let row = currentRow, let theme = currentTheme else { return }
 
-    let targetAlpha: CGFloat = row.kind == .toggle ? 0 : (isHighlighted ? 1 : 0)
+    let isLink = row.kind == .link
+    let targetAlpha: CGFloat = isLink ? (isHighlighted ? 1 : 0) : 0
     let targetTransform: CGAffineTransform =
-      row.kind == .toggle || !isHighlighted
-      ? .identity
-      : CGAffineTransform(scaleX: 0.97, y: 0.97)
+      isLink && isHighlighted
+      ? CGAffineTransform(scaleX: 0.975, y: 0.975)
+      : .identity
     let targetOverlayColor =
       theme.isDark
-      ? UIColor.white.withAlphaComponent(0.08)
-      : UIColor.black.withAlphaComponent(0.05)
+      ? UIColor.white.withAlphaComponent(0.10)
+      : UIColor.black.withAlphaComponent(0.07)
 
     let updates = {
       self.highlightOverlayView.backgroundColor = targetOverlayColor
       self.highlightOverlayView.alpha = targetAlpha
-      self.iconBackgroundView.transform = targetTransform
+      self.transform = targetTransform
     }
 
     if animated {
       UIView.animate(
-        withDuration: 0.16,
+        withDuration: 0.12,
         delay: 0,
         options: [.curveEaseOut, .allowUserInteraction, .beginFromCurrentState],
         animations: updates
@@ -443,7 +444,7 @@ private enum SettingsAvatarHeroMetrics {
   }
 }
 
-private enum SettingsAvatarImageLoader {
+enum SettingsAvatarImageLoader {
   static func load(from rawValue: String?) async -> UIImage? {
     guard let rawValue else { return nil }
     let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)

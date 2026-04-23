@@ -311,12 +311,26 @@ struct AppRootView: View {
     AppThemePlateOption.glacier.rawValue
   @StateObject private var coordinator = AppShellCoordinator()
   @StateObject private var toastController = AppToastController.shared
+  @StateObject private var profileController = AppProfileController.shared
+  @State private var settingsTabAvatarImage: UIImage?
 
   private var palette: AppThemePalette {
     AppThemePalette.resolve(
       for: colorScheme,
       plate: AppThemePlateOption(rawValue: themePlateRaw) ?? .glacier
     )
+  }
+
+  private var settingsTabIcon: Image {
+    let rendered = Self.renderCircularTabAvatar(
+      source: settingsTabAvatarImage,
+      fallback: String(
+        (profileController.profile?.displayName ?? AppSessionConfig.current?.name ?? "U")
+          .prefix(1)
+      ).uppercased(),
+      size: 26
+    )
+    return Image(uiImage: rendered).renderingMode(.original)
   }
 
   var body: some View {
@@ -342,7 +356,11 @@ struct AppRootView: View {
 
         SettingsRootView()
           .tabItem {
-            Label("Settings", systemImage: "gearshape")
+            Label {
+              Text("Settings")
+            } icon: {
+              settingsTabIcon
+            }
           }
           .tag(AppShellTab.settings)
       }
@@ -362,6 +380,13 @@ struct AppRootView: View {
     .onAppear {
       AppAppearanceController.applyStoredPreference()
     }
+    .task {
+      await profileController.loadIfNeeded()
+      await loadSettingsTabAvatar()
+    }
+    .onChange(of: profileController.profile?.profileImage) { _, _ in
+      Task { await loadSettingsTabAvatar() }
+    }
     .overlay(alignment: .bottom) {
       if let message = toastController.message {
         AppToastBanner(message: message, palette: palette)
@@ -373,6 +398,47 @@ struct AppRootView: View {
     .animation(.easeInOut(duration: 0.22), value: coordinator.presentedChat?.requestID)
     .animation(.spring(response: 0.3, dampingFraction: 0.82), value: toastController.message)
     .environmentObject(coordinator)
+  }
+
+  @MainActor
+  private func loadSettingsTabAvatar() async {
+    guard let uri = profileController.profile?.profileImage else {
+      settingsTabAvatarImage = nil
+      return
+    }
+    settingsTabAvatarImage = await SettingsAvatarImageLoader.load(from: uri)
+  }
+
+  private static func renderCircularTabAvatar(
+    source: UIImage?, fallback: String, size: CGFloat
+  ) -> UIImage {
+    let renderer = UIGraphicsImageRenderer(size: CGSize(width: size, height: size))
+    return renderer.image { context in
+      let rect = CGRect(origin: .zero, size: CGSize(width: size, height: size))
+      let path = UIBezierPath(ovalIn: rect)
+      path.addClip()
+
+      if let source {
+        source.draw(in: rect)
+      } else {
+        UIColor(red: 180 / 255, green: 190 / 255, blue: 210 / 255, alpha: 1.0).setFill()
+        path.fill()
+
+        let text = fallback.isEmpty ? "U" : fallback
+        let attributes: [NSAttributedString.Key: Any] = [
+          .font: UIFont.systemFont(ofSize: size * 0.42, weight: .semibold),
+          .foregroundColor: UIColor.white,
+        ]
+        let textSize = (text as NSString).size(withAttributes: attributes)
+        let textRect = CGRect(
+          x: (size - textSize.width) / 2,
+          y: (size - textSize.height) / 2,
+          width: textSize.width,
+          height: textSize.height
+        )
+        (text as NSString).draw(in: textRect, withAttributes: attributes)
+      }
+    }
   }
 }
 
