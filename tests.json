@@ -1,6 +1,10 @@
 {
-  "updated_at": "2026-04-22",
+  "updated_at": "2026-04-23",
   "checks": {
+    "ios_settings_old_native_host_restore": {
+      "status": "passed",
+      "details": "Replaced the standalone iOS settings root SwiftUI recreation with the old native host pattern. `ios/Sources/App/SettingsView.swift` now uses `SettingsNativeMainViewRepresentable`, and `ios/Sources/App/SettingsNativeComponents.swift` now hosts the avatar outside the scroll view, keeps the hero spacer inside the scroll content, and forwards `scrollViewDidScroll` into `setScrollOffset(...)` like the legacy native settings module. Revalidated with `xcodebuild -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO -derivedDataPath /tmp/vibe-settings-old-host` from `ios/`."
+    },
     "ios_settings_followup_avatar_row_alignment": {
       "status": "passed",
       "details": "Fixed the latest standalone iOS settings follow-up issues. `ios/Sources/App/SettingsNativeComponents.swift` now hosts the UIKit row inside a full-width container and applies stronger trailing-edge hugging/compression priorities so the chevron and toggle stay aligned on the right edge, while `ios/Sources/App/SettingsView.swift` now overlays the reused morphing avatar above the scroll view with a hero spacer underneath so the avatar responds to scroll like the old native settings host. The `Saved Messages` row now routes back to the main Chats page instead of pushing the placeholder conversation screen. Revalidated with `xcodebuild -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO -derivedDataPath /tmp/vibe-settings-fix-2` from `ios/`."

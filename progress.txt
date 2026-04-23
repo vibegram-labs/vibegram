@@ -1,3 +1,11 @@
+2026-04-23
+
+Completed:
+- Replaced the standalone iOS settings root imitation with the old native host model. `ios/Sources/App/SettingsView.swift` now mounts `SettingsNativeMainViewRepresentable` instead of a SwiftUI `ScrollView` overlay, and `ios/Sources/App/SettingsNativeComponents.swift` now includes the old `NativeSettingsMainView`-style UIKit host where the avatar lives outside the scroll view, the hero spacer lives inside the scroll content, and `scrollViewDidScroll` drives the avatar morph. Revalidated with `xcodebuild -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO -derivedDataPath /tmp/vibe-settings-old-host` from `ios/`.
+
+Remaining:
+- Live-verify the restored settings host in the simulator or on device to confirm the avatar motion, top spacing, and header controls now match the legacy settings page under real scrolling. The build passes, but there has not been a manual interaction pass in this workspace yet.
+
 2026-04-22
 
 Completed:

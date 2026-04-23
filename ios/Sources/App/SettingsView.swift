@@ -21,14 +21,6 @@ private enum SettingsModal: String, Identifiable {
   var id: String { rawValue }
 }
 
-private struct SettingsScrollOffsetKey: PreferenceKey {
-  static var defaultValue: CGFloat = 0
-
-  static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
-    value = nextValue()
-  }
-}
-
 struct SettingsView: View {
   @Environment(\.colorScheme) private var colorScheme
   @EnvironmentObject private var coordinator: AppShellCoordinator
@@ -38,7 +30,6 @@ struct SettingsView: View {
   @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
     AppThemePlateOption.glacier.rawValue
 
-  @State private var scrollOffset: CGFloat = 0
   @State private var activeRoute: SettingsRoute?
   @State private var activeModal: SettingsModal?
 
@@ -230,95 +221,28 @@ struct SettingsView: View {
   }
 
   var body: some View {
-    ZStack(alignment: .top) {
-      ScrollView(showsIndicators: false) {
-        GeometryReader { proxy in
-          Color.clear
-            .preference(
-              key: SettingsScrollOffsetKey.self,
-              value: proxy.frame(in: .named("settings-scroll")).minY
-            )
-        }
-        .frame(height: 0)
-
-        VStack(spacing: 22) {
-          Color.clear
-            .frame(height: SettingsAvatarHeroView.hostHeight)
-
-          VStack(spacing: 2) {
-            Text(currentProfile.displayName)
-              .font(.system(size: 28, weight: .semibold))
-              .foregroundStyle(palette.text)
-
-            Text(headerSubtitle)
-              .font(.system(size: 14, weight: .medium))
-              .foregroundStyle(palette.secondaryText)
-              .multilineTextAlignment(.center)
-          }
-          .frame(maxWidth: .infinity)
-
-          ForEach(sections) { section in
-            SettingsNativeSectionCard(
-              section: section,
-              palette: palette,
-              isDark: isDark,
-              onPress: handleRowPress,
-              onToggle: handleRowToggle
-            )
-          }
-
-          Button(role: .destructive) {
-            AppRootControllerFactory.signOut()
-          } label: {
-            Text("Sign Out")
-              .font(.system(size: 17, weight: .semibold))
-              .foregroundStyle(palette.danger)
-              .frame(maxWidth: .infinity)
-              .frame(height: 54)
-              .background(
-                RoundedRectangle(cornerRadius: 24, style: .continuous)
-                  .fill(palette.card)
-              )
-          }
-          .buttonStyle(.plain)
-
-          Text("Vibe Mobile")
-            .font(.system(size: 13, weight: .medium))
-            .foregroundStyle(palette.secondaryText.opacity(0.64))
-            .padding(.bottom, 28)
-        }
-        .padding(.horizontal, 16)
+    SettingsNativeMainViewRepresentable(
+      displayName: currentProfile.displayName,
+      subtitle: headerSubtitle,
+      avatarImageURI: currentProfile.profileImage,
+      avatarFallbackText: currentProfile.displayName,
+      footerText: "Vibe Mobile",
+      sections: sections,
+      palette: palette,
+      isDark: isDark,
+      onRowPress: handleRowPress,
+      onRowToggle: handleRowToggle,
+      onHeaderQr: {
+        activeRoute = .qr
+      },
+      onHeaderEdit: {
+        activeRoute = .profile
+      },
+      onSignOut: {
+        AppRootControllerFactory.signOut()
       }
-      .coordinateSpace(name: "settings-scroll")
-      .background(palette.background.ignoresSafeArea())
-
-      SettingsAvatarHeroView(
-        imageURI: currentProfile.profileImage,
-        fallbackText: currentProfile.displayName,
-        scrollOffset: scrollOffset,
-        palette: palette
-      )
-      .allowsHitTesting(false)
-    }
+    )
     .background(palette.background.ignoresSafeArea())
-    .navigationTitle("Settings")
-    .navigationBarTitleDisplayMode(.inline)
-    .toolbar {
-      ToolbarItemGroup(placement: .topBarTrailing) {
-        Button {
-          activeRoute = .qr
-        } label: {
-          Image(systemName: "qrcode")
-        }
-
-        Button("Edit") {
-          activeRoute = .profile
-        }
-      }
-    }
-    .onPreferenceChange(SettingsScrollOffsetKey.self) { value in
-      scrollOffset = max(0, -value)
-    }
     .task {
       await profileController.loadIfNeeded()
     }
