@@ -118,6 +118,269 @@ enum AppThemePlateController {
   }
 }
 
+enum AppWallpaperPresetOption: String, CaseIterable, Identifiable {
+  case glacier
+  case zen
+  case ocean
+  case obsidian
+  case custom
+
+  var id: String { rawValue }
+
+  var title: String {
+    switch self {
+    case .glacier:
+      return "Glacier"
+    case .zen:
+      return "Zen"
+    case .ocean:
+      return "Ocean"
+    case .obsidian:
+      return "Obsidian"
+    case .custom:
+      return "Custom"
+    }
+  }
+
+  var subtitle: String {
+    switch self {
+    case .glacier:
+      return "Cool mist"
+    case .zen:
+      return "Muted plum"
+    case .ocean:
+      return "Soft tide"
+    case .obsidian:
+      return "Quiet slate"
+    case .custom:
+      return "Your layers"
+    }
+  }
+}
+
+struct AppWallpaperStyle: Equatable {
+  let preset: AppWallpaperPresetOption
+  let layerColors: [String]
+  let gradientColors: [String]
+}
+
+enum AppWallpaperController {
+  static let presetStorageKey = "vibe.app.wallpaperPreset"
+  static let customColorsStorageKey = "vibe.app.wallpaperCustomColors"
+
+  static let colorLibrary: [String] = [
+    "#567D8F",
+    "#5E8D88",
+    "#708F74",
+    "#7D9768",
+    "#8F8D74",
+    "#9B8468",
+    "#9C756B",
+    "#956C7D",
+    "#856D96",
+    "#6F78A1",
+    "#6389A5",
+    "#7A93B2",
+    "#8A9CB5",
+    "#9A9387",
+    "#8A8E7A",
+    "#7A858C",
+    "#86908E",
+    "#9B8795",
+  ]
+
+  static var currentPreset: AppWallpaperPresetOption {
+    let rawValue = UserDefaults.standard.string(forKey: presetStorageKey) ?? ""
+    if let preset = AppWallpaperPresetOption(rawValue: rawValue), !rawValue.isEmpty {
+      return preset
+    }
+    return defaultPreset(for: AppThemePlateController.currentOption)
+  }
+
+  static var currentCustomColors: [String] {
+    normalizedColorArray(
+      UserDefaults.standard.stringArray(forKey: customColorsStorageKey),
+      fallback: presetLayerColors(for: defaultPreset(for: AppThemePlateController.currentOption))
+    )
+  }
+
+  static func setPreset(_ option: AppWallpaperPresetOption) {
+    UserDefaults.standard.set(option.rawValue, forKey: presetStorageKey)
+  }
+
+  static func setCustomColors(_ colors: [String]) {
+    UserDefaults.standard.set(
+      normalizedColorArray(colors, fallback: presetLayerColors(for: .glacier)),
+      forKey: customColorsStorageKey
+    )
+  }
+
+  static func style(
+    for preset: AppWallpaperPresetOption = currentPreset,
+    isDark: Bool,
+    customColors: [String]? = nil
+  ) -> AppWallpaperStyle {
+    let resolvedLayerColors = normalizedColorArray(
+      preset == .custom ? (customColors ?? currentCustomColors) : presetLayerColors(for: preset),
+      fallback: presetLayerColors(for: .glacier)
+    )
+    return AppWallpaperStyle(
+      preset: preset,
+      layerColors: resolvedLayerColors,
+      gradientColors: gradientColors(for: resolvedLayerColors, isDark: isDark)
+    )
+  }
+
+  static func appearancePayload(isDark: Bool) -> [String: Any] {
+    let wallpaper = style(isDark: isDark)
+    return [
+      "theme": isDark ? "dark" : "light",
+      "backgroundMode": "gradient",
+      "wallpaperGradient": wallpaper.gradientColors,
+      "wallpaperOpacity": 1.0,
+      "wallpaperPatternGradient": [],
+      "wallpaperPatternOpacity": 0.0,
+    ]
+  }
+
+  static func defaultPreset(for plate: AppThemePlateOption) -> AppWallpaperPresetOption {
+    switch plate {
+    case .glacier:
+      return .glacier
+    case .zen:
+      return .zen
+    case .ocean:
+      return .ocean
+    case .obsidian:
+      return .obsidian
+    }
+  }
+
+  private static func presetLayerColors(for preset: AppWallpaperPresetOption) -> [String] {
+    switch preset {
+    case .glacier:
+      return ["#5C888B", "#6F8DA1", "#8B7E9E"]
+    case .zen:
+      return ["#7A6F94", "#8B7890", "#9A846E"]
+    case .ocean:
+      return ["#5A8092", "#6C8B8E", "#7F82A3"]
+    case .obsidian:
+      return ["#5A6D82", "#6D7B86", "#85726E"]
+    case .custom:
+      return currentCustomColors
+    }
+  }
+
+  private static func baseGradient(isDark: Bool) -> [UIColor] {
+    if isDark {
+      return [
+        color(from: "#101317") ?? .black,
+        color(from: "#1A1E25") ?? .black,
+      ]
+    }
+    return [
+      color(from: "#FBF8F3") ?? .white,
+      color(from: "#EEE8E1") ?? .white,
+    ]
+  }
+
+  private static func gradientColors(for layerColors: [String], isDark: Bool) -> [String] {
+    let resolvedLayers = normalizedColorArray(
+      layerColors,
+      fallback: presetLayerColors(for: .glacier)
+    )
+    let base = baseGradient(isDark: isDark)
+    let start = base[0]
+    let end = base[1]
+    let center = blend(start, with: end, amount: 0.5)
+    let anchors = [
+      blend(start, with: center, amount: 0.34),
+      center,
+      blend(center, with: end, amount: 0.66),
+    ]
+    let mixAmounts: [CGFloat] = isDark ? [0.46, 0.52, 0.48] : [0.28, 0.34, 0.30]
+
+    let softenedLayers = zip(resolvedLayers, zip(anchors, mixAmounts)).map { hex, values in
+      let (anchor, amount) = values
+      let target = color(from: hex) ?? anchor
+      return hexString(blend(anchor, with: target, amount: amount))
+    }
+
+    return [hexString(start)] + softenedLayers + [hexString(end)]
+  }
+
+  private static func normalizedColorArray(_ colors: [String]?, fallback: [String]) -> [String] {
+    let resolved = (colors ?? [])
+      .map { $0.trimmingCharacters(in: .whitespacesAndNewlines).uppercased() }
+      .filter { color(from: $0) != nil }
+
+    if resolved.count >= 3 {
+      return Array(resolved.prefix(3))
+    }
+
+    var filled = resolved
+    let fallbackColors = fallback.map { $0.uppercased() }
+    for color in fallbackColors where filled.count < 3 {
+      filled.append(color)
+    }
+    return Array(filled.prefix(3))
+  }
+
+  private static func color(from hex: String) -> UIColor? {
+    let normalized = hex.trimmingCharacters(in: .whitespacesAndNewlines)
+      .replacingOccurrences(of: "#", with: "")
+    guard normalized.count == 6, let value = UInt64(normalized, radix: 16) else { return nil }
+    return UIColor(
+      red: CGFloat((value >> 16) & 0xFF) / 255.0,
+      green: CGFloat((value >> 8) & 0xFF) / 255.0,
+      blue: CGFloat(value & 0xFF) / 255.0,
+      alpha: 1.0
+    )
+  }
+
+  private static func hexString(_ color: UIColor) -> String {
+    var red: CGFloat = 0
+    var green: CGFloat = 0
+    var blue: CGFloat = 0
+    var alpha: CGFloat = 0
+    guard color.getRed(&red, green: &green, blue: &blue, alpha: &alpha) else {
+      return "#000000"
+    }
+    return String(
+      format: "#%02X%02X%02X",
+      Int(round(red * 255.0)),
+      Int(round(green * 255.0)),
+      Int(round(blue * 255.0))
+    )
+  }
+
+  private static func blend(_ from: UIColor, with to: UIColor, amount: CGFloat) -> UIColor {
+    let t = max(0.0, min(1.0, amount))
+    var fr: CGFloat = 0
+    var fg: CGFloat = 0
+    var fb: CGFloat = 0
+    var fa: CGFloat = 0
+    var tr: CGFloat = 0
+    var tg: CGFloat = 0
+    var tb: CGFloat = 0
+    var ta: CGFloat = 0
+
+    guard from.getRed(&fr, green: &fg, blue: &fb, alpha: &fa),
+      to.getRed(&tr, green: &tg, blue: &tb, alpha: &ta)
+    else {
+      return from
+    }
+
+    let inverse = 1.0 - t
+    return UIColor(
+      red: (fr * inverse) + (tr * t),
+      green: (fg * inverse) + (tg * t),
+      blue: (fb * inverse) + (tb * t),
+      alpha: (fa * inverse) + (ta * t)
+    )
+  }
+}
+
 struct AppThemePalette {
   let backgroundUIColor: UIColor
   let secondaryBackgroundUIColor: UIColor

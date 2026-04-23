@@ -1206,57 +1206,7 @@ private final class ChatConversationController: UIViewController {
   }
 
   private static func resolvedAppearance(isDark: Bool) -> [String: Any] {
-    let plate = AppThemePlateController.currentOption
-
-    let wallpaperGradient: [String]
-    let patternGradient: [String]
-    let patternOpacity: Double
-
-    switch (plate, isDark) {
-    case (.glacier, true):
-      wallpaperGradient = ["#131325", "#0D0D1F"]
-      patternGradient = ["#115E59", "#0891B2", "#0284C7"]
-      patternOpacity = 0.12
-    case (.glacier, false):
-      wallpaperGradient = ["#F9F3EA", "#EFE6D9"]
-      patternGradient = ["#5A8A66", "#5A6675", "#8A75A3"]
-      patternOpacity = 0.06
-    case (.zen, true):
-      wallpaperGradient = ["#1A1528", "#120E20"]
-      patternGradient = ["#7C3AED", "#6D28D9", "#5B21B6"]
-      patternOpacity = 0.14
-    case (.zen, false):
-      wallpaperGradient = ["#F5F3FB", "#EDE8F5"]
-      patternGradient = ["#7C3AED", "#6366F1", "#3F51B5"]
-      patternOpacity = 0.06
-    case (.ocean, true):
-      wallpaperGradient = ["#0F1A24", "#0A1520"]
-      patternGradient = ["#0277BD", "#0288D1", "#039BE5"]
-      patternOpacity = 0.13
-    case (.ocean, false):
-      wallpaperGradient = ["#F0F7FA", "#E3EFF5"]
-      patternGradient = ["#0277BD", "#0288D1", "#4FC3F7"]
-      patternOpacity = 0.06
-    case (.obsidian, true):
-      wallpaperGradient = ["#111118", "#0D0D14"]
-      patternGradient = ["#1565C0", "#1E88E5", "#42A5F5"]
-      patternOpacity = 0.10
-    case (.obsidian, false):
-      wallpaperGradient = ["#F2F4F8", "#E8EBF0"]
-      patternGradient = ["#1565C0", "#1976D2", "#42A5F5"]
-      patternOpacity = 0.06
-    }
-
-    return [
-      "theme": isDark ? "dark" : "light",
-      "backgroundMode": "gradient",
-      "wallpaperGradient": wallpaperGradient,
-      "wallpaperOpacity": 1.0,
-      "wallpaperPatternGradient": patternGradient,
-      "wallpaperPatternLocations": [0.0, 0.5, 1.0],
-      "wallpaperPatternOpacity": patternOpacity,
-      "wallpaperMaskKey": "doodles",
-    ]
+    AppWallpaperController.appearancePayload(isDark: isDark)
   }
 }
 

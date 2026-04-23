@@ -29,6 +29,7 @@ struct SettingsView: View {
   @AppStorage("vibe.settings.notificationsEnabled") private var notificationsEnabled = true
   @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
     AppThemePlateOption.glacier.rawValue
+  @AppStorage(AppWallpaperController.presetStorageKey) private var wallpaperPresetRaw = ""
 
   @State private var activeRoute: SettingsRoute?
   @State private var activeModal: SettingsModal?
@@ -232,16 +233,28 @@ struct SettingsView: View {
       isDark: isDark,
       onRowPress: handleRowPress,
       onRowToggle: handleRowToggle,
-      onHeaderQr: {
-        activeRoute = .qr
-      },
-      onHeaderEdit: {
-        activeRoute = .profile
-      },
       onSignOut: {
         AppRootControllerFactory.signOut()
       }
     )
+    .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Button {
+          activeRoute = .qr
+        } label: {
+          Image(systemName: "qrcode")
+            .font(.system(size: 17, weight: .semibold))
+            .foregroundStyle(palette.text)
+        }
+      }
+      ToolbarItem(placement: .topBarTrailing) {
+        Button("Edit") {
+          activeRoute = .profile
+        }
+        .font(.system(size: 17, weight: .semibold))
+        .foregroundStyle(palette.text)
+      }
+    }
     .ignoresSafeArea(.container, edges: [.top, .bottom])
     .background(palette.background.ignoresSafeArea())
     .navigationBarTitleDisplayMode(.inline)
@@ -279,8 +292,9 @@ struct SettingsView: View {
 
   private var appearanceSummary: String {
     let appearance = AppAppearanceController.currentOption.title
-    let plate = AppThemePlateController.currentOption.title
-    return "\(appearance) • \(plate)"
+    let _ = wallpaperPresetRaw
+    let wallpaper = AppWallpaperController.currentPreset.title
+    return "\(appearance) • \(wallpaper)"
   }
 
   private var connectionModeTitle: String {
