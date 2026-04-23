@@ -321,8 +321,8 @@ struct AppRootView: View {
     )
   }
 
-  private var settingsTabIcon: Image {
-    let rendered = Self.renderCircularTabAvatar(
+  private var settingsTabUIImage: UIImage {
+    Self.renderCircularTabAvatar(
       source: settingsTabAvatarImage,
       fallback: String(
         (profileController.profile?.displayName ?? AppSessionConfig.current?.name ?? "U")
@@ -330,7 +330,6 @@ struct AppRootView: View {
       ).uppercased(),
       size: 26
     )
-    return Image(uiImage: rendered).renderingMode(.original)
   }
 
   var body: some View {
@@ -359,14 +358,14 @@ struct AppRootView: View {
             Label {
               Text("Settings")
             } icon: {
-              settingsTabIcon
+              Image(uiImage: settingsTabUIImage)
+                .renderingMode(.original)
             }
           }
           .tag(AppShellTab.settings)
       }
       .tint(palette.accent)
       .background(palette.background.ignoresSafeArea())
-      .toolbarBackground(.hidden, for: .tabBar)
     }
     .onChange(of: coordinator.presentedChat?.requestID) { previousRequestID, _ in
       if let presented = coordinator.presentedChat {

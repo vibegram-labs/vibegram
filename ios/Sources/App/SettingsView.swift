@@ -232,32 +232,20 @@ struct SettingsView: View {
       isDark: isDark,
       onRowPress: handleRowPress,
       onRowToggle: handleRowToggle,
+      onHeaderQr: {
+        activeRoute = .qr
+      },
+      onHeaderEdit: {
+        activeRoute = .profile
+      },
       onSignOut: {
         AppRootControllerFactory.signOut()
       }
     )
-    .toolbar {
-      ToolbarItem(placement: .topBarLeading) {
-        Button {
-          activeRoute = .qr
-        } label: {
-          Image(systemName: "qrcode")
-            .font(.system(size: 17, weight: .semibold))
-            .foregroundStyle(palette.text)
-        }
-      }
-      ToolbarItem(placement: .topBarTrailing) {
-        Button("Edit") {
-          activeRoute = .profile
-        }
-        .font(.system(size: 17, weight: .semibold))
-        .foregroundStyle(palette.text)
-      }
-    }
     .ignoresSafeArea(.container, edges: [.top, .bottom])
     .background(palette.background.ignoresSafeArea())
     .navigationBarTitleDisplayMode(.inline)
-    .toolbarBackground(.hidden, for: .navigationBar)
+    .toolbar(.hidden, for: .navigationBar)
     .task {
       await profileController.loadIfNeeded()
     }

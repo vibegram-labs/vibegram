@@ -979,6 +979,8 @@ private final class SettingsNativeGlassButton: UIControl {
 final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
   var onRowPress: ((String) -> Void)?
   var onRowToggle: ((String, Bool) -> Void)?
+  var onHeaderQr: (() -> Void)?
+  var onHeaderEdit: (() -> Void)?
   var onSignOut: (() -> Void)?
 
   private let backgroundView = UIView()
@@ -987,6 +989,8 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
   private let contentStack = UIStackView()
   private let headerMaskContainer = UIView()
   private let headerMaskLayer = CAGradientLayer()
+  private let qrButton = SettingsNativeGlassButton()
+  private let editButton = SettingsNativeGlassButton()
   private let avatarView = SettingsNativeAvatarView()
   private let heroSpacerView = UIView()
   private let profileHeaderStack = UIStackView()
@@ -997,6 +1001,8 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
   private let signOutButton = UIButton(type: .system)
 
   private var headerMaskHeightConstraint: NSLayoutConstraint?
+  private var qrTopConstraint: NSLayoutConstraint?
+  private var editTopConstraint: NSLayoutConstraint?
   private var avatarHeightConstraint: NSLayoutConstraint?
   private var heroSpacerHeightConstraint: NSLayoutConstraint?
 
@@ -1041,12 +1047,16 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     isDark: Bool,
     onRowPress: ((String) -> Void)?,
     onRowToggle: ((String, Bool) -> Void)?,
+    onHeaderQr: (() -> Void)?,
+    onHeaderEdit: (() -> Void)?,
     onSignOut: (() -> Void)?
   ) {
     theme = SettingsNativeTheme(palette: palette, isDark: isDark)
     self.sections = sections
     self.onRowPress = onRowPress
     self.onRowToggle = onRowToggle
+    self.onHeaderQr = onHeaderQr
+    self.onHeaderEdit = onHeaderEdit
     self.onSignOut = onSignOut
 
     nameLabel.text = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1097,6 +1107,18 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     headerMaskLayer.startPoint = CGPoint(x: 0.5, y: 0)
     headerMaskLayer.endPoint = CGPoint(x: 0.5, y: 1)
     headerMaskContainer.layer.addSublayer(headerMaskLayer)
+
+    qrButton.setIcon(systemName: "qrcode", pointSize: 20)
+    qrButton.setButtonSize(width: 44)
+    qrButton.addTarget(self, action: #selector(handleHeaderQrPress), for: .touchUpInside)
+    qrButton.layer.zPosition = 40
+    addSubview(qrButton)
+
+    editButton.setTitle("Edit")
+    editButton.setButtonSize(width: nil)
+    editButton.addTarget(self, action: #selector(handleHeaderEditPress), for: .touchUpInside)
+    editButton.layer.zPosition = 40
+    addSubview(editButton)
 
     avatarView.translatesAutoresizingMaskIntoConstraints = false
     avatarView.clipsToBounds = false
@@ -1164,6 +1186,9 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
       headerMaskContainer.trailingAnchor.constraint(equalTo: trailingAnchor),
       headerMaskContainer.topAnchor.constraint(equalTo: topAnchor),
 
+      qrButton.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 16),
+      editButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -16),
+
       avatarView.leadingAnchor.constraint(equalTo: leadingAnchor),
       avatarView.trailingAnchor.constraint(equalTo: trailingAnchor),
       avatarView.topAnchor.constraint(equalTo: topAnchor),
@@ -1172,6 +1197,12 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     headerMaskHeightConstraint = headerMaskContainer.heightAnchor.constraint(equalToConstant: 104)
     headerMaskHeightConstraint?.isActive = true
 
+    qrTopConstraint = qrButton.topAnchor.constraint(equalTo: topAnchor, constant: 8)
+    qrTopConstraint?.isActive = true
+
+    editTopConstraint = editButton.topAnchor.constraint(equalTo: topAnchor, constant: 8)
+    editTopConstraint?.isActive = true
+
     avatarHeightConstraint = avatarView.heightAnchor.constraint(equalToConstant: 220)
     avatarHeightConstraint?.isActive = true
 
@@ -1179,6 +1210,8 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     heroSpacerHeightConstraint?.isActive = true
 
     bringSubviewToFront(avatarView)
+    bringSubviewToFront(qrButton)
+    bringSubviewToFront(editButton)
 
     applyTheme()
   }
@@ -1295,6 +1328,10 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
       theme.background.withAlphaComponent(theme.isDark ? 0.05 : 0.03).cgColor,
       UIColor.clear.cgColor,
     ]
+    qrButton.iconTintColor = theme.text
+    editButton.iconTintColor = theme.text
+    qrButton.setGlassTheme(isDark: theme.isDark)
+    editButton.setGlassTheme(isDark: theme.isDark)
     nameLabel.textColor = theme.text
     subtitleLabel.textColor = theme.secondaryText
     footerLabel.textColor = theme.secondaryText
@@ -1318,6 +1355,8 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     currentCollapsedTop = collapsedTop
 
     headerMaskHeightConstraint?.constant = headerHeight
+    qrTopConstraint?.constant = topInset
+    editTopConstraint?.constant = topInset
     avatarHeightConstraint?.constant = hostHeight
     heroSpacerHeightConstraint?.constant = hostHeight
 
@@ -1337,6 +1376,14 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     updateScrollAnimations(offsetY: scrollView.contentOffset.y)
   }
 
+  @objc private func handleHeaderQrPress() {
+    onHeaderQr?()
+  }
+
+  @objc private func handleHeaderEditPress() {
+    onHeaderEdit?()
+  }
+
   @objc private func handleSignOutPress() {
     onSignOut?()
   }
@@ -1353,6 +1400,8 @@ struct SettingsNativeMainViewRepresentable: UIViewRepresentable {
   let isDark: Bool
   let onRowPress: (String) -> Void
   let onRowToggle: (String, Bool) -> Void
+  let onHeaderQr: () -> Void
+  let onHeaderEdit: () -> Void
   let onSignOut: () -> Void
 
   func makeUIView(context: Context) -> SettingsNativeMainView {
@@ -1371,6 +1420,8 @@ struct SettingsNativeMainViewRepresentable: UIViewRepresentable {
       isDark: isDark,
       onRowPress: onRowPress,
       onRowToggle: onRowToggle,
+      onHeaderQr: onHeaderQr,
+      onHeaderEdit: onHeaderEdit,
       onSignOut: onSignOut
     )
   }
