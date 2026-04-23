@@ -272,6 +272,10 @@
     "ios_native_agent_code_block_storage_key_collision": {
       "status": "passed",
       "details": "Fixed `AgentCodeBlockView.isExpanded(...)` in `mobile/modules/vibe-chat-native/ios/ChatNativeAgentStreamingText.swift` by qualifying the static helper call as `Self.storageKey(...)` so the `storageKey` parameter no longer shadows the helper and triggers `Cannot call value of non-function type 'String?'`. `xcrun swiftc -parse` passed and `get_errors` reported no file-level errors after the patch."
+    },
+    "ios_native_theme_preset_pass_through": {
+      "status": "passed",
+      "details": "Removed the unsupported custom wallpaper controller from `ios/Sources/App/AppRuntimeController.swift`, restored `ios/Sources/App/AppRootView.swift` to pass `nativeThemeId` plus `nativeThemeIsDark` into the native chat appearance payload, and returned `ios/Sources/App/SettingsView.swift` to the supported appearance controls that map to the existing theme plates. `xcrun swiftc -parse ios/Sources/App/AppRuntimeController.swift ios/Sources/App/AppRootView.swift ios/Sources/App/SettingsView.swift` passed, `git diff --check -- ios/Sources/App/AppRuntimeController.swift ios/Sources/App/AppRootView.swift ios/Sources/App/SettingsView.swift` passed, and `xcodebuild -project Vibe.xcodeproj -scheme Vibe -sdk iphonesimulator -configuration Debug build CODE_SIGNING_ALLOWED=NO` succeeded from `ios/`."
     }
   }
 }

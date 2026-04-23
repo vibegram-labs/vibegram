@@ -29,7 +29,6 @@ struct SettingsView: View {
   @AppStorage("vibe.settings.notificationsEnabled") private var notificationsEnabled = true
   @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
     AppThemePlateOption.glacier.rawValue
-  @AppStorage(AppWallpaperController.presetStorageKey) private var wallpaperPresetRaw = ""
 
   @State private var activeRoute: SettingsRoute?
   @State private var activeModal: SettingsModal?
@@ -292,9 +291,8 @@ struct SettingsView: View {
 
   private var appearanceSummary: String {
     let appearance = AppAppearanceController.currentOption.title
-    let _ = wallpaperPresetRaw
-    let wallpaper = AppWallpaperController.currentPreset.title
-    return "\(appearance) • \(wallpaper)"
+    let plate = AppThemePlateController.currentOption.title
+    return "\(appearance) • \(plate)"
   }
 
   private var connectionModeTitle: String {

@@ -1206,7 +1206,13 @@ private final class ChatConversationController: UIViewController {
   }
 
   private static func resolvedAppearance(isDark: Bool) -> [String: Any] {
-    AppWallpaperController.appearancePayload(isDark: isDark)
+    [
+      "theme": isDark ? "dark" : "light",
+      "backgroundMode": "gradient",
+      "wallpaperOpacity": 1.0,
+      "nativeThemeId": AppThemePlateController.currentOption.rawValue,
+      "nativeThemeIsDark": isDark,
+    ]
   }
 }
 
