@@ -95,6 +95,7 @@ class AuthActivity : AppCompatActivity() {
   private var dialog: BottomSheetDialog? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    AppAppearanceController.applyStoredPreference(this)
     super.onCreate(savedInstanceState)
     val isDark = isNightMode(applicationContext)
     WindowCompat.setDecorFitsSystemWindows(window, false)
@@ -484,11 +485,6 @@ private data class AuthSheetPalette(
       }
     }
   }
-}
-
-internal fun isNightMode(context: Context): Boolean {
-  return (context.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) ==
-    Configuration.UI_MODE_NIGHT_YES
 }
 
 private data class NativeAuthResponse(

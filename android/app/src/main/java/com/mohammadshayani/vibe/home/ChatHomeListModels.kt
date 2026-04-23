@@ -45,9 +45,7 @@ internal fun parseChatHomeRows(
       raw["name"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
         ?: raw["title"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
         ?: "Unknown"
-    val preview =
-      raw["preview"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["subtitle"]?.toString()?.trim().orEmpty()
+    val preview = resolvePreview(raw, isSavedMessages)
     val timeLabel =
       raw["timeLabel"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
         ?: raw["time"]?.toString()?.trim().orEmpty()
@@ -112,6 +110,35 @@ internal fun parseChatHomeRows(
       isSavedMessages = isSavedMessages,
     )
   }
+}
+
+private fun resolvePreview(
+  raw: Map<String, Any?>,
+  isSavedMessages: Boolean,
+): String {
+  val explicit =
+    raw["preview"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+      ?: raw["subtitle"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+  if (!explicit.isNullOrBlank()) return explicit
+
+  val previewRows =
+    (raw["previewRows"] as? List<*>)
+      ?: (raw["preview_rows"] as? List<*>)
+      ?: (raw["messages"] as? List<*>)
+      ?: emptyList<Any?>()
+
+  val derived =
+    previewRows.firstNotNullOfOrNull { entry ->
+      val row = entry as? Map<*, *> ?: return@firstNotNullOfOrNull null
+      val body =
+        row["body"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+          ?: row["content"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+          ?: row["text"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+      body?.takeIf { it.isNotBlank() }
+    }
+  if (!derived.isNullOrBlank()) return derived
+
+  return if (isSavedMessages) "Your private notes" else "Start a conversation"
 }
 
 private fun resolveRowAvatarUri(

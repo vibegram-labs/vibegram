@@ -9,6 +9,8 @@
     android:roundIcon="@mipmap/ic_launcher_round"
     android:supportsRtl="true"
     android:theme="@style/Theme.Vibe">
+    <activity android:name=".ui.ConversationActivity" />
+    <activity android:name=".ui.AppearanceSettingsActivity" />
     <activity android:name=".ui.ChatHomeActivity" />
     <activity android:name=".ui.AuthActivity" />
     <activity android:name=".ui.WelcomeActivity" />

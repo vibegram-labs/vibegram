@@ -122,9 +122,9 @@ class AppearanceSettingsActivity : AppCompatActivity() {
     }
     scrollView.addView(
       stack,
-      ScrollView.LayoutParams(
-        ScrollView.LayoutParams.MATCH_PARENT,
-        ScrollView.LayoutParams.WRAP_CONTENT,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.WRAP_CONTENT,
       ),
     )
 

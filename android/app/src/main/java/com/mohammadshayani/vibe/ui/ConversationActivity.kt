@@ -50,7 +50,7 @@ class ConversationActivity : AppCompatActivity() {
     private const val extraPeerUserId = "peer_user_id"
     private const val extraIsSavedMessages = "is_saved_messages"
 
-    fun intent(context: Context, row: ChatHomeListRow): Intent {
+    internal fun intent(context: Context, row: ChatHomeListRow): Intent {
       return Intent(context, ConversationActivity::class.java).apply {
         putExtra(extraChatId, row.chatId)
         putExtra(extraTitle, row.title)

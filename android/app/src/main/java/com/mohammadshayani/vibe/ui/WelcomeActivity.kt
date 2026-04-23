@@ -28,6 +28,7 @@ import com.google.android.material.button.MaterialButton
 
 class WelcomeActivity : AppCompatActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    AppAppearanceController.applyStoredPreference(this)
     super.onCreate(savedInstanceState)
     val palette = WelcomeSurfacePalette.resolve(this)
     WindowCompat.setDecorFitsSystemWindows(window, false)

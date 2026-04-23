@@ -10,6 +10,7 @@ import com.mohammadshayani.vibe.ui.WelcomeActivity
 
 class MainActivity : AppCompatActivity() {
   override fun onCreate(savedInstanceState: Bundle?) {
+    com.mohammadshayani.vibe.ui.AppAppearanceController.applyStoredPreference(this)
     super.onCreate(savedInstanceState)
     val destination =
       if (AppSessionConfig.current(applicationContext) != null) {
