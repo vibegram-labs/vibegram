@@ -232,12 +232,6 @@ struct SettingsView: View {
       isDark: isDark,
       onRowPress: handleRowPress,
       onRowToggle: handleRowToggle,
-      onHeaderQr: {
-        activeRoute = .qr
-      },
-      onHeaderEdit: {
-        activeRoute = .profile
-      },
       onSignOut: {
         AppRootControllerFactory.signOut()
       }
@@ -245,7 +239,25 @@ struct SettingsView: View {
     .ignoresSafeArea(.container, edges: [.top, .bottom])
     .background(palette.background.ignoresSafeArea())
     .navigationBarTitleDisplayMode(.inline)
-    .toolbar(.hidden, for: .navigationBar)
+    .toolbarBackground(.hidden, for: .navigationBar)
+    .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Button {
+          activeRoute = .qr
+        } label: {
+          Image(systemName: "qrcode")
+            .font(.system(size: 17, weight: .medium))
+            .foregroundStyle(palette.text)
+        }
+      }
+      ToolbarItem(placement: .topBarTrailing) {
+        Button("Edit") {
+          activeRoute = .profile
+        }
+        .font(.system(size: 17))
+        .foregroundStyle(palette.accent)
+      }
+    }
     .task {
       await profileController.loadIfNeeded()
     }
