@@ -130,10 +130,10 @@ private fun nativePresetAppearance(
     resolvedPatternGradientColors = variant.patternGradientColors
     resolvedPatternOpacity = variant.patternOpacity
   } else {
-    // Matches JS resolveThemeVariant() light override path.
-    resolvedBackgroundGradient = listOf("#F8FAFC", "#EEF3F7")
-    resolvedPatternGradientColors = listOf("#4C8C96", "#5A7A91", "#6D829D")
-    resolvedPatternOpacity = 0.025f
+    // Matches iOS and JS resolveThemeVariant() light override path.
+    resolvedBackgroundGradient = listOf("#F9F3EA", "#EFE6D9")
+    resolvedPatternGradientColors = listOf("#5A8A66", "#5A6675", "#8A75A3")
+    resolvedPatternOpacity = 0.04f
   }
 
   val wallpaperGradient = parseGradientStrings(resolvedBackgroundGradient, fallback.wallpaperGradient)

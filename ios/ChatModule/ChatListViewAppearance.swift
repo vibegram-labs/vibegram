@@ -379,13 +379,14 @@ private func nativePresetAppearance(
     ?? parseColor(variant.bubbleThemGradient.first)
     ?? parseColor(variant.bubbleThem)
     ?? fallback.bubbleThemColor
+  let resolvedBubbleThemColor = isDark ? rawBubbleThemColor : UIColor.white
   let textColorMe = parseColor(raw["textColorMe"] as? String) ?? parseColor(variant.textColorMe)
     ?? fallback.textColorMe
   let textColorThem =
     parseColor(raw["textColorThem"] as? String) ?? parseColor(variant.textColorThem)
     ?? fallback.textColorThem
   let dayPlateBase = resolvedDayPlateBase(
-    bubbleThemColor: rawBubbleThemColor,
+    bubbleThemColor: resolvedBubbleThemColor,
     wallpaperGradient: wallpaperGradient,
     isDark: isDark
   )
@@ -404,7 +405,7 @@ private func nativePresetAppearance(
       raw["bubbleThemGradient"] as? [String],
       fallback: variant.bubbleThemGradient.compactMap(parseColor)
     ),
-    bubbleThemColor: rawBubbleThemColor,
+    bubbleThemColor: resolvedBubbleThemColor,
     textColorMe: textColorMe,
     textColorThem: textColorThem,
     timeColorMe: parseColor(raw["timeColorMe"] as? String) ?? colorWithAlpha(textColorMe, 0.72),

@@ -504,7 +504,7 @@ final class BubbleBackgroundView: UIView {
       gradientLayer.opacity = wallpaperLayer.isHidden ? 0.82 : 0.70
       fillLayer.fillColor =
         appearance.bubbleThemColor.withAlphaComponent(
-          wallpaperLayer.isHidden ? (appearance.isDark ? 0.86 : 0.90) : (appearance.isDark ? 0.62 : 0.54)
+          wallpaperLayer.isHidden ? (appearance.isDark ? 0.86 : 1.0) : (appearance.isDark ? 0.62 : 1.0)
         ).cgColor
       blurView.alpha = wallpaperLayer.isHidden ? 0.42 : 0.0
     } else {
@@ -650,7 +650,7 @@ final class BubbleBackgroundView: UIView {
       fillLayer.fillColor =
         isMe
         ? UIColor.clear.cgColor
-        : appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 0.90).cgColor
+        : appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 1.0).cgColor
     }
   }
 
@@ -8341,7 +8341,7 @@ final class BubbleTailView: UIView {
       fillLayer.fillColor =
         isMe
         ? UIColor.clear.cgColor
-        : appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 0.90).cgColor
+        : appearance.bubbleThemColor.withAlphaComponent(appearance.isDark ? 0.86 : 1.0).cgColor
     }
 
     // For 'me': rotate CW 26.565° (tail curves right at bottom-right of bubble)

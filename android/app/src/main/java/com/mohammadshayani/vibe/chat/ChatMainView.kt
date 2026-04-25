@@ -3,7 +3,9 @@ package com.mohammadshayani.vibe.chat
 import com.mohammadshayani.vibe.R
 import com.mohammadshayani.vibe.network.resolveAvatarUri
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.graphics.BitmapFactory
 import android.graphics.Color
 import android.graphics.PorterDuff
@@ -25,6 +27,7 @@ import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import androidx.core.view.WindowInsetsControllerCompat
 import java.text.DateFormat
 import java.util.Calendar
 import java.util.Date
@@ -156,6 +159,7 @@ class ChatMainView(
   private var secondaryTextColor: Int = Color.argb(220, 220, 220, 220)
   private var surfaceColor: Int = Color.argb(235, 20, 22, 28)
   private var headerBackgroundColor: Int = Color.argb(242, 16, 18, 24)
+  private var navigationBarColor: Int = Color.argb(242, 16, 18, 24)
   private var profileBackgroundColor: Int = Color.argb(255, 16, 18, 24)
 
   init {
@@ -1276,11 +1280,12 @@ class ChatMainView(
   }
 
   private fun parseAppearance(raw: Map<String, Any?>) {
+    val resolvedAppearance = ChatListAppearance.from(raw)
     val textCandidate = colorFromAny(raw["textColorThem"])
     val timeCandidate = colorFromAny(raw["timeColorThem"])
     val bubbleCandidate = colorFromAny(raw["bubbleThemColor"])
-    val bgCandidate = (raw["wallpaperGradient"] as? List<*>)?.firstOrNull()?.let { colorFromAny(it) }
-    val headerCandidate = colorFromAny(raw["headerBackgroundColor"])
+    val bgCandidate = resolvedAppearance.wallpaperGradient.firstOrNull()
+    val bottomBgCandidate = resolvedAppearance.wallpaperGradient.lastOrNull() ?: bgCandidate
     val headerTextCandidate = colorFromAny(raw["headerTextColor"])
 
     if (textCandidate != null) textColor = textCandidate
@@ -1291,9 +1296,8 @@ class ChatMainView(
       headerBackgroundColor = bgCandidate
       profileBackgroundColor = withAlpha(bgCandidate, 0.94f)
     }
-    if (headerCandidate != null) {
-      headerBackgroundColor = headerCandidate
-      profileBackgroundColor = headerCandidate
+    if (bottomBgCandidate != null) {
+      navigationBarColor = bottomBgCandidate
     }
   }
 
@@ -1302,7 +1306,7 @@ class ChatMainView(
     val shouldHighlightStatus = hasGroupTyping || isOnline
     val savedMessagesMode = isSavedMessagesHeaderMode()
     val headerActionColor = resolveHeaderActionColor()
-    chatHeader.setBackgroundColor(withAlpha(headerBackgroundColor, 0.95f))
+    chatHeader.setBackgroundColor(headerBackgroundColor)
     profileHeader.setBackgroundColor(Color.TRANSPARENT)
     profileHeaderGlass.setTintColor(withAlpha(surfaceColor, 0.88f))
     profileHeaderGlass.setBorderEnabled(true)
@@ -1338,6 +1342,7 @@ class ChatMainView(
       surfaceColor = headerBackgroundColor,
       isDark = contrastForegroundFor(headerBackgroundColor) == Color.WHITE,
     )
+    applyChatNavigationBarColor()
     profileHeaderTitle.setTextColor(textColor)
     profileHeaderName.setTextColor(textColor)
     profileBackButton.setColorFilter(textColor, PorterDuff.Mode.SRC_IN)
@@ -1365,6 +1370,22 @@ class ChatMainView(
     updateChatHeaderControls()
     updateProfileActionState()
     updateProfileHeaderChrome(profileScroll.scrollY)
+  }
+
+  private fun applyChatNavigationBarColor() {
+    val activity = findActivity(context) ?: return
+    activity.window.navigationBarColor = navigationBarColor
+    val isDark = contrastForegroundFor(navigationBarColor) == Color.WHITE
+    WindowInsetsControllerCompat(activity.window, activity.window.decorView).isAppearanceLightNavigationBars = !isDark
+  }
+
+  private fun findActivity(value: Context): Activity? {
+    var current: Context? = value
+    while (current is ContextWrapper) {
+      if (current is Activity) return current
+      current = current.baseContext
+    }
+    return current as? Activity
   }
 
   private fun updateHeaderTexts() {
