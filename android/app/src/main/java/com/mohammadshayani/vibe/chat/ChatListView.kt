@@ -44,7 +44,6 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import android.view.HapticFeedbackConstants
 import android.view.MotionEvent
-import android.view.ViewConfiguration
 import java.io.File
 import java.text.DateFormat
 import java.net.URLConnection
@@ -217,6 +216,7 @@ private class NativeRowsAdapter(
   private var externalVoiceMessageId: String? = null
   private var externalVoiceIsPlaying = false
   private var externalVoiceProgress = 0f
+  private val nudgedErrorKeys = LinkedHashSet<String>()
   private val contextMenuOverlay = ChatContextMenuOverlay(context)
 
   init {
@@ -870,6 +870,9 @@ private class NativeRowsAdapter(
       holder.voiceButton.setPlaybackState(isPlaying = false, progress = 0f, level = 0f)
       holder.agentSenderLabel.visibility = View.GONE
       holder.replyPreviewView.visibility = View.GONE
+      holder.retryButtonView.setOnClickListener(null)
+      holder.retryButtonView.visibility = View.GONE
+      holder.statusView.bind(null, Color.WHITE)
     } else if (holder is TypingRowViewHolder) {
       holder.shimmerView.stopShimmer()
     }
@@ -1210,6 +1213,8 @@ private class NativeRowsAdapter(
       agentSenderLabel.visibility = View.GONE
       replyPreviewView.visibility = View.GONE
       inlineAttachmentView.visibility = View.GONE
+      retryButtonView.setOnClickListener(null)
+      retryButtonView.visibility = View.GONE
       voiceWaveView.setWaveform(null, null)
       container.setOnLongClickListener(null)
       return
@@ -1276,10 +1281,42 @@ private class NativeRowsAdapter(
     val displayStatus = statusResolver?.invoke(item) ?: item.status
     statusView.bind(displayStatus, metaBaseColor)
     val showStatus = effectiveIsMe && when (displayStatus?.lowercase()) {
-      "pending", "sent", "delivered", "read", "error" -> true
+      "pending", "sending", "sent", "delivered", "read", "error" -> true
       else -> false
     }
     statusView.visibility = if (showStatus) View.VISIBLE else View.GONE
+    val showInlineRetry =
+      !hidden &&
+        effectiveIsMe &&
+        displayStatus?.trim()?.lowercase() == "error" &&
+        !item.messageId.isNullOrBlank()
+    retryButtonView.visibility = if (showInlineRetry) View.VISIBLE else View.GONE
+    retryButtonView.setOnClickListener(
+      if (showInlineRetry) {
+        View.OnClickListener {
+          val messageId = item.messageId?.takeIf { it.isNotBlank() } ?: return@OnClickListener
+          emitNativeEvent(
+            mapOf(
+              "type" to "contextMenuAction",
+              "action" to "resend",
+              "messageId" to messageId,
+            ),
+          )
+        }
+      } else {
+        null
+      },
+    )
+    if (showInlineRetry) {
+      layoutRetryButtonBesideBubble(this)
+      if (nudgedErrorKeys.add(item.key)) {
+        animateErrorNudge(this)
+      }
+    } else {
+      retryButtonView.clearAnimation()
+      retryButtonView.translationX = 0f
+      nudgedErrorKeys.remove(item.key)
+    }
 
     val statusLp = statusView.layoutParams as FrameLayout.LayoutParams
     statusLp.gravity = Gravity.END or Gravity.BOTTOM
@@ -1774,6 +1811,55 @@ private class NativeRowsAdapter(
     }
   }
 
+  private fun layoutRetryButtonBesideBubble(holder: NativeRowViewHolder) {
+    val retry = holder.retryButtonView
+    val bubble = holder.bubbleContainer
+    val applyLayout = {
+      val lp = retry.layoutParams as FrameLayout.LayoutParams
+      lp.width = dp(28)
+      lp.height = dp(28)
+      lp.gravity = Gravity.END or Gravity.BOTTOM
+      lp.rightMargin = (bubble.width + dp(9)).coerceAtLeast(dp(36))
+      lp.bottomMargin = dp(6)
+      retry.layoutParams = lp
+    }
+    if (bubble.width > 0) {
+      applyLayout()
+    } else {
+      bubble.post { applyLayout() }
+    }
+  }
+
+  private fun animateErrorNudge(holder: NativeRowViewHolder) {
+    val bubble = holder.bubbleContainer
+    val tail = holder.tailView
+    bubble.clearAnimation()
+    tail.clearAnimation()
+    ValueAnimator.ofFloat(0f, -dpF(4f), dpF(3f), -dpF(2f), 0f).apply {
+      duration = 280L
+      interpolator = PathInterpolator(0.2f, 0f, 0f, 1f)
+      addUpdateListener { animator ->
+        val value = animator.animatedValue as Float
+        bubble.translationX = value
+        if (tail.visibility == View.VISIBLE) {
+          tail.translationX = value
+        }
+      }
+      addListener(object : AnimatorListenerAdapter() {
+        override fun onAnimationEnd(animation: Animator) {
+          bubble.translationX = 0f
+          tail.translationX = 0f
+        }
+
+        override fun onAnimationCancel(animation: Animator) {
+          bubble.translationX = 0f
+          tail.translationX = 0f
+        }
+      })
+      start()
+    }
+  }
+
   private fun installSwipeReplyGesture(holder: NativeRowViewHolder, item: NativeRowItem, hidden: Boolean) {
     if (hidden || item.kind != "message") {
       holder.container.setOnTouchListener(null)
@@ -1788,14 +1874,12 @@ private class NativeRowsAdapter(
     var downY = 0f
     var swiping = false
     var replyArmed = false
-    var downAtMs = 0L
-    val horizontalSlop = dp(26)
+    val horizontalSlop = dp(12)
     holder.container.setOnTouchListener { view, event ->
       when (event.actionMasked) {
         MotionEvent.ACTION_DOWN -> {
           downX = event.rawX
           downY = event.rawY
-          downAtMs = SystemClock.uptimeMillis()
           swiping = false
           replyArmed = false
           false
@@ -1803,17 +1887,17 @@ private class NativeRowsAdapter(
         MotionEvent.ACTION_MOVE -> {
           val dx = event.rawX - downX
           val dy = event.rawY - downY
-          val elapsed = SystemClock.uptimeMillis() - downAtMs
           if (
             !swiping &&
-            elapsed < ViewConfiguration.getLongPressTimeout() &&
             dx > horizontalSlop &&
-            kotlin.math.abs(dx) > kotlin.math.abs(dy) * 2.0f
+            kotlin.math.abs(dx) > kotlin.math.abs(dy) * 1.35f
           ) {
             swiping = true
+            view.cancelLongPress()
             view.parent?.requestDisallowInterceptTouchEvent(true)
           }
           if (swiping) {
+            view.cancelLongPress()
             val offset = dx.coerceIn(0f, dpF(62f))
             holder.bubbleContainer.translationX = offset * 0.42f
             holder.tailView.translationX = offset * 0.42f
@@ -1868,7 +1952,7 @@ private class NativeRowsAdapter(
       tailView = tailView,
       item = item,
       messageId = messageId,
-      animateHold = true,
+      animateHold = false,
     )
   }
 
@@ -1882,11 +1966,12 @@ private class NativeRowsAdapter(
   ) {
     val actions = ArrayList<Pair<String, String>>()
     val contextText = nativeRowDisplayCaption(item).ifBlank { item.text.trim() }
+    val displayStatus = statusResolver?.invoke(item) ?: item.status
     actions.add("reply" to "Reply")
     if (contextText.isNotBlank()) actions.add("copy" to "Copy")
     if (item.isMe && item.text.isNotBlank()) actions.add("edit" to "Edit")
     actions.add("pin" to "Pin")
-    if (item.isMe && item.status?.lowercase() == "error") actions.add("resend" to "Resend")
+    if (item.isMe && displayStatus?.trim()?.lowercase() == "error") actions.add("resend" to "Resend")
     actions.add("delete" to "Delete")
 
     emitNativeEvent(

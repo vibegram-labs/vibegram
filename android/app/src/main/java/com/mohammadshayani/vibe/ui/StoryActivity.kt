@@ -81,6 +81,7 @@ class StoryActivity : AppCompatActivity() {
   private lateinit var aiEditButton: TextView
   private lateinit var nextButton: MaterialButton
   private lateinit var loadingIndicator: ProgressBar
+  private lateinit var cameraCardContainer: FrameLayout
 
   private val httpClient = OkHttpClient()
   private val mainHandler = Handler(Looper.getMainLooper())
@@ -159,16 +160,11 @@ class StoryActivity : AppCompatActivity() {
 
   private fun buildViewHierarchy() {
     cameraPreviewView = PreviewView(this).apply {
-      layoutParams =
-        FrameLayout.LayoutParams(
-          FrameLayout.LayoutParams.MATCH_PARENT,
-          FrameLayout.LayoutParams.MATCH_PARENT
-        )
+      id = View.generateViewId()
       implementationMode = PreviewView.ImplementationMode.COMPATIBLE
       scaleType = PreviewView.ScaleType.FILL_CENTER
       setBackgroundColor(Color.BLACK)
     }
-    root.addView(cameraPreviewView)
 
     selectedBackdropView = ImageView(this).apply {
       layoutParams =
@@ -222,21 +218,51 @@ class StoryActivity : AppCompatActivity() {
   }
 
   private fun buildMainPage(): FrameLayout {
-    val page =
-      FrameLayout(this).apply {
-        layoutParams =
-          FrameLayout.LayoutParams(
-            FrameLayout.LayoutParams.MATCH_PARENT,
-            FrameLayout.LayoutParams.MATCH_PARENT
-          )
-      }
+    val page = FrameLayout(this).apply {
+      layoutParams = FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT
+      )
+    }
 
-    val topBar =
-      LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(dp(16f), safeTopInset() + dp(10f), dp(16f), 0)
+    val safeTop = safeTopInset().toFloat()
+    val horizontalMargin = dp(10f)
+    val cardTop = (safeTop + dp(10f).toFloat()).toInt()
+
+    cameraCardContainer = FrameLayout(this).apply {
+      background = roundedPanelDrawable(Color.argb(15, 255, 255, 255), Color.argb(20, 255, 255, 255), 32f)
+      clipToOutline = true
+      setPadding(dp(1f), dp(1f), dp(1f), dp(1f))
+    }
+
+    val displayMetrics = resources.displayMetrics
+    val cardHeight = (displayMetrics.heightPixels * 0.65f).toInt()
+
+    page.addView(
+      cameraCardContainer,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        cardHeight
+      ).apply {
+        topMargin = cardTop
+        marginStart = horizontalMargin
+        marginEnd = horizontalMargin
       }
+    )
+
+    cameraCardContainer.addView(
+      cameraPreviewView,
+      FrameLayout.LayoutParams(
+        FrameLayout.LayoutParams.MATCH_PARENT,
+        FrameLayout.LayoutParams.MATCH_PARENT
+      )
+    )
+
+    val topBar = LinearLayout(this).apply {
+      orientation = LinearLayout.HORIZONTAL
+      gravity = Gravity.CENTER_VERTICAL
+      setPadding(dp(14f), dp(14f), dp(14f), 0)
+    }
 
     mainCloseButton = overlayCircleButton("X").apply { setOnClickListener { finish() } }
     mainFlipButton = overlayCircleButton("FLIP").apply { setOnClickListener { flipCamera() } }
@@ -244,7 +270,8 @@ class StoryActivity : AppCompatActivity() {
     topBar.addView(mainCloseButton, LinearLayout.LayoutParams(dp(44f), dp(44f)))
     topBar.addView(Space(this), LinearLayout.LayoutParams(0, 0, 1f))
     topBar.addView(mainFlipButton, LinearLayout.LayoutParams(dp(60f), dp(44f)))
-    page.addView(
+
+    cameraCardContainer.addView(
       topBar,
       FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT,
@@ -253,11 +280,10 @@ class StoryActivity : AppCompatActivity() {
       )
     )
 
-    val centerStack =
-      LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_HORIZONTAL
-      }
+    val centerStack = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
+    }
 
     centerStack.addView(
       TextView(this).apply {
@@ -270,125 +296,61 @@ class StoryActivity : AppCompatActivity() {
       }
     )
 
-    centerStack.addView(
-      TextView(this).apply {
-        text = "Capture a frame or import one before you publish."
-        setTextColor(Color.WHITE)
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 18f)
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        gravity = Gravity.CENTER
-        setPadding(dp(28f), dp(18f), dp(28f), 0)
-      }
-    )
-
-    centerStack.addView(
-      TextView(this).apply {
-        text = "The Android story main page now follows the iOS camera-first flow."
-        setTextColor(Color.argb(210, 255, 255, 255))
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 13f)
-        gravity = Gravity.CENTER
-        setPadding(dp(28f), dp(10f), dp(28f), 0)
-      }
-    )
-
-    page.addView(
+    cameraCardContainer.addView(
       centerStack,
       FrameLayout.LayoutParams(
         FrameLayout.LayoutParams.MATCH_PARENT,
         FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.CENTER_HORIZONTAL or Gravity.CENTER_VERTICAL
-      ).apply {
-        topMargin = -dp(36f)
-      }
-    )
-
-    val bottomDock =
-      LinearLayout(this).apply {
-        orientation = LinearLayout.VERTICAL
-        gravity = Gravity.CENTER_HORIZONTAL
-        setPadding(dp(22f), 0, dp(22f), safeBottomInset() + dp(24f))
-      }
-
-    bottomDock.addView(
-      TextView(this).apply {
-        text = "Photo"
-        setTextColor(Color.WHITE)
-        textSize = 13f
-        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        background = capsuleDrawable(Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
-        setPadding(dp(16f), dp(8f), dp(16f), dp(8f))
-      }
-    )
-
-    bottomDock.addView(spaceView(16f))
-
-    val captureRow =
-      FrameLayout(this).apply {
-        layoutParams =
-          LinearLayout.LayoutParams(
-            LinearLayout.LayoutParams.MATCH_PARENT,
-            LinearLayout.LayoutParams.WRAP_CONTENT
-          )
-      }
-
-    galleryQuickButton =
-      overlayCircleButton("G").apply {
-        setOnClickListener { launchGallery() }
-      }
-    captureRow.addView(
-      galleryQuickButton,
-      FrameLayout.LayoutParams(dp(52f), dp(52f), Gravity.START or Gravity.CENTER_VERTICAL)
-    )
-
-    shutterButton =
-      FrameLayout(this).apply {
-        background = circleDrawable(Color.WHITE)
-        setOnClickListener { capturePhoto() }
-      }
-    shutterButton.addView(
-      View(this).apply { background = circleDrawable(Color.BLACK) },
-      FrameLayout.LayoutParams(dp(58f), dp(58f), Gravity.CENTER)
-    )
-    captureRow.addView(
-      shutterButton,
-      FrameLayout.LayoutParams(dp(78f), dp(78f), Gravity.CENTER)
-    )
-
-    captureRow.addView(
-      TextView(this).apply {
-        text = "Import"
-        setTextColor(Color.WHITE)
-        textSize = 13f
-        gravity = Gravity.CENTER
-        background = capsuleDrawable(Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
-        setPadding(dp(16f), dp(14f), dp(16f), dp(14f))
-        setOnClickListener { launchGallery() }
-      },
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.END or Gravity.CENTER_VERTICAL
+        Gravity.CENTER
       )
     )
-    bottomDock.addView(captureRow)
 
-    bottomDock.addView(spaceView(12f))
-    bottomDock.addView(
-      TextView(this).apply {
-        text = "Tap the shutter or pick from gallery"
-        setTextColor(Color.argb(220, 255, 255, 255))
-        setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
-        gravity = Gravity.CENTER
-      }
-    )
+    val bottomDock = LinearLayout(this).apply {
+      orientation = LinearLayout.VERTICAL
+      gravity = Gravity.CENTER_HORIZONTAL
+      setPadding(dp(22f), 0, dp(22f), safeBottomInset() + dp(24f))
+    }
+
+    val photoLabel = TextView(this).apply {
+      text = "Photo"
+      setTextColor(Color.WHITE)
+      textSize = 13f
+      typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+      background = capsuleDrawable(Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
+      setPadding(dp(16f), dp(8f), dp(16f), dp(8f))
+    }
+    bottomDock.addView(photoLabel)
+    bottomDock.addView(spaceView(16f))
+
+    val captureRow = FrameLayout(this).apply {
+      layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+    }
+
+    galleryQuickButton = overlayCircleButton("G").apply { setOnClickListener { launchGallery() } }
+    captureRow.addView(galleryQuickButton, FrameLayout.LayoutParams(dp(52f), dp(52f), Gravity.START or Gravity.CENTER_VERTICAL))
+
+    shutterButton = FrameLayout(this).apply {
+      background = circleDrawable(Color.WHITE)
+      setOnClickListener { capturePhoto() }
+    }
+    shutterButton.addView(View(this).apply { background = circleDrawable(Color.BLACK) }, FrameLayout.LayoutParams(dp(58f), dp(58f), Gravity.CENTER))
+    captureRow.addView(shutterButton, FrameLayout.LayoutParams(dp(78f), dp(78f), Gravity.CENTER))
+
+    val importBtn = TextView(this).apply {
+      text = "Import"
+      setTextColor(Color.WHITE)
+      textSize = 13f
+      gravity = Gravity.CENTER
+      background = capsuleDrawable(Color.argb(42, 255, 255, 255), Color.TRANSPARENT)
+      setPadding(dp(16f), dp(14f), dp(16f), dp(14f))
+      setOnClickListener { launchGallery() }
+    }
+    captureRow.addView(importBtn, FrameLayout.LayoutParams(FrameLayout.LayoutParams.WRAP_CONTENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL))
+    bottomDock.addView(captureRow)
 
     page.addView(
       bottomDock,
-      FrameLayout.LayoutParams(
-        FrameLayout.LayoutParams.MATCH_PARENT,
-        FrameLayout.LayoutParams.WRAP_CONTENT,
-        Gravity.BOTTOM
-      )
+      FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM)
     )
 
     return page

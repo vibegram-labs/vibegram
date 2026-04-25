@@ -720,7 +720,7 @@ private struct ChatsRootView: View {
     }
 
     guard
-      action == "select",
+      ["select", "chat", "call", "saveContact"].contains(action),
       let rawUser = payload["user"] as? [String: Any],
       let user = ContactSearchUser(payload: rawUser)
     else {
@@ -729,9 +729,35 @@ private struct ChatsRootView: View {
       return
     }
 
+    if action == "saveContact" {
+      Task {
+        await saveContact(for: user)
+      }
+      return
+    }
+
     isShowingSearch = false
     Task {
       await openChat(for: user)
+      if action == "call" {
+        AppToastController.shared.show("Use the call button in chat.")
+      }
+    }
+  }
+
+  @MainActor
+  private func saveContact(for user: ContactSearchUser) async {
+    guard let config = AppSessionConfig.current else {
+      errorMessage = "The current session is unavailable."
+      return
+    }
+
+    do {
+      _ = try await ChatDirectMessageService.startChat(config: config, friendID: user.userID)
+      await model.refresh()
+      AppToastController.shared.show("Contact saved.")
+    } catch {
+      errorMessage = error.localizedDescription
     }
   }
 
@@ -748,6 +774,13 @@ private struct ChatsRootView: View {
 
     do {
       let result = try await ChatDirectMessageService.startChat(config: config, friendID: user.userID)
+      if let publicKey = user.publicKey, !publicKey.isEmpty {
+        _ = ChatEngine.shared.cachePeerPublicKey([
+          "chatId": result.chatID,
+          "peerUserId": user.userID,
+          "publicKey": publicKey,
+        ])
+      }
       coordinator.openChat(
         ChatRoute(
           chatId: result.chatID,
@@ -1303,7 +1336,7 @@ private struct ContactsPageView: View {
     }
 
     guard
-      action == "select",
+      ["select", "chat", "call", "saveContact"].contains(action),
       let rawUser = payload["user"] as? [String: Any],
       let user = ContactSearchUser(payload: rawUser)
     else {
@@ -1312,9 +1345,35 @@ private struct ContactsPageView: View {
       return
     }
 
+    if action == "saveContact" {
+      Task {
+        await saveContact(for: user)
+      }
+      return
+    }
+
     isShowingSearch = false
     Task {
       await openChat(for: user)
+      if action == "call" {
+        AppToastController.shared.show("Use the call button in chat.")
+      }
+    }
+  }
+
+  @MainActor
+  private func saveContact(for user: ContactSearchUser) async {
+    guard let config = AppSessionConfig.current else {
+      errorMessage = "The current session is unavailable."
+      return
+    }
+
+    do {
+      _ = try await ChatDirectMessageService.startChat(config: config, friendID: user.userID)
+      await model.refresh()
+      AppToastController.shared.show("Contact saved.")
+    } catch {
+      errorMessage = error.localizedDescription
     }
   }
 
@@ -1331,6 +1390,13 @@ private struct ContactsPageView: View {
 
     do {
       let result = try await ChatDirectMessageService.startChat(config: config, friendID: user.userID)
+      if let publicKey = user.publicKey, !publicKey.isEmpty {
+        _ = ChatEngine.shared.cachePeerPublicKey([
+          "chatId": result.chatID,
+          "peerUserId": user.userID,
+          "publicKey": publicKey,
+        ])
+      }
       coordinator.openChat(
         ChatRoute(
           chatId: result.chatID,
@@ -2039,6 +2105,8 @@ private struct ContactSearchView: View {
   let onResult: ([String: Any]) -> Void
   @State private var query = ""
   @State private var results: [ContactSearchUser] = []
+  @State private var selectedUser: ContactSearchUser?
+  @State private var savedUserIDs = Set<String>()
   @State private var isLoading = false
   @State private var statusText = "Find by username, phone, or user ID"
   @FocusState private var isQueryFieldFocused: Bool
@@ -2063,7 +2131,65 @@ private struct ContactSearchView: View {
       }
       .listRowBackground(palette.card)
 
-      if isLoading {
+      if let selectedUser {
+        Section {
+          VStack(spacing: 16) {
+            Circle()
+              .fill(palette.card)
+              .frame(width: 78, height: 78)
+              .overlay {
+                Text(String(selectedUser.username.prefix(1)).uppercased())
+                  .font(.system(size: 28, weight: .semibold))
+                  .foregroundStyle(palette.accent)
+              }
+
+            VStack(spacing: 4) {
+              Text(selectedUser.username)
+                .font(.system(size: 20, weight: .semibold))
+                .foregroundStyle(palette.text)
+              Text(selectedUser.subtitle)
+                .font(.footnote)
+                .foregroundStyle(palette.secondaryText)
+            }
+
+            HStack(spacing: 10) {
+              Button {
+                onResult(["action": "chat", "user": selectedUser.payload])
+                dismiss()
+              } label: {
+                Label("Chat", systemImage: "message.fill")
+                  .frame(maxWidth: .infinity)
+              }
+              .buttonStyle(.borderedProminent)
+
+              Button {
+                onResult(["action": "call", "user": selectedUser.payload])
+                dismiss()
+              } label: {
+                Label("Call", systemImage: "phone.fill")
+                  .frame(maxWidth: .infinity)
+              }
+              .buttonStyle(.bordered)
+            }
+
+            Button {
+              savedUserIDs.insert(selectedUser.userID)
+              onResult(["action": "saveContact", "user": selectedUser.payload])
+            } label: {
+              Label(
+                savedUserIDs.contains(selectedUser.userID) ? "Saved" : "Add Contact",
+                systemImage: savedUserIDs.contains(selectedUser.userID) ? "checkmark.circle.fill" : "person.badge.plus"
+              )
+              .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(savedUserIDs.contains(selectedUser.userID))
+          }
+          .frame(maxWidth: .infinity)
+          .padding(.vertical, 16)
+        }
+        .listRowBackground(palette.card)
+      } else if isLoading {
         Section {
           HStack(spacing: 12) {
             ProgressView()
@@ -2076,8 +2202,8 @@ private struct ContactSearchView: View {
         Section("Results") {
           ForEach(results) { user in
             Button {
-              onResult(["action": "select", "user": user.payload])
-              dismiss()
+              selectedUser = user
+              isQueryFieldFocused = false
             } label: {
               VStack(alignment: .leading, spacing: 4) {
                 Text(user.username)
@@ -2137,6 +2263,7 @@ private struct ContactSearchView: View {
     }
 
     isLoading = true
+    selectedUser = nil
     defer { isLoading = false }
 
     do {
@@ -2152,6 +2279,7 @@ private struct ContactSearchView: View {
 private struct ContactSearchUser: Identifiable {
   let userID: String
   let username: String
+  let handle: String?
   let phoneNumber: String?
   let profileImage: String?
   let publicKey: String?
@@ -2159,7 +2287,11 @@ private struct ContactSearchUser: Identifiable {
   var id: String { userID }
 
   var subtitle: String {
-    phoneNumber ?? userID
+    if let phoneNumber { return phoneNumber }
+    if let handle, !handle.isEmpty, !Self.looksLikeUUID(handle), handle.localizedCaseInsensitiveCompare(username) != .orderedSame {
+      return "@\(handle.trimmingCharacters(in: CharacterSet(charactersIn: "@")))"
+    }
+    return "User is in Vibegram"
   }
 
   var payload: [String: Any] {
@@ -2167,7 +2299,9 @@ private struct ContactSearchUser: Identifiable {
       "userId": userID,
       "id": userID,
       "username": username,
+      "displayName": username,
     ]
+    if let handle { value["handle"] = handle }
     if let phoneNumber { value["phoneNumber"] = phoneNumber }
     if let profileImage { value["profileImage"] = profileImage }
     if let publicKey { value["publicKey"] = publicKey }
@@ -2180,10 +2314,22 @@ private struct ContactSearchUser: Identifiable {
     }
 
     self.userID = userID
-    self.username = Self.normalizedString(payload["username"] ?? payload["name"]) ?? userID
-    self.phoneNumber = Self.normalizedString(payload["phoneNumber"] ?? payload["phone"])
-    self.profileImage = Self.normalizedString(payload["profileImage"])
-    self.publicKey = Self.normalizedString(payload["publicKey"])
+    let rawHandle = Self.normalizedString(payload["username"] ?? payload["handle"])
+    let rawDisplayName =
+      Self.normalizedString(
+        payload["displayName"] ?? payload["display_name"] ?? payload["fullName"] ?? payload["full_name"]
+          ?? payload["name"])
+      ?? rawHandle
+    self.username =
+      rawDisplayName.flatMap { Self.looksLikeUUID($0) ? nil : $0 }
+      ?? rawHandle.flatMap { Self.looksLikeUUID($0) ? nil : $0 }
+      ?? "Vibegram User"
+    self.handle = rawHandle
+    self.phoneNumber = Self.normalizedString(payload["phoneNumber"] ?? payload["phone_number"] ?? payload["phone"])
+    self.profileImage = Self.normalizedString(
+      payload["profileImage"] ?? payload["profile_image"] ?? payload["avatarUrl"] ?? payload["avatar_url"])
+    self.publicKey = Self.normalizedString(
+      payload["publicKey"] ?? payload["public_key"] ?? payload["friendKey"] ?? payload["friendPublicKey"])
   }
 
   private static func normalizedString(_ value: Any?) -> String? {
@@ -2195,6 +2341,10 @@ private struct ContactSearchUser: Identifiable {
       return value.stringValue
     }
     return nil
+  }
+
+  private static func looksLikeUUID(_ value: String) -> Bool {
+    UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
   }
 }
 

@@ -2092,6 +2092,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     cell.onMediaNaturalSizeResolved = { [weak self] messageId, mediaURL, size in
       self?.handleResolvedMediaSize(messageId: messageId, mediaURL: mediaURL, size: size)
     }
+    cell.onRetryMessageTap = { [weak self] row in
+      self?.retryOutgoingMessage(row: row, source: "inline_retry")
+    }
     cell.onVoiceUploadCancelTap = { [weak self] row in
       guard let self, let messageId = row.messageId, !messageId.isEmpty else { return }
       let downloadState = self.remoteMediaDownloadState(for: row)
@@ -3340,6 +3343,29 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     row["message"] = message
     nativeOutgoingRowsById[messageId] = row
     setRows(sourceRowsPayload)
+  }
+
+  func retryOutgoingMessage(row: ChatListRow, source: String) {
+    guard let messageId = normalizedMessageId(row.messageId) else { return }
+    let rowChatId = row.chatId?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let chatId = rowChatId.isEmpty ? engineChatId.trimmingCharacters(in: .whitespacesAndNewlines) : rowChatId
+    guard !chatId.isEmpty else { return }
+    setNativeOutgoingMessageStatus(messageId, status: "pending")
+    DispatchQueue.global(qos: .utility).async {
+      let result = ChatEngine.shared.retryOutgoingMessage([
+        "chatId": chatId,
+        "messageId": messageId,
+      ])
+      NSLog(
+        "[ChatListView] retryOutgoingMessage source=%@ chatId=%@ messageId=%@ result=%@ status=%@ journalTail=%@",
+        source,
+        chatId,
+        messageId,
+        String(describing: result),
+        String(describing: ChatEngine.shared.getStatus()),
+        String(describing: Array(ChatEngine.shared.getJournal().suffix(6)))
+      )
+    }
   }
 
   private func indexForMessage(_ messageId: String) -> Int? {

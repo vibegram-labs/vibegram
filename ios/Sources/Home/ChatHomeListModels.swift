@@ -143,15 +143,25 @@ struct ChatHomeListRow {
     }
     let isSavedMessages = chatId == "saved_messages"
     let serverMessages = parseServerMessages(raw["messages"])
-    let title =
-      normalizedString(
-        raw["name"] ?? raw["title"] ?? raw["chatName"] ?? raw["chat_name"] ?? raw["friendName"]
-          ?? raw["friend_name"])
-      ?? "Unknown"
-    let preview =
-      normalizedString(raw["preview"] ?? raw["subtitle"])
-      ?? serverMessages.last.map(homePreviewText(from:))
-      ?? ""
+    let names = [
+      raw["name"], raw["title"], raw["chatName"], raw["chat_name"],
+      raw["friendName"], raw["friend_name"], raw["displayName"], raw["display_name"],
+      raw["fullName"], raw["full_name"], raw["username"], raw["handle"]
+    ]
+    var resolvedTitle: String? = nil
+    for name in names {
+      if let n = normalizedString(name) {
+        if !looksLikeUUID(n) {
+          resolvedTitle = n
+          break
+        }
+      }
+    }
+    let title = resolvedTitle ?? "Vibegram User"
+
+    let previewRaw = normalizedString(raw["preview"] ?? raw["subtitle"])
+    let previewMessage = serverMessages.last.map(homePreviewText(from:))
+    let preview = previewRaw ?? previewMessage ?? ""
     let timeLabel =
       normalizedString(raw["timeLabel"] ?? raw["time_label"] ?? raw["time"])
       ?? serverMessages.last.map(homeTimeLabel(from:))
@@ -162,12 +172,14 @@ struct ChatHomeListRow {
     let pinned = parseBool(raw["pinned"]) ?? false
     let isTyping = parseBool(raw["isTyping"] ?? raw["is_typing"]) ?? false
     let isOnline = parseBool(raw["isOnline"] ?? raw["is_online"]) ?? false
-    let friendId = normalizedString(raw["friendId"] ?? raw["friend_id"])
+    let friendId = normalizedString(
+      raw["friendId"] ?? raw["friend_id"] ?? raw["peerUserId"] ?? raw["peer_user_id"]
+        ?? raw["userId"] ?? raw["user_id"])
     let peerUserId = friendId
     let rawAvatar =
       normalizedString(
         raw["avatarUri"] ?? raw["avatar_uri"] ?? raw["friendImage"] ?? raw["friend_image"]
-          ?? raw["avatarUrl"] ?? raw["avatar_url"])
+          ?? raw["profileImage"] ?? raw["profile_image"] ?? raw["avatarUrl"] ?? raw["avatar_url"])
     let avatarUri = resolveAvatarURI(rawAvatar: rawAvatar, friendId: friendId, chatId: chatId)
     let avatarFallback =
       normalizedString(raw["avatarFallback"] ?? raw["avatar_fallback"])
@@ -302,6 +314,10 @@ struct ChatHomeListRow {
       return value.stringValue
     }
     return nil
+  }
+
+  private static func looksLikeUUID(_ value: String) -> Bool {
+    UUID(uuidString: value.trimmingCharacters(in: .whitespacesAndNewlines)) != nil
   }
 
   private static func parseInt(_ value: Any?) -> Int? {

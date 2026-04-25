@@ -42,9 +42,21 @@ internal fun parseChatHomeRows(
     val isDirectChat = chatType == "dm"
 
     val title =
-      raw["name"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["title"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: "Unknown"
+      firstNonBlank(
+        raw["name"],
+        raw["title"],
+        raw["chatName"],
+        raw["chat_name"],
+        raw["friendName"],
+        raw["friend_name"],
+        raw["displayName"],
+        raw["display_name"],
+        raw["fullName"],
+        raw["full_name"],
+        raw["username"],
+        raw["handle"],
+      )?.takeUnless { looksLikeUuid(it) }
+        ?: "Vibegram User"
     val preview = resolvePreview(raw, isSavedMessages)
     val timeLabel =
       raw["timeLabel"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
@@ -57,16 +69,26 @@ internal fun parseChatHomeRows(
     val isTyping = parseBool(raw["isTyping"] ?: raw["is_typing"]) ?: false
     val isOnline = parseBool(raw["isOnline"] ?: raw["is_online"]) ?: false
     val friendId =
-      raw["friendId"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["friend_id"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+      firstNonBlank(
+        raw["friendId"],
+        raw["friend_id"],
+        raw["peerUserId"],
+        raw["peer_user_id"],
+        raw["userId"],
+        raw["user_id"],
+      )
     val peerUserId = if (isDirectChat) friendId else null
     val rawAvatar =
-      raw["avatarUri"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["avatar_uri"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["friendImage"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["friend_image"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["avatarUrl"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
-        ?: raw["avatar_url"]?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+      firstNonBlank(
+        raw["avatarUri"],
+        raw["avatar_uri"],
+        raw["friendImage"],
+        raw["friend_image"],
+        raw["profileImage"],
+        raw["profile_image"],
+        raw["avatarUrl"],
+        raw["avatar_url"],
+      )
     val avatarUri = resolveRowAvatarUri(
       rawAvatar = rawAvatar,
       friendId = peerUserId,
@@ -189,4 +211,16 @@ private fun parseChatType(value: Any?): String {
     "channel" -> "channel"
     else -> "dm"
   }
+}
+
+private fun firstNonBlank(vararg values: Any?): String? {
+  return values.firstNotNullOfOrNull { value ->
+    value?.toString()?.trim()?.takeIf { it.isNotEmpty() }
+  }
+}
+
+private fun looksLikeUuid(value: String): Boolean {
+  val trimmed = value.trim()
+  if (trimmed.length != 36) return false
+  return runCatching { java.util.UUID.fromString(trimmed) }.isSuccess
 }

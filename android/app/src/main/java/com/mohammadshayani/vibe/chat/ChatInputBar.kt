@@ -105,13 +105,11 @@ internal class ChatNativeInputBar(
   private val lockHintIcon = ImageView(context)
   private val micButton = FrameLayout(context)
   private val micIcon = ImageView(context)
-  private val sendButton = FrameLayout(context)
-  private val sendIcon = ImageView(context)
   private val cancelOverlayButton = TextView(context)
 
   private val uiHandler = Handler(Looper.getMainLooper())
   private val longPressTimeoutMs = min(200, ViewConfiguration.getLongPressTimeout())
-  private val lockThresholdPx = dp(60)
+  private val lockThresholdPx = dp(132)
   private val cancelThresholdPx = dp(100)
   private val minRecordSendDurationMs = 600L
 
@@ -121,7 +119,6 @@ internal class ChatNativeInputBar(
   private var passiveIconColor = Color.WHITE
   private var accentColor = Color.argb(255, 106, 79, 207)
   private var dangerColor = Color.argb(255, 255, 59, 48)
-  private var lastActionRes = R.drawable.ic_mic
   private var currentAppearance = ChatListAppearance()
   private var isDark: Boolean = true
   private var attachmentMenu: ChatAttachmentMenuController? = null
@@ -209,7 +206,6 @@ internal class ChatNativeInputBar(
       LayoutParams.WRAP_CONTENT,
     )
     row.setBackgroundColor(Color.TRANSPARENT)
-    row.layoutTransition = android.animation.LayoutTransition()
     rootColumn.addView(row)
 
     setupMicButton()
@@ -295,11 +291,9 @@ internal class ChatNativeInputBar(
     mentionDescLabel.setTextColor(withAlpha(textColor, 0.72f))
     lockHintPill.background = roundedDrawable(withAlpha(surfaceColor, 0.78f), dpF(22f))
     
-    // Add background to separated buttons
     val btnBgColor = withAlpha(surfaceColor, if (isDark) 1.0f else 0.92f)
     attachmentButton.background = circleDrawable(btnBgColor)
     micButton.background = circleDrawable(btnBgColor)
-    sendButton.background = circleDrawable(accentColor)
     
     updateSurfaces()
     refreshVisualState()
@@ -344,12 +338,12 @@ internal class ChatNativeInputBar(
   }
 
   private fun setupAttachmentButton() {
-    attachmentButton.layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply {
+    attachmentButton.layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
       gravity = Gravity.BOTTOM
-      bottomMargin = dp(9)
-      rightMargin = dp(8)
+      bottomMargin = dp(2)
+      rightMargin = dp(6)
     }
-    attachmentButton.background = circleDrawable(Color.TRANSPARENT, Color.TRANSPARENT, 0f)
+    attachmentButton.background = circleDrawable(surfaceColor)
     attachmentButton.clipChildren = false
     attachmentButton.clipToPadding = false
     attachmentButton.isClickable = true
@@ -363,7 +357,7 @@ internal class ChatNativeInputBar(
 
   private fun setupTextSurface() {
     textSurface.layoutParams = LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
-    textSurface.minimumHeight = dp(52)
+    textSurface.minimumHeight = dp(44)
     textSurface.background = roundedDrawable(withAlpha(surfaceColor, 0.92f), dpF(22f))
     textSurface.clipChildren = false
     textSurface.clipToPadding = false
@@ -397,12 +391,12 @@ internal class ChatNativeInputBar(
     replyBanner.orientation = LinearLayout.HORIZONTAL
     replyBanner.gravity = Gravity.CENTER_VERTICAL
     replyBanner.layoutParams = LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(44)).apply {
-      topMargin = dp(6)
-      leftMargin = dp(46)
-      rightMargin = dp(46)
+      topMargin = dp(4)
+      leftMargin = dp(10)
+      rightMargin = dp(10)
     }
     replyBanner.visibility = View.GONE
-    replyBanner.setPadding(dp(10), dp(6), dp(4), dp(6))
+    replyBanner.setPadding(dp(8), dp(5), dp(2), dp(5))
     replyAccentBar.layoutParams = LinearLayout.LayoutParams(dp(3), LinearLayout.LayoutParams.MATCH_PARENT).apply {
       rightMargin = dp(8)
     }
@@ -432,9 +426,9 @@ internal class ChatNativeInputBar(
     mentionBanner.orientation = LinearLayout.HORIZONTAL
     mentionBanner.gravity = Gravity.CENTER_VERTICAL
     mentionBanner.layoutParams = LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, dp(26)).apply {
-      topMargin = dp(6)
-      leftMargin = dp(46)
-      rightMargin = dp(46)
+      topMargin = dp(4)
+      leftMargin = dp(10)
+      rightMargin = dp(10)
     }
     mentionBanner.visibility = View.GONE
 
@@ -463,49 +457,22 @@ internal class ChatNativeInputBar(
     textContainer.addView(mentionBanner)
 
     input.layoutParams = LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT).apply {
-      leftMargin = dp(16)
-      rightMargin = dp(16)
+      leftMargin = dp(14)
+      rightMargin = dp(14)
     }
     input.setBackgroundColor(Color.TRANSPARENT)
     input.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16f)
     input.typeface = Typeface.DEFAULT
     input.maxLines = 4
     input.minLines = 1
+    input.minHeight = 0
+    input.minimumHeight = 0
     input.gravity = Gravity.CENTER_VERTICAL
     input.inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES
     input.imeOptions = EditorInfo.IME_ACTION_SEND or EditorInfo.IME_FLAG_NO_EXTRACT_UI
-    input.setPadding(0, dp(10), 0, dp(10))
+    input.setPadding(0, dp(6), 0, dp(6))
     input.includeFontPadding = false
-    
-    val textAndSendRow = LinearLayout(context).apply {
-      orientation = LinearLayout.HORIZONTAL
-      gravity = Gravity.BOTTOM
-      layoutParams = LinearLayout.LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.WRAP_CONTENT)
-    }
-    
-    val inputWrapper = FrameLayout(context).apply {
-      layoutParams = LinearLayout.LayoutParams(0, LayoutParams.WRAP_CONTENT, 1f)
-      addView(input)
-    }
-    textAndSendRow.addView(inputWrapper)
-    
-    sendButton.layoutParams = LinearLayout.LayoutParams(dp(30), dp(30)).apply {
-      gravity = Gravity.BOTTOM
-      bottomMargin = dp(11)
-      leftMargin = dp(4)
-      rightMargin = dp(4)
-    }
-    sendButton.isClickable = true
-    sendButton.setOnClickListener { sendCurrentText() }
-    
-    sendIcon.layoutParams = LayoutParams(dp(14), dp(14), Gravity.CENTER)
-    sendIcon.setImageResource(R.drawable.ic_send)
-    sendIcon.setColorFilter(Color.WHITE)
-    sendIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
-    sendButton.addView(sendIcon)
-    
-    textAndSendRow.addView(sendButton)
-    textContainer.addView(textAndSendRow)
+    textContainer.addView(input)
 
     textSurface.addView(textContainer)
 
@@ -525,11 +492,11 @@ internal class ChatNativeInputBar(
 
     recordingOverlay.layoutParams = FrameLayout.LayoutParams(
       LayoutParams.MATCH_PARENT,
-      dp(52),
+      dp(44),
     ).apply {
       gravity = Gravity.CENTER_VERTICAL
-      leftMargin = dp(16)
-      rightMargin = dp(16)
+      leftMargin = dp(12)
+      rightMargin = dp(12)
     }
     recordingOverlay.orientation = LinearLayout.HORIZONTAL
     recordingOverlay.gravity = Gravity.CENTER_VERTICAL
@@ -568,15 +535,15 @@ internal class ChatNativeInputBar(
   }
 
   private fun setupMicButton() {
-    micButton.layoutParams = LinearLayout.LayoutParams(dp(34), dp(34)).apply {
+    micButton.layoutParams = LinearLayout.LayoutParams(dp(44), dp(44)).apply {
       gravity = Gravity.BOTTOM
-      bottomMargin = dp(9)
-      leftMargin = dp(8)
+      bottomMargin = dp(2)
+      leftMargin = dp(6)
     }
     micButton.isClickable = true
     micButton.isFocusable = true
 
-    micIcon.layoutParams = LayoutParams(dp(20), dp(20), Gravity.CENTER)
+    micIcon.layoutParams = LayoutParams(dp(21), dp(21), Gravity.CENTER)
     micIcon.setImageResource(R.drawable.ic_mic)
     micIcon.scaleType = ImageView.ScaleType.CENTER_INSIDE
     micButton.addView(micIcon)
@@ -816,8 +783,8 @@ internal class ChatNativeInputBar(
 
   private fun resetVadVisuals() {
     vadVisualLevel = 0f
-    actionButton.animate().cancel()
-    actionButton.animate()
+    micButton.animate().cancel()
+    micButton.animate()
       .scaleX(1f)
       .scaleY(1f)
       .setDuration(160L)
@@ -832,21 +799,17 @@ internal class ChatNativeInputBar(
       recordingSlideChevron.alpha = 1f
       recordingSlideLabel.translationX = 0f
       recordingSlideChevron.translationX = 0f
-      lockHintPill.translationY = 0f
       return
     }
     if (abs(dx) > dpF(1f) || abs(dy) > dpF(1f)) {
       stopRecordingHintAnimations(resetTransforms = false)
     }
     val cancelProgress = (-dx / cancelThresholdPx.toFloat()).coerceIn(0f, 1f)
-    val lockProgress = (-dy / lockThresholdPx.toFloat()).coerceIn(0f, 1f)
     val dragOffset = dpF(18f) * cancelProgress
     recordingSlideLabel.translationX = -dragOffset
     recordingSlideChevron.translationX = -dragOffset
     recordingSlideLabel.alpha = 1f - (cancelProgress * 0.55f)
     recordingSlideChevron.alpha = 1f - (cancelProgress * 0.70f)
-    lockHintPill.translationY = dpF(8f) - (dpF(10f) * lockProgress)
-    lockHintPill.alpha = 0.72f + (0.28f * lockProgress)
   }
 
   private fun resetRecordingDragVisuals() {
@@ -854,8 +817,7 @@ internal class ChatNativeInputBar(
     recordingSlideChevron.alpha = 1f
     recordingSlideLabel.translationX = 0f
     recordingSlideChevron.translationX = 0f
-    lockHintPill.alpha = if (lockHintPill.visibility == View.VISIBLE) 1f else 0f
-    lockHintPill.translationY = 0f
+    showLockHint(visible = false, animated = false)
     if (isRecording && !isLockedRecording) {
       startRecordingHintAnimations()
     }
@@ -923,6 +885,24 @@ internal class ChatNativeInputBar(
   }
 
   private fun handleMicTouch(event: MotionEvent): Boolean {
+    if (hasTypedText() && !isRecording) {
+      when (event.actionMasked) {
+        MotionEvent.ACTION_DOWN -> {
+          animateButtonPress(micButton, true, 70L)
+          return true
+        }
+        MotionEvent.ACTION_UP -> {
+          animateButtonPress(micButton, false, 120L)
+          sendCurrentText()
+          return true
+        }
+        MotionEvent.ACTION_CANCEL -> {
+          animateButtonPress(micButton, false, 120L)
+          return true
+        }
+      }
+      return true
+    }
 
     when (event.actionMasked) {
       MotionEvent.ACTION_DOWN -> {
@@ -961,17 +941,6 @@ internal class ChatNativeInputBar(
           val dx = event.rawX - downRawX
           val dy = event.rawY - downRawY
           updateDragVisuals(dx = dx, dy = dy)
-          if (!isLockedRecording && dy < -dp(80) && abs(dy) > abs(dx)) {
-            isLockedRecording = true
-            lockActivatedInGesture = true
-            listener?.onRecordingState(true, true)
-            performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP)
-            recordingSlideLabel.text = "Cancel"
-            recordingSlideChevron.visibility = View.GONE
-            showLockHint(visible = false, animated = true)
-            resetRecordingDragVisuals()
-            refreshVisualState()
-          }
           if (!isLockedRecording && dx < -cancelThresholdPx) {
             cancelVoiceRecording()
             animateButtonPress(micButton, false, 90L)
@@ -1203,18 +1172,30 @@ internal class ChatNativeInputBar(
     } else {
       applyReadyBannerAction(ReadyBannerAction.None)
     }
-    micIcon.setColorFilter(passiveIconColor)
-    
     val showSend = (hasText && !isRecording) || isLockedRecording
-    micButton.visibility = if (showSend) View.GONE else View.VISIBLE
-    sendButton.visibility = if (showSend) View.VISIBLE else View.GONE
+    val actionIcon =
+      when {
+        showSend -> R.drawable.ic_send
+        isRecording -> R.drawable.ic_recording_dot
+        else -> R.drawable.ic_mic
+      }
+    micIcon.setImageResource(actionIcon)
+    micIcon.setColorFilter(if (showSend || isRecording) Color.WHITE else passiveIconColor)
+    micButton.visibility = View.VISIBLE
+    micButton.background =
+      if (showSend || isRecording) {
+        circleDrawable(accentColor)
+      } else {
+        circleDrawable(withAlpha(surfaceColor, if (isDark) 1.0f else 0.92f))
+      }
     
     attachmentIcon.setColorFilter(passiveIconColor)
     attachmentButton.alpha = if (isRecording) 0.45f else 1f
-    attachmentButton.background = circleDrawable(Color.TRANSPARENT)
+    attachmentButton.background = circleDrawable(withAlpha(surfaceColor, if (isDark) 1.0f else 0.92f))
 
-    textContainer.visibility = if (isRecording && !isLockedRecording) View.GONE else View.VISIBLE
-    input.visibility = if (isRecording) View.INVISIBLE else View.VISIBLE
+    textContainer.visibility = View.VISIBLE
+    textContainer.alpha = if (isRecording && !isLockedRecording) 0f else 1f
+    input.visibility = View.VISIBLE
     recordingOverlay.visibility = if (isRecording && !isLockedRecording) View.VISIBLE else View.GONE
     cancelOverlayButton.visibility = if (isLockedRecording) View.VISIBLE else View.GONE
     if (!isRecording) {
@@ -1250,7 +1231,7 @@ internal class ChatNativeInputBar(
         startRecordingHintAnimations()
       }
       recordingSlideChevron.setTextColor(withAlpha(textColor, 0.78f))
-      showLockHint(visible = !isLockedRecording, animated = true)
+      showLockHint(visible = false, animated = false)
     }
     updateSurfaces()
   }
@@ -1263,22 +1244,20 @@ internal class ChatNativeInputBar(
   }
 
   private fun animateRecordingStartUi() {
-    attachmentButton.visibility = View.GONE
     micButton.animate().cancel()
     micButton.animate()
       .scaleX(1.08f)
       .scaleY(1.08f)
       .setDuration(180L)
       .start()
-    showLockHint(visible = true, animated = true)
+    showLockHint(visible = false, animated = false)
     resetRecordingDragVisuals()
     startRecordingHintAnimations()
   }
 
   private fun resetRecordingUiEffects() {
-    attachmentButton.visibility = View.VISIBLE
-    actionButton.animate().cancel()
-    actionButton.animate()
+    micButton.animate().cancel()
+    micButton.animate()
       .scaleX(1f)
       .scaleY(1f)
       .setDuration(160L)

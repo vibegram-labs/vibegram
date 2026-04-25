@@ -8,6 +8,8 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import com.mohammadshayani.vibe.chat.notifications.VibeNativeCallStore
+import com.mohammadshayani.vibe.packet.PacketRuntime
+import com.mohammadshayani.vibe.session.AppSessionConfig
 import com.mohammadshayani.vibe.storage.ChatEngineStore
 import okhttp3.Call
 import okhttp3.Callback
@@ -55,6 +57,7 @@ private val chatEngineOaepSpec = OAEPParameterSpec(
 private const val minimumNativeUploadProgress = 0.027f
 private const val uploadProgressFrameIntervalMs = 33L
 private const val uploadProgressStep = 0.01f
+private const val queuedOutboundVisibleErrorDelayMs = 20_000L
 
 private fun chatEngineDecodePem(pem: String): ByteArray {
   val sanitized = pem
@@ -307,6 +310,7 @@ internal object ChatEngine {
   private val nativePendingDeletePushRefs = linkedMapOf<String, Pair<String, String>>() // ref -> (chatId,messageId)
   private val pendingOutboundDraftsByMessageId = linkedMapOf<String, Map<String, Any?>>()
   private val pendingOutboundQueueByChat = linkedMapOf<String, MutableList<String>>()
+  private var packetRuntimeStartInFlight = false
   private val activeMediaUploadCallsByMessageId = linkedMapOf<String, Call>()
   private val canceledOutboundMessageIds = linkedSetOf<String>()
   private val nativeTypingStateByChatId = linkedMapOf<String, Boolean>()
@@ -583,11 +587,110 @@ internal object ChatEngine {
     }.apply { isDaemon = true }.start()
   }
 
+  private fun ensurePacketRuntimeAsync(trigger: String): Boolean {
+    val ctx = appContextRef ?: return false
+    var shouldStart = false
+    var handled = false
+    synchronized(lock) {
+      val config = ChatEngineStore.getConfig(ctx)
+      if (transportModeLocked(config) == "packet_mesh" && packetProxyPortLocked(config) == null) {
+        handled = true
+        if (!packetRuntimeStartInFlight) {
+          packetRuntimeStartInFlight = true
+          shouldStart = true
+          state["state"] = "starting-packet-mesh"
+          state["connected"] = false
+          state["updatedAt"] = System.currentTimeMillis()
+          state["transportMode"] = "packet_mesh"
+          state["note"] = "Starting Packet mesh for native chat transport"
+          appendJournalLocked("packet-runtime-start", mapOf("trigger" to trigger))
+          emitChangeLocked("connectionStateChanged", null, null)
+        }
+      }
+    }
+    if (!handled) return false
+    if (!shouldStart) return true
+
+    Thread {
+      try {
+        val config =
+          AppSessionConfig.current(ctx)
+            ?: throw IllegalStateException("missing native auth config")
+        val snapshot = PacketRuntime.ensureStarted(ctx, config)
+        synchronized(lock) {
+          packetRuntimeStartInFlight = false
+          state["state"] = "packet-runtime-ready"
+          state["connected"] = false
+          state["updatedAt"] = System.currentTimeMillis()
+          state["transportMode"] = "packet_mesh"
+          state["note"] = "Packet mesh ready for native chat transport"
+          putNullableStateLocked("packetProxyPort", snapshot.proxyPort)
+          appendJournalLocked(
+            "packet-runtime-ready",
+            mapOf(
+              "trigger" to trigger,
+              "proxyHost" to snapshot.proxyHost,
+              "proxyPort" to snapshot.proxyPort,
+              "activeBridgeId" to snapshot.activeBridgeId,
+            ),
+          )
+          emitChangeLocked("connectionStateChanged", null, null)
+        }
+        ensureNativeTransport("packet_runtime_ready:$trigger")
+        val queuedChatIds = synchronized(lock) { pendingOutboundQueueByChat.keys.toList() }
+        queuedChatIds.forEach { chatId ->
+          synchronized(lock) {
+            scheduleReplayQueuedOutboundLocked(chatId, "packet_runtime_ready")
+          }
+        }
+      } catch (t: Throwable) {
+        val errorText = t.message ?: t.javaClass.simpleName
+        Log.w("ChatEngine", "Packet runtime start failed trigger=$trigger error=$errorText", t)
+        ChatEngineStore.updateConfig(
+          ctx,
+          mapOf(
+            "transportMode" to "direct",
+            "packetStatus" to "failed",
+            "packetProxyPort" to null,
+            "packetLastError" to errorText,
+          ),
+        )
+        synchronized(lock) {
+          packetRuntimeStartInFlight = false
+          state["state"] = "packet-runtime-direct-fallback"
+          state["connected"] = false
+          state["updatedAt"] = System.currentTimeMillis()
+          state["transportMode"] = "direct"
+          state["note"] = "Packet mesh failed; falling back to direct native chat transport"
+          appendJournalLocked(
+            "packet-runtime-direct-fallback",
+            mapOf("trigger" to trigger, "error" to errorText.take(180)),
+          )
+          emitChangeLocked("connectionStateChanged", null, null)
+        }
+        ensureNativeTransport("packet_runtime_direct_fallback:$trigger")
+      }
+    }.apply {
+      isDaemon = true
+      name = "ChatPacketRuntimeStart"
+      start()
+    }
+    return true
+  }
+
   fun configure(context: Context, payload: Map<String, Any?>): Map<String, Any?> {
     appContextRef = context.applicationContext
-    ChatEngineStore.setConfig(context, payload)
+    val existingPayload = ChatEngineStore.getConfig(context)
+    val nextUserId = normalized(payload["userId"])
+    val existingUserId = normalized(existingPayload["userId"])
+    val mergedPayload =
+      if (existingPayload.isNotEmpty() && (existingUserId == null || existingUserId == nextUserId)) {
+        LinkedHashMap(existingPayload).apply { putAll(payload) }
+      } else {
+        LinkedHashMap(payload)
+      }
+    ChatEngineStore.setConfig(context, mergedPayload)
     val snapshot = synchronized(lock) {
-      val nextUserId = normalized(payload["userId"])
       if (configuredUserId != null && configuredUserId != nextUserId) {
         pendingOutboundDraftsByMessageId.clear()
         pendingOutboundQueueByChat.clear()
@@ -598,10 +701,10 @@ internal object ChatEngine {
       state["state"] = "configured"
       state["updatedAt"] = System.currentTimeMillis()
       state["configuredAt"] = state["updatedAt"]
-      state["configKeys"] = payload.keys.sorted()
+      state["configKeys"] = mergedPayload.keys.sorted()
       state["note"] = "ChatEngine configured (native Phoenix presence enabled, shadow fallback active)"
       state["presenceSource"] = if (nativePresenceActive) "native" else "shadow"
-      appendJournalLocked("configure", mapOf("keys" to payload.keys.sorted()))
+      appendJournalLocked("configure", mapOf("keys" to mergedPayload.keys.sorted()))
       openChatChannels.keys.forEach { joinNativeChatTopicIfNeededLocked(it) }
       val result = statusSnapshotLocked()
       emitChangeLocked("configure", null, null)
@@ -768,6 +871,10 @@ internal object ChatEngine {
 
     val resolvedTarget = if (transportMode == "bridge_text") bridgeBaseUrl else socketUrl
     val hasRequiredPacketProxy = transportMode != "packet_mesh" || packetProxyPort != null
+    if (transportMode == "packet_mesh" && resolvedTarget != null && userTopic != null && packetProxyPort == null) {
+      ensurePacketRuntimeAsync("connect_missing_packet_proxy")
+      return synchronized(lock) { statusSnapshotLocked() }
+    }
     if (resolvedTarget == null || userTopic == null || !hasRequiredPacketProxy) {
       synchronized(lock) {
         state["state"] = "native-config-missing"
@@ -1153,6 +1260,31 @@ internal object ChatEngine {
     }
   }
 
+  fun seedChatPeerInfo(payload: Map<String, Any?>): Map<String, Any?> {
+    val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
+      ?: return mapOf("accepted" to false, "reason" to "invalid_chat")
+    val peerId = normalizedUpper(
+      payload["peerUserId"] ?: payload["peer_user_id"] ?: payload["friendId"] ?: payload["friend_id"] ?: payload["userId"] ?: payload["user_id"],
+    ) ?: return mapOf("accepted" to false, "reason" to "invalid_peer")
+    val publicKey = normalized(
+      payload["publicKey"] ?: payload["public_key"] ?: payload["friendKey"] ?: payload["friendPublicKey"],
+    )
+    return synchronized(lock) {
+      chatPeerUserIdsByChatId[chatId] = peerId
+      if (!publicKey.isNullOrBlank()) {
+        friendPublicKeysByUserId[peerId] = publicKey
+      }
+      appendJournalLocked(
+        "seed-chat-peer-info",
+        mapOf("chatId" to chatId, "peerUserId" to peerId, "hasPublicKey" to !publicKey.isNullOrBlank()),
+      )
+      if (!publicKey.isNullOrBlank()) {
+        scheduleReplayQueuedOutboundLocked(chatId, "peer_info_seeded")
+      }
+      mapOf("accepted" to true, "chatId" to chatId, "peerUserId" to peerId, "hasPublicKey" to !publicKey.isNullOrBlank())
+    }
+  }
+
   fun retryOutgoingMessage(payload: Map<String, Any?>): Map<String, Any?> {
     val messageId = normalized(payload["messageId"] ?: payload["message_id"])
       ?: return mapOf("accepted" to false, "reason" to "invalid_message")
@@ -1164,8 +1296,10 @@ internal object ChatEngine {
         normalized(payload["chatId"] ?: payload["chat_id"])
           ?: normalized(draft["chatId"] ?: draft["chat_id"])
           ?: return@synchronized mapOf("accepted" to false, "reason" to "invalid_chat", "messageId" to messageId)
+      upsertLocalStatusLocked(chatId, messageId, "sending", allowDowngrade = true)
       queueOutboundDraftLocked(chatId, messageId, draft, "manual_retry")
       scheduleReplayQueuedOutboundLocked(chatId, "manual_retry")
+      emitChangeLocked("messageStatusChanged", chatId, messageId)
       mapOf("accepted" to true, "queued" to true, "messageId" to messageId, "state" to "pending")
     }
   }
@@ -1331,7 +1465,7 @@ internal object ChatEngine {
       if (!replyToId.isNullOrBlank()) optimisticMessage["replyToId"] = replyToId
       optimisticRow["message"] = optimisticMessage
       upsertLiveMessageRowLocked(chatId, messageId, optimisticRow)
-      upsertLocalStatusLocked(chatId, messageId, "sending")
+      upsertLocalStatusLocked(chatId, messageId, "sending", allowDowngrade = true)
       emitChangeLocked("chatMessageInserted", chatId, messageId)
       emitChangeLocked("messageStatusChanged", chatId, messageId)
       val shouldSeedNativeUploadProgress =
@@ -1673,6 +1807,9 @@ internal object ChatEngine {
               val pending = nativePendingMessagePushRefs.remove(ref)
               if (pending != null) {
                 appendJournalLocked("native-send-timeout", mapOf("chatId" to pending.first, "messageId" to pending.second, "ref" to ref))
+                pendingOutboundDraftsByMessageId[pending.second]?.let { draft ->
+                  queueOutboundDraftLocked(pending.first, pending.second, draft, "send_timeout")
+                }
                 upsertLocalStatusLocked(pending.first, pending.second, "error")
                 emitChangeLocked("messageStatusChanged", pending.first, pending.second)
               }
@@ -1736,6 +1873,9 @@ internal object ChatEngine {
           val pending = nativePendingMessagePushRefs.remove(ref)
           if (pending != null) {
             appendJournalLocked("native-send-timeout", mapOf("chatId" to pending.first, "messageId" to pending.second, "ref" to ref))
+            pendingOutboundDraftsByMessageId[pending.second]?.let { draft ->
+              queueOutboundDraftLocked(pending.first, pending.second, draft, "encrypted_send_timeout")
+            }
             upsertLocalStatusLocked(pending.first, pending.second, "error")
             emitChangeLocked("messageStatusChanged", pending.first, pending.second)
           }
@@ -3089,10 +3229,10 @@ internal object ChatEngine {
 
   private fun strongerDisplayStatus(current: String?, incoming: String): String {
     fun rank(v: String?): Int = when (v) {
-      "error" -> 6
-      "read" -> 5
-      "delivered" -> 4
-      "sent" -> 3
+      "read" -> 6
+      "delivered" -> 5
+      "sent" -> 4
+      "error" -> 3
       "sending" -> 2
       "pending" -> 1
       else -> 0
@@ -3100,9 +3240,14 @@ internal object ChatEngine {
     return if (rank(incoming) >= rank(current)) incoming else (current ?: incoming)
   }
 
-  private fun upsertLocalStatusLocked(chatId: String, messageId: String, status: String) {
+  private fun upsertLocalStatusLocked(
+    chatId: String,
+    messageId: String,
+    status: String,
+    allowDowngrade: Boolean = false,
+  ) {
     val chatMap = localStatusIndex.getOrPut(chatId) { linkedMapOf() }
-    val nextStatus = strongerDisplayStatus(chatMap[messageId], status)
+    val nextStatus = if (allowDowngrade) status else strongerDisplayStatus(chatMap[messageId], status)
     chatMap[messageId] = nextStatus
     setLiveMessageStatusLocked(chatId, messageId, nextStatus)
     if (nextStatus == "sent" || nextStatus == "delivered" || nextStatus == "read" || nextStatus == "error") {
@@ -3145,7 +3290,14 @@ internal object ChatEngine {
     normalized(map["publicKey"] ?: map["friendKey"] ?: map["friendPublicKey"] ?: map["public_key"])
 
   private fun cacheChatPeerInfoLocked(chatId: String, chat: JSONObject) {
-    val friendId = normalizedUpper(chat.opt("friendId") ?: chat.opt("friend_id"))
+    val friendId = normalizedUpper(
+      chat.opt("friendId")
+        ?: chat.opt("friend_id")
+        ?: chat.opt("peerUserId")
+        ?: chat.opt("peer_user_id")
+        ?: chat.opt("userId")
+        ?: chat.opt("user_id"),
+    )
     if (!friendId.isNullOrBlank()) {
       chatPeerUserIdsByChatId[chatId] = friendId
       val key = normalized(chat.opt("publicKey") ?: chat.opt("friendKey") ?: chat.opt("friendPublicKey") ?: chat.opt("public_key"))
@@ -3193,8 +3345,7 @@ internal object ChatEngine {
       val body = try { res.body?.string() } catch (_: Throwable) { null } ?: return null
       return try {
         val json = JSONObject(body)
-        val map = linkedMapOf<String, Any?>()
-        json.keys().forEach { key -> map[key] = json.opt(key) }
+        val map = jsonObjectToMap(json)
         val nested = map["data"] as? Map<String, Any?>
         val key = extractPublicKeyValue(map) ?: nested?.let(::extractPublicKeyValue)
         if (!key.isNullOrBlank()) {
@@ -3719,7 +3870,33 @@ internal object ChatEngine {
     ids.add(messageId)
     appendJournalLocked("native-outgoing-queued", mapOf("chatId" to chatId, "messageId" to messageId, "reason" to reason))
     persistOutboundStateLocked()
+    scheduleQueuedOutboundVisibleErrorLocked(chatId, messageId, reason)
     emitChangeLocked("outgoingMessageQueued", chatId, messageId)
+  }
+
+  private fun scheduleQueuedOutboundVisibleErrorLocked(
+    chatId: String,
+    messageId: String,
+    reason: String,
+  ) {
+    Handler(Looper.getMainLooper()).postDelayed({
+      synchronized(lock) {
+        val stillQueued = pendingOutboundQueueByChat[chatId]?.contains(messageId) == true
+        val stillDrafted = pendingOutboundDraftsByMessageId.containsKey(messageId)
+        val inFlight = nativePendingMessagePushRefs.values.contains(chatId to messageId)
+        val currentStatus = localStatusIndex[chatId]?.get(messageId)
+        if (!stillQueued || !stillDrafted || inFlight) return@synchronized
+        if (currentStatus == "sent" || currentStatus == "delivered" || currentStatus == "read") {
+          return@synchronized
+        }
+        upsertLocalStatusLocked(chatId, messageId, "error")
+        appendJournalLocked(
+          "native-outgoing-visible-error",
+          mapOf("chatId" to chatId, "messageId" to messageId, "reason" to reason),
+        )
+        emitChangeLocked("messageStatusChanged", chatId, messageId)
+      }
+    }, queuedOutboundVisibleErrorDelayMs)
   }
 
   private fun removeQueuedOutboundDraftLocked(chatId: String, messageId: String, dropDraft: Boolean) {

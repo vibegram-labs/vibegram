@@ -375,6 +375,7 @@ final class ChatEngine {
   private var nativePendingDeletePushRefs: [String: (chatId: String, messageId: String)] = [:]
   private var pendingOutboundDraftsByMessageId: [String: [String: Any]] = [:]
   private var pendingOutboundQueueByChat: [String: [String]] = [:]
+  private var packetRuntimeStartInFlight = false
   private var activeMediaUploadTasksByMessageId: [String: URLSessionTask] = [:]
   private var canceledOutboundMessageIds = Set<String>()
   private var nativeTypingStateByChatId: [String: Bool] = [:]
@@ -404,6 +405,8 @@ final class ChatEngine {
   private var cachedDecryptPrivateKey: SecKey?
   private var cachedDecryptKeyTimestamp: Date?
   private static let fallbackApiBaseURL = "https://api.vibegram.io"
+  private let nativeConnectStaleTimeoutMs = 5_000
+  private let queuedOutboundVisibleErrorDelayMs = 20_000
   /// Time-to-live for the cached private key in memory (seconds).
   /// After this period of inactivity the key is cleared and re-derived from Keychain on next use.
   private let keyTTL: TimeInterval = 300
@@ -652,13 +655,52 @@ final class ChatEngine {
 
   private func ensureNativeTransport(trigger: String) {
     guard #available(iOS 13.0, *) else { return }
+    var clientToDisconnect: ChatRealtimeTransport?
     let shouldConnect = queue.sync {
       if !hasRealtimeDemandLocked() {
         return false
       }
       autoReconnectEnabled = true
       let connected = (state["connected"] as? Bool) == true
-      let currentState = normalizedString(state["state"])?.lowercased() ?? ""
+      var currentState = normalizedString(state["state"])?.lowercased() ?? ""
+      let now = nowMs()
+      let updatedAt = parseLongValue(state["updatedAt"]) ?? 0
+      let stateAge = updatedAt > 0 ? now - Int(updatedAt) : -1
+      if currentState == "connecting-native-presence" && stateAge >= nativeConnectStaleTimeoutMs {
+        NSLog(
+          "[ChatEngine] ensureNativeTransport resetting stale connect trigger=%@ stateAgeMs=%d hasClient=%@",
+          trigger,
+          stateAge,
+          phoenixClient == nil ? "N" : "Y"
+        )
+        clientToDisconnect = phoenixClient
+        phoenixClient = nil
+        nativeSocketSignature = nil
+        nativePresenceActive = false
+        nativeUserJoinRef = nil
+        nativeUserTopic = nil
+        nativeChatJoinRefsByRef.removeAll()
+        nativeJoinedChatIds.removeAll()
+        nativePendingMessagePushRefs.removeAll()
+        nativePendingEditPushRefs.removeAll()
+        nativePendingDeletePushRefs.removeAll()
+        nativeTypingStateByChatId.removeAll()
+        peerTypingUserIdsByChatId.removeAll()
+        agentProgressByChatId.removeAll()
+        nativeRecordingStateByChatId.removeAll()
+        pinnedFetchInFlightChatIds.removeAll()
+        historyLoadingChats.removeAll()
+        state["connected"] = false
+        state["state"] = "native-connect-stale"
+        state["updatedAt"] = now
+        state["presenceSource"] = "shadow"
+        appendJournalLocked(
+          event: "native-connect-stale-reset",
+          payload: ["trigger": trigger, "stateAgeMs": stateAge]
+        )
+        postChangeLocked(reason: "connectionStateChanged", userInfo: ["state": statusSnapshotLocked()])
+        currentState = "native-connect-stale"
+      }
       if connected || currentState == "connecting-native-presence"
         || currentState == "native-socket-open"
       {
@@ -669,8 +711,110 @@ final class ChatEngine {
       }
       return bootstrapConfigFromNativeSessionIfNeededLocked(trigger: trigger)
     }
+    clientToDisconnect?.disconnect()
     guard shouldConnect else { return }
     _ = connectNativePresence()
+  }
+
+  @discardableResult
+  private func ensurePacketRuntimeAsync(trigger: String) -> Bool {
+    var shouldStart = false
+    var handled = false
+    let configPayload = queue.sync { () -> [String: Any]? in
+      let config = store.getConfig()
+      if transportModeLocked(config: config) == "packet_mesh" && packetProxyPortLocked(config: config) == nil {
+        handled = true
+        if !packetRuntimeStartInFlight {
+          packetRuntimeStartInFlight = true
+          shouldStart = true
+          state["state"] = "starting-packet-mesh"
+          state["connected"] = false
+          state["updatedAt"] = nowMs()
+          state["transportMode"] = "packet_mesh"
+          state["note"] = "Starting Packet mesh for native chat transport"
+          appendJournalLocked(event: "packet-runtime-start", payload: ["trigger": trigger])
+          postChangeLocked(reason: "connectionStateChanged", userInfo: ["state": statusSnapshotLocked()])
+        }
+        return config
+      }
+      return nil
+    }
+
+    guard handled else { return false }
+    guard shouldStart else { return true }
+    guard let configPayload, let config = AppSessionConfig(payload: configPayload) else {
+      queue.async {
+        self.packetRuntimeStartInFlight = false
+        self.appendJournalLocked(
+          event: "packet-runtime-start-skip",
+          payload: ["trigger": trigger, "reason": "missing_native_auth_config"]
+        )
+      }
+      return true
+    }
+
+    Task.detached(priority: .utility) { [weak self] in
+      guard let self else { return }
+      do {
+        let snapshot = try await PacketRuntime.shared.ensureStarted(config: config)
+        self.queue.async {
+          self.packetRuntimeStartInFlight = false
+          self.state["state"] = "packet-runtime-ready"
+          self.state["connected"] = false
+          self.state["updatedAt"] = self.nowMs()
+          self.state["transportMode"] = "packet_mesh"
+          self.state["note"] = "Packet mesh ready for native chat transport"
+          self.state["packetProxyPort"] = snapshot.proxyPort
+          self.appendJournalLocked(
+            event: "packet-runtime-ready",
+            payload: [
+              "trigger": trigger,
+              "proxyHost": snapshot.proxyHost,
+              "proxyPort": snapshot.proxyPort,
+              "activeBridgeId": snapshot.activeBridgeID as Any,
+            ]
+          )
+          self.postChangeLocked(
+            reason: "connectionStateChanged",
+            userInfo: ["state": self.statusSnapshotLocked()]
+          )
+        }
+        self.ensureNativeTransport(trigger: "packet_runtime_ready:\(trigger)")
+        let queuedChatIds = self.queue.sync { Array(self.pendingOutboundQueueByChat.keys) }
+        for chatId in queuedChatIds {
+          self.queue.async {
+            self.scheduleReplayQueuedOutboundLocked(chatId: chatId, trigger: "packet_runtime_ready")
+          }
+        }
+      } catch {
+        let errorText = error.localizedDescription
+        NSLog("[ChatEngine] Packet runtime start failed trigger=%@ error=%@", trigger, errorText)
+        self.store.updateConfig([
+          "transportMode": "direct",
+          "packetStatus": "failed",
+          "packetProxyPort": nil,
+          "packetLastError": errorText,
+        ])
+        self.queue.async {
+          self.packetRuntimeStartInFlight = false
+          self.state["state"] = "packet-runtime-direct-fallback"
+          self.state["connected"] = false
+          self.state["updatedAt"] = self.nowMs()
+          self.state["transportMode"] = "direct"
+          self.state["note"] = "Packet mesh failed; falling back to direct native chat transport"
+          self.appendJournalLocked(
+            event: "packet-runtime-direct-fallback",
+            payload: ["trigger": trigger, "error": String(errorText.prefix(180))]
+          )
+          self.postChangeLocked(
+            reason: "connectionStateChanged",
+            userInfo: ["state": self.statusSnapshotLocked()]
+          )
+        }
+        self.ensureNativeTransport(trigger: "packet_runtime_direct_fallback:\(trigger)")
+      }
+    }
+    return true
   }
 
   private func chatNeedsRealtimeLocked(_ rawChatId: String?) -> Bool {
@@ -762,10 +906,16 @@ final class ChatEngine {
   }
 
   func configure(_ payload: [String: Any]) -> [String: Any] {
-    store.setConfig(payload)
+    let existingPayload = store.getConfig()
+    let nextUserId = normalizedString(payload["userId"])
+    let existingUserId = normalizedString(existingPayload["userId"])
+    let mergedPayload: [String: Any] =
+      !existingPayload.isEmpty && (existingUserId == nil || existingUserId == nextUserId)
+      ? existingPayload.merging(payload) { _, new in new }
+      : payload
+    store.setConfig(mergedPayload)
     let now = nowMs()
     let snapshot = queue.sync {
-      let nextUserId = normalizedString(payload["userId"])
       if configuredUserId != nil, configuredUserId != nextUserId {
         pendingOutboundDraftsByMessageId.removeAll()
         pendingOutboundQueueByChat.removeAll()
@@ -776,12 +926,15 @@ final class ChatEngine {
       state["state"] = "configured"
       state["updatedAt"] = now
       state["configuredAt"] = now
-      state["configKeys"] = Array(payload.keys).sorted()
+      state["configKeys"] = Array(mergedPayload.keys).sorted()
       state["note"] =
         "ChatEngine configured (native Phoenix presence enabled, shadow fallback active)"
       state["presenceSource"] = nativePresenceActive ? "native" : "shadow"
       let snapshot = statusSnapshotLocked()
-      appendJournalLocked(event: "configure", payload: ["keys": Array(payload.keys).sorted()])
+      appendJournalLocked(event: "configure", payload: ["keys": Array(mergedPayload.keys).sorted()])
+      for chatId in openChatChannels.keys {
+        joinNativeChatTopicIfNeededLocked(chatId: chatId)
+      }
       postChangeLocked(reason: "configure", userInfo: ["state": snapshot])
       return snapshot
     }
@@ -1243,10 +1396,57 @@ final class ChatEngine {
       guard !resolvedChatId.isEmpty else {
         return ["accepted": false, "reason": "invalid_chat", "messageId": messageId]
       }
+      upsertLocalStatusLocked(
+        chatId: resolvedChatId,
+        messageId: messageId,
+        status: "pending",
+        allowDowngrade: true
+      )
       queueOutboundDraftLocked(
         chatId: resolvedChatId, messageId: messageId, payload: draft, reason: "manual_retry")
       scheduleReplayQueuedOutboundLocked(chatId: resolvedChatId, trigger: "manual_retry")
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        self?.ensureNativeTransport(trigger: "manual_retry")
+      }
+      postChangeLocked(
+        reason: "messageStatusChanged",
+        userInfo: ["chatId": resolvedChatId, "messageId": messageId, "status": "pending"]
+      )
       return ["accepted": true, "queued": true, "messageId": messageId, "state": "pending"]
+    }
+  }
+
+  func cachePeerPublicKey(_ payload: [String: Any]) -> [String: Any] {
+    let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
+    let peerUserId = normalizedUpper(payload["peerUserId"] ?? payload["peer_user_id"] ?? payload["userId"] ?? payload["id"])
+    let publicKey = extractPublicKeyValue(from: payload)
+    return queue.sync {
+      guard let chatId, !chatId.isEmpty, let peerUserId, !peerUserId.isEmpty else {
+        return ["accepted": false, "reason": "invalid_peer"]
+      }
+      chatPeerUserIdsByChatId[chatId] = peerUserId
+      if let publicKey, !publicKey.isEmpty {
+        friendPublicKeysByUserId[peerUserId] = publicKey
+        pendingFriendKeyChatIdsByUserId.removeValue(forKey: peerUserId)
+        friendKeyRetryWorkItemsByUserId[peerUserId]?.cancel()
+        friendKeyRetryWorkItemsByUserId.removeValue(forKey: peerUserId)
+        scheduleReplayQueuedOutboundLocked(chatId: chatId, trigger: "peer_public_key_cached")
+      } else {
+        scheduleFriendPublicKeyFetchLocked(
+          chatId: chatId,
+          peerUserIdHint: peerUserId,
+          trigger: "cache_peer_missing_key"
+        )
+      }
+      appendJournalLocked(
+        event: "peer-public-key-cache",
+        payload: [
+          "chatId": chatId,
+          "peerUserId": peerUserId,
+          "hasPublicKey": publicKey != nil,
+        ]
+      )
+      return ["accepted": true, "chatId": chatId, "peerUserId": peerUserId, "hasPublicKey": publicKey != nil]
     }
   }
 
@@ -2023,6 +2223,14 @@ final class ChatEngine {
           self.queue.asyncAfter(deadline: .now() + 15.0) { [weak self] in
             guard let self = self else { return }
             if let pending = self.nativePendingMessagePushRefs.removeValue(forKey: timeoutRef) {
+              if let draft = self.pendingOutboundDraftsByMessageId[pending.messageId] {
+                self.queueOutboundDraftLocked(
+                  chatId: pending.chatId,
+                  messageId: pending.messageId,
+                  payload: draft,
+                  reason: "send_timeout"
+                )
+              }
               self.appendJournalLocked(
                 event: "native-send-timeout",
                 payload: [
@@ -2037,6 +2245,10 @@ final class ChatEngine {
                 userInfo: [
                   "chatId": pending.chatId, "messageId": pending.messageId, "status": "error",
                 ])
+              self.scheduleReconnectLocked(reason: "send_timeout")
+              DispatchQueue.global(qos: .utility).async { [weak self] in
+                self?.ensureNativeTransport(trigger: "send_timeout")
+              }
             }
           }
 
@@ -3116,10 +3328,15 @@ final class ChatEngine {
     state["updatedAt"] = nowMs()
   }
 
-  private func upsertLocalStatusLocked(chatId: String, messageId: String, status: String) {
+  private func upsertLocalStatusLocked(
+    chatId: String,
+    messageId: String,
+    status: String,
+    allowDowngrade: Bool = false
+  ) {
     var chatMap = localStatusIndex[chatId] ?? [:]
     let current = chatMap[messageId]
-    let next = strongerDisplayStatus(current, status)
+    let next = allowDowngrade ? status : strongerDisplayStatus(current, status)
     chatMap[messageId] = next
     localStatusIndex[chatId] = chatMap
     setLiveMessageStatusLocked(chatId: chatId, messageId: messageId, status: next)
@@ -3166,12 +3383,12 @@ final class ChatEngine {
   private func strongerDisplayStatus(_ lhs: String?, _ rhs: String) -> String {
     func rank(_ value: String?) -> Int {
       switch value {
-      case "read": return 5
-      case "delivered": return 4
-      case "sent": return 3
+      case "read": return 6
+      case "delivered": return 5
+      case "sent": return 4
+      case "error": return 3
       case "sending": return 2
       case "pending": return 1
-      case "error": return 6
       default: return 0
       }
     }
@@ -3358,6 +3575,10 @@ final class ChatEngine {
     let packetProxyPort = packetProxyPortLocked(config: config)
     let packetProxyHost = packetProxyHostLocked(config: config)
     let hasRequiredPacketProxy = transportMode != "packet_mesh" || packetProxyPort != nil
+    if transportMode == "packet_mesh", resolvedTarget != nil, userTopic != nil, packetProxyPort == nil {
+      _ = ensurePacketRuntimeAsync(trigger: "connect_missing_packet_proxy")
+      return getStatus()
+    }
     guard resolvedTarget != nil, let userTopic, hasRequiredPacketProxy else {
       return queue.sync {
         state["state"] = "native-config-missing"
@@ -4008,10 +4229,10 @@ final class ChatEngine {
         in: .whitespacesAndNewlines
       ).lowercased()
     switch mode {
-    case "packet_mesh", "bridge_text", "offline":
+    case "direct", "packet_mesh", "bridge_text", "offline":
       return mode ?? "packet_mesh"
     default:
-      return "packet_mesh"
+      return "direct"
     }
   }
 
@@ -4108,6 +4329,10 @@ final class ChatEngine {
       ?? normalizedString(data["friendKey"])
       ?? normalizedString(data["friendPublicKey"])
       ?? normalizedString(data["public_key"])
+      ?? normalizedString(data["public_key_pem"])
+      ?? ((data["data"] as? [String: Any]).flatMap(extractPublicKeyValue(from:)))
+      ?? ((data["user"] as? [String: Any]).flatMap(extractPublicKeyValue(from:)))
+      ?? ((data["friend"] as? [String: Any]).flatMap(extractPublicKeyValue(from:)))
   }
 
   private func cacheChatPeerInfoLocked(chatId: String, chatObject: [String: Any]) {
@@ -4243,7 +4468,10 @@ final class ChatEngine {
             ?? self.normalizedString(obj["friendKey"])
             ?? self.normalizedString(obj["friendPublicKey"])
             ?? self.normalizedString(obj["public_key"])
+            ?? self.normalizedString(obj["public_key_pem"])
             ?? ((obj["data"] as? [String: Any]).flatMap(self.extractPublicKeyValue(from:)))
+            ?? ((obj["user"] as? [String: Any]).flatMap(self.extractPublicKeyValue(from:)))
+            ?? ((obj["friend"] as? [String: Any]).flatMap(self.extractPublicKeyValue(from:)))
         }()
         let resolvedAgentId: String? = {
           guard let obj = parsedObject else { return nil }
@@ -5414,6 +5642,25 @@ final class ChatEngine {
         "messageId": messageId,
         "reason": reason,
       ])
+    queue.asyncAfter(deadline: .now() + .milliseconds(queuedOutboundVisibleErrorDelayMs)) { [weak self] in
+      guard let self else { return }
+      let stillQueued = self.pendingOutboundQueueByChat[chatId]?.contains(messageId) == true
+      let stillDrafted = self.pendingOutboundDraftsByMessageId[messageId] != nil
+      guard stillQueued && stillDrafted else { return }
+      let currentStatus = self.localStatusIndex[chatId]?[messageId]
+      if currentStatus == "sent" || currentStatus == "delivered" || currentStatus == "read" {
+        return
+      }
+      self.upsertLocalStatusLocked(chatId: chatId, messageId: messageId, status: "error")
+      self.appendJournalLocked(
+        event: "native-outgoing-visible-error",
+        payload: ["chatId": chatId, "messageId": messageId, "reason": reason]
+      )
+      self.postChangeLocked(
+        reason: "messageStatusChanged",
+        userInfo: ["chatId": chatId, "messageId": messageId, "status": "error"]
+      )
+    }
   }
 
   private func removeQueuedOutboundDraftLocked(chatId: String, messageId: String, dropDraft: Bool) {

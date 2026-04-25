@@ -34,6 +34,26 @@ object ChatEngineApi {
   }
   private val mainHandler = Handler(Looper.getMainLooper())
 
+  internal data class PeerLookupResult(
+    val userId: String,
+    val displayName: String,
+    val username: String?,
+    val phoneNumber: String?,
+    val avatarUri: String?,
+    val publicKey: String?,
+    val isOnline: Boolean,
+  ) {
+    val subtitle: String
+      get() {
+        if (!phoneNumber.isNullOrBlank()) return phoneNumber
+        val handle = username?.trim()?.removePrefix("@").orEmpty()
+        if (handle.isNotEmpty() && !looksLikeUuid(handle) && !handle.equals(displayName, ignoreCase = true)) {
+          return "@$handle"
+        }
+        return "User is in Vibegram"
+      }
+  }
+
   internal fun fetchChats(context: Context, callback: (Result<List<ChatHomeListRow>>) -> Unit) {
     val config = AppSessionConfig.current(context)
     if (config == null) {
@@ -85,6 +105,20 @@ object ChatEngineApi {
     lookup: String,
     callback: (Result<ChatHomeListRow>) -> Unit,
   ) {
+    findUser(context, lookup) { result ->
+      result.onSuccess { peer ->
+        startDirectChat(context, peer, callback)
+      }.onFailure { error ->
+        callback(Result.failure(error))
+      }
+    }
+  }
+
+  internal fun findUser(
+    context: Context,
+    lookup: String,
+    callback: (Result<PeerLookupResult>) -> Unit,
+  ) {
     val config = AppSessionConfig.current(context)
     if (config == null) {
       callback(Result.failure(IllegalStateException("Missing native auth config.")))
@@ -98,9 +132,61 @@ object ChatEngineApi {
 
     Thread {
       val result = runCatching {
+        val executor: (OkHttpClient) -> PeerLookupResult = { client ->
+          resolvePeer(client, config, normalizedLookup)
+        }
+        when (config.transportMode) {
+          PacketTransportMode.OFFLINE ->
+            throw IOException("Transport mode offline is not available in the standalone native app.")
+          PacketTransportMode.BRIDGE_TEXT ->
+            throw IOException("Transport mode bridge_text is not available in the standalone native app.")
+          PacketTransportMode.PACKET_MESH -> {
+            try {
+              val snapshot = PacketRuntime.ensureStarted(context, config)
+              executor(PacketRuntime.buildHttpClient(snapshot))
+            } catch (_: Throwable) {
+              executor(httpClient)
+            }
+          }
+          PacketTransportMode.DIRECT -> {
+            try {
+              val row = executor(httpClient)
+              PacketRuntime.stop(context, resetToDirect = true)
+              PacketBootstrapService.prefetchIfNeeded(context, config)
+              row
+            } catch (_: Throwable) {
+              val snapshot = PacketRuntime.ensureStarted(context, config)
+              executor(PacketRuntime.buildHttpClient(snapshot))
+            }
+          }
+        }
+      }
+      mainHandler.post { callback(result) }
+    }.start()
+  }
+
+  internal fun startDirectChat(
+    context: Context,
+    peer: PeerLookupResult,
+    callback: (Result<ChatHomeListRow>) -> Unit,
+  ) {
+    val config = AppSessionConfig.current(context)
+    if (config == null) {
+      callback(Result.failure(IllegalStateException("Missing native auth config.")))
+      return
+    }
+
+    Thread {
+      val result = runCatching {
         val executor: (OkHttpClient) -> ChatHomeListRow = { client ->
-          val peer = resolvePeer(client, config, normalizedLookup)
           val chatId = createDirectChat(client, config, peer.userId)
+          ChatEngine.seedChatPeerInfo(
+            mapOf(
+              "chatId" to chatId,
+              "peerUserId" to peer.userId,
+              "publicKey" to peer.publicKey,
+            ),
+          )
           ChatHomeListRow(
             chatId = chatId,
             title = peer.displayName,
@@ -181,20 +267,35 @@ object ChatEngineApi {
             return@use
           }
           val json = JSONObject(body)
-          val userId = json.optString("userId").trim()
-          if (userId.isBlank()) {
+          val source = json.optJSONObject("data") ?: json
+          val userId = firstNonBlank(
+            source.opt("userId"),
+            source.opt("user_id"),
+            source.opt("id"),
+          )
+          if (userId.isNullOrBlank()) {
             lastFailure = IOException("User lookup returned no user id.")
             return@use
           }
-          val title =
-            json.optString("name").trim().takeIf { it.isNotEmpty() }
-              ?: json.optString("username").trim().takeIf { it.isNotEmpty() }
-              ?: lookup
+          val username = firstNonBlank(source.opt("username"), source.opt("handle"))
+          val title = firstNonBlank(
+            source.opt("displayName"),
+            source.opt("display_name"),
+            source.opt("fullName"),
+            source.opt("full_name"),
+            source.opt("name"),
+            username,
+          )?.takeUnless { looksLikeUuid(it) }
+            ?: username?.takeUnless { looksLikeUuid(it) }
+            ?: "Vibegram User"
           return PeerLookupResult(
             userId = userId,
             displayName = title,
-            avatarUri = json.optString("profileImage").trim().takeIf { it.isNotEmpty() },
-            isOnline = json.optBoolean("online", false),
+            username = username,
+            phoneNumber = firstNonBlank(source.opt("phoneNumber"), source.opt("phone_number"), source.opt("phone")),
+            avatarUri = firstNonBlank(source.opt("profileImage"), source.opt("profile_image"), source.opt("avatarUrl"), source.opt("avatar_url")),
+            publicKey = firstNonBlank(source.opt("publicKey"), source.opt("public_key"), source.opt("friendKey"), source.opt("friendPublicKey")),
+            isOnline = parseBool(source.opt("online") ?: source.opt("isOnline") ?: source.opt("is_online")) ?: false,
           )
         }
       } catch (error: IOException) {
@@ -213,6 +314,7 @@ object ChatEngineApi {
     val pathBase = if (base.lowercase().endsWith("/api")) base else "$base/api"
     val body =
       JSONObject()
+        .put("myId", config.userId)
         .put("friendId", peerUserId)
         .toString()
         .toRequestBody("application/json; charset=utf-8".toMediaType())
@@ -343,10 +445,32 @@ object ChatEngineApi {
     }
   }
 
-  private data class PeerLookupResult(
-    val userId: String,
-    val displayName: String,
-    val avatarUri: String?,
-    val isOnline: Boolean,
-  )
+  private fun firstNonBlank(vararg values: Any?): String? {
+    return values.firstNotNullOfOrNull { value ->
+      when (value) {
+        null, JSONObject.NULL -> null
+        is String -> value.trim().takeIf { it.isNotEmpty() }
+        else -> value.toString().trim().takeIf { it.isNotEmpty() }
+      }
+    }
+  }
+
+  private fun parseBool(value: Any?): Boolean? {
+    return when (value) {
+      is Boolean -> value
+      is Number -> value.toInt() != 0
+      is String -> when (value.trim().lowercase()) {
+        "1", "true", "yes", "on" -> true
+        "0", "false", "no", "off" -> false
+        else -> null
+      }
+      else -> null
+    }
+  }
+
+  private fun looksLikeUuid(value: String): Boolean {
+    val trimmed = value.trim()
+    if (trimmed.length != 36) return false
+    return runCatching { java.util.UUID.fromString(trimmed) }.isSuccess
+  }
 }

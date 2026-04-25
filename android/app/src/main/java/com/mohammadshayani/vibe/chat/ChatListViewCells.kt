@@ -51,6 +51,7 @@ internal class NativeRowViewHolder(
   val voiceDurationView: TextView,
   val timeView: TextView,
   val statusView: BubbleStatusIndicatorView,
+  val retryButtonView: BubbleRetryButtonView,
   val dayLabel: TextView,
   val agentSenderLabel: TextView,
 ) : RecyclerView.ViewHolder(container)
@@ -94,32 +95,33 @@ internal class BubbleTailView(context: Context) : View(context) {
   }
 }
 
-internal class BubbleStatusIndicatorView(context: Context) : android.widget.ImageView(context) {
+internal class BubbleStatusIndicatorView(context: Context) : View(context) {
   private var status: String? = null
   private var baseColor: Int = Color.WHITE
-
-  init {
-    scaleType = ScaleType.FIT_END
+  private var rotationDegrees = 0f
+  private var pendingAnimator: ValueAnimator? = null
+  private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.STROKE
+    strokeCap = Paint.Cap.ROUND
   }
+  private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.FILL
+  }
+  private val arcRect = RectF()
+  private val path = Path()
 
   fun bind(rawStatus: String?, color: Int) {
     val normalized = rawStatus?.trim()?.lowercase()
     if (status == normalized && baseColor == color) return
     status = normalized
     baseColor = color
-
-    when (normalized) {
-      "pending" -> setImageResource(R.drawable.ic_bubble_pending)
-      "error" -> setImageResource(R.drawable.ic_bubble_error)
-      "sent" -> setImageResource(R.drawable.ic_bubble_sent)
-      "delivered", "read" -> setImageResource(R.drawable.ic_bubble_read)
-      else -> setImageDrawable(null)
+    if (normalized == "pending" || normalized == "sending") {
+      startPendingAnimator()
+    } else {
+      stopPendingAnimator()
     }
-
-    val tintColor = if (normalized == "read") Color.argb(255, 0, 163, 255) else if (normalized == "error") Color.argb(255, 255, 122, 122) else baseColor
-    setColorFilter(tintColor, android.graphics.PorterDuff.Mode.SRC_IN)
-
     requestLayout()
+    invalidate()
   }
 
   override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
@@ -134,12 +136,170 @@ internal class BubbleStatusIndicatorView(context: Context) : android.widget.Imag
     setMeasuredDimension(w, h)
   }
 
+  override fun onDraw(canvas: Canvas) {
+    super.onDraw(canvas)
+    val normalized = status ?: return
+    if (width <= 0 || height <= 0) return
+    val tintColor =
+      when (normalized) {
+        "read" -> Color.argb(255, 0, 163, 255)
+        "error" -> Color.argb(255, 255, 122, 122)
+        else -> baseColor
+      }
+    strokePaint.color = tintColor
+    fillPaint.color = tintColor
+    strokePaint.strokeWidth = dpF(if (normalized == "error") 1.8f else 1.55f)
+
+    when (normalized) {
+      "pending", "sending" -> drawPending(canvas)
+      "sent" -> drawCheck(canvas, second = false)
+      "delivered", "read" -> drawCheck(canvas, second = true)
+      "error" -> drawError(canvas)
+    }
+  }
+
+  override fun onDetachedFromWindow() {
+    stopPendingAnimator()
+    super.onDetachedFromWindow()
+  }
+
+  private fun drawPending(canvas: Canvas) {
+    val side = min(width.toFloat(), height.toFloat()) - dpF(2f)
+    if (side <= 0f) return
+    val cx = width - side * 0.5f - dpF(0.5f)
+    val cy = height * 0.5f
+    val radius = side * 0.46f
+    arcRect.set(cx - radius, cy - radius, cx + radius, cy + radius)
+    strokePaint.alpha = 148
+    canvas.drawOval(arcRect, strokePaint)
+    strokePaint.alpha = 255
+    canvas.save()
+    canvas.rotate(rotationDegrees, cx, cy)
+    canvas.drawLine(cx, cy, cx, cy - radius * 0.58f, strokePaint)
+    canvas.drawLine(cx, cy, cx + radius * 0.42f, cy, strokePaint)
+    canvas.restore()
+  }
+
+  private fun drawCheck(canvas: Canvas, second: Boolean) {
+    fun checkPath(offsetX: Float): Path {
+      path.reset()
+      path.moveTo(offsetX + dpF(1.5f), height * 0.55f)
+      path.lineTo(offsetX + dpF(5.2f), height * 0.78f)
+      path.lineTo(offsetX + dpF(13.8f), height * 0.24f)
+      return path
+    }
+    if (second) {
+      canvas.drawPath(checkPath(width - dpF(20f)), strokePaint)
+      canvas.drawPath(checkPath(width - dpF(12.5f)), strokePaint)
+    } else {
+      canvas.drawPath(checkPath(width - dpF(15.5f)), strokePaint)
+    }
+  }
+
+  private fun drawError(canvas: Canvas) {
+    val cx = width - dpF(7.5f)
+    val top = dpF(2.8f)
+    val bottom = height - dpF(5f)
+    canvas.drawLine(cx, top, cx, bottom, strokePaint)
+    canvas.drawCircle(cx, height - dpF(2.3f), dpF(1.25f), fillPaint)
+  }
+
+  private fun startPendingAnimator() {
+    if (pendingAnimator != null) return
+    pendingAnimator =
+      ValueAnimator.ofFloat(0f, 360f).apply {
+        duration = 1050L
+        repeatCount = ValueAnimator.INFINITE
+        interpolator = LinearInterpolator()
+        addUpdateListener {
+          rotationDegrees = it.animatedValue as Float
+          invalidate()
+        }
+        start()
+      }
+  }
+
+  private fun stopPendingAnimator() {
+    pendingAnimator?.cancel()
+    pendingAnimator = null
+    rotationDegrees = 0f
+  }
+
   private fun dp(value: Int): Int =
     android.util.TypedValue.applyDimension(
       android.util.TypedValue.COMPLEX_UNIT_DIP,
       value.toFloat(),
       context.resources.displayMetrics,
     ).toInt()
+
+  private fun dpF(value: Float): Float =
+    android.util.TypedValue.applyDimension(
+      android.util.TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      context.resources.displayMetrics,
+    )
+}
+
+internal class BubbleRetryButtonView(context: Context) : View(context) {
+  private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.FILL
+    color = Color.argb(34, 255, 122, 122)
+  }
+  private val iconPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.STROKE
+    strokeCap = Paint.Cap.ROUND
+    strokeJoin = Paint.Join.ROUND
+    strokeWidth = dpF(1.8f)
+    color = Color.argb(255, 255, 122, 122)
+  }
+  private val arcRect = RectF()
+  private val arrowPath = Path()
+
+  init {
+    isClickable = true
+    isFocusable = true
+  }
+
+  override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+    val size = dp(28)
+    setMeasuredDimension(resolveSize(size, widthMeasureSpec), resolveSize(size, heightMeasureSpec))
+  }
+
+  override fun onDraw(canvas: Canvas) {
+    super.onDraw(canvas)
+    val cx = width * 0.5f
+    val cy = height * 0.5f
+    val radius = min(width, height) * 0.5f - dpF(1f)
+    canvas.drawCircle(cx, cy, radius, ringPaint)
+
+    val iconRadius = radius - dpF(7f)
+    arcRect.set(cx - iconRadius, cy - iconRadius, cx + iconRadius, cy + iconRadius)
+    canvas.drawArc(arcRect, 35f, 280f, false, iconPaint)
+
+    val angle = Math.toRadians(35.0)
+    val tipX = cx + kotlin.math.cos(angle).toFloat() * iconRadius
+    val tipY = cy + kotlin.math.sin(angle).toFloat() * iconRadius
+    arrowPath.reset()
+    arrowPath.moveTo(tipX, tipY)
+    arrowPath.lineTo(tipX - dpF(4.2f), tipY - dpF(0.5f))
+    arrowPath.moveTo(tipX, tipY)
+    arrowPath.lineTo(tipX - dpF(0.4f), tipY + dpF(4.2f))
+    canvas.drawPath(arrowPath, iconPaint)
+  }
+
+  private fun dp(value: Int): Int =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value.toFloat(),
+      context.resources.displayMetrics,
+    ).toInt()
+
+  private fun dpF(value: Float): Float =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      context.resources.displayMetrics,
+    )
 }
 
 internal class VoicePlayProgressView(context: Context) : View(context) {
@@ -1141,6 +1301,9 @@ internal fun createNativeMessageRowViewHolder(context: Context): NativeRowViewHo
   val status = BubbleStatusIndicatorView(context).apply {
     visibility = View.GONE
   }
+  val retryButton = BubbleRetryButtonView(context).apply {
+    visibility = View.GONE
+  }
 
   val day = TextView(context).apply {
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -1275,6 +1438,13 @@ internal fun createNativeMessageRowViewHolder(context: Context): NativeRowViewHo
   )
   root.addView(bubble)
   root.addView(
+    retryButton,
+    FrameLayout.LayoutParams(dp(28), dp(28), Gravity.END or Gravity.BOTTOM).apply {
+      rightMargin = dp(34)
+      bottomMargin = dp(6)
+    },
+  )
+  root.addView(
     day,
     FrameLayout.LayoutParams(
       FrameLayout.LayoutParams.WRAP_CONTENT,
@@ -1308,6 +1478,7 @@ internal fun createNativeMessageRowViewHolder(context: Context): NativeRowViewHo
     voiceDurationView = voiceDuration,
     time,
     status,
+    retryButton,
     day,
     agentSender,
   )

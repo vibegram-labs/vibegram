@@ -499,6 +499,8 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
         inputBar?.showReplyBanner(messageId: mid, text: row.text, isMe: row.isMe)
       } else if actionId == "copy" {
         UIPasteboard.general.string = row.text
+      } else if actionId == "resend" {
+        retryOutgoingMessage(row: row, source: "context_menu")
       }
     }
   }

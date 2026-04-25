@@ -184,6 +184,7 @@ private final class AppNativeStoryCameraView: UIView, AVCapturePhotoCaptureDeleg
   private let photoOutput = AVCapturePhotoOutput()
   private let movieOutput = AVCaptureMovieFileOutput()
   private let previewView = AppNativeStoryCameraPreviewView()
+  private let cardContainer = UIView()
   private let topBar = UIView()
   private let closeButton = UIButton(type: .system)
   private let galleryButton = UIButton(type: .system)
@@ -212,6 +213,11 @@ private final class AppNativeStoryCameraView: UIView, AVCapturePhotoCaptureDeleg
     super.init(frame: frame)
     backgroundColor = .black
     clipsToBounds = true
+
+    cardContainer.backgroundColor = .black
+    cardContainer.layer.cornerRadius = 32.0
+    cardContainer.layer.cornerCurve = .continuous
+    cardContainer.clipsToBounds = true
 
     previewView.previewLayer.session = session
     previewView.previewLayer.videoGravity = .resizeAspectFill
@@ -266,17 +272,34 @@ private final class AppNativeStoryCameraView: UIView, AVCapturePhotoCaptureDeleg
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    previewView.frame = bounds
 
-    let safeTop = safeAreaInsets.top
-    let safeBottom = safeAreaInsets.bottom
-    topBar.frame = CGRect(x: 0, y: 0, width: bounds.width, height: safeTop + 66)
-    closeButton.frame = CGRect(x: bounds.width - 62, y: safeTop + 10, width: 46, height: 46)
+    let safeTop = max(safeAreaInsets.top, 12.0)
+    let safeBottom = max(safeAreaInsets.bottom, 20.0)
+    let horizontalMargin: CGFloat = 10.0
+    let bottomReservedHeight: CGFloat = 140.0
+    let cardTop = safeTop + 4.0
+    let cardWidth = max(0.0, bounds.width - (horizontalMargin * 2.0))
+    let maxCardHeight = max(280.0, bounds.height - cardTop - bottomReservedHeight)
+    let preferredCardHeight = max(340.0, bounds.height * 0.85)
+    let cardHeight = min(preferredCardHeight, maxCardHeight)
+
+    cardContainer.frame = CGRect(
+      x: horizontalMargin,
+      y: cardTop,
+      width: cardWidth,
+      height: cardHeight
+    )
+    previewView.frame = cardContainer.bounds
+
+    topBar.frame = CGRect(x: 14.0, y: 14.0, width: max(0.0, cardWidth - 28.0), height: 44.0)
+    closeButton.frame = CGRect(x: cardWidth - 44.0, y: 0.0, width: 44.0, height: 44.0)
 
     let shutterSize: CGFloat = 84
+    let remainingSpace = bounds.height - cardContainer.frame.maxY - safeBottom
+    let shutterY = cardContainer.frame.maxY + (remainingSpace - shutterSize) * 0.5 + 10.0
     shutterButton.frame = CGRect(
       x: (bounds.width - shutterSize) * 0.5,
-      y: bounds.height - safeBottom - 132,
+      y: shutterY,
       width: shutterSize,
       height: shutterSize
     )
@@ -312,19 +335,20 @@ private final class AppNativeStoryCameraView: UIView, AVCapturePhotoCaptureDeleg
     )
     permissionTitleLabel.frame = CGRect(x: 22, y: 28, width: permissionWidth - 44, height: 44)
     permissionButton.frame = CGRect(x: 22, y: 88, width: permissionWidth - 44, height: 44)
-    loadingSpinner.center = CGPoint(x: bounds.midX, y: bounds.midY)
+    loadingSpinner.center = CGPoint(x: cardContainer.frame.midX, y: cardContainer.frame.midY)
     updatePreviewOrientation()
   }
 
   private func configureView() {
-    addSubview(previewView)
+    addSubview(cardContainer)
+    cardContainer.addSubview(previewView)
 
     topBar.backgroundColor = .clear
-    addSubview(topBar)
+    cardContainer.addSubview(topBar)
 
     configureCircleButton(closeButton, symbol: "xmark")
     closeButton.addTarget(self, action: #selector(handleClosePress), for: .touchUpInside)
-    addSubview(closeButton)
+    topBar.addSubview(closeButton)
 
     configureCircleButton(galleryButton, symbol: "photo.on.rectangle.angled")
     galleryButton.addTarget(self, action: #selector(handleGalleryPress), for: .touchUpInside)

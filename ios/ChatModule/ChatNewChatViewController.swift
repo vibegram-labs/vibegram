@@ -54,6 +54,7 @@ private struct ChatNativeNewChatTheme {
 private struct ChatNativeNewChatUser {
   let userId: String
   let username: String
+  let handle: String?
   let phoneNumber: String?
   let profileImage: String?
   let publicKey: String?
@@ -64,23 +65,57 @@ private struct ChatNativeNewChatUser {
       ?? chatNativeNewChatString(raw["id"])
     guard let resolvedUserId, !resolvedUserId.isEmpty else { return nil }
 
-    let resolvedUsername =
+    let resolvedHandle =
       chatNativeNewChatString(raw["username"])
-      ?? chatNativeNewChatString(raw["name"])
-      ?? resolvedUserId
+      ?? chatNativeNewChatString(raw["handle"])
+    let nameKeys = ["displayName", "display_name", "fullName", "full_name", "name"]
+    var foundName: String? = nil
+    for key in nameKeys {
+      if let val = chatNativeNewChatString(raw[key]) {
+        if !chatNativeNewChatLooksLikeUUID(val) {
+          foundName = val
+          break
+        }
+      }
+    }
+
+    if foundName == nil {
+      if let h = resolvedHandle, !chatNativeNewChatLooksLikeUUID(h) {
+        foundName = h
+      }
+    }
+
+    let resolvedUsername = foundName ?? "Vibegram User"
 
     userId = resolvedUserId
     username = resolvedUsername
-    phoneNumber = chatNativeNewChatString(raw["phoneNumber"]) ?? chatNativeNewChatString(raw["phone"])
-    profileImage = chatNativeNewChatString(raw["profileImage"])
-    publicKey = chatNativeNewChatString(raw["publicKey"])
+    handle = resolvedHandle
+    phoneNumber =
+      chatNativeNewChatString(raw["phoneNumber"])
+      ?? chatNativeNewChatString(raw["phone_number"])
+      ?? chatNativeNewChatString(raw["phone"])
+    profileImage =
+      chatNativeNewChatString(raw["profileImage"])
+      ?? chatNativeNewChatString(raw["profile_image"])
+      ?? chatNativeNewChatString(raw["avatarUrl"])
+      ?? chatNativeNewChatString(raw["avatar_url"])
+    publicKey =
+      chatNativeNewChatString(raw["publicKey"])
+      ?? chatNativeNewChatString(raw["public_key"])
+      ?? chatNativeNewChatString(raw["friendKey"])
+      ?? chatNativeNewChatString(raw["friendPublicKey"])
   }
 
   var subtitle: String {
     if let phoneNumber, !phoneNumber.isEmpty {
       return phoneNumber
     }
-    return userId
+    if let handle, !handle.isEmpty, !chatNativeNewChatLooksLikeUUID(handle),
+      handle.localizedCaseInsensitiveCompare(username) != .orderedSame
+    {
+      return "@\(handle.trimmingCharacters(in: CharacterSet(charactersIn: "@")))"
+    }
+    return "User is in Vibegram"
   }
 
   var initials: String {
@@ -104,7 +139,9 @@ private struct ChatNativeNewChatUser {
       "id": userId,
       "userId": userId,
       "username": username,
+      "displayName": username,
     ]
+    if let handle { value["handle"] = handle }
     if let phoneNumber { value["phoneNumber"] = phoneNumber }
     if let profileImage { value["profileImage"] = profileImage }
     if let publicKey { value["publicKey"] = publicKey }

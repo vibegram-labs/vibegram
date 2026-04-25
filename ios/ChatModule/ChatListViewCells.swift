@@ -697,6 +697,77 @@ private let bubbleStatusSlotWidth: CGFloat = 18.0
 private let bubbleStatusSlotHeight: CGFloat = 15.0
 private let bubbleStatusCheckStrokeWidth: CGFloat = 1.7
 
+private final class ChatPendingStatusView: UIView {
+  private let ringLayer = CAShapeLayer()
+  private let handLayer = CAShapeLayer()
+  private var color = UIColor.white
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    isUserInteractionEnabled = false
+    backgroundColor = .clear
+    ringLayer.fillColor = UIColor.clear.cgColor
+    ringLayer.lineCap = .round
+    ringLayer.opacity = 0.58
+    handLayer.fillColor = UIColor.clear.cgColor
+    handLayer.lineCap = .round
+    layer.addSublayer(ringLayer)
+    layer.addSublayer(handLayer)
+  }
+
+  required init?(coder: NSCoder) {
+    nil
+  }
+
+  func configure(color: UIColor) {
+    self.color = color
+    ringLayer.strokeColor = color.cgColor
+    handLayer.strokeColor = color.cgColor
+    setNeedsLayout()
+    startAnimating()
+  }
+
+  func stopAnimating() {
+    handLayer.removeAnimation(forKey: "pendingClockRotation")
+  }
+
+  override func layoutSubviews() {
+    super.layoutSubviews()
+    let side = min(bounds.width, bounds.height) - 1.5
+    let rect = CGRect(
+      x: floor((bounds.width - side) * 0.5),
+      y: floor((bounds.height - side) * 0.5),
+      width: side,
+      height: side
+    )
+    let lineWidth = max(1.2, side * 0.13)
+    ringLayer.frame = bounds
+    ringLayer.lineWidth = lineWidth
+    ringLayer.path = UIBezierPath(ovalIn: rect).cgPath
+
+    handLayer.frame = bounds
+    handLayer.lineWidth = lineWidth
+    let center = CGPoint(x: rect.midX, y: rect.midY)
+    let radius = side * 0.30
+    let path = UIBezierPath()
+    path.move(to: center)
+    path.addLine(to: CGPoint(x: center.x, y: center.y - radius))
+    handLayer.path = path.cgPath
+  }
+
+  private func startAnimating() {
+    if handLayer.animation(forKey: "pendingClockRotation") != nil { return }
+    let animation = CABasicAnimation(keyPath: "transform.rotation.z")
+    animation.fromValue = 0.0
+    animation.toValue = CGFloat.pi * 2.0
+    animation.duration = 1.05
+    animation.repeatCount = .infinity
+    animation.timingFunction = CAMediaTimingFunction(name: .linear)
+    animation.isRemovedOnCompletion = false
+    handLayer.add(animation, forKey: "pendingClockRotation")
+  }
+}
+
 private func pixelAlignedRect(_ rect: CGRect) -> CGRect {
   let scale = max(UIScreen.main.scale, 1.0)
   let minX = floor(rect.minX * scale) / scale
@@ -4860,6 +4931,8 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   private let timestampLabel = UILabel()
   private let statusImageView = UIImageView()
   private let statusLabel = UILabel()
+  private let pendingStatusView = ChatPendingStatusView()
+  private let retryButton = UIButton(type: .system)
   private let dayLabel = UILabel()
   private let reactionPillView = UIView()
   private let reactionLabel = UILabel()
@@ -4917,6 +4990,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   var onVoiceUploadCancelTap: ((ChatListRow) -> Void)?
   var onInlineAttachmentTap: ((ChatListRow) -> Void)?
   var onMediaNaturalSizeResolved: ((String?, String, CGSize) -> Void)?
+  var onRetryMessageTap: ((ChatListRow) -> Void)?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -4963,7 +5037,9 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     metaContainerView.addSubview(timestampLabel)
     metaContainerView.addSubview(statusImageView)
     metaContainerView.addSubview(statusLabel)
+    metaContainerView.addSubview(pendingStatusView)
     contentView.addSubview(dayLabel)
+    contentView.addSubview(retryButton)
 
     contentView.addSubview(reactionPillView)
     reactionPillView.addSubview(reactionLabel)
@@ -5096,8 +5172,17 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     timestampLabel.textColor = UIColor(white: 1.0, alpha: 0.72)
     statusImageView.contentMode = .scaleAspectFit
     statusImageView.isHidden = true
+    pendingStatusView.isHidden = true
     statusLabel.font = bubbleMetaStatusFont
     statusLabel.textAlignment = .center
+    retryButton.isHidden = true
+    retryButton.tintColor = UIColor(red: 1.0, green: 0.48, blue: 0.48, alpha: 1.0)
+    retryButton.backgroundColor = UIColor(red: 1.0, green: 0.48, blue: 0.48, alpha: 0.14)
+    retryButton.layer.cornerCurve = .continuous
+    retryButton.layer.cornerRadius = 14
+    retryButton.setImage(UIImage(systemName: "arrow.clockwise"), for: .normal)
+    retryButton.imageView?.contentMode = .scaleAspectFit
+    retryButton.addTarget(self, action: #selector(handleRetryTap), for: .touchUpInside)
 
     dayLabel.font = UIFont.systemFont(ofSize: 12, weight: .semibold)
     dayLabel.textAlignment = .center
@@ -5457,6 +5542,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     onVoiceUploadCancelTap = nil
     onInlineAttachmentTap = nil
     onMediaNaturalSizeResolved = nil
+    onRetryMessageTap = nil
     row = nil
     cachedLayoutMetrics = nil
     isGhostHidden = false
@@ -5498,8 +5584,11 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     mediaWaveformView.setWaveform(nil)
     statusImageView.isHidden = true
     statusImageView.image = nil
+    pendingStatusView.isHidden = true
+    pendingStatusView.stopAnimating()
     statusLabel.isHidden = true
     statusLabel.text = nil
+    retryButton.isHidden = true
     renderedStatusKey = nil
     isContextMenuExtracted = false
     isContextMenuHeld = false
@@ -5909,6 +5998,23 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       width: reactionFrame.width,
       height: reactionFrame.height
     )
+
+    let retrySize: CGFloat = 28.0
+    if retryButton.isHidden {
+      retryButton.frame = .zero
+    } else {
+      let retryX = row.isMe
+        ? max(8.0, bubbleFrame.minX - retrySize - 7.0)
+        : min(bounds.width - retrySize - 8.0, bubbleFrame.maxX + 7.0)
+      let retryY = min(
+        max(4.0, bubbleFrame.maxY - retrySize - 5.0),
+        max(4.0, bounds.height - retrySize - 2.0)
+      )
+      retryButton.frame = pixelAlignedRect(
+        CGRect(x: retryX, y: retryY, width: retrySize, height: retrySize)
+      )
+      retryButton.layer.cornerRadius = retrySize * 0.5
+    }
 
     if !reactionPillView.isHidden {
       let signature =
@@ -7286,6 +7392,11 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     )
   }
 
+  @objc private func handleRetryTap() {
+    guard let row else { return }
+    onRetryMessageTap?(row)
+  }
+
   @objc private func handleInlineAttachmentTap() {
     guard let row, hasInlineAttachment(row) else { return }
     onInlineAttachmentTap?(row)
@@ -7430,6 +7541,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       ))
     statusLabel.frame = statusFrame
     statusImageView.frame = statusFrame
+    pendingStatusView.frame = statusFrame
   }
 
   private func configureStatus(for newRow: ChatListRow, baseColor: UIColor) {
@@ -7444,23 +7556,19 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     statusImageView.image = nil
     statusImageView.isHidden = true
     statusImageView.layer.opacity = 1.0
+    pendingStatusView.isHidden = true
+    pendingStatusView.stopAnimating()
 
     guard newRow.isMe else {
       renderedStatusKey = nil
+      retryButton.isHidden = true
       return
     }
 
     switch newStatus {
-    case "pending":
-      if newRow.visualKind == .media || newRow.visualKind == .video || newRow.visualKind == .videoNote || newRow.visualKind == .voice || newRow.visualKind == .sticker {
-         let config = UIImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
-         statusImageView.image = UIImage(systemName: "timer", withConfiguration: config)?.withTintColor(baseColor, renderingMode: .alwaysOriginal)
-         statusImageView.isHidden = false
-      } else {
-         statusLabel.font = bubbleMetaPendingFont
-         statusLabel.text = "◷"
-         statusLabel.isHidden = false
-      }
+    case "pending", "sending":
+      pendingStatusView.configure(color: baseColor)
+      pendingStatusView.isHidden = false
     case "sent":
       statusImageView.image = bubbleStatusCheckImage(double: false, color: baseColor)
       statusImageView.isHidden = false
@@ -7481,15 +7589,36 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       break
     }
 
+    let showRetry = newStatus == "error" && !isGhostHidden
+    retryButton.isHidden = !showRetry
+
     let shouldAnimateCheckIn =
       oldStatusKey != nil
       && oldStatusKey != nextStatusKey
       && statusImageView.isHidden == false
       && (newStatus == "sent" || newStatus == "delivered" || newStatus == "read")
+    let shouldAnimateError =
+      oldStatusKey != nil
+      && oldStatusKey != nextStatusKey
+      && newStatus == "error"
     renderedStatusKey = nextStatusKey
     if shouldAnimateCheckIn {
       animateStatusGlyphIn()
     }
+    if shouldAnimateError {
+      animateBubbleErrorNudge()
+    }
+  }
+
+  private func animateBubbleErrorNudge() {
+    bubbleView.layer.removeAnimation(forKey: "bubbleErrorNudge")
+    let animation = CAKeyframeAnimation(keyPath: "transform.translation.x")
+    animation.values = [0.0, -4.0, 3.0, -2.0, 0.0]
+    animation.keyTimes = [0.0, 0.24, 0.52, 0.76, 1.0]
+    animation.duration = 0.28
+    animation.timingFunction = CAMediaTimingFunction(name: .easeOut)
+    animation.isRemovedOnCompletion = true
+    bubbleView.layer.add(animation, forKey: "bubbleErrorNudge")
   }
 
   private func animateStatusGlyphIn() {

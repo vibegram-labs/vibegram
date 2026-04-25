@@ -97,8 +97,9 @@ struct NativeMusicPlayerTrack: Codable, Equatable {
 
   init?(payload: [String: Any]) {
     guard let trackId = Self.resolveTrackId(from: payload) else { return nil }
-    let title =
-      (payload["title"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let titleRaw = (payload["title"] as? String) ?? (payload["name"] as? String)
+    let titleTrimmed = titleRaw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    let title = titleTrimmed
     let artist =
       (payload["artist"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     guard !title.isEmpty else { return nil }

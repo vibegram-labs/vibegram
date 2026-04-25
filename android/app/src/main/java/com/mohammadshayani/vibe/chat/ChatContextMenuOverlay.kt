@@ -396,7 +396,7 @@ internal class ChatContextMenuOverlay(
       View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED),
     )
 
-    val layout = computeLayout(
+    var layout = computeLayout(
       overlayWidth = rootWidth,
       overlayHeight = rootHeight,
       // Keep geometry anchored to the full bubble snapshot (bubble + tail),
@@ -408,6 +408,16 @@ internal class ChatContextMenuOverlay(
       actionsHeight = actionsCard.measuredHeight.toFloat(),
       isMe = config.isMe,
     )
+    if (!animateHold) {
+      layout = layout.withControlsAtTop(
+        overlayWidth = rootWidth,
+        reactionWidth = reactionCard.measuredWidth.toFloat(),
+        reactionHeight = reactionCard.measuredHeight.toFloat(),
+        actionsWidth = actionsCard.measuredWidth.toFloat(),
+        actionsHeight = actionsCard.measuredHeight.toFloat(),
+        isMe = config.isMe,
+      )
+    }
     val bubbleSnapshotRect = android.graphics.RectF(layout.bubbleRect)
     Log.d(
       TAG,
@@ -433,6 +443,7 @@ internal class ChatContextMenuOverlay(
     bubbleSnapshot.scaleX = startScale
     bubbleSnapshot.scaleY = startScale
     bubbleSnapshot.alpha = 1f
+    bubbleSnapshot.visibility = if (animateHold) View.VISIBLE else View.GONE
     bubbleSnapshot.elevation = dpF(16f)
 
     reactionCard.alpha = 0f
@@ -468,13 +479,18 @@ internal class ChatContextMenuOverlay(
       }
     }
 
-    val hiddenViews = LinkedHashSet<View>().apply {
-      // Hide the same host used for snapshot capture to prevent live/snapshot
-      // mismatch flicker while the context overlay animates in.
-      add(holdView)
-      if (anchor !== holdView) add(anchor)
-      if (tailView != null && tailView !== anchor && tailView !== holdView) add(tailView)
-    }
+    val hiddenViews =
+      if (animateHold) {
+        LinkedHashSet<View>().apply {
+          // Hide the same host used for snapshot capture to prevent live/snapshot
+          // mismatch flicker while the context overlay animates in.
+          add(holdView)
+          if (anchor !== holdView) add(anchor)
+          if (tailView != null && tailView !== anchor && tailView !== holdView) add(tailView)
+        }
+      } else {
+        linkedSetOf()
+      }
 
     active = ActiveOverlay(
       popup = popup,
@@ -529,14 +545,16 @@ internal class ChatContextMenuOverlay(
         .setDuration(180L)
         .setInterpolator(PathInterpolator(0.22f, 0f, 0f, 1f))
         .start()
-      bubbleSnapshot.animate()
-        .translationX(0f)
-        .translationY(0f)
-        .scaleX(1f)
-        .scaleY(1f)
-        .setDuration(230L)
-        .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
-        .start()
+      if (animateHold) {
+        bubbleSnapshot.animate()
+          .translationX(0f)
+          .translationY(0f)
+          .scaleX(1f)
+          .scaleY(1f)
+          .setDuration(230L)
+          .setInterpolator(PathInterpolator(0.16f, 1f, 0.3f, 1f))
+          .start()
+      }
       reactionCard.animate()
         .alpha(1f)
         .translationY(0f)
@@ -701,6 +719,43 @@ internal class ChatContextMenuOverlay(
     )
   }
 
+  private fun Layout.withControlsAtTop(
+    overlayWidth: Float,
+    reactionWidth: Float,
+    reactionHeight: Float,
+    actionsWidth: Float,
+    actionsHeight: Float,
+    isMe: Boolean,
+  ): Layout {
+    val safeMargin = dpF(14f)
+    val safeLeft = safeMargin
+    val safeRight = overlayWidth - safeMargin
+    val top = safeMargin + dpF(12f)
+    val gap = dpF(8f)
+    val alignRight = isMe || bubbleRect.centerX() > overlayWidth * 0.5f
+    fun xFor(width: Float): Float {
+      val target = if (alignRight) safeRight - width else safeLeft
+      return target.coerceIn(safeLeft, (safeRight - width).coerceAtLeast(safeLeft))
+    }
+    val reactionRect = android.graphics.RectF(
+      xFor(reactionWidth),
+      top,
+      xFor(reactionWidth) + reactionWidth,
+      top + reactionHeight,
+    )
+    val actionsTop = reactionRect.bottom + gap
+    val actionsRect = android.graphics.RectF(
+      xFor(actionsWidth),
+      actionsTop,
+      xFor(actionsWidth) + actionsWidth,
+      actionsTop + actionsHeight,
+    )
+    return copy(
+      reactionRect = reactionRect,
+      actionsRect = actionsRect,
+    )
+  }
+
   private fun setFrame(view: View, rect: android.graphics.RectF) {
     val width = max(1, rect.width().roundToInt())
     val height = max(1, rect.height().roundToInt())
@@ -711,6 +766,7 @@ internal class ChatContextMenuOverlay(
   }
 
   private fun containsPoint(view: View, x: Float, y: Float): Boolean {
+    if (view.visibility != View.VISIBLE) return false
     val left = view.x
     val top = view.y
     val right = left + view.width

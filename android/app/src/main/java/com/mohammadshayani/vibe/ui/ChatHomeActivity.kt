@@ -538,6 +538,16 @@ class ChatHomeActivity : AppCompatActivity() {
         bottomMargin = dp(16f)
       }
     }
+    val resultAvatarLabel = TextView(this).apply {
+      setTextColor(palette.accentColor)
+      textSize = 28f
+      typeface = Typeface.create("sans-serif-bold", Typeface.NORMAL)
+      gravity = Gravity.CENTER
+    }
+    resultAvatar.addView(
+      resultAvatarLabel,
+      FrameLayout.LayoutParams(FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT),
+    )
     resultView.addView(resultAvatar)
 
     val resultName = TextView(this).apply {
@@ -559,7 +569,7 @@ class ChatHomeActivity : AppCompatActivity() {
     val actionsRow = LinearLayout(this).apply {
       orientation = LinearLayout.HORIZONTAL
       gravity = Gravity.CENTER
-      weightSum = 2f
+      weightSum = 3f
     }
     val messageBtn = MaterialButton(this).apply {
       text = "Message"
@@ -567,7 +577,18 @@ class ChatHomeActivity : AppCompatActivity() {
       setBackgroundColor(palette.accentColor)
       setTextColor(Color.WHITE)
       cornerRadius = dp(20f)
-      layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f).apply { marginEnd = dp(8f) }
+      layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f).apply { marginEnd = dp(6f) }
+    }
+    val callBtn = MaterialButton(this).apply {
+      text = "Call"
+      isAllCaps = false
+      setBackgroundColor(palette.inputColor)
+      setTextColor(palette.textColor)
+      cornerRadius = dp(20f)
+      layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f).apply {
+        marginStart = dp(6f)
+        marginEnd = dp(6f)
+      }
     }
     val addContactBtn = MaterialButton(this).apply {
       text = "Add Contact"
@@ -575,16 +596,56 @@ class ChatHomeActivity : AppCompatActivity() {
       setBackgroundColor(palette.inputColor)
       setTextColor(palette.textColor)
       cornerRadius = dp(20f)
-      layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f).apply { marginStart = dp(8f) }
+      layoutParams = LinearLayout.LayoutParams(0, dp(54f), 1f).apply { marginStart = dp(6f) }
     }
     actionsRow.addView(messageBtn)
+    actionsRow.addView(callBtn)
     actionsRow.addView(addContactBtn)
     resultView.addView(actionsRow, LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT))
 
     container.addView(searchView)
     container.addView(resultView)
 
-    var foundUserLookup = ""
+    var foundPeer: ChatEngineApi.PeerLookupResult? = null
+    var resolvedRow: ChatHomeListRow? = null
+
+    fun addResolvedRow(row: ChatHomeListRow) {
+      rows = ensureSavedMessagesRow(listOf(row) + rows.filter { it.chatId != row.chatId })
+      renderShell()
+    }
+
+    fun openResolvedChat(row: ChatHomeListRow) {
+      addResolvedRow(row)
+      bottomSheet.dismiss()
+      openConversation(row)
+    }
+
+    fun startChatForFoundPeer(onSuccess: (ChatHomeListRow) -> Unit) {
+      val cachedRow = resolvedRow
+      if (cachedRow != null) {
+        onSuccess(cachedRow)
+        return
+      }
+      val peer = foundPeer ?: return
+      messageBtn.isEnabled = false
+      addContactBtn.isEnabled = false
+      callBtn.isEnabled = false
+      ChatEngineApi.startDirectChat(this@ChatHomeActivity, peer) { result ->
+        messageBtn.isEnabled = true
+        addContactBtn.isEnabled = true
+        callBtn.isEnabled = true
+        result.onSuccess { row ->
+          resolvedRow = row
+          onSuccess(row)
+        }.onFailure { error ->
+          Toast.makeText(
+            this@ChatHomeActivity,
+            error.localizedMessage ?: error.message ?: "Could not open chat",
+            Toast.LENGTH_SHORT,
+          ).show()
+        }
+      }
+    }
 
     startButton.setOnClickListener {
       val lookup = input.text?.toString().orEmpty().trim()
@@ -594,26 +655,38 @@ class ChatHomeActivity : AppCompatActivity() {
       }
       startButton.isEnabled = false
       startButton.text = "Searching..."
-      ChatEngineApi.startDirectChat(this@ChatHomeActivity, lookup) { result ->
+      ChatEngineApi.findUser(this@ChatHomeActivity, lookup) { result ->
         startButton.isEnabled = true
         startButton.text = "Search"
-        result.onSuccess { row ->
-          foundUserLookup = lookup
+        result.onSuccess { peer ->
+          foundPeer = peer
+          resolvedRow = null
           searchView.visibility = View.GONE
           resultView.visibility = View.VISIBLE
-          resultName.text = row.title
-          resultId.text = "@$lookup"
+          resultName.text = peer.displayName
+          resultId.text = peer.subtitle
+          resultAvatarLabel.text = peer.displayName.take(1).uppercase().ifBlank { "V" }
+          addContactBtn.text = "Add Contact"
+          addContactBtn.isEnabled = true
           
           messageBtn.setOnClickListener {
-            rows = ensureSavedMessagesRow(listOf(row) + rows.filter { it.chatId != row.chatId })
-            renderShell()
-            bottomSheet.dismiss()
-            openConversation(row)
+            startChatForFoundPeer { row ->
+              openResolvedChat(row)
+            }
+          }
+          callBtn.setOnClickListener {
+            startChatForFoundPeer { row ->
+              openResolvedChat(row)
+              Toast.makeText(this@ChatHomeActivity, "Use the call button in chat", Toast.LENGTH_SHORT).show()
+            }
           }
           addContactBtn.setOnClickListener {
-            Toast.makeText(this@ChatHomeActivity, "Contact Added", Toast.LENGTH_SHORT).show()
-            addContactBtn.text = "Added"
-            addContactBtn.isEnabled = false
+            startChatForFoundPeer { row ->
+              addResolvedRow(row)
+              Toast.makeText(this@ChatHomeActivity, "Contact added", Toast.LENGTH_SHORT).show()
+              addContactBtn.text = "Added"
+              addContactBtn.isEnabled = false
+            }
           }
         }.onFailure { error ->
           input.error = error.localizedMessage ?: error.message ?: "Could not find user"
@@ -948,7 +1021,7 @@ private class ChatListPageView(
     }
     addStoryIcon.setColorFilter(palette.textColor)
     addStoryLabel.setTextColor(palette.secondaryTextColor)
-    storyStrip.visibility = if (query.isEmpty()) View.VISIBLE else View.GONE
+    storyStrip.visibility = if (query.isEmpty() && storyContainer.childCount > 1) View.VISIBLE else View.GONE
     allRows = rows
     nativeHomeListView.setIsDark(palette.isDark)
     nativeHomeListView.setPreviewAppearance(
@@ -1001,6 +1074,7 @@ private class ChatListPageView(
       searchShell.layoutParams = lp
     }
     nativeHomeListView.translationY = if (searchFocused) -dp(context, 6f).toFloat() else 0f
+    storyStrip.visibility = if (query.isEmpty() && storyContainer.childCount > 1) View.VISIBLE else View.GONE
   }
 
   private fun selectableItemBackground() =
