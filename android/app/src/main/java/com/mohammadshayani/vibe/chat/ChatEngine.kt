@@ -281,6 +281,13 @@ internal object ChatEngine {
     val peerUserId: String?,
   )
 
+  private data class PendingCallSignal(
+    val id: String,
+    val event: String,
+    val payload: Map<String, Any?>,
+    val createdAtMs: Long,
+  )
+
   @Volatile private var appContextRef: Context? = null
   private val lock = Any()
   private val state = ConcurrentHashMap<String, Any?>(
@@ -308,6 +315,9 @@ internal object ChatEngine {
   private val nativePendingMessagePushRefs = linkedMapOf<String, Pair<String, String>>() // ref -> (chatId,messageId)
   private val nativePendingEditPushRefs = linkedMapOf<String, Pair<String, String>>() // ref -> (chatId,messageId)
   private val nativePendingDeletePushRefs = linkedMapOf<String, Pair<String, String>>() // ref -> (chatId,messageId)
+  private val nativePendingCallSignals = mutableListOf<PendingCallSignal>()
+  private val nativePendingCallPushRefs = linkedMapOf<String, String>()
+  private var nativeUserChannelDemandUntilMs = 0L
   private val pendingOutboundDraftsByMessageId = linkedMapOf<String, Map<String, Any?>>()
   private val pendingOutboundQueueByChat = linkedMapOf<String, MutableList<String>>()
   private var packetRuntimeStartInFlight = false
@@ -328,6 +338,8 @@ internal object ChatEngine {
   private var cachedDecryptPrivateKeyPem: String? = null
   private var cachedDecryptPrivateKey: PrivateKey? = null
   private var cachedDecryptKeyTimestampMs: Long = 0L
+  private val nativeCallSignalDemandMs = 60_000L
+  private val nativeCallSignalMaxAgeMs = 45_000L
   /// Time-to-live for the cached private key in memory (milliseconds).
   /// After this period of inactivity the key is cleared and re-derived from secure storage.
   private val keyTTLMs: Long = 300_000L
@@ -548,6 +560,7 @@ internal object ChatEngine {
         nativePendingMessagePushRefs.clear()
         nativePendingEditPushRefs.clear()
         nativePendingDeletePushRefs.clear()
+        nativePendingCallPushRefs.clear()
         nativeTypingStateByChatId.clear()
         peerTypingUserIdsByChatId.clear()
         nativeRecordingStateByChatId.clear()
@@ -928,6 +941,7 @@ internal object ChatEngine {
         nativePendingMessagePushRefs.clear()
         nativePendingEditPushRefs.clear()
         nativePendingDeletePushRefs.clear()
+        nativePendingCallPushRefs.clear()
         pendingOutboundDraftsByMessageId.clear()
         pendingOutboundQueueByChat.clear()
         nativeTypingStateByChatId.clear()
@@ -1032,6 +1046,9 @@ internal object ChatEngine {
       nativePendingMessagePushRefs.clear()
       nativePendingEditPushRefs.clear()
       nativePendingDeletePushRefs.clear()
+      nativePendingCallSignals.clear()
+      nativePendingCallPushRefs.clear()
+      nativeUserChannelDemandUntilMs = 0L
       pendingOutboundDraftsByMessageId.clear()
       pendingOutboundQueueByChat.clear()
       onlineUsers.clear()
@@ -1147,6 +1164,71 @@ internal object ChatEngine {
 
   fun sendReadReceipt(payload: Map<String, Any?>): Map<String, Any?> =
     sendReceipt(payload, "read", "read-receipt", "read-receipt")
+
+  fun sendCallSignal(payload: Map<String, Any?>): Map<String, Any?> {
+    val event = normalized(payload["event"]) ?: "call-start"
+    if (event !in setOf("call-start", "call-accepted", "call-end", "webrtc-signal")) {
+      return mapOf("accepted" to false, "reason" to "unsupported_call_event", "event" to event)
+    }
+    val toUserId = normalized(
+      payload["toUserId"] ?: payload["to_user_id"] ?: payload["remoteUserId"] ?: payload["remote_user_id"],
+    ) ?: return mapOf("accepted" to false, "reason" to "missing_to_user_id", "event" to event)
+
+    val now = System.currentTimeMillis()
+    val callId = normalized(payload["callId"] ?: payload["call_id"])
+      ?: "call_${now}_${java.util.UUID.randomUUID().toString().take(8)}"
+    val wirePayload = LinkedHashMap(chatEngineMakeJsonSafeMap(payload)).apply {
+      put("event", event)
+      put("callId", callId)
+      put("toUserId", toUserId)
+    }
+    val signalId = "$event:$callId:$toUserId:$now"
+    var shouldConnect = false
+    val result = synchronized(lock) {
+      nativeUserChannelDemandUntilMs = maxOf(nativeUserChannelDemandUntilMs, now + nativeCallSignalDemandMs)
+      expirePendingCallSignalsLocked(now)
+
+      val client = phoenixClient
+      val topic = nativeUserTopic
+      if (client == null || topic.isNullOrBlank() || state["connected"] != true || !nativePresenceActive) {
+        nativePendingCallSignals.add(PendingCallSignal(signalId, event, wirePayload, now))
+        appendJournalLocked(
+          "native-call-signal-queued",
+          mapOf("id" to signalId, "event" to event, "callId" to callId, "toUserId" to toUserId),
+        )
+        shouldConnect = true
+        state["updatedAt"] = now
+        emitChangeLocked("callSignalQueued", null, null)
+        return@synchronized mapOf(
+          "accepted" to true,
+          "transport" to "native",
+          "event" to event,
+          "callId" to callId,
+          "queued" to true,
+          "reason" to "user_channel_not_ready",
+        )
+      }
+
+      val ref = client.push(topic, event, wirePayload)
+      nativePendingCallPushRefs[ref] = signalId
+      appendJournalLocked(
+        "native-call-signal-push",
+        mapOf("id" to signalId, "event" to event, "callId" to callId, "toUserId" to toUserId, "ref" to ref, "topic" to topic),
+      )
+      state["updatedAt"] = now
+      emitChangeLocked("callSignalSent", null, null)
+      mapOf(
+        "accepted" to true,
+        "transport" to "native",
+        "event" to event,
+        "callId" to callId,
+        "queued" to false,
+        "ref" to ref,
+      )
+    }
+    if (shouldConnect) ensureNativeTransportAsync("call_signal:$event")
+    return result
+  }
 
   fun sendTypingState(payload: Map<String, Any?>): Map<String, Any?> {
     val chatId = normalized(payload["chatId"] ?: payload["chat_id"])
@@ -4520,6 +4602,7 @@ internal object ChatEngine {
       nativePendingMessagePushRefs.clear()
       nativePendingEditPushRefs.clear()
       nativePendingDeletePushRefs.clear()
+      nativePendingCallPushRefs.clear()
       nativeTypingStateByChatId.clear()
       peerTypingUserIdsByChatId.clear()
       nativeRecordingStateByChatId.clear()
@@ -4553,6 +4636,7 @@ internal object ChatEngine {
       nativePendingMessagePushRefs.clear()
       nativePendingEditPushRefs.clear()
       nativePendingDeletePushRefs.clear()
+      nativePendingCallPushRefs.clear()
       nativeTypingStateByChatId.clear()
       peerTypingUserIdsByChatId.clear()
       nativeRecordingStateByChatId.clear()
@@ -4584,6 +4668,57 @@ internal object ChatEngine {
       appendJournalLocked("native-socket-error", mapOf("error" to error))
       emitChangeLocked("engineError", null, null)
     }
+  }
+
+  private fun expirePendingCallSignalsLocked(now: Long) {
+    val before = nativePendingCallSignals.size
+    nativePendingCallSignals.removeAll { now - it.createdAtMs > nativeCallSignalMaxAgeMs }
+    val expired = before - nativePendingCallSignals.size
+    if (expired > 0) {
+      appendJournalLocked("native-call-signal-expired", mapOf("count" to expired))
+    }
+  }
+
+  private fun flushPendingCallSignalsLocked(trigger: String) {
+    val client = phoenixClient ?: return
+    val topic = nativeUserTopic ?: return
+    if (state["connected"] != true || !nativePresenceActive) return
+    val now = System.currentTimeMillis()
+    expirePendingCallSignalsLocked(now)
+    if (nativePendingCallSignals.isEmpty()) return
+    val signals = nativePendingCallSignals.toList()
+    nativePendingCallSignals.clear()
+    signals.forEach { signal ->
+      val ref = client.push(topic, signal.event, signal.payload)
+      nativePendingCallPushRefs[ref] = signal.id
+      appendJournalLocked(
+        "native-call-signal-flush",
+        mapOf("id" to signal.id, "event" to signal.event, "ref" to ref, "topic" to topic, "trigger" to trigger),
+      )
+    }
+    state["updatedAt"] = now
+    emitChangeLocked("callSignalSent", null, null)
+  }
+
+  private fun handleUserCallEventLocked(event: String, payload: Map<String, Any?>): Boolean {
+    if (event !in setOf("call-start", "call-accepted", "call-end", "webrtc-signal")) return false
+    val callPayload = LinkedHashMap(chatEngineMakeJsonSafeMap(payload)).apply {
+      put("event", event)
+      put("direction", "inbound")
+    }
+    appendJournalLocked(
+      "native-call-signal-inbound",
+      mapOf("event" to event, "callId" to normalized(callPayload["callId"] ?: callPayload["call_id"]).orEmpty()),
+    )
+    when (event) {
+      "call-end" -> {
+        callPayload["remote"] = true
+        NativeCallEngine.endCall(callPayload)
+      }
+      else -> NativeCallEngine.handleSignal(callPayload)
+    }
+    emitChangeLocked("callSignalReceived", null, null)
+    return true
   }
 
   private fun onNativeSocketEvent(frame: ChatTransportEvent) {
@@ -4618,6 +4753,7 @@ internal object ChatEngine {
         state["userChannelState"] = "joined"
         state["updatedAt"] = System.currentTimeMillis()
         appendJournalLocked("native-user-joined", mapOf("topic" to topic))
+        flushPendingCallSignalsLocked("user_joined")
         emitChangeLocked("connectionStateChanged", null, null)
         return
       }
@@ -4694,6 +4830,18 @@ internal object ChatEngine {
             mapOf("chatId" to chatId, "messageId" to messageId, "ref" to ref, "status" to status),
           )
           emitChangeLocked("chatMessageDeleted", chatId, messageId)
+          return
+        }
+
+        val callSignalId = nativePendingCallPushRefs.remove(ref)
+        if (!callSignalId.isNullOrBlank()) {
+          val status = normalized(payload["status"])?.lowercase().orEmpty()
+          appendJournalLocked(
+            "native-call-signal-reply",
+            mapOf("id" to callSignalId, "ref" to ref, "status" to status),
+          )
+          state["updatedAt"] = System.currentTimeMillis()
+          emitChangeLocked("callSignalAck", null, null)
           return
         }
         Log.w(
@@ -4774,6 +4922,9 @@ internal object ChatEngine {
         }
       }
       if (topic != nativeUserTopic) return
+      if (handleUserCallEventLocked(event, payload)) {
+        return
+      }
       if (applyPresenceEventLocked(event, payload)) {
         state["presenceSource"] = "native"
         state["updatedAt"] = System.currentTimeMillis()
@@ -5231,4 +5382,27 @@ internal object ChatEngine {
 
   private fun normalizedUpper(value: Any?): String? =
     normalized(value)?.uppercase()
+
+  private fun chatEngineMakeJsonSafeMap(value: Map<String, Any?>): Map<String, Any?> {
+    val out = LinkedHashMap<String, Any?>()
+    value.forEach { (key, raw) -> out[key] = chatEngineMakeJsonSafeValue(raw) }
+    return out
+  }
+
+  private fun chatEngineMakeJsonSafeValue(value: Any?): Any? =
+    when (value) {
+      null -> null
+      is JSONObject -> jsonObjectToMap(value)
+      is JSONArray -> jsonArrayToList(value)
+      is Map<*, *> -> {
+        val out = LinkedHashMap<String, Any?>()
+        value.forEach { (key, item) ->
+          key?.toString()?.let { out[it] = chatEngineMakeJsonSafeValue(item) }
+        }
+        out
+      }
+      is List<*> -> value.map { chatEngineMakeJsonSafeValue(it) }
+      is String, is Number, is Boolean -> value
+      else -> value.toString()
+    }
 }

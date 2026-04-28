@@ -4072,7 +4072,10 @@ final class ChatEngine {
       switch event {
       case "call-start":
         _ = VibeNativeCallEngine.shared.handleSignal(callPayload)
-        _ = VibeNativeCallManager.shared.handleRemoteNotification(userInfo: callPayload)
+        let notificationPayload = callPayload.reduce(into: [AnyHashable: Any]()) { out, item in
+          out[item.key] = item.value
+        }
+        _ = VibeNativeCallManager.shared.handleRemoteNotification(userInfo: notificationPayload)
       case "call-end":
         var endPayload = callPayload
         endPayload["remote"] = true
@@ -4100,6 +4103,7 @@ final class ChatEngine {
         self.state["userChannelState"] = "joined"
         self.state["updatedAt"] = self.nowMs()
         self.appendJournalLocked(event: "native-user-joined", payload: ["topic": frame.topic])
+        self.flushPendingCallSignalsLocked(trigger: "user_joined")
         let snapshot = self.statusSnapshotLocked()
         self.postChangeLocked(reason: "connectionStateChanged", userInfo: ["state": snapshot])
         return
@@ -4205,6 +4209,18 @@ final class ChatEngine {
               "state": snapshot,
             ]
           )
+          return
+        }
+
+        if let callSignalId = self.nativePendingCallPushRefs.removeValue(forKey: ref) {
+          let status = (frame.payload["status"] as? String)?.lowercased() ?? ""
+          self.appendJournalLocked(
+            event: "native-call-signal-reply",
+            payload: ["id": callSignalId, "ref": ref, "status": status]
+          )
+          self.state["updatedAt"] = self.nowMs()
+          let snapshot = self.statusSnapshotLocked()
+          self.postChangeLocked(reason: "callSignalAck", userInfo: ["state": snapshot])
           return
         }
       }
@@ -4378,6 +4394,14 @@ final class ChatEngine {
       }
 
       guard frame.topic == self.nativeUserTopic else { return }
+      if self.handleUserCallEventLocked(event: frame.event, payload: frame.payload) {
+        let snapshot = self.statusSnapshotLocked()
+        self.postChangeLocked(
+          reason: "callSignalReceived",
+          userInfo: ["event": frame.event, "state": snapshot]
+        )
+        return
+      }
       if self.applyPresenceEventLocked(event: frame.event, payload: frame.payload) {
         self.state["presenceSource"] = "native"
         self.state["updatedAt"] = self.nowMs()

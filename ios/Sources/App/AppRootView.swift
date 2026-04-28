@@ -79,6 +79,50 @@ struct PresentedChatRoute: Identifiable, Hashable {
 }
 
 @MainActor
+private enum NativeCallRouteBridge {
+  @discardableResult
+  static func startOutgoing(route: ChatRoute, callType: String) -> [String: Any]? {
+    guard route.chatId != "saved_messages",
+      let toUserId = normalizedString(route.peerUserId)
+    else {
+      AppToastController.shared.show("Calls are available in direct chats.")
+      return nil
+    }
+    guard let config = AppSessionConfig.current else {
+      AppToastController.shared.show("The current session is unavailable.")
+      return nil
+    }
+
+    VibeNativeCallManager.shared.start()
+    _ = VibeNativeCallEngine.shared.configure(config.payload)
+    let now = Int(Date().timeIntervalSince1970 * 1000)
+    let callId = "call_\(now)_\(UUID().uuidString.prefix(8))"
+    let payload: [String: Any] = [
+      "event": "call-start",
+      "callId": callId,
+      "callType": callType == "video" ? "video" : "voice",
+      "toUserId": toUserId,
+      "toUserName": route.title,
+      "toUserImage": route.avatarURI ?? "",
+      "chatId": route.chatId,
+    ]
+    let status = VibeNativeCallEngine.shared.startOutgoing(payload)
+    let accepted = (status["signalingAccepted"] as? Bool) ?? true
+    if accepted {
+      AppToastController.shared.show(callType == "video" ? "Starting video call..." : "Calling...")
+    } else {
+      AppToastController.shared.show("Could not start call.")
+    }
+    return status
+  }
+
+  private static func normalizedString(_ value: String?) -> String? {
+    let trimmed = value?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    return trimmed.isEmpty ? nil : trimmed
+  }
+}
+
+@MainActor
 final class AppShellCoordinator: ObservableObject {
   @Published var selectedTab: AppShellTab = .chats
   @Published var presentedChat: PresentedChatRoute?
@@ -965,9 +1009,9 @@ private struct ChatsRootView: View {
 
     isShowingSearch = false
     Task {
-      await openChat(for: user)
-      if action == "call" {
-        AppToastController.shared.show("Use the call button in chat.")
+      let route = await openChat(for: user)
+      if action == "call", let route {
+        NativeCallRouteBridge.startOutgoing(route: route, callType: "voice")
       }
     }
   }
@@ -989,10 +1033,10 @@ private struct ChatsRootView: View {
   }
 
   @MainActor
-  private func openChat(for user: ContactSearchUser) async {
+  private func openChat(for user: ContactSearchUser) async -> ChatRoute? {
     guard let config = AppSessionConfig.current else {
       errorMessage = "The current session is unavailable."
-      return
+      return nil
     }
 
     isStartingChat = true
@@ -1008,24 +1052,25 @@ private struct ChatsRootView: View {
           "publicKey": publicKey,
         ])
       }
-      coordinator.openChat(
-        ChatRoute(
-          chatId: result.chatID,
-          title: user.username,
+      let route = ChatRoute(
+        chatId: result.chatID,
+        title: user.username,
+        peerUserId: user.userID,
+        avatarURI: ChatAvatarURLResolver.resolve(
+          rawAvatar: user.profileImage,
           peerUserId: user.userID,
-          avatarURI: ChatAvatarURLResolver.resolve(
-            rawAvatar: user.profileImage,
-            peerUserId: user.userID,
-            chatId: result.chatID,
-            preferPushAvatar: true
-          ),
-          isGroup: false,
-          initialRows: result.messages
-        )
+          chatId: result.chatID,
+          preferPushAvatar: true
+        ),
+        isGroup: false,
+        initialRows: result.messages
       )
+      coordinator.openChat(route)
       await model.refresh()
+      return route
     } catch {
       errorMessage = error.localizedDescription
+      return nil
     }
   }
 }
@@ -1633,9 +1678,9 @@ private struct ContactsPageView: View {
 
     isShowingSearch = false
     Task {
-      await openChat(for: user)
-      if action == "call" {
-        AppToastController.shared.show("Use the call button in chat.")
+      let route = await openChat(for: user)
+      if action == "call", let route {
+        NativeCallRouteBridge.startOutgoing(route: route, callType: "voice")
       }
     }
   }
@@ -1657,10 +1702,10 @@ private struct ContactsPageView: View {
   }
 
   @MainActor
-  private func openChat(for user: ContactSearchUser) async {
+  private func openChat(for user: ContactSearchUser) async -> ChatRoute? {
     guard let config = AppSessionConfig.current else {
       errorMessage = "The current session is unavailable."
-      return
+      return nil
     }
 
     isStartingChat = true
@@ -1676,23 +1721,24 @@ private struct ContactsPageView: View {
           "publicKey": publicKey,
         ])
       }
-      coordinator.openChat(
-        ChatRoute(
-          chatId: result.chatID,
-          title: user.username,
+      let route = ChatRoute(
+        chatId: result.chatID,
+        title: user.username,
+        peerUserId: user.userID,
+        avatarURI: ChatAvatarURLResolver.resolve(
+          rawAvatar: user.profileImage,
           peerUserId: user.userID,
-          avatarURI: ChatAvatarURLResolver.resolve(
-            rawAvatar: user.profileImage,
-            peerUserId: user.userID,
-            chatId: result.chatID,
-            preferPushAvatar: true
-          ),
-          isGroup: false,
-          initialRows: result.messages
-        )
+          chatId: result.chatID,
+          preferPushAvatar: true
+        ),
+        isGroup: false,
+        initialRows: result.messages
       )
+      coordinator.openChat(route)
+      return route
     } catch {
       errorMessage = error.localizedDescription
+      return nil
     }
   }
 }
@@ -2055,9 +2101,14 @@ private final class ChatConversationController: UIViewController {
         mainView.setPage(ChatConversationPage.profile.rawValue, animated: true)
       }
     case "headerAvatarPressed":
-      return
+      currentPage = .profile
+      mainView.setPage(ChatConversationPage.profile.rawValue, animated: true)
     case "headerAgentPressed":
       return
+    case "headerAudioCallPressed":
+      NativeCallRouteBridge.startOutgoing(route: route, callType: "voice")
+    case "headerVideoCallPressed":
+      NativeCallRouteBridge.startOutgoing(route: route, callType: "video")
     case "mainPageChanged":
       if let page = Self.normalizedString(payload["page"]),
         let resolved = ChatConversationPage(rawValue: page)

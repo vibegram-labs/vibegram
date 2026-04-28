@@ -436,13 +436,9 @@ class ChatMainView(
       "setPage request=$normalized animated=$animated current=$currentPage standalone=$standaloneProfileMode pending=$pendingNativePageTarget",
     )
     if (normalized == "profile") {
-      if (standaloneProfileMode) {
-        if (currentPage != "profile") {
-          currentPage = "profile"
-          applyPageState(animated = animated, emitEvent = false)
-        }
-      } else {
-        onNativeEvent(mapOf("type" to "headerAvatarPressed"))
+      if (currentPage != "profile") {
+        currentPage = "profile"
+        applyPageState(animated = animated, emitEvent = false)
       }
       return
     }

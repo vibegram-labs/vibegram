@@ -1,11 +1,14 @@
 package com.mohammadshayani.vibe.ui
 
+import android.Manifest
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.widget.Toast
 import android.content.res.ColorStateList
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Bundle
 import android.text.Editable
 import android.text.TextWatcher
@@ -31,9 +34,11 @@ import com.google.android.material.button.MaterialButton
 import com.google.android.material.materialswitch.MaterialSwitch
 import com.google.android.material.navigation.NavigationBarView
 import com.mohammadshayani.vibe.R
+import com.mohammadshayani.vibe.chat.ChatEngine
 import com.mohammadshayani.vibe.chat.ChatNativeHomeListView
-import com.mohammadshayani.vibe.chat.NativeChatContext
 import com.mohammadshayani.vibe.chat.ChatEngineApi
+import com.mohammadshayani.vibe.chat.NativeCallEngine
+import com.mohammadshayani.vibe.chat.NativeChatContext
 import com.mohammadshayani.vibe.home.ChatHomeListRow
 import com.mohammadshayani.vibe.packet.PacketTransportMode
 import com.mohammadshayani.vibe.session.AppSessionConfig
@@ -57,6 +62,12 @@ class ChatHomeActivity : AppCompatActivity() {
     }
   }
 
+  private data class PendingOutgoingCall(
+    val row: ChatHomeListRow,
+    val peer: ChatEngineApi.PeerLookupResult?,
+    val callType: String,
+  )
+
   private lateinit var contentHost: FrameLayout
   private lateinit var headerContainer: LinearLayout
   private lateinit var navigationContainer: FrameLayout
@@ -77,6 +88,7 @@ class ChatHomeActivity : AppCompatActivity() {
   private var errorMessage: String? = null
   private var notificationsEnabled = true
   private var isSyncingBottomNavigation = false
+  private var pendingOutgoingCall: PendingOutgoingCall? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     AppAppearanceController.applyStoredPreference(this)
@@ -465,6 +477,79 @@ class ChatHomeActivity : AppCompatActivity() {
     )
   }
 
+  private fun startOutgoingCallForRow(
+    row: ChatHomeListRow,
+    peer: ChatEngineApi.PeerLookupResult?,
+    callType: String = "voice",
+  ) {
+    val targetUserId = row.peerUserId?.trim().orEmpty().ifBlank { peer?.userId?.trim().orEmpty() }
+    if (targetUserId.isBlank()) {
+      Toast.makeText(this, "Calls are available in direct chats.", Toast.LENGTH_SHORT).show()
+      return
+    }
+    val config = AppSessionConfig.current(applicationContext)
+    if (config == null) {
+      Toast.makeText(this, "The current session is unavailable.", Toast.LENGTH_SHORT).show()
+      return
+    }
+    if (!hasCallPermissions(callType)) {
+      pendingOutgoingCall = PendingOutgoingCall(row, peer, if (callType == "video") "video" else "voice")
+      requestCallPermissions(callType)
+      return
+    }
+    ChatEngine.configure(applicationContext, config.toPayload())
+    NativeCallEngine.configure(applicationContext, config.toPayload())
+    val now = System.currentTimeMillis()
+    val result = NativeCallEngine.startOutgoing(
+      mapOf(
+        "event" to "call-start",
+        "callId" to "call_${now}_${java.util.UUID.randomUUID().toString().take(8)}",
+        "callType" to if (callType == "video") "video" else "voice",
+        "toUserId" to targetUserId,
+        "toUserName" to row.title,
+        "toUserImage" to (row.avatarUri ?: ""),
+        "chatId" to row.chatId,
+      ),
+    )
+    val accepted = result["signalingAccepted"] as? Boolean ?: true
+    Toast.makeText(
+      this,
+      if (accepted) "Calling..." else "Could not start call.",
+      Toast.LENGTH_SHORT,
+    ).show()
+  }
+
+  private fun hasCallPermissions(callType: String): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+    val audioGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    val cameraGranted =
+      callType != "video" || checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    return audioGranted && cameraGranted
+  }
+
+  private fun requestCallPermissions(callType: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+    if (callType == "video") permissions += Manifest.permission.CAMERA
+    requestPermissions(permissions.toTypedArray(), if (callType == "video") 5202 else 5201)
+  }
+
+  override fun onRequestPermissionsResult(
+    requestCode: Int,
+    permissions: Array<out String>,
+    grantResults: IntArray,
+  ) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode != 5201 && requestCode != 5202) return
+    val pending = pendingOutgoingCall
+    pendingOutgoingCall = null
+    if (pending != null && grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+      startOutgoingCallForRow(pending.row, pending.peer, pending.callType)
+    } else {
+      Toast.makeText(this, "Microphone permission is needed for calls.", Toast.LENGTH_SHORT).show()
+    }
+  }
+
   private fun showNewChatDialog() {
     val palette = resolveAppThemePalette(this)
     val bottomSheet = com.google.android.material.bottomsheet.BottomSheetDialog(this, R.style.ThemeOverlay_Vibe_BottomSheetDialog)
@@ -677,7 +762,7 @@ class ChatHomeActivity : AppCompatActivity() {
           callBtn.setOnClickListener {
             startChatForFoundPeer { row ->
               openResolvedChat(row)
-              Toast.makeText(this@ChatHomeActivity, "Use the call button in chat", Toast.LENGTH_SHORT).show()
+              startOutgoingCallForRow(row, foundPeer, "voice")
             }
           }
           addContactBtn.setOnClickListener {

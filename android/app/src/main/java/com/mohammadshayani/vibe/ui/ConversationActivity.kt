@@ -1,15 +1,20 @@
 package com.mohammadshayani.vibe.ui
 
+import android.Manifest
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import com.mohammadshayani.vibe.chat.ChatEngine
 import com.mohammadshayani.vibe.chat.ChatMainView
+import com.mohammadshayani.vibe.chat.NativeCallEngine
 import com.mohammadshayani.vibe.chat.NativeChatContext
 import com.mohammadshayani.vibe.home.ChatHomeListRow
 import com.mohammadshayani.vibe.session.AppSessionConfig
@@ -46,8 +51,12 @@ class ConversationActivity : AppCompatActivity() {
 
   private lateinit var chatView: ChatMainView
   private var chatId = ""
+  private var conversationTitle = ""
+  private var peerUserId = ""
+  private var currentConfig: AppSessionConfig? = null
   private var isSavedMessages = false
   private var savedMessageIds: List<String> = emptyList()
+  private var pendingCallPermissionType: String? = null
 
   override fun onCreate(savedInstanceState: Bundle?) {
     AppAppearanceController.applyStoredPreference(this)
@@ -68,9 +77,12 @@ class ConversationActivity : AppCompatActivity() {
     val title = intent.getStringExtra(extraTitle).orEmpty().ifBlank {
       if (isSavedMessages) "Saved Messages" else "Chat"
     }
-    val peerUserId = intent.getStringExtra(extraPeerUserId).orEmpty()
+    conversationTitle = title
+    peerUserId = intent.getStringExtra(extraPeerUserId).orEmpty()
+    currentConfig = config
 
     ChatEngine.configure(applicationContext, config.toPayload())
+    NativeCallEngine.configure(applicationContext, config.toPayload())
 
     chatView = ChatMainView(this, NativeChatContext(this)).apply {
       setSurfaceId("standalone-$chatId")
@@ -91,6 +103,9 @@ class ConversationActivity : AppCompatActivity() {
       nativeEventSink = { payload ->
         when (payload["type"]) {
           "headerBack" -> finish()
+          "headerAvatarPressed" -> chatView.setPage("profile", true)
+          "headerAudioCallPressed" -> startNativeCall("voice")
+          "headerVideoCallPressed" -> startNativeCall("video")
           "savedMessageSent" -> if (isSavedMessages) loadSavedMessages(config.userId)
           "savedMessagesClearRequested" -> if (isSavedMessages) confirmClearSavedMessages(config.userId)
         }
@@ -108,6 +123,78 @@ class ConversationActivity : AppCompatActivity() {
       loadSavedMessages(config.userId)
     } else {
       ChatEngine.openChatChannel(mapOf("chatId" to chatId))
+    }
+  }
+
+  private fun startNativeCall(callType: String) {
+    val targetUserId = peerUserId.trim()
+    if (isSavedMessages || targetUserId.isBlank()) {
+      Toast.makeText(this, "Calls are available in direct chats.", Toast.LENGTH_SHORT).show()
+      return
+    }
+    val config = currentConfig ?: AppSessionConfig.current(applicationContext)
+    if (config == null) {
+      Toast.makeText(this, "The current session is unavailable.", Toast.LENGTH_SHORT).show()
+      return
+    }
+    if (!hasCallPermissions(callType)) {
+      requestCallPermissions(callType)
+      return
+    }
+
+    NativeCallEngine.configure(applicationContext, config.toPayload())
+    val now = System.currentTimeMillis()
+    val result = NativeCallEngine.startOutgoing(
+      mapOf(
+        "event" to "call-start",
+        "callId" to "call_${now}_${java.util.UUID.randomUUID().toString().take(8)}",
+        "callType" to if (callType == "video") "video" else "voice",
+        "toUserId" to targetUserId,
+        "toUserName" to conversationTitle,
+        "chatId" to chatId,
+      ),
+    )
+    val accepted = result["signalingAccepted"] as? Boolean ?: true
+    Toast.makeText(
+      this,
+      if (accepted) {
+        if (callType == "video") "Starting video call..." else "Calling..."
+      } else {
+        "Could not start call."
+      },
+      Toast.LENGTH_SHORT,
+    ).show()
+  }
+
+  private fun hasCallPermissions(callType: String): Boolean {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+    val needsCamera = callType == "video"
+    val audioGranted = checkSelfPermission(Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+    val cameraGranted = !needsCamera || checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+    return audioGranted && cameraGranted
+  }
+
+  private fun requestCallPermissions(callType: String) {
+    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+    pendingCallPermissionType = if (callType == "video") "video" else "voice"
+    val permissions = mutableListOf(Manifest.permission.RECORD_AUDIO)
+    if (callType == "video") permissions += Manifest.permission.CAMERA
+    requestPermissions(permissions.toTypedArray(), if (callType == "video") 4202 else 4201)
+  }
+
+  override fun onRequestPermissionsResult(
+    requestCode: Int,
+    permissions: Array<out String>,
+    grantResults: IntArray,
+  ) {
+    super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+    if (requestCode != 4201 && requestCode != 4202) return
+    val callType = pendingCallPermissionType ?: if (requestCode == 4202) "video" else "voice"
+    pendingCallPermissionType = null
+    if (grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }) {
+      startNativeCall(callType)
+    } else {
+      Toast.makeText(this, "Microphone permission is needed for calls.", Toast.LENGTH_SHORT).show()
     }
   }
 

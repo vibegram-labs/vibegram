@@ -58,8 +58,8 @@ public final class VibeNativeCallEngine {
       let now = Int(Date().timeIntervalSince1970 * 1000)
       next[Keys.configuredAt] = now
       next[Keys.updatedAt] = now
-      next[Keys.signalingState] = "mirroring"
-      next[Keys.note] = "Native engine scaffolding configured; signaling/media port pending."
+      next[Keys.signalingState] = "ready"
+      next[Keys.note] = "Native call signaling configured."
       state = next
       NSLog("[VibeNativeCall][Engine] configure keys=[%@]", payload.keys.sorted().joined(separator: ","))
       return next
@@ -211,7 +211,7 @@ public final class VibeNativeCallEngine {
         next[Keys.turnLastFetchAt] = fetchedAt
         next[Keys.turnLastError] = nil
         next[Keys.updatedAt] = fetchedAt
-        next[Keys.note] = "Native engine scaffolding configured; TURN config ready."
+        next[Keys.note] = "Native call signaling configured; TURN config ready."
         self.state = next
         NSLog(
           "[VibeNativeCall][Engine] turn fetch ok servers=%d policy=%@ forceRelay=%@",
@@ -226,47 +226,146 @@ public final class VibeNativeCallEngine {
   }
 
   public func startOutgoing(_ payload: [String: Any]) -> [String: Any] {
-    recordSignalingEvent(payload, defaultEvent: "call-start", defaultDirection: "outbound")
+    var callPayload = preparedCallPayload(payload, event: "call-start", direction: "outbound")
+    let signal = ChatEngine.shared.sendCallSignal(callPayload)
+    callPayload["signaling"] = signal
+    callPayload["signalingAccepted"] = signal["accepted"] ?? false
+    callPayload["signalingQueued"] = signal["queued"] ?? false
+    callPayload["signalingRef"] = signal["ref"] ?? NSNull()
+    recordSignalingEvent(callPayload, defaultEvent: "call-start", defaultDirection: "outbound")
     return transition(
       stateValue: "starting",
-      payload: payload,
+      payload: callPayload,
       direction: "outgoing",
-      note: "Native engine scaffolding only; JS signaling/media still active."
+      note: signalingNote(signal, fallback: "Outgoing call routed through native signaling.")
     )
   }
 
   public func acceptIncoming(_ payload: [String: Any]) -> [String: Any] {
-    recordSignalingEvent(payload, defaultEvent: "call-accepted", defaultDirection: "outbound")
+    var callPayload = preparedCallPayload(payload, event: "call-accepted", direction: "outbound")
+    if normalizedString(callPayload["toUserId"]) == nil,
+       let fromUserId = normalizedString(callPayload["fromUserId"] ?? callPayload["from_user_id"]) {
+      callPayload["toUserId"] = fromUserId
+    }
+    let signal = ChatEngine.shared.sendCallSignal(callPayload)
+    callPayload["signaling"] = signal
+    callPayload["signalingAccepted"] = signal["accepted"] ?? false
+    callPayload["signalingQueued"] = signal["queued"] ?? false
+    callPayload["signalingRef"] = signal["ref"] ?? NSNull()
+    recordSignalingEvent(callPayload, defaultEvent: "call-accepted", defaultDirection: "outbound")
     return transition(
       stateValue: "accepting",
-      payload: payload,
+      payload: callPayload,
       direction: "incoming",
-      note: "Native engine scaffolding only; JS signaling/media still active."
+      note: signalingNote(signal, fallback: "Incoming call accepted through native signaling.")
     )
   }
 
   public func handleSignal(_ payload: [String: Any]) -> [String: Any] {
-    recordSignalingEvent(payload, defaultEvent: "webrtc-signal", defaultDirection: "inbound")
-    return queue.sync {
-      var next = state
-      next[Keys.updatedAt] = Int(Date().timeIntervalSince1970 * 1000)
-      next["lastSignalType"] = payload["type"] ?? payload["signalType"]
-      next[Keys.note] = "Signal observed by native scaffolding."
-      state = next
-      NSLog("[VibeNativeCall][Engine] handleSignal type=%@", String(describing: payload["type"] ?? payload["signalType"]))
-      return next
+    let event =
+      normalizedString(payload["event"])
+      ?? (["call-start", "call-accepted", "call-end"].contains(normalizedString(payload["type"]) ?? "")
+        ? normalizedString(payload["type"]) : nil)
+      ?? "webrtc-signal"
+    var callPayload = preparedCallPayload(payload, event: event, direction: "inbound")
+    recordSignalingEvent(callPayload, defaultEvent: event, defaultDirection: "inbound")
+    switch event {
+    case "call-start":
+      return transition(
+        stateValue: "ringing",
+        payload: callPayload,
+        direction: "incoming",
+        note: "Incoming call routed through native signaling."
+      )
+    case "call-accepted":
+      return transition(
+        stateValue: "connecting",
+        payload: callPayload,
+        direction: "outgoing",
+        note: "Call accepted through native signaling."
+      )
+    case "call-end":
+      callPayload["remote"] = true
+      return endCall(callPayload)
+    default:
+      return queue.sync {
+        var next = state
+        next[Keys.updatedAt] = Int(Date().timeIntervalSince1970 * 1000)
+        next["lastSignalType"] = payload["type"] ?? payload["signalType"]
+        next[Keys.note] = "WebRTC signal routed through native signaling."
+        state = next
+        NSLog("[VibeNativeCall][Engine] handleSignal type=%@", String(describing: payload["type"] ?? payload["signalType"]))
+        return next
+      }
     }
   }
 
   public func endCall(_ payload: [String: Any]) -> [String: Any] {
-    let inferredDirection: String = ((payload["remote"] as? Bool) == true) ? "inbound" : "outbound"
-    recordSignalingEvent(payload, defaultEvent: "call-end", defaultDirection: inferredDirection)
+    var callPayload = preparedCallPayload(
+      payload,
+      event: "call-end",
+      direction: boolValue(payload["remote"]) ? "inbound" : "outbound"
+    )
+    if !boolValue(callPayload["remote"]) {
+      if normalizedString(callPayload["toUserId"]) == nil,
+         let target = remoteUserId(callPayload) {
+        callPayload["toUserId"] = target
+      }
+      let signal = ChatEngine.shared.sendCallSignal(callPayload)
+      callPayload["signaling"] = signal
+      callPayload["signalingAccepted"] = signal["accepted"] ?? false
+      callPayload["signalingQueued"] = signal["queued"] ?? false
+      callPayload["signalingRef"] = signal["ref"] ?? NSNull()
+    }
+    let inferredDirection: String = boolValue(callPayload["remote"]) ? "inbound" : "outbound"
+    recordSignalingEvent(callPayload, defaultEvent: "call-end", defaultDirection: inferredDirection)
     return transition(
       stateValue: "ended",
-      payload: payload,
+      payload: callPayload,
       direction: payload["direction"] as? String,
-      note: "End observed by native scaffolding."
+      note: "Call ended through native signaling."
     )
+  }
+
+  private func preparedCallPayload(
+    _ payload: [String: Any],
+    event: String,
+    direction: String
+  ) -> [String: Any] {
+    var next = makeJsonSafeDictionary(payload)
+    let now = nowMs()
+    next["event"] = event
+    next["direction"] = direction
+    if normalizedString(next["callId"] ?? next["call_id"]) == nil {
+      next["callId"] = "call_\(now)_\(UUID().uuidString.prefix(8))"
+    }
+    if normalizedString(next["callType"] ?? next["call_type"]) == nil {
+      next["callType"] = "voice"
+    }
+    if let callId = normalizedString(next["call_id"]), normalizedString(next["callId"]) == nil {
+      next["callId"] = callId
+    }
+    if let callType = normalizedString(next["call_type"]), normalizedString(next["callType"]) == nil {
+      next["callType"] = callType
+    }
+    return next
+  }
+
+  private func remoteUserId(_ payload: [String: Any]) -> String? {
+    normalizedString(payload["toUserId"] ?? payload["to_user_id"])
+      ?? normalizedString(payload["remoteUserId"] ?? payload["remote_user_id"])
+      ?? normalizedString(payload["fromUserId"] ?? payload["from_user_id"])
+      ?? normalizedString(payload["peerUserId"] ?? payload["peer_user_id"])
+  }
+
+  private func signalingNote(_ signal: [String: Any], fallback: String) -> String {
+    guard boolValue(signal["accepted"]) else {
+      return "Native signaling rejected: \(normalizedString(signal["reason"]) ?? "unknown")."
+    }
+    if boolValue(signal["queued"]) {
+      return "Native signaling queued until the user channel joins."
+    }
+    return fallback
   }
 
   private func transition(

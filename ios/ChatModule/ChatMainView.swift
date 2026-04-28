@@ -632,9 +632,6 @@ public final class ChatMainView: UIView,
   func setPage(_ value: String, animated: Bool) {
     let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
     if normalized == "profile" {
-      if !standaloneProfileMode {
-        return
-      }
       if currentPage != .profile {
         currentPage = .profile
         applyPageState(animated: animated, emitEvent: false)

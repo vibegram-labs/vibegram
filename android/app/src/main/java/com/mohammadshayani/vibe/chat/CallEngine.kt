@@ -35,8 +35,8 @@ internal object NativeCallEngine {
       state["userChannelTopic"] = payload["userChannelTopic"] ?: payload["topic"]
       state["configuredAt"] = now
       state["updatedAt"] = now
-      state["signalingState"] = "mirroring"
-      state["note"] = "Native engine scaffolding configured; signaling/media port pending."
+      state["signalingState"] = "ready"
+      state["note"] = "Native call signaling configured."
       Log.d("VibeNativeCall", "Engine.configure keys=${payload.keys.sorted().joinToString(",")}")
       val result = LinkedHashMap(state)
       refreshTurnConfig(context, force = true)
@@ -164,7 +164,7 @@ internal object NativeCallEngine {
           state["turnLastFetchAt"] = fetchedAt
           state["turnLastError"] = null
           state["updatedAt"] = fetchedAt
-          state["note"] = "Native engine scaffolding configured; TURN config ready."
+          state["note"] = "Native call signaling configured; TURN config ready."
         }
         Log.d("VibeNativeCall", "Engine.turnFetch ok servers=${iceServersArray.length()} policy=$effectivePolicy forceRelay=$shouldForceRelay")
       } catch (t: Throwable) {
@@ -179,32 +179,132 @@ internal object NativeCallEngine {
 
   fun startOutgoing(payload: Map<String, Any?>): Map<String, Any?> =
     run {
-      recordSignalingEvent(payload, defaultEvent = "call-start", defaultDirection = "outbound")
-      transition("starting", payload, "outgoing", "Native engine scaffolding only; JS signaling/media still active.")
+      val callPayload = preparedCallPayload(payload, event = "call-start", direction = "outbound").toMutableMap()
+      val signal = ChatEngine.sendCallSignal(callPayload)
+      callPayload["signaling"] = signal
+      callPayload["signalingAccepted"] = signal["accepted"] ?: false
+      callPayload["signalingQueued"] = signal["queued"] ?: false
+      callPayload["signalingRef"] = signal["ref"]
+      recordSignalingEvent(callPayload, defaultEvent = "call-start", defaultDirection = "outbound")
+      transition("starting", callPayload, "outgoing", signalingNote(signal, "Outgoing call routed through native signaling."))
     }
 
   fun acceptIncoming(payload: Map<String, Any?>): Map<String, Any?> =
     run {
-      recordSignalingEvent(payload, defaultEvent = "call-accepted", defaultDirection = "outbound")
-      transition("accepting", payload, "incoming", "Native engine scaffolding only; JS signaling/media still active.")
+      val callPayload = preparedCallPayload(payload, event = "call-accepted", direction = "outbound").toMutableMap()
+      if (normalizedString(callPayload["toUserId"]) == null) {
+        normalizedString(callPayload["fromUserId"] ?: callPayload["from_user_id"])?.let { callPayload["toUserId"] = it }
+      }
+      val signal = ChatEngine.sendCallSignal(callPayload)
+      callPayload["signaling"] = signal
+      callPayload["signalingAccepted"] = signal["accepted"] ?: false
+      callPayload["signalingQueued"] = signal["queued"] ?: false
+      callPayload["signalingRef"] = signal["ref"]
+      recordSignalingEvent(callPayload, defaultEvent = "call-accepted", defaultDirection = "outbound")
+      transition("accepting", callPayload, "incoming", signalingNote(signal, "Incoming call accepted through native signaling."))
     }
 
   fun handleSignal(payload: Map<String, Any?>): Map<String, Any?> =
-    synchronized(state) {
-      recordSignalingEvent(payload, defaultEvent = "webrtc-signal", defaultDirection = "inbound")
-      state["updatedAt"] = System.currentTimeMillis()
-      state["lastSignalType"] = payload["type"] ?: payload["signalType"]
-      state["note"] = "Signal observed by native scaffolding."
-      Log.d("VibeNativeCall", "Engine.handleSignal type=${payload["type"] ?: payload["signalType"]}")
-      LinkedHashMap(state)
+    run {
+      val typeAsEvent = normalizedString(payload["type"]).takeIf { it in setOf("call-start", "call-accepted", "call-end") }
+      val event = normalizedString(payload["event"]) ?: typeAsEvent ?: "webrtc-signal"
+      val callPayload = preparedCallPayload(payload, event = event, direction = "inbound").toMutableMap()
+      recordSignalingEvent(callPayload, defaultEvent = event, defaultDirection = "inbound")
+      when (event) {
+        "call-start" -> {
+          appContextRef?.let { VibeNativeCallStore.enqueueIncomingCall(it, stringPayload(callPayload)) }
+          transition("ringing", callPayload, "incoming", "Incoming call routed through native signaling.")
+        }
+        "call-accepted" ->
+          transition("connecting", callPayload, "outgoing", "Call accepted through native signaling.")
+        "call-end" -> {
+          callPayload["remote"] = true
+          endCall(callPayload)
+        }
+        else ->
+          synchronized(state) {
+            state["updatedAt"] = System.currentTimeMillis()
+            state["lastSignalType"] = payload["type"] ?: payload["signalType"]
+            state["note"] = "WebRTC signal routed through native signaling."
+            Log.d("VibeNativeCall", "Engine.handleSignal type=${payload["type"] ?: payload["signalType"]}")
+            LinkedHashMap(state)
+          }
+      }
     }
 
   fun endCall(payload: Map<String, Any?>): Map<String, Any?> =
     run {
-      val inferredDirection = if ((payload["remote"] as? Boolean) == true) "inbound" else "outbound"
-      recordSignalingEvent(payload, defaultEvent = "call-end", defaultDirection = inferredDirection)
-      transition("ended", payload, payload["direction"]?.toString(), "End observed by native scaffolding.")
+      val remote = boolValue(payload["remote"])
+      val callPayload = preparedCallPayload(
+        payload,
+        event = "call-end",
+        direction = if (remote) "inbound" else "outbound",
+      ).toMutableMap()
+      if (!remote) {
+        if (normalizedString(callPayload["toUserId"]) == null) {
+          remoteUserId(callPayload)?.let { callPayload["toUserId"] = it }
+        }
+        val signal = ChatEngine.sendCallSignal(callPayload)
+        callPayload["signaling"] = signal
+        callPayload["signalingAccepted"] = signal["accepted"] ?: false
+        callPayload["signalingQueued"] = signal["queued"] ?: false
+        callPayload["signalingRef"] = signal["ref"]
+      }
+      val inferredDirection = if (boolValue(callPayload["remote"])) "inbound" else "outbound"
+      recordSignalingEvent(callPayload, defaultEvent = "call-end", defaultDirection = inferredDirection)
+      transition("ended", callPayload, payload["direction"]?.toString(), "Call ended through native signaling.")
     }
+
+  private fun preparedCallPayload(
+    payload: Map<String, Any?>,
+    event: String,
+    direction: String,
+  ): Map<String, Any?> {
+    val now = System.currentTimeMillis()
+    val next = LinkedHashMap(makeJsonSafeMap(payload))
+    next["event"] = event
+    next["direction"] = direction
+    if (normalizedString(next["callId"] ?: next["call_id"]) == null) {
+      next["callId"] = "call_${now}_${java.util.UUID.randomUUID().toString().take(8)}"
+    }
+    if (normalizedString(next["callType"] ?: next["call_type"]) == null) {
+      next["callType"] = "voice"
+    }
+    normalizedString(next["call_id"])?.let {
+      if (normalizedString(next["callId"]) == null) next["callId"] = it
+    }
+    normalizedString(next["call_type"])?.let {
+      if (normalizedString(next["callType"]) == null) next["callType"] = it
+    }
+    return next
+  }
+
+  private fun remoteUserId(payload: Map<String, Any?>): String? =
+    normalizedString(payload["toUserId"] ?: payload["to_user_id"])
+      ?: normalizedString(payload["remoteUserId"] ?: payload["remote_user_id"])
+      ?: normalizedString(payload["fromUserId"] ?: payload["from_user_id"])
+      ?: normalizedString(payload["peerUserId"] ?: payload["peer_user_id"])
+
+  private fun signalingNote(signal: Map<String, Any?>, fallback: String): String {
+    if (!boolValue(signal["accepted"])) {
+      return "Native signaling rejected: ${normalizedString(signal["reason"]) ?: "unknown"}."
+    }
+    if (boolValue(signal["queued"])) {
+      return "Native signaling queued until the user channel joins."
+    }
+    return fallback
+  }
+
+  private fun boolValue(value: Any?): Boolean =
+    when (value) {
+      is Boolean -> value
+      is Number -> value.toInt() != 0
+      is String -> value.equals("true", ignoreCase = true) || value == "1" || value.equals("yes", ignoreCase = true)
+      else -> false
+    }
+
+  private fun stringPayload(payload: Map<String, Any?>): Map<String, String> =
+    payload.mapValues { (_, value) -> value?.toString().orEmpty() }
 
   private fun transition(
     nextState: String,

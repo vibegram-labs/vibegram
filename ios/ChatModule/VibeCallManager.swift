@@ -221,6 +221,9 @@ extension VibeNativeCallManager: CXProviderDelegate {
       var eventPayload = payload
       eventPayload["action"] = "answer"
       store.enqueueEvent(type: "callAction", payload: eventPayload)
+      _ = VibeNativeCallEngine.shared.acceptIncoming(eventPayload.reduce(into: [String: Any]()) {
+        $0[$1.key] = $1.value
+      })
     }
     action.fulfill()
   }
@@ -231,6 +234,9 @@ extension VibeNativeCallManager: CXProviderDelegate {
       var eventPayload = payload
       eventPayload["action"] = "decline"
       store.enqueueEvent(type: "callAction", payload: eventPayload)
+      _ = VibeNativeCallEngine.shared.endCall(eventPayload.reduce(into: [String: Any]()) {
+        $0[$1.key] = $1.value
+      })
       store.clearActiveCall(uuid: action.callUUID)
     }
     action.fulfill()
