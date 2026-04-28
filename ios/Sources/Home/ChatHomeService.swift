@@ -5,6 +5,26 @@ enum ChatHomeService {
     ChatHomeRowsCache.rows(userID: config.userID)
   }
 
+  static func isOfflineError(_ error: Error) -> Bool {
+    if let homeError = error as? ChatHomeServiceError {
+      switch homeError {
+      case let .transportUnavailable(reason):
+        return reason == "offline"
+      default:
+        return false
+      }
+    }
+
+    guard let urlError = firstURLError(in: error) else { return false }
+    switch urlError.code {
+    case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost,
+      .dnsLookupFailed, .internationalRoamingOff, .callIsActive, .dataNotAllowed:
+      return true
+    default:
+      return false
+    }
+  }
+
   static func fetchChats(config: AppSessionConfig) async throws -> [ChatHomeListRow] {
     let request = try buildRequest(config: config)
     switch config.transportMode {
@@ -231,6 +251,21 @@ enum ChatHomeService {
     }
     return 0
   }
+
+  private static func firstURLError(in error: Error) -> URLError? {
+    if let urlError = error as? URLError {
+      return urlError
+    }
+
+    let nsError = error as NSError
+    if nsError.domain == NSURLErrorDomain {
+      return URLError(URLError.Code(rawValue: nsError.code))
+    }
+    if let underlying = nsError.userInfo[NSUnderlyingErrorKey] as? Error {
+      return firstURLError(in: underlying)
+    }
+    return nil
+  }
 }
 
 private enum ChatHomeRowsCache {
@@ -241,13 +276,19 @@ private enum ChatHomeRowsCache {
     guard let data = defaults.data(forKey: cacheKey(userID: userID)),
       let object = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]]
     else {
+      NSLog("[ChatHomeRowsCache] restored rows=0 user=%@", String(userID.prefix(8)))
       return []
     }
-    return object.compactMap(ChatHomeListRow.parse)
+    let rows = object.compactMap(ChatHomeListRow.parse)
+    NSLog("[ChatHomeRowsCache] restored rows=%d user=%@", rows.count, String(userID.prefix(8)))
+    return rows
   }
 
   static func store(_ rows: [ChatHomeListRow], userID: String) {
-    let payload = rows.map { $0.cachePayload() }
+    var payload = rows.map { $0.cachePayload() }
+    if !JSONSerialization.isValidJSONObject(payload) {
+      payload = rows.map { $0.cachePayload(messageLimit: 0) }
+    }
     guard JSONSerialization.isValidJSONObject(payload),
       let data = try? JSONSerialization.data(withJSONObject: payload, options: [])
     else {
@@ -255,6 +296,8 @@ private enum ChatHomeRowsCache {
       return
     }
     UserDefaults.standard.set(data, forKey: cacheKey(userID: userID))
+    UserDefaults.standard.synchronize()
+    NSLog("[ChatHomeRowsCache] stored rows=%d user=%@", rows.count, String(userID.prefix(8)))
   }
 
   private static func cacheKey(userID: String) -> String {

@@ -848,12 +848,15 @@ public final class ChatMainView: UIView,
       label.font = UIFont.systemFont(ofSize: 12, weight: .medium)
       label.textAlignment = .center
       label.lineBreakMode = .byTruncatingTail
+      label.isHidden = true
     }
 
     chatHeaderStack.addArrangedSubview(chatTitleLabel)
     chatHeaderStack.addArrangedSubview(chatSubtitleLabel)
     profileHeaderStack.addArrangedSubview(profileTitleLabel)
     profileHeaderStack.addArrangedSubview(profileSubtitleLabel)
+    chatHeaderStack.frame = CGRect(x: 12.0, y: 4.0, width: 160.0, height: 36.0)
+    profileHeaderStack.frame = CGRect(x: 12.0, y: 4.0, width: 160.0, height: 36.0)
     profileHeaderStack.isUserInteractionEnabled = false
 
     profileScrollView.showsVerticalScrollIndicator = false

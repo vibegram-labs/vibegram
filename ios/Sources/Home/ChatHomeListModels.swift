@@ -187,7 +187,7 @@ struct ChatHomeListRow {
     }
     let title = resolvedTitle ?? "Vibegram User"
 
-    let previewRaw = normalizedString(raw["preview"] ?? raw["subtitle"])
+    let previewRaw = firstSafeDisplayText(raw["preview"], raw["subtitle"])
     let previewMessage = serverMessages.last.map(homePreviewText(from:))
     let preview = previewRaw ?? previewMessage ?? ""
     let timeLabel =
@@ -269,11 +269,20 @@ struct ChatHomeListRow {
   }
 
   static func homePreviewText(from raw: [String: Any]) -> String {
-    if let text = normalizedString(
-      raw["preview"] ?? raw["plainContent"] ?? raw["plain_content"] ?? raw["plaintext"]
-        ?? raw["content"] ?? raw["text"]),
-      !text.isEmpty
-    {
+    if let text = firstSafeDisplayText(
+      raw["preview"],
+      raw["plainContent"],
+      raw["plain_content"],
+      raw["plaintext"]
+    ) {
+      return text
+    }
+
+    if let text = ChatEngine.shared.makeHomePreviewText(raw) {
+      return text
+    }
+
+    if let text = firstSafeDisplayText(raw["content"], raw["text"]) {
       return text
     }
 
@@ -342,6 +351,29 @@ struct ChatHomeListRow {
       return value.stringValue
     }
     return nil
+  }
+
+  private static func firstSafeDisplayText(_ values: Any?...) -> String? {
+    for value in values {
+      guard let text = normalizedString(value), !looksLikeEncryptedPayload(text) else {
+        continue
+      }
+      return text
+    }
+    return nil
+  }
+
+  private static func looksLikeEncryptedPayload(_ value: String) -> Bool {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty else { return false }
+    if trimmed.hasPrefix("{"), let data = trimmed.data(using: .utf8),
+      let object = try? JSONSerialization.jsonObject(with: data),
+      let json = object as? [String: Any]
+    {
+      return json["iv"] != nil && json["c"] != nil && json["k"] != nil
+    }
+    let compact = trimmed.replacingOccurrences(of: "\\s+", with: "", options: .regularExpression)
+    return compact.contains("\"iv\"") && compact.contains("\"c\"") && compact.contains("\"k\"")
   }
 
   private static func looksLikeUUID(_ value: String) -> Bool {

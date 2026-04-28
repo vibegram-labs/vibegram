@@ -3150,6 +3150,27 @@ final class ChatEngine {
     }
   }
 
+  func makeHomePreviewText(_ payload: [String: Any]) -> String? {
+    syncOnQueue {
+      let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"]) ?? "home_preview"
+      guard
+        let row = buildHistoryRowsLocked(chatId: chatId, rawMessages: [payload]).first,
+        let message = row["message"] as? [String: Any]
+      else {
+        return nil
+      }
+      if (message["decryptionFailed"] as? Bool) == true {
+        return nil
+      }
+      guard let text = normalizedString(message["plainContent"] ?? message["text"]),
+        !isLikelyHybridCiphertext(text)
+      else {
+        return nil
+      }
+      return text
+    }
+  }
+
   func makeTransientChatRows(_ payload: [String: Any]) -> [[String: Any]] {
     let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
     let messages = payload["messages"] as? [[String: Any]]
@@ -3188,7 +3209,7 @@ final class ChatEngine {
   /// native rows can fully replace JS rows.
   func isChatHistoryLoaded(chatId: String) -> Bool {
     syncOnQueue {
-      historyRowsByChat[chatId] != nil
+      historyFullyLoadedChats.contains(chatId)
     }
   }
 

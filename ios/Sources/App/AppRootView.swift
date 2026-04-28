@@ -87,9 +87,17 @@ final class AppShellCoordinator: ObservableObject {
 
   private var activeRequestID: Int?
   private weak var activeChatController: ChatConversationController?
+  private var isChatPresentationTransitioning = false
+  private var deferredChatPresentation: PresentedChatRoute?
   private let pushTransitionDelegate = ChatPushTransitionDelegate()
 
   func openChat(_ route: ChatRoute) {
+    if let presentedChat, presentedChat.route == route {
+      appShellRouteLog(
+        "openChat ignored duplicate requestId=\(presentedChat.requestID) chatId=\(route.chatId) title=\(route.title)")
+      return
+    }
+
     chatOpenRequestID &+= 1
     let requestID = chatOpenRequestID
     appShellRouteLog(
@@ -112,6 +120,7 @@ final class AppShellCoordinator: ObservableObject {
     appShellRouteLog(
       "closeChat requested requestId=\(presentedChat.requestID) chatId=\(presentedChat.route.chatId) title=\(presentedChat.route.title)")
     self.presentedChat = nil
+    deferredChatPresentation = nil
     dismissActiveChatController(animated: true)
   }
 
@@ -125,17 +134,62 @@ final class AppShellCoordinator: ObservableObject {
   // MARK: - UIKit presentation
 
   private func presentChatController(route: ChatRoute, requestID: Int) {
-    // If another chat was already presented, dismiss it first
-    if activeRequestID != nil, activeRequestID != requestID {
+    guard presentedChat?.requestID == requestID else {
       appShellRouteLog(
-        "presentChatController replacing previous requestId=\(activeRequestID.map(String.init) ?? "nil") with requestId=\(requestID)")
-      dismissActiveChatController(animated: false)
+        "presentChatController ignored stale requestId=\(requestID) currentRequestId=\(presentedChat?.requestID.description ?? "nil")")
+      return
     }
 
-    guard activeRequestID != requestID else { return }
+    if isChatPresentationTransitioning {
+      deferredChatPresentation = PresentedChatRoute(requestID: requestID, route: route)
+      appShellRouteLog(
+        "presentChatController deferred requestId=\(requestID) chatId=\(route.chatId) reason=transitionInFlight")
+      return
+    }
+
+    if let activeChatController {
+      if activeChatController.represents(route) {
+        activeRequestID = requestID
+        appShellRouteLog(
+          "presentChatController reused active requestId=\(requestID) chatId=\(route.chatId)")
+        updateChatController(activeChatController, route: route, requestID: requestID)
+        return
+      }
+
+      appShellRouteLog(
+        "presentChatController replacing previous requestId=\(activeRequestID.map(String.init) ?? "nil") with requestId=\(requestID)")
+      isChatPresentationTransitioning = true
+      dismissActiveChatController(animated: false) { [weak self] in
+        guard let self else { return }
+        self.isChatPresentationTransitioning = false
+        self.presentChatController(route: route, requestID: requestID)
+      }
+      return
+    }
 
     guard let window = Self.activeWindow() else {
       appShellRouteLog("presentChatController FAILED requestId=\(requestID) reason=noWindow")
+      return
+    }
+
+    if let visibleChat = Self.visibleChatController(in: window) {
+      if visibleChat.represents(route) {
+        activeRequestID = requestID
+        activeChatController = visibleChat
+        appShellRouteLog(
+          "presentChatController recovered visible requestId=\(requestID) chatId=\(route.chatId)")
+        updateChatController(visibleChat, route: route, requestID: requestID)
+        return
+      }
+
+      appShellRouteLog(
+        "presentChatController dismissing visible stale chat before requestId=\(requestID) chatId=\(route.chatId)")
+      isChatPresentationTransitioning = true
+      visibleChat.dismiss(animated: false) { [weak self] in
+        guard let self else { return }
+        self.isChatPresentationTransitioning = false
+        self.presentChatController(route: route, requestID: requestID)
+      }
       return
     }
 
@@ -146,6 +200,12 @@ final class AppShellCoordinator: ObservableObject {
 
     guard let presenter = top else {
       appShellRouteLog("presentChatController FAILED requestId=\(requestID) reason=noPresenter")
+      return
+    }
+    guard !presenter.isBeingPresented, !presenter.isBeingDismissed else {
+      deferredChatPresentation = PresentedChatRoute(requestID: requestID, route: route)
+      appShellRouteLog(
+        "presentChatController deferred requestId=\(requestID) chatId=\(route.chatId) reason=presenterTransitioning")
       return
     }
 
@@ -164,20 +224,62 @@ final class AppShellCoordinator: ObservableObject {
 
     appShellRouteLog(
       "presentChatController presenting requestId=\(requestID) chatId=\(route.chatId) presenter=\(String(describing: type(of: presenter)))")
-    presenter.present(controller, animated: true)
+    isChatPresentationTransitioning = true
+    presenter.present(controller, animated: true) { [weak self] in
+      self?.completeChatPresentationTransition()
+    }
   }
 
-  private func dismissActiveChatController(animated: Bool) {
+  private func updateChatController(
+    _ controller: ChatConversationController,
+    route: ChatRoute,
+    requestID: Int
+  ) {
+    let isDark = Self.activeWindow()?.traitCollection.userInterfaceStyle == .dark
+      || UITraitCollection.current.userInterfaceStyle == .dark
+    controller.update(
+      route: route,
+      isDark: isDark,
+      onClose: { [weak self] in
+        self?.closePresentedChat(requestID: requestID)
+      }
+    )
+  }
+
+  private func dismissActiveChatController(animated: Bool, completion: (() -> Void)? = nil) {
     guard let controller = activeChatController else {
       activeRequestID = nil
+      if let window = Self.activeWindow(), let visibleChat = Self.visibleChatController(in: window),
+        visibleChat.presentingViewController != nil, !visibleChat.isBeingDismissed
+      {
+        visibleChat.dismiss(animated: animated, completion: completion)
+      } else {
+        completion?()
+      }
       return
     }
 
     activeRequestID = nil
     activeChatController = nil
 
-    if controller.presentingViewController != nil {
-      controller.dismiss(animated: animated)
+    if controller.presentingViewController != nil, !controller.isBeingDismissed {
+      controller.dismiss(animated: animated, completion: completion)
+    } else {
+      completion?()
+    }
+  }
+
+  private func completeChatPresentationTransition() {
+    isChatPresentationTransitioning = false
+    guard let deferred = deferredChatPresentation else { return }
+    deferredChatPresentation = nil
+    guard presentedChat?.requestID == deferred.requestID else {
+      appShellRouteLog(
+        "presentChatController dropped deferred requestId=\(deferred.requestID) currentRequestId=\(presentedChat?.requestID.description ?? "nil")")
+      return
+    }
+    DispatchQueue.main.async { [weak self] in
+      self?.presentChatController(route: deferred.route, requestID: deferred.requestID)
     }
   }
 
@@ -187,6 +289,17 @@ final class AppShellCoordinator: ObservableObject {
       if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
         return keyWindow
       }
+    }
+    return nil
+  }
+
+  private static func visibleChatController(in window: UIWindow) -> ChatConversationController? {
+    var current = window.rootViewController
+    while let presented = current?.presentedViewController {
+      if let chat = presented as? ChatConversationController {
+        return chat
+      }
+      current = presented
     }
     return nil
   }
@@ -307,8 +420,6 @@ private final class ChatsViewModel: ObservableObject {
     guard let config = AppSessionConfig.current else {
       if rows.isEmpty {
         errorMessage = "The current session is unavailable."
-      } else {
-        isWaitingForNetwork = true
       }
       return
     }
@@ -324,11 +435,12 @@ private final class ChatsViewModel: ObservableObject {
       isWaitingForNetwork = false
       warmCachedRows(rows, shouldFetchHistory: true)
     } catch {
-      isWaitingForNetwork = true
-      if rows.isEmpty {
+      let offline = ChatHomeService.isOfflineError(error)
+      isWaitingForNetwork = offline
+      if rows.isEmpty || !offline {
         errorMessage = error.localizedDescription
       } else {
-        errorMessage = error.localizedDescription
+        errorMessage = nil
       }
       hasLoaded = true
     }
@@ -1640,6 +1752,10 @@ private final class ChatConversationController: UIViewController {
     }
   }
 
+  func represents(_ route: ChatRoute) -> Bool {
+    self.route == route
+  }
+
   private func applyRoute(forceChannelRefresh: Bool) {
     view.backgroundColor = Self.backgroundColor(isDark: isDark)
     currentPage = .chat
@@ -1792,6 +1908,14 @@ private final class ChatConversationController: UIViewController {
         if let onClose {
           appShellRouteLog("ChatConversationController dismissPresented chatId=\(route.chatId)")
           onClose()
+          DispatchQueue.main.async { [weak self] in
+            guard let self, self.presentingViewController != nil, !self.isBeingDismissed else {
+              return
+            }
+            appShellRouteLog(
+              "ChatConversationController fallbackSelfDismiss chatId=\(self.route.chatId)")
+            self.dismiss(animated: true)
+          }
         } else if let navigationController {
           navigationController.popViewController(animated: true)
         }
