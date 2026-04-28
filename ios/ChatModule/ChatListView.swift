@@ -586,6 +586,8 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
   private var reactionDebugRemainingRowsChecks: Int = 0
 
   private var hiddenMessageId: String?
+  private var selectionMode = false
+  private var selectedMessageIds = Set<String>()
   private var pendingSendTransition: SendTransitionPayload?
   private var activeSendTransition: SendTransitionState?
   private var projectedSendTransitionMessageId: String?
@@ -959,6 +961,7 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     let applyDataSource = { [weak self] in
       guard let self else { return }
       self.rows = parsed
+      self.pruneMessageSelection(for: parsed)
       let engineChatId = self.engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
       let resolvedChatId: String
       if !engineChatId.isEmpty {
@@ -1265,8 +1268,14 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
         for indexPath in safeReloads {
           guard indexPath.item < rows.count else { continue }
           if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
+            let row = rows[indexPath.item]
             cell.applyAppearance(appearance)
-            cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
+            cell.configure(
+              row: row,
+              hiddenMessageId: hiddenMessageId,
+              selectionMode: selectionMode,
+              selected: row.messageId.map { selectedMessageIds.contains($0) } ?? false
+            )
             bindWallpaperBackdrop(to: cell)
             cell.alpha = 1.0
             cell.contentView.alpha = 1.0
@@ -1750,6 +1759,64 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     refreshVisibleStatuses(reason: "statusAuthorityEnabled")
   }
 
+  func beginMessageSelection(messageId: String) {
+    let resolvedMessageId = messageId.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !resolvedMessageId.isEmpty else { return }
+    let wasActive = selectionMode
+    let inserted = selectedMessageIds.insert(resolvedMessageId).inserted
+    selectionMode = true
+    guard !wasActive || inserted else { return }
+    refreshMessageSelectionLayout()
+    emitMessageSelectionChanged()
+  }
+
+  func toggleMessageSelection(row: ChatListRow) {
+    guard let messageId = row.messageId?.trimmingCharacters(in: .whitespacesAndNewlines),
+      !messageId.isEmpty
+    else { return }
+    if selectedMessageIds.contains(messageId) {
+      selectedMessageIds.remove(messageId)
+    } else {
+      selectedMessageIds.insert(messageId)
+    }
+    selectionMode = !selectedMessageIds.isEmpty
+    refreshMessageSelectionLayout()
+    emitMessageSelectionChanged()
+  }
+
+  private func pruneMessageSelection(for parsedRows: [ChatListRow]) {
+    guard selectionMode || !selectedMessageIds.isEmpty else { return }
+    let validIds = Set(
+      parsedRows.compactMap {
+        $0.messageId?.trimmingCharacters(in: .whitespacesAndNewlines)
+      }.filter { !$0.isEmpty }
+    )
+    let before = selectedMessageIds
+    selectedMessageIds = Set(selectedMessageIds.filter { validIds.contains($0) })
+    let wasActive = selectionMode
+    selectionMode = !selectedMessageIds.isEmpty
+    if before != selectedMessageIds || wasActive != selectionMode {
+      emitMessageSelectionChanged()
+    }
+  }
+
+  private func refreshMessageSelectionLayout() {
+    collectionView.collectionViewLayout.invalidateLayout()
+    UIView.performWithoutAnimation {
+      collectionView.reloadData()
+      collectionView.layoutIfNeeded()
+    }
+  }
+
+  private func emitMessageSelectionChanged() {
+    onNativeEvent([
+      "type": "messageSelectionChanged",
+      "active": selectionMode,
+      "selectedCount": selectedMessageIds.count,
+      "selectedMessageIds": Array(selectedMessageIds),
+    ])
+  }
+
   func setAppearance(_ rawAppearance: [String: Any]) {
     Self.cacheNativeThemeSeed(from: rawAppearance)
     let next = ChatListAppearance.from(raw: rawAppearance)
@@ -2070,7 +2137,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       row: row,
       hiddenMessageId: hiddenMessageId,
       skipRemoteMediaLoad: mediaDownloadState.needsDownload,
-      preferredLocalMediaURLOverride: preferredLocalMediaURLOverride
+      preferredLocalMediaURLOverride: preferredLocalMediaURLOverride,
+      selectionMode: selectionMode,
+      selected: row.messageId.map { selectedMessageIds.contains($0) } ?? false
     )
     bindWallpaperBackdrop(to: cell)
     cell.applyMediaDownloadState(
@@ -2111,6 +2180,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     }
     cell.onRetryMessageTap = { [weak self] row in
       self?.retryOutgoingMessage(row: row, source: "inline_retry")
+    }
+    cell.onSelectionToggle = { [weak self] row in
+      self?.toggleMessageSelection(row: row)
     }
     cell.onVoiceUploadCancelTap = { [weak self] row in
       guard let self, let messageId = row.messageId, !messageId.isEmpty else { return }
@@ -2190,6 +2262,10 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
   ) {
     guard indexPath.item < rows.count else { return }
     let row = rows[indexPath.item]
+    if selectionMode {
+      toggleMessageSelection(row: row)
+      return
+    }
     guard let mediaURLRaw = row.mediaUrl else { return }
     let mediaURL = mediaURLRaw.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !mediaURL.isEmpty else { return }
@@ -2431,7 +2507,13 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       cell.resolveDisplayStatus = { [weak self] row in
         self?.resolvedDisplayStatus(for: row)
       }
-      cell.configure(row: rows[indexPath.item], hiddenMessageId: hiddenMessageId)
+      let row = rows[indexPath.item]
+      cell.configure(
+        row: row,
+        hiddenMessageId: hiddenMessageId,
+        selectionMode: selectionMode,
+        selected: row.messageId.map { selectedMessageIds.contains($0) } ?? false
+      )
       bindWallpaperBackdrop(to: cell)
     }
   }
@@ -2449,7 +2531,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     if row.kind == .day {
       return CGSize(width: width, height: 30.0)
     }
-    return CGSize(width: width, height: estimateMessageHeight(row, rowWidth: width))
+    let measurementWidth =
+      selectionMode ? max(1.0, width - messageSelectionLeadingInset) : width
+    return CGSize(width: width, height: estimateMessageHeight(row, rowWidth: measurementWidth))
   }
 
   public func scrollViewDidScroll(_ scrollView: UIScrollView) {
@@ -3615,8 +3699,14 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         if let cell = collectionView.cellForItem(at: indexPath) as? ChatListCell {
+          let row = rows[rowIndex]
           cell.applyAppearance(appearance)
-          cell.configure(row: rows[rowIndex], hiddenMessageId: nil)
+          cell.configure(
+            row: row,
+            hiddenMessageId: nil,
+            selectionMode: selectionMode,
+            selected: row.messageId.map { selectedMessageIds.contains($0) } ?? false
+          )
           bindWallpaperBackdrop(to: cell)
           cell.alpha = 1.0
           cell.contentView.alpha = 1.0

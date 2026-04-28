@@ -230,6 +230,8 @@ private class NativeRowsAdapter(
   private var externalVoiceProgress = 0f
   private val nudgedErrorKeys = LinkedHashSet<String>()
   private val contextMenuOverlay = ChatContextMenuOverlay(context)
+  private val selectedMessageIds = LinkedHashSet<String>()
+  private var selectionMode = false
 
   init {
     setHasStableIds(true)
@@ -702,6 +704,7 @@ private class NativeRowsAdapter(
         previous.size <= next.size &&
         previous.indices.all { index -> previous[index].key == next[index].key }
 
+    pruneSelection(next)
     rows.clear()
     rows.addAll(next)
     if (previous.isEmpty()) {
@@ -779,6 +782,53 @@ private class NativeRowsAdapter(
 
   fun refreshStatusDecorations() {
     notifyDataSetChanged()
+  }
+
+  fun enterSelectionMode(messageId: String) {
+    val resolvedMessageId = messageId.trim()
+    if (resolvedMessageId.isEmpty()) return
+    val wasActive = selectionMode
+    val changed = selectedMessageIds.add(resolvedMessageId)
+    selectionMode = true
+    if (!wasActive || changed) {
+      notifyDataSetChanged()
+      emitSelectionChanged()
+    }
+  }
+
+  private fun toggleMessageSelection(messageId: String) {
+    val resolvedMessageId = messageId.trim()
+    if (resolvedMessageId.isEmpty()) return
+    if (selectedMessageIds.contains(resolvedMessageId)) {
+      selectedMessageIds.remove(resolvedMessageId)
+    } else {
+      selectedMessageIds.add(resolvedMessageId)
+    }
+    selectionMode = selectedMessageIds.isNotEmpty()
+    notifyDataSetChanged()
+    emitSelectionChanged()
+  }
+
+  private fun pruneSelection(nextRows: List<NativeRowItem>) {
+    if (!selectionMode && selectedMessageIds.isEmpty()) return
+    val validMessageIds = nextRows.mapNotNull { it.messageId?.trim()?.takeIf { id -> id.isNotEmpty() } }.toSet()
+    val removed = selectedMessageIds.removeAll { it !in validMessageIds }
+    val wasActive = selectionMode
+    selectionMode = selectedMessageIds.isNotEmpty()
+    if (removed || wasActive != selectionMode) {
+      emitSelectionChanged()
+    }
+  }
+
+  private fun emitSelectionChanged() {
+    emitNativeEvent(
+      mapOf(
+        "type" to "messageSelectionChanged",
+        "active" to selectionMode,
+        "selectedCount" to selectedMessageIds.size,
+        "selectedMessageIds" to selectedMessageIds.toList(),
+      ),
+    )
   }
 
   fun setVoicePlayback(messageId: String?, isPlaying: Boolean, progress: Float) {
@@ -866,7 +916,14 @@ private class NativeRowsAdapter(
     }
 
     if (holder is NativeRowViewHolder) {
-      holder.bind(item, hiddenMessageId == item.messageId, position)
+      val messageId = item.messageId?.trim().orEmpty()
+      holder.bind(
+        item,
+        hiddenMessageId == item.messageId,
+        position,
+        selectionMode = selectionMode,
+        selected = messageId.isNotEmpty() && selectedMessageIds.contains(messageId),
+      )
       if (pendingBottomInsertKeys.remove(item.key)) {
         holder.container.clearAnimation()
         holder.container.alpha = 1f
@@ -1232,9 +1289,17 @@ private class NativeRowsAdapter(
     return value
   }
 
-  private fun NativeRowViewHolder.bind(item: NativeRowItem, hidden: Boolean, position: Int) {
+  private fun NativeRowViewHolder.bind(
+    item: NativeRowItem,
+    hidden: Boolean,
+    position: Int,
+    selectionMode: Boolean,
+    selected: Boolean,
+  ) {
     if (item.kind == "day") {
       voicePlayback.detach(this)
+      container.setPadding(dp(8), dp(1), dp(8), dp(1))
+      container.setOnClickListener(null)
       dayLabel.visibility = View.VISIBLE
       dayLabel.text = item.text
       dayLabel.setTextColor(appearance.dayTextColor)
@@ -1251,14 +1316,32 @@ private class NativeRowsAdapter(
       inlineAttachmentView.visibility = View.GONE
       retryButtonView.setOnClickListener(null)
       retryButtonView.visibility = View.GONE
+      selectionCircleView.setOnClickListener(null)
+      selectionCircleView.visibility = View.GONE
       voiceWaveView.setWaveform(null, null)
       container.setOnLongClickListener(null)
+      container.setOnTouchListener(null)
       return
     }
 
     dayLabel.visibility = View.GONE
+    container.setPadding(if (selectionMode) dp(48) else dp(8), dp(1), dp(8), dp(1))
     bubbleContainer.visibility = View.VISIBLE
     bubbleContainer.alpha = if (hidden) 0f else 1f
+    val selectableMessageId = item.messageId?.trim()?.takeIf { it.isNotEmpty() }
+    val showSelectionCircle = selectionMode && selectableMessageId != null && !hidden
+    selectionCircleView.visibility = if (showSelectionCircle) View.VISIBLE else View.GONE
+    selectionCircleView.bind(selected, appearance)
+    val selectionCircleClickListener =
+      if (showSelectionCircle) {
+        val messageIdForSelection = selectableMessageId.orEmpty()
+        View.OnClickListener {
+          toggleMessageSelection(messageIdForSelection)
+        }
+      } else {
+        null
+      }
+    selectionCircleView.setOnClickListener(selectionCircleClickListener)
 
     val isVideoMedia = nativeRowRepresentsVideo(item)
     val isAudioMedia = !isVideoMedia && nativeRowRepresentsAudio(item)
@@ -1825,20 +1908,34 @@ private class NativeRowsAdapter(
       }
     }
 
-    container.setOnLongClickListener {
-      if (hidden) return@setOnLongClickListener false
-      val messageId = item.messageId?.takeIf { it.isNotBlank() } ?: return@setOnLongClickListener false
-      container.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
-      animateHoldAndOpenContextMenu(
-        anchor = bubbleContainer,
-        holdView = container,
-        tailView = if (tailView.visibility == View.VISIBLE && tailView.width > 0 && tailView.height > 0) tailView else null,
-        item = item,
-        messageId = messageId,
-      )
-      true
+    if (selectionMode && selectableMessageId != null) {
+      val selectionClick = View.OnClickListener {
+        toggleMessageSelection(selectableMessageId)
+      }
+      container.setOnLongClickListener(null)
+      container.setOnTouchListener(null)
+      container.setOnClickListener(selectionClick)
+      mediaPreviewView.setOnClickListener(selectionClick)
+      inlineAttachmentView.setOnClickListener(selectionClick)
+      mediaTransferOverlayView.setOnClickListener(selectionClick)
+      voiceButton.setOnClickListener(selectionClick)
+    } else {
+      container.setOnClickListener(null)
+      container.setOnLongClickListener {
+        if (hidden) return@setOnLongClickListener false
+        val messageId = item.messageId?.takeIf { it.isNotBlank() } ?: return@setOnLongClickListener false
+        container.performHapticFeedback(HapticFeedbackConstants.LONG_PRESS)
+        animateHoldAndOpenContextMenu(
+          anchor = bubbleContainer,
+          holdView = container,
+          tailView = if (tailView.visibility == View.VISIBLE && tailView.width > 0 && tailView.height > 0) tailView else null,
+          item = item,
+          messageId = messageId,
+        )
+        true
+      }
+      installSwipeReplyGesture(this, item, hidden)
     }
-    installSwipeReplyGesture(this, item, hidden)
 
     if (!hidden && item.shape.showTail && !hasMediaPreview) {
       tailView.configure(
@@ -1999,7 +2096,7 @@ private class NativeRowsAdapter(
       tailView = tailView,
       item = item,
       messageId = messageId,
-      animateHold = false,
+      animateHold = true,
     )
   }
 
@@ -2015,6 +2112,7 @@ private class NativeRowsAdapter(
     val contextText = nativeRowDisplayCaption(item).ifBlank { item.text.trim() }
     val displayStatus = statusResolver?.invoke(item) ?: item.status
     actions.add("reply" to "Reply")
+    actions.add("select" to "Select")
     if (contextText.isNotBlank()) actions.add("copy" to "Copy")
     if (item.isMe && item.text.isNotBlank()) actions.add("edit" to "Edit")
     actions.add("pin" to "Pin")
@@ -2049,7 +2147,11 @@ private class NativeRowsAdapter(
           ),
         )
       },
-      onAction = { actionId ->
+      onAction = actionHandler@ { actionId ->
+        if (actionId == "select") {
+          enterSelectionMode(messageId)
+          return@actionHandler
+        }
         emitNativeEvent(
           mapOf(
             "type" to "contextMenuAction",
@@ -2859,6 +2961,10 @@ class ChatListView(
         val action = (payload["action"] as? String)?.trim()?.lowercase()
         val messageId = (payload["messageId"] as? String)?.trim().orEmpty()
         val chatId = engineChatId.trim()
+        if (action == "select" && messageId.isNotEmpty()) {
+          adapter.enterSelectionMode(messageId)
+          return
+        }
         if (action == "reply" && messageId.isNotEmpty()) {
           startReplyToMessage(messageId)
           return

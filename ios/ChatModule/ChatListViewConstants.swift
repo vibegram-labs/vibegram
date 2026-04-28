@@ -2,6 +2,7 @@ import UIKit
 
 let listBottomThreshold: CGFloat = 88.0
 let messageHorizontalInset: CGFloat = 16.0
+let messageSelectionLeadingInset: CGFloat = 38.0
 let sectionTopInset: CGFloat = 10.0
 let sectionBottomInset: CGFloat = 14.0
 let bubbleSideMargin: CGFloat = 8.0

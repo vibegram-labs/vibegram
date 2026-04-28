@@ -30,6 +30,7 @@ internal class NativeRowViewHolder(
   val container: FrameLayout,
   val bubbleContainer: FrameLayout,
   val tailView: BubbleTailView,
+  val selectionCircleView: MessageSelectionCircleView,
   val replyPreviewView: FrameLayout,
   val replyPreviewTitleView: TextView,
   val replyPreviewTextView: TextView,
@@ -55,6 +56,65 @@ internal class NativeRowViewHolder(
   val dayLabel: TextView,
   val agentSenderLabel: TextView,
 ) : RecyclerView.ViewHolder(container)
+
+internal class MessageSelectionCircleView(context: Context) : View(context) {
+  private var checked = false
+  private var accentColor = Color.argb(255, 106, 79, 207)
+  private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.STROKE
+    strokeWidth = dpF(2f)
+    strokeCap = Paint.Cap.ROUND
+  }
+  private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.FILL
+  }
+  private val checkPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+    style = Paint.Style.STROKE
+    strokeWidth = dpF(2.1f)
+    strokeCap = Paint.Cap.ROUND
+    strokeJoin = Paint.Join.ROUND
+    color = Color.WHITE
+  }
+  private val checkPath = Path()
+
+  init {
+    isClickable = true
+    isFocusable = true
+  }
+
+  fun bind(selected: Boolean, appearance: ChatListAppearance) {
+    checked = selected
+    accentColor = appearance.bubbleMeGradient.firstOrNull() ?: accentColor
+    invalidate()
+  }
+
+  override fun onDraw(canvas: Canvas) {
+    super.onDraw(canvas)
+    val size = min(width, height).toFloat().coerceAtLeast(1f)
+    val radius = (size * 0.5f) - dpF(2f)
+    val cx = width * 0.5f
+    val cy = height * 0.5f
+    if (checked) {
+      fillPaint.color = accentColor
+      canvas.drawCircle(cx, cy, radius, fillPaint)
+      checkPath.reset()
+      checkPath.moveTo(cx - radius * 0.42f, cy + radius * 0.02f)
+      checkPath.lineTo(cx - radius * 0.12f, cy + radius * 0.32f)
+      checkPath.lineTo(cx + radius * 0.45f, cy - radius * 0.30f)
+      canvas.drawPath(checkPath, checkPaint)
+    } else {
+      ringPaint.color = Color.argb(180, 142, 150, 165)
+      canvas.drawCircle(cx, cy, radius, ringPaint)
+    }
+  }
+
+  private fun dpF(value: Float): Float =
+    TypedValue.applyDimension(
+      TypedValue.COMPLEX_UNIT_DIP,
+      value,
+      context.resources.displayMetrics,
+    )
+}
 
 internal class BubbleTailView(context: Context) : View(context) {
   companion object {
@@ -1102,6 +1162,9 @@ internal fun createNativeMessageRowViewHolder(context: Context): NativeRowViewHo
   val tail = BubbleTailView(context).apply {
     visibility = View.GONE
   }
+  val selectionCircle = MessageSelectionCircleView(context).apply {
+    visibility = View.GONE
+  }
 
   val agentSender = TextView(context).apply {
     setTextSize(TypedValue.COMPLEX_UNIT_SP, 12f)
@@ -1482,6 +1545,12 @@ internal fun createNativeMessageRowViewHolder(context: Context): NativeRowViewHo
   )
   root.addView(bubble)
   root.addView(
+    selectionCircle,
+    FrameLayout.LayoutParams(dp(26), dp(26), Gravity.START or Gravity.CENTER_VERTICAL).apply {
+      leftMargin = dp(6)
+    },
+  )
+  root.addView(
     retryButton,
     FrameLayout.LayoutParams(dp(28), dp(28), Gravity.END or Gravity.BOTTOM).apply {
       rightMargin = dp(34)
@@ -1501,6 +1570,7 @@ internal fun createNativeMessageRowViewHolder(context: Context): NativeRowViewHo
     root,
     bubble,
     tail,
+    selectionCircle,
     replyPreview,
     replyTitle,
     replyText,

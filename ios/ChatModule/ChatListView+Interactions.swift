@@ -483,10 +483,17 @@ extension ChatListView: UIGestureRecognizerDelegate, ChatContextMenuOverlayDeleg
   }
 
   public func contextMenuDidSelectAction(_ actionId: String, messageId _: String) {
-    customContextMenuOverlay?.animateOut(reason: "action:\(actionId)", completion: nil)
-
     guard let overlay = customContextMenuOverlay else { return }
     let mid = overlay.messageId
+
+    if actionId == "select" {
+      overlay.animateOut(reason: "action:\(actionId)") { [weak self] in
+        self?.beginMessageSelection(messageId: mid)
+      }
+      return
+    }
+
+    overlay.animateOut(reason: "action:\(actionId)", completion: nil)
 
     onNativeEvent([
       "type": "contextMenuAction",

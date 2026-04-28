@@ -4914,6 +4914,57 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
   }
 }
 
+private final class MessageSelectionCircleView: UIControl {
+  private var checked = false
+  private var accentColor = UIColor.systemBlue
+
+  override init(frame: CGRect) {
+    super.init(frame: frame)
+    backgroundColor = .clear
+    isHidden = true
+    isAccessibilityElement = true
+    accessibilityLabel = "Select message"
+  }
+
+  required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+  func configure(selected: Bool, appearance: ChatListAppearance) {
+    checked = selected
+    accentColor = appearance.bubbleMeGradient.first ?? UIColor.systemBlue
+    accessibilityValue = selected ? "Selected" : "Not selected"
+    setNeedsDisplay()
+  }
+
+  override func draw(_ rect: CGRect) {
+    let diameter = min(rect.width, rect.height) - 4.0
+    guard diameter > 1.0 else { return }
+    let circleRect = CGRect(
+      x: (rect.width - diameter) * 0.5,
+      y: (rect.height - diameter) * 0.5,
+      width: diameter,
+      height: diameter
+    )
+    let circlePath = UIBezierPath(ovalIn: circleRect)
+    if checked {
+      accentColor.setFill()
+      circlePath.fill()
+      let check = UIBezierPath()
+      check.move(to: CGPoint(x: circleRect.minX + diameter * 0.28, y: circleRect.midY + diameter * 0.03))
+      check.addLine(to: CGPoint(x: circleRect.minX + diameter * 0.43, y: circleRect.midY + diameter * 0.22))
+      check.addLine(to: CGPoint(x: circleRect.minX + diameter * 0.72, y: circleRect.midY - diameter * 0.24))
+      UIColor.white.setStroke()
+      check.lineWidth = 2.0
+      check.lineCapStyle = .round
+      check.lineJoinStyle = .round
+      check.stroke()
+    } else {
+      UIColor.secondaryLabel.withAlphaComponent(0.56).setStroke()
+      circlePath.lineWidth = 2.0
+      circlePath.stroke()
+    }
+  }
+}
+
 final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   static let reuseIdentifier = "ChatListCell"
   private static let reactionBadgeBaseSize = CGSize(width: 34.0, height: 24.0)
@@ -4962,8 +5013,11 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   private let dayLabel = UILabel()
   private let reactionPillView = UIView()
   private let reactionLabel = UILabel()
+  private let selectionCircleView = MessageSelectionCircleView()
   private var appearance = ChatListAppearance.fallback
-  internal(set) var row: ChatListRow?
+  var row: ChatListRow?
+  private var selectionMode = false
+  private var isSelectionChecked = false
   private var isGhostHidden = false
   private var isContextMenuExtracted = false
   private var isContextMenuHeld = false
@@ -5017,6 +5071,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   var onInlineAttachmentTap: ((ChatListRow) -> Void)?
   var onMediaNaturalSizeResolved: ((String?, String, CGSize) -> Void)?
   var onRetryMessageTap: ((ChatListRow) -> Void)?
+  var onSelectionToggle: ((ChatListRow) -> Void)?
 
   override init(frame: CGRect) {
     super.init(frame: frame)
@@ -5069,6 +5124,8 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
 
     contentView.addSubview(reactionPillView)
     reactionPillView.addSubview(reactionLabel)
+    contentView.addSubview(selectionCircleView)
+    selectionCircleView.addTarget(self, action: #selector(handleSelectionToggle), for: .touchUpInside)
 
     messageLabel.numberOfLines = 0
     messageLabel.font = bubbleMessageFont
@@ -5330,10 +5387,14 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     row: ChatListRow,
     hiddenMessageId: String?,
     skipRemoteMediaLoad: Bool = false,
-    preferredLocalMediaURLOverride: String? = nil
+    preferredLocalMediaURLOverride: String? = nil,
+    selectionMode: Bool = false,
+    selected: Bool = false
   ) {
     let activeVoiceSnapshot = VoiceBubblePlaybackCoordinator.shared.currentSnapshot
     self.row = row
+    self.selectionMode = selectionMode
+    self.isSelectionChecked = selected
     cachedLayoutMetrics = nil
     if row.visualKind == .voice, activeVoiceSnapshot.messageId == row.messageId {
       mediaNeedsDownload = activeVoiceSnapshot.isDownloading
@@ -5368,6 +5429,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       mediaProgressSpinner.stopAnimating()
       mediaProgressOverlayView.isHidden = true
       mediaProgressSizeLabel.isHidden = true
+      selectionCircleView.isHidden = true
     case .message:
       let isGhostHidden = hiddenMessageId == row.messageId
       let usesTransparentAgentStreaming = usesTransparentAgentStreamingLayout(row)
@@ -5392,6 +5454,8 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       mediaContainerView.isHidden = isGhostHidden || row.visualKind == .text
       inlineAttachmentView.isHidden = isGhostHidden || !hasInlineAttachment(row)
       metaContainerView.isHidden = isGhostHidden || usesTransparentAgentStreaming
+      selectionCircleView.isHidden = !selectionMode || isGhostHidden
+      selectionCircleView.configure(selected: selected, appearance: appearance)
 
       // Agent/Mention labeling
       let isTyping = row.messageType == "typing"
@@ -5571,7 +5635,10 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     onInlineAttachmentTap = nil
     onMediaNaturalSizeResolved = nil
     onRetryMessageTap = nil
+    onSelectionToggle = nil
     row = nil
+    selectionMode = false
+    isSelectionChecked = false
     cachedLayoutMetrics = nil
     isGhostHidden = false
     mediaProgressSpinner.stopAnimating()
@@ -5602,6 +5669,7 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     bubbleView.applyWallpaperBackdrop(snapshot: nil, containerSize: .zero, sampleRect: .zero)
     tailView.applyWallpaperBackdrop(snapshot: nil, containerSize: .zero, sampleRect: .zero)
     reactionPillView.isHidden = true
+    selectionCircleView.isHidden = true
     externalVoiceMessageId = nil
     externalVoiceIsPlaying = false
     externalVoiceProgress = 0.0
@@ -5688,17 +5756,20 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
       return
     }
 
+    let selectionInset = selectionMode ? messageSelectionLeadingInset : 0.0
+    let layoutWidth = max(1.0, bounds.width - selectionInset)
     let metrics: ChatMessageBubbleLayoutMetrics
-    if let cached = cachedLayoutMetrics, cachedLayoutWidth == bounds.width, !cached.usesRichTextLayout {
+    if let cached = cachedLayoutMetrics, cachedLayoutWidth == layoutWidth, !cached.usesRichTextLayout {
       metrics = cached
     } else {
-      metrics = measureMessageBubbleLayout(row: row, rowWidth: bounds.width)
+      metrics = measureMessageBubbleLayout(row: row, rowWidth: layoutWidth)
       cachedLayoutMetrics = metrics
-      cachedLayoutWidth = bounds.width
+      cachedLayoutWidth = layoutWidth
     }
     let bubbleWidth = metrics.bubbleWidth
     let bubbleHeight = metrics.bubbleHeight
-    let bubbleX = row.isMe ? bounds.width - bubbleWidth - bubbleSideMargin : bubbleSideMargin
+    let bubbleX =
+      (row.isMe ? layoutWidth - bubbleWidth - bubbleSideMargin : bubbleSideMargin) + selectionInset
     let bubbleY = max(0.0, bounds.height - bubbleHeight)
     let bubbleFrame = pixelAlignedRect(
       CGRect(
@@ -5714,6 +5785,14 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
     CATransaction.setDisableActions(true)
 
     bubbleView.frame = bubbleFrame
+    let selectionSize: CGFloat = 26.0
+    selectionCircleView.frame = pixelAlignedRect(
+      CGRect(
+        x: 2.0,
+        y: max(0.0, bubbleFrame.midY - selectionSize * 0.5),
+        width: selectionSize,
+        height: selectionSize
+      ))
     let isTransparentSticker = isTransparentStickerMessage(row)
     let usesTransparentAgentStreaming = usesTransparentAgentStreamingLayout(row)
     let isFullBleed = metrics.isMediaLayout && usesFullBleedMediaLayout(row)
@@ -7423,6 +7502,11 @@ final class ChatListCell: UICollectionViewCell, VoicePlayableCell {
   @objc private func handleRetryTap() {
     guard let row else { return }
     onRetryMessageTap?(row)
+  }
+
+  @objc private func handleSelectionToggle() {
+    guard let row else { return }
+    onSelectionToggle?(row)
   }
 
   @objc private func handleInlineAttachmentTap() {

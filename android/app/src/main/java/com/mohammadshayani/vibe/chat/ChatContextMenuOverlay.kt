@@ -408,16 +408,6 @@ internal class ChatContextMenuOverlay(
       actionsHeight = actionsCard.measuredHeight.toFloat(),
       isMe = config.isMe,
     )
-    if (!animateHold) {
-      layout = layout.withControlsAtTop(
-        overlayWidth = rootWidth,
-        reactionWidth = reactionCard.measuredWidth.toFloat(),
-        reactionHeight = reactionCard.measuredHeight.toFloat(),
-        actionsWidth = actionsCard.measuredWidth.toFloat(),
-        actionsHeight = actionsCard.measuredHeight.toFloat(),
-        isMe = config.isMe,
-      )
-    }
     val bubbleSnapshotRect = android.graphics.RectF(layout.bubbleRect)
     Log.d(
       TAG,
@@ -714,43 +704,6 @@ internal class ChatContextMenuOverlay(
 
     return Layout(
       bubbleRect = bubbleRect,
-      reactionRect = reactionRect,
-      actionsRect = actionsRect,
-    )
-  }
-
-  private fun Layout.withControlsAtTop(
-    overlayWidth: Float,
-    reactionWidth: Float,
-    reactionHeight: Float,
-    actionsWidth: Float,
-    actionsHeight: Float,
-    isMe: Boolean,
-  ): Layout {
-    val safeMargin = dpF(14f)
-    val safeLeft = safeMargin
-    val safeRight = overlayWidth - safeMargin
-    val top = safeMargin + dpF(12f)
-    val gap = dpF(8f)
-    val alignRight = isMe || bubbleRect.centerX() > overlayWidth * 0.5f
-    fun xFor(width: Float): Float {
-      val target = if (alignRight) safeRight - width else safeLeft
-      return target.coerceIn(safeLeft, (safeRight - width).coerceAtLeast(safeLeft))
-    }
-    val reactionRect = android.graphics.RectF(
-      xFor(reactionWidth),
-      top,
-      xFor(reactionWidth) + reactionWidth,
-      top + reactionHeight,
-    )
-    val actionsTop = reactionRect.bottom + gap
-    val actionsRect = android.graphics.RectF(
-      xFor(actionsWidth),
-      actionsTop,
-      xFor(actionsWidth) + actionsWidth,
-      actionsTop + actionsHeight,
-    )
-    return copy(
       reactionRect = reactionRect,
       actionsRect = actionsRect,
     )
