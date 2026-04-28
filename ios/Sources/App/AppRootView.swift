@@ -217,7 +217,8 @@ final class AppShellCoordinator: ObservableObject {
         self?.closePresentedChat(requestID: requestID)
       }
     )
-    controller.modalPresentationStyle = .fullScreen
+    controller.modalPresentationStyle = .overFullScreen
+    controller.modalPresentationCapturesStatusBarAppearance = true
     controller.transitioningDelegate = pushTransitionDelegate
     activeRequestID = requestID
     activeChatController = controller
@@ -334,7 +335,7 @@ private final class ChatPushAnimator: NSObject, UIViewControllerAnimatedTransiti
   func transitionDuration(using transitionContext: (any UIViewControllerContextTransitioning)?)
     -> TimeInterval
   {
-    0.22
+    0.20
   }
 
   func animateTransition(using transitionContext: any UIViewControllerContextTransitioning) {
@@ -349,20 +350,25 @@ private final class ChatPushAnimator: NSObject, UIViewControllerAnimatedTransiti
       let finalFrame = transitionContext.finalFrame(for: transitionContext.viewController(forKey: .to)!)
       toView.frame = finalFrame.offsetBy(dx: finalFrame.width, dy: 0)
       containerView.addSubview(toView)
-
-      let fromView = transitionContext.view(forKey: .from)
+      toView.layer.shadowColor = UIColor.black.cgColor
+      toView.layer.shadowOpacity = 0.18
+      toView.layer.shadowRadius = 18
+      toView.layer.shadowOffset = CGSize(width: -8, height: 0)
 
       UIView.animate(
         withDuration: duration,
         delay: 0,
-        options: [.curveEaseInOut],
+        options: [.curveEaseOut, .allowUserInteraction],
         animations: {
           toView.frame = finalFrame
-          fromView?.frame = fromView?.frame.offsetBy(dx: -(finalFrame.width * 0.3), dy: 0) ?? .zero
         },
         completion: { finished in
-          fromView?.frame = finalFrame
-          transitionContext.completeTransition(!transitionContext.transitionWasCancelled)
+          let completed = !transitionContext.transitionWasCancelled
+          if !completed {
+            toView.removeFromSuperview()
+          }
+          toView.layer.shadowOpacity = 0
+          transitionContext.completeTransition(completed)
         }
       )
     } else {
@@ -374,20 +380,28 @@ private final class ChatPushAnimator: NSObject, UIViewControllerAnimatedTransiti
       let initialFrame = fromView.frame
 
       if let toView {
-        toView.frame = initialFrame.offsetBy(dx: -(initialFrame.width * 0.3), dy: 0)
+        toView.frame = initialFrame
         containerView.insertSubview(toView, belowSubview: fromView)
       }
+      fromView.layer.shadowColor = UIColor.black.cgColor
+      fromView.layer.shadowOpacity = 0.16
+      fromView.layer.shadowRadius = 18
+      fromView.layer.shadowOffset = CGSize(width: -8, height: 0)
 
       UIView.animate(
         withDuration: duration,
         delay: 0,
-        options: [.curveEaseInOut],
+        options: [.curveEaseIn, .allowUserInteraction],
         animations: {
           fromView.frame = initialFrame.offsetBy(dx: initialFrame.width, dy: 0)
-          toView?.frame = initialFrame
         },
         completion: { finished in
-          transitionContext.completeTransition(!transitionContext.transitionWasCancelled)
+          let completed = !transitionContext.transitionWasCancelled
+          if !completed {
+            fromView.frame = initialFrame
+          }
+          fromView.layer.shadowOpacity = 0
+          transitionContext.completeTransition(completed)
         }
       )
     }
@@ -402,21 +416,14 @@ private final class ChatsViewModel: ObservableObject {
   @Published var errorMessage: String?
 
   private var hasLoaded = false
+  private var backgroundRefreshTask: Task<Void, Never>?
+
+  deinit {
+    backgroundRefreshTask?.cancel()
+  }
 
   func loadIfNeeded() async {
     guard !hasLoaded else { return }
-    if let config = AppSessionConfig.current {
-      let cachedRows = ChatHomeService.cachedRows(config: config)
-      if !cachedRows.isEmpty {
-        rows = cachedRows
-        hasLoaded = true
-        warmCachedRows(cachedRows, shouldFetchHistory: false)
-      }
-    }
-    await refresh()
-  }
-
-  func refresh() async {
     guard let config = AppSessionConfig.current else {
       if rows.isEmpty {
         errorMessage = "The current session is unavailable."
@@ -424,25 +431,73 @@ private final class ChatsViewModel: ObservableObject {
       return
     }
 
-    isLoading = rows.isEmpty
+    let cachedRows = ChatHomeService.cachedRows(config: config)
+    if !cachedRows.isEmpty {
+      rows = cachedRows
+      hasLoaded = true
+      isLoading = false
+      isWaitingForNetwork = false
+      errorMessage = nil
+      warmCachedRows(cachedRows, shouldFetchHistory: false)
+      NSLog("[ChatsViewModel] restored cached rows count=%d; scheduling background refresh", cachedRows.count)
+      scheduleBackgroundRefreshAfterCachedStart()
+      return
+    }
+
+    await refresh(preserveRows: false)
+  }
+
+  func refresh() async {
+    backgroundRefreshTask?.cancel()
+    backgroundRefreshTask = nil
+    await refresh(preserveRows: false)
+  }
+
+  private func refresh(preserveRows: Bool) async {
+    guard let config = AppSessionConfig.current else {
+      if rows.isEmpty {
+        errorMessage = "The current session is unavailable."
+      }
+      return
+    }
+
+    isLoading = rows.isEmpty && !preserveRows
     isWaitingForNetwork = false
     errorMessage = nil
     defer { isLoading = false }
 
     do {
-      rows = try await ChatHomeService.fetchChats(config: config)
+      let nextRows = try await ChatHomeService.fetchChats(config: config)
+      if Self.rowsSnapshotSignature(nextRows) != Self.rowsSnapshotSignature(rows) {
+        rows = nextRows
+        NSLog("[ChatsViewModel] applied remote rows count=%d preserveRows=%@", nextRows.count, preserveRows ? "Y" : "N")
+      } else {
+        NSLog("[ChatsViewModel] skipped identical remote rows count=%d preserveRows=%@", nextRows.count, preserveRows ? "Y" : "N")
+      }
       hasLoaded = true
       isWaitingForNetwork = false
-      warmCachedRows(rows, shouldFetchHistory: true)
+      warmCachedRows(nextRows, shouldFetchHistory: true)
     } catch {
       let offline = ChatHomeService.isOfflineError(error)
       isWaitingForNetwork = offline
-      if rows.isEmpty || !offline {
+      if rows.isEmpty {
         errorMessage = error.localizedDescription
       } else {
         errorMessage = nil
       }
       hasLoaded = true
+    }
+  }
+
+  private func scheduleBackgroundRefreshAfterCachedStart() {
+    backgroundRefreshTask?.cancel()
+    backgroundRefreshTask = Task { [weak self] in
+      do {
+        try await Task.sleep(nanoseconds: 450_000_000)
+      } catch {
+        return
+      }
+      await self?.refresh(preserveRows: true)
     }
   }
 
@@ -459,6 +514,24 @@ private final class ChatsViewModel: ObservableObject {
     guard shouldFetchHistory else { return }
     let preloadChatIds = visibleRows.prefix(2).map(\.chatId)
     ChatEngine.shared.prefetchChatHistories(chatIds: preloadChatIds)
+  }
+
+  private static func rowsSnapshotSignature(_ rows: [ChatHomeListRow]) -> String {
+    rows.map { row in
+      [
+        row.chatId,
+        row.title,
+        row.preview,
+        row.timeLabel,
+        "\(row.unreadCount)",
+        "\(row.markedUnread)",
+        "\(row.muted)",
+        "\(row.pinned)",
+        "\(row.isTyping)",
+        "\(row.isOnline)",
+        row.avatarUri ?? "",
+      ].joined(separator: "\u{1F}")
+    }.joined(separator: "\u{1E}")
   }
 }
 
@@ -1201,6 +1274,8 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
       selectedChatIDs: selectedChatIDs
     )
     guard nextSignature != lastAppliedSignature else { return }
+    let previousRowCount = self.rows.count
+    let previousContentOffset = tableView.contentOffset
     lastAppliedSignature = nextSignature
     self.rows = rows
     self.isDark = isDark
@@ -1209,6 +1284,15 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
     UIView.performWithoutAnimation {
       tableView.reloadData()
       tableView.layoutIfNeeded()
+      if previousRowCount == rows.count, !rows.isEmpty {
+        let minY = -tableView.adjustedContentInset.top
+        let maxY = max(
+          minY,
+          tableView.contentSize.height - tableView.bounds.height + tableView.adjustedContentInset.bottom
+        )
+        let y = min(max(previousContentOffset.y, minY), maxY)
+        tableView.setContentOffset(CGPoint(x: previousContentOffset.x, y: y), animated: false)
+      }
     }
   }
 

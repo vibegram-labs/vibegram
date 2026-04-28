@@ -111,6 +111,7 @@ struct ChatHomeListRow {
   let initialMessages: [[String: Any]]
 
   func cachePayload(messageLimit: Int = 5) -> [String: Any] {
+    let shouldIncludeMessagePayload = messageLimit > 0
     var payload: [String: Any] = [
       "chatId": chatId,
       "title": title,
@@ -125,8 +126,8 @@ struct ChatHomeListRow {
       "avatarFallback": avatarFallback,
       "isSavedMessages": isSavedMessages,
       "isGroup": isGroup,
-      "previewRows": previewRows,
-      "messages": Array(initialMessages.suffix(max(0, messageLimit))),
+      "previewRows": shouldIncludeMessagePayload ? previewRows : [],
+      "messages": shouldIncludeMessagePayload ? Array(initialMessages.suffix(messageLimit)) : [],
     ]
     if let peerUserId { payload["peerUserId"] = peerUserId }
     if let avatarUri { payload["avatarUri"] = avatarUri }
