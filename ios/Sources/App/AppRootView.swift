@@ -1656,6 +1656,9 @@ private final class ChatConversationController: UIViewController {
   private var didInitialScroll = false
   private var rowsRefreshGeneration: UInt = 0
   private var lastLayoutSignature: String?
+  private var hasAppeared = false
+  private var pendingDeferredEngineStateRefresh = false
+  private var deferredEngineRowsReadyChatId: String?
 
   init(route: ChatRoute, isDark: Bool, onClose: (() -> Void)?) {
     self.route = route
@@ -1706,9 +1709,11 @@ private final class ChatConversationController: UIViewController {
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
+    hasAppeared = true
     logLifecycle("viewDidAppear")
     logVisualState("viewDidAppear", force: true)
     settleInitialBottomIfNeeded(reason: "viewDidAppear")
+    completeDeferredEngineStateRefreshIfNeeded(chatId: route.chatId)
   }
 
   override func viewDidLayoutSubviews() {
@@ -1762,8 +1767,22 @@ private final class ChatConversationController: UIViewController {
     appShellRouteLog(
       "ChatConversationController applyRoute chatId=\(route.chatId) title=\(route.title) forceRefresh=\(forceChannelRefresh) initialRows=\(route.initialRows.count)")
 
+    let deferEngineStateRefreshes = view.window == nil && !hasAppeared
+    if deferEngineStateRefreshes {
+      pendingDeferredEngineStateRefresh = true
+      deferredEngineRowsReadyChatId = nil
+      appShellRouteLog(
+        "ChatConversationController deferEngineState chatId=\(route.chatId) reason=prePresentation")
+    } else {
+      pendingDeferredEngineStateRefresh = false
+      deferredEngineRowsReadyChatId = nil
+    }
+
     let surfaceId = "native_chat_\(route.chatId)"
     mainView.surfaceId = surfaceId
+    mainView.setDefersEngineStateRefreshes(deferEngineStateRefreshes)
+    mainView.setEngineChannelBindingEnabled(false)
+    mainView.setStatusAuthorityEnabled(!deferEngineStateRefreshes)
     mainView.setEngineSurfaceId(surfaceId)
     mainView.setEngineChatId(route.chatId)
     mainView.setEnginePeerUserId(route.peerUserId ?? "")
@@ -1780,7 +1799,6 @@ private final class ChatConversationController: UIViewController {
     mainView.setProfileBio("")
     mainView.setAvatarUri(route.avatarURI)
     mainView.setIsGroupOrChannel(route.isGroup)
-    mainView.setStatusAuthorityEnabled(true)
     mainView.setInputPlaceholder(route.chatId == "saved_messages" ? "Saved Message" : "Message")
     mainView.setInputBarEnabled(true)
     mainView.setNativeSendEnabled(true)
@@ -1789,7 +1807,11 @@ private final class ChatConversationController: UIViewController {
     appShellRouteLog(
       "ChatConversationController configuredSurface chatId=\(route.chatId) surfaceId=\(surfaceId) peerUserId=\(route.peerUserId ?? "") isGroup=\(route.isGroup) headerMode=\(route.chatId == "saved_messages" ? "savedmessages" : "default") windowAttached=\(view.window != nil)")
 
-    refreshHeaderState()
+    if deferEngineStateRefreshes {
+      refreshRouteOnlyHeaderState()
+    } else {
+      refreshHeaderState()
+    }
     refreshRows(preferInitialRows: true)
     logVisualState("afterApplyRoute", force: true)
 
@@ -1870,10 +1892,26 @@ private final class ChatConversationController: UIViewController {
         appShellRouteLog(
           "ChatConversationController refreshRows chatId=\(chatId) rows=\(rows.count) nativeRows=\(nativeRows.count) initialRows=\(initialRows.count) source=\(nativeRows.isEmpty ? "initial" : "native") firstRowId=\(firstRowID)")
         self.mainView.setRows(rows)
+        self.deferredEngineRowsReadyChatId = chatId
+        self.completeDeferredEngineStateRefreshIfNeeded(chatId: chatId)
         self.settleInitialBottomIfNeeded(reason: "refreshRows")
         self.logVisualState("afterRefreshRows")
       }
     }
+  }
+
+  private func completeDeferredEngineStateRefreshIfNeeded(chatId: String) {
+    guard hasAppeared, pendingDeferredEngineStateRefresh, route.chatId == chatId,
+      deferredEngineRowsReadyChatId == chatId
+    else { return }
+    pendingDeferredEngineStateRefresh = false
+    deferredEngineRowsReadyChatId = nil
+    appShellRouteLog(
+      "ChatConversationController completeDeferredEngineState chatId=\(chatId)")
+    mainView.setDefersEngineStateRefreshes(false)
+    mainView.setStatusAuthorityEnabled(true)
+    mainView.refreshEngineStateAfterDeferredRouteOpen()
+    refreshHeaderState()
   }
 
   private func appRouteLogOpenResult(chatId: String, snapshot: [String: Any]) {
@@ -1894,6 +1932,12 @@ private final class ChatConversationController: UIViewController {
   private func refreshHeaderState() {
     mainView.setHeaderSubtitle(Self.headerSubtitle(for: route))
     mainView.setIsOnline(Self.isOnline(for: route))
+    mainView.setProfileHandle(Self.profileHandle(for: route))
+  }
+
+  private func refreshRouteOnlyHeaderState() {
+    mainView.setHeaderSubtitle(Self.routeOnlyHeaderSubtitle(for: route))
+    mainView.setIsOnline(false)
     mainView.setProfileHandle(Self.profileHandle(for: route))
   }
 
@@ -1954,7 +1998,11 @@ private final class ChatConversationController: UIViewController {
     appShellRouteLog(
       "ChatConversationController engineChanged routeChatId=\(route.chatId) changedChatId=\(changedChatId ?? "nil") reason=\(Self.normalizedString(notification.userInfo?["reason"]) ?? "unknown")")
 
-    refreshHeaderState()
+    if pendingDeferredEngineStateRefresh {
+      refreshRouteOnlyHeaderState()
+    } else {
+      refreshHeaderState()
+    }
 
     switch Self.normalizedString(notification.userInfo?["reason"]) ?? "" {
     case "chatRowsReloaded", "chatMessageInserted", "chatMessageEdited", "chatMessageDeleted",
@@ -1987,6 +2035,16 @@ private final class ChatConversationController: UIViewController {
       let label = lastSeenLabel(from: lastSeen)
     {
       return label
+    }
+    return route.peerUserId == nil ? "" : "last seen recently"
+  }
+
+  private static func routeOnlyHeaderSubtitle(for route: ChatRoute) -> String {
+    if route.chatId == "saved_messages" {
+      return "Saved Messages"
+    }
+    if route.isGroup {
+      return "group"
     }
     return route.peerUserId == nil ? "" : "last seen recently"
   }

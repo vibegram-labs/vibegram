@@ -5,6 +5,10 @@ import UIKit
 
 private let chatListMediaVerboseDebugLogs = false
 private let chatListInlineVideoVerboseDebugLogs = false
+private let chatListEngineBindingQueue = DispatchQueue(
+  label: "com.vibe.chatlist.engine-binding",
+  qos: .utility
+)
 
 public final class NativeEventDispatcher {
   public var handler: (([String: Any]) -> Void)?
@@ -547,6 +551,7 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
   private var enginePeerAgentId: String = ""
   private var enginePeerDisplayName: String = ""
   private var engineOpenedChatId: String = ""
+  private var engineChannelBindingEnabled = true
   private var statusAuthorityEnabled = false
   private var nativeOutgoingRowsById: [String: [String: Any]] = [:]
   private var nativeOutgoingOrder: [String] = []
@@ -804,7 +809,10 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     NotificationCenter.default.removeObserver(self)
     updateChatEngineChannelBinding(forceDetach: true)
     if !engineSurfaceId.isEmpty {
-      _ = ChatEngine.shared.unbindSurface(["surfaceId": engineSurfaceId])
+      let surfaceId = engineSurfaceId
+      chatListEngineBindingQueue.async {
+        _ = ChatEngine.shared.unbindSurface(["surfaceId": surfaceId])
+      }
     }
   }
 
@@ -1677,7 +1685,10 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
     if engineSurfaceId == next { return }
     if !engineSurfaceId.isEmpty {
-      _ = ChatEngine.shared.unbindSurface(["surfaceId": engineSurfaceId])
+      let surfaceId = engineSurfaceId
+      chatListEngineBindingQueue.async {
+        _ = ChatEngine.shared.unbindSurface(["surfaceId": surfaceId])
+      }
     }
     engineSurfaceId = next
     updateChatEngineBinding()
@@ -1716,6 +1727,12 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     if enginePeerAgentId == next { return }
     enginePeerAgentId = next
     updateChatEngineBinding()
+  }
+
+  func setEngineChannelBindingEnabled(_ enabled: Bool) {
+    if engineChannelBindingEnabled == enabled { return }
+    engineChannelBindingEnabled = enabled
+    updateChatEngineChannelBinding(forceDetach: !enabled)
   }
 
   func setEnginePeerDisplayName(_ value: String) {
@@ -2333,30 +2350,38 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
 
   private func updateChatEngineBinding() {
     guard !engineSurfaceId.isEmpty else { return }
-    _ = ChatEngine.shared.bindSurface([
+    let payload: [String: Any] = [
       "surfaceId": engineSurfaceId,
       "chatId": engineChatId,
       "myUserId": engineMyUserId,
       "peerUserId": enginePeerUserId,
       "peerAgentId": enginePeerAgentId,
-    ])
+    ]
+    chatListEngineBindingQueue.async {
+      _ = ChatEngine.shared.bindSurface(payload)
+    }
   }
 
   private func updateChatEngineChannelBinding(forceDetach: Bool = false) {
     let desiredChatId: String?
-    if forceDetach || window == nil {
+    if forceDetach || window == nil || !engineChannelBindingEnabled {
       desiredChatId = nil
     } else {
       desiredChatId = engineChatId.isEmpty ? nil : engineChatId
     }
 
     if !engineOpenedChatId.isEmpty, engineOpenedChatId != desiredChatId {
-      _ = ChatEngine.shared.closeChatChannel(["chatId": engineOpenedChatId])
+      let closeChatId = engineOpenedChatId
+      chatListEngineBindingQueue.async {
+        _ = ChatEngine.shared.closeChatChannel(["chatId": closeChatId])
+      }
       engineOpenedChatId = ""
     }
 
     if let desiredChatId, engineOpenedChatId != desiredChatId {
-      _ = ChatEngine.shared.openChatChannel(["chatId": desiredChatId])
+      chatListEngineBindingQueue.async {
+        _ = ChatEngine.shared.openChatChannel(["chatId": desiredChatId])
+      }
       engineOpenedChatId = desiredChatId
     }
   }

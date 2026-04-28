@@ -211,6 +211,7 @@ public final class ChatMainView: UIView,
   private var groupTypingUserIds: [String] = []
   private var directPeerTypingActive = false
   private var agentProgressSubtitle: String?
+  private var defersEngineStateRefreshes = false
   private var pinnedBannerMessageId: String?
   private var pinnedBannerTitle: String?
   private var pinnedBannerBody: String?
@@ -342,10 +343,21 @@ public final class ChatMainView: UIView,
     chatListView.setEngineSurfaceId(value)
   }
 
+  func setDefersEngineStateRefreshes(_ value: Bool) {
+    if defersEngineStateRefreshes == value { return }
+    defersEngineStateRefreshes = value
+    NSLog("[ChatMainView] defersEngineStateRefreshes=%@", value ? "true" : "false")
+  }
+
   func setEngineChatId(_ value: String) {
     engineChatId = value.trimmingCharacters(in: .whitespacesAndNewlines)
     NSLog("[ChatMainView][Pin] setEngineChatId=%@", engineChatId)
     chatListView.setEngineChatId(value)
+    guard !defersEngineStateRefreshes else {
+      updateHeaderTexts()
+      updateProfileTexts()
+      return
+    }
     refreshTypingStateFromEngine(force: true)
     refreshAgentProgressFromEngine(force: true)
     refreshPinnedBannerFromEngine(force: true)
@@ -369,6 +381,12 @@ public final class ChatMainView: UIView,
       updateAvatarViews()
       return
     }
+    guard !defersEngineStateRefreshes else {
+      updateHeaderTexts()
+      updateProfileTexts()
+      updateAvatarViews()
+      return
+    }
     refreshPresenceStateFromEngine(force: true)
     refreshTypingStateFromEngine(force: true)
     updateAvatarViews()
@@ -378,8 +396,22 @@ public final class ChatMainView: UIView,
     chatListView.setEnginePeerAgentId(value)
   }
 
+  func setEngineChannelBindingEnabled(_ enabled: Bool) {
+    chatListView.setEngineChannelBindingEnabled(enabled)
+  }
+
   func setStatusAuthorityEnabled(_ enabled: Bool) {
     chatListView.setStatusAuthorityEnabled(enabled)
+  }
+
+  func refreshEngineStateAfterDeferredRouteOpen() {
+    guard !defersEngineStateRefreshes else { return }
+    refreshPresenceStateFromEngine(force: true)
+    refreshTypingStateFromEngine(force: true)
+    refreshAgentProgressFromEngine(force: true)
+    refreshPinnedBannerFromEngine(force: true)
+    refreshProfileSummaryFromEngine(force: true)
+    fetchAgentConfigForCurrentChat()
   }
 
   func setAppearance(_ rawAppearance: [String: Any]) {
@@ -1048,6 +1080,11 @@ public final class ChatMainView: UIView,
         changedChatId,
         engineChatId
       )
+    }
+    guard !defersEngineStateRefreshes else {
+      updateHeaderTexts()
+      updateProfileTexts()
+      return
     }
     refreshPresenceStateFromEngine()
     refreshTypingStateFromEngine()
