@@ -345,6 +345,13 @@ final class ChatEngine {
     let updatedAtMs: Int64
   }
 
+  private struct PendingCallSignal {
+    let id: String
+    let event: String
+    let payload: [String: Any]
+    let createdAtMs: Int
+  }
+
   private let queue = DispatchQueue(label: "vibe.chat.engine")
   private let queueSpecificKey = DispatchSpecificKey<UInt8>()
   private let queueSpecificValue: UInt8 = 1
@@ -373,6 +380,9 @@ final class ChatEngine {
   private var nativePendingMessagePushRefs: [String: (chatId: String, messageId: String)] = [:]
   private var nativePendingEditPushRefs: [String: (chatId: String, messageId: String)] = [:]
   private var nativePendingDeletePushRefs: [String: (chatId: String, messageId: String)] = [:]
+  private var nativePendingCallSignals: [PendingCallSignal] = []
+  private var nativePendingCallPushRefs: [String: String] = [:]
+  private var nativeUserChannelDemandUntilMs = 0
   private var pendingOutboundDraftsByMessageId: [String: [String: Any]] = [:]
   private var pendingOutboundQueueByChat: [String: [String]] = [:]
   private var packetRuntimeStartInFlight = false
@@ -388,6 +398,8 @@ final class ChatEngine {
   private var historyFullyLoadedChats = Set<String>()
   private var cachedSavedMessagesResponse: [[String: Any]]?
   private var historyLoadingChats = Set<String>()
+  private let nativeCallSignalDemandMs = 60_000
+  private let nativeCallSignalMaxAgeMs = 45_000
   private var liveMessageRowsByChat: [String: [String: [String: Any]]] = [:]
   private var deletedMessageIdsByChat: [String: Set<String>] = [:]
   private var chatPeerUserIdsByChatId: [String: String] = [:]
@@ -684,6 +696,7 @@ final class ChatEngine {
         nativePendingMessagePushRefs.removeAll()
         nativePendingEditPushRefs.removeAll()
         nativePendingDeletePushRefs.removeAll()
+        nativePendingCallPushRefs.removeAll()
         nativeTypingStateByChatId.removeAll()
         peerTypingUserIdsByChatId.removeAll()
         agentProgressByChatId.removeAll()
@@ -825,6 +838,9 @@ final class ChatEngine {
   }
 
   private func hasRealtimeDemandLocked() -> Bool {
+    if nativeUserChannelDemandUntilMs > nowMs() {
+      return true
+    }
     if pendingOutboundQueueByChat.keys.contains(where: { chatNeedsRealtimeLocked($0) }) {
       return true
     }
@@ -1018,6 +1034,9 @@ final class ChatEngine {
       nativePendingMessagePushRefs.removeAll()
       nativePendingEditPushRefs.removeAll()
       nativePendingDeletePushRefs.removeAll()
+      nativePendingCallSignals.removeAll()
+      nativePendingCallPushRefs.removeAll()
+      nativeUserChannelDemandUntilMs = 0
       pendingOutboundDraftsByMessageId.removeAll()
       pendingOutboundQueueByChat.removeAll()
       onlineUsers.removeAll()
@@ -1275,6 +1294,95 @@ final class ChatEngine {
       eventName: "read-receipt",
       wireEvent: "read-receipt"
     )
+  }
+
+  func sendCallSignal(_ payload: [String: Any]) -> [String: Any] {
+    guard #available(iOS 13.0, *) else {
+      return ["accepted": false, "reason": "ios_unavailable"]
+    }
+    let event = normalizedString(payload["event"]) ?? "call-start"
+    guard ["call-start", "call-accepted", "call-end", "webrtc-signal"].contains(event) else {
+      return ["accepted": false, "reason": "unsupported_call_event", "event": event]
+    }
+    guard
+      let toUserId = normalizedString(
+        payload["toUserId"] ?? payload["to_user_id"] ?? payload["remoteUserId"]
+          ?? payload["remote_user_id"])
+    else {
+      return ["accepted": false, "reason": "missing_to_user_id", "event": event]
+    }
+
+    let now = nowMs()
+    let callId =
+      normalizedString(payload["callId"] ?? payload["call_id"])
+      ?? "call_\(now)_\(UUID().uuidString.prefix(8))"
+    var wirePayload = makeJSONSafeMap(payload)
+    wirePayload["event"] = event
+    wirePayload["callId"] = callId
+    wirePayload["toUserId"] = toUserId
+    let signalId = "\(event):\(callId):\(toUserId):\(now)"
+    var shouldConnect = false
+
+    let result = queue.sync {
+      nativeUserChannelDemandUntilMs = max(nativeUserChannelDemandUntilMs, now + nativeCallSignalDemandMs)
+      expirePendingCallSignalsLocked(now: now)
+
+      guard let client = phoenixClient,
+        let topic = nativeUserTopic,
+        (state["connected"] as? Bool) == true,
+        nativePresenceActive
+      else {
+        nativePendingCallSignals.append(
+          PendingCallSignal(id: signalId, event: event, payload: wirePayload, createdAtMs: now))
+        appendJournalLocked(
+          event: "native-call-signal-queued",
+          payload: ["id": signalId, "event": event, "callId": callId, "toUserId": toUserId]
+        )
+        shouldConnect = true
+        state["updatedAt"] = now
+        let snapshot = statusSnapshotLocked()
+        postChangeLocked(reason: "callSignalQueued", userInfo: ["event": event, "state": snapshot])
+        return [
+          "accepted": true,
+          "transport": "native",
+          "event": event,
+          "callId": callId,
+          "queued": true,
+          "reason": "user_channel_not_ready",
+        ]
+      }
+
+      let ref = client.push(topic: topic, event: event, payload: wirePayload)
+      nativePendingCallPushRefs[ref] = signalId
+      appendJournalLocked(
+        event: "native-call-signal-push",
+        payload: [
+          "id": signalId,
+          "event": event,
+          "callId": callId,
+          "toUserId": toUserId,
+          "ref": ref,
+          "topic": topic,
+        ])
+      state["updatedAt"] = now
+      let snapshot = statusSnapshotLocked()
+      postChangeLocked(reason: "callSignalSent", userInfo: ["event": event, "state": snapshot])
+      return [
+        "accepted": true,
+        "transport": "native",
+        "event": event,
+        "callId": callId,
+        "queued": false,
+        "ref": ref,
+      ]
+    }
+
+    if shouldConnect {
+      DispatchQueue.global(qos: .utility).async { [weak self] in
+        self?.ensureNativeTransport(trigger: "call_signal:\(event)")
+      }
+    }
+    return result
   }
 
   func sendTypingState(_ payload: [String: Any]) -> [String: Any] {
@@ -3684,6 +3792,7 @@ final class ChatEngine {
         nativePendingMessagePushRefs.removeAll()
         nativePendingEditPushRefs.removeAll()
         nativePendingDeletePushRefs.removeAll()
+        nativePendingCallPushRefs.removeAll()
         pendingOutboundDraftsByMessageId.removeAll()
         pendingOutboundQueueByChat.removeAll()
         nativeTypingStateByChatId.removeAll()
@@ -3787,6 +3896,7 @@ final class ChatEngine {
       self.nativePendingMessagePushRefs.removeAll()
       self.nativePendingEditPushRefs.removeAll()
       self.nativePendingDeletePushRefs.removeAll()
+      self.nativePendingCallPushRefs.removeAll()
       self.nativeTypingStateByChatId.removeAll()
       self.peerTypingUserIdsByChatId.removeAll()
       self.agentProgressByChatId.removeAll()
@@ -3827,6 +3937,7 @@ final class ChatEngine {
       self.nativePendingMessagePushRefs.removeAll()
       self.nativePendingEditPushRefs.removeAll()
       self.nativePendingDeletePushRefs.removeAll()
+      self.nativePendingCallPushRefs.removeAll()
       self.nativeTypingStateByChatId.removeAll()
       self.peerTypingUserIdsByChatId.removeAll()
       self.agentProgressByChatId.removeAll()
@@ -3877,6 +3988,7 @@ final class ChatEngine {
         self.nativePendingMessagePushRefs.removeAll()
         self.nativePendingEditPushRefs.removeAll()
         self.nativePendingDeletePushRefs.removeAll()
+        self.nativePendingCallPushRefs.removeAll()
         self.nativeTypingStateByChatId.removeAll()
         self.peerTypingUserIdsByChatId.removeAll()
         self.agentProgressByChatId.removeAll()
@@ -3896,6 +4008,82 @@ final class ChatEngine {
       let snapshot = self.statusSnapshotLocked()
       self.postChangeLocked(reason: "engineError", userInfo: ["state": snapshot, "error": error])
     }
+  }
+
+  @available(iOS 13.0, *)
+  private func expirePendingCallSignalsLocked(now: Int) {
+    let before = nativePendingCallSignals.count
+    nativePendingCallSignals.removeAll { signal in
+      now - signal.createdAtMs > nativeCallSignalMaxAgeMs
+    }
+    let expired = before - nativePendingCallSignals.count
+    if expired > 0 {
+      appendJournalLocked(event: "native-call-signal-expired", payload: ["count": expired])
+    }
+  }
+
+  @available(iOS 13.0, *)
+  private func flushPendingCallSignalsLocked(trigger: String) {
+    guard let client = phoenixClient,
+      let topic = nativeUserTopic,
+      (state["connected"] as? Bool) == true,
+      nativePresenceActive
+    else { return }
+
+    let now = nowMs()
+    expirePendingCallSignalsLocked(now: now)
+    guard !nativePendingCallSignals.isEmpty else { return }
+
+    let signals = nativePendingCallSignals
+    nativePendingCallSignals.removeAll()
+    for signal in signals {
+      let ref = client.push(topic: topic, event: signal.event, payload: signal.payload)
+      nativePendingCallPushRefs[ref] = signal.id
+      appendJournalLocked(
+        event: "native-call-signal-flush",
+        payload: ["id": signal.id, "event": signal.event, "ref": ref, "topic": topic, "trigger": trigger]
+      )
+    }
+    state["updatedAt"] = now
+    let snapshot = statusSnapshotLocked()
+    postChangeLocked(
+      reason: "callSignalSent",
+      userInfo: ["count": signals.count, "trigger": trigger, "state": snapshot]
+    )
+  }
+
+  private func handleUserCallEventLocked(event: String, payload: [String: Any]) -> Bool {
+    guard ["call-start", "call-accepted", "call-end", "webrtc-signal"].contains(event) else {
+      return false
+    }
+
+    var callPayload = makeJSONSafeMap(payload)
+    callPayload["event"] = event
+    callPayload["direction"] = "inbound"
+    appendJournalLocked(
+      event: "native-call-signal-inbound",
+      payload: [
+        "event": event,
+        "callId": normalizedString(callPayload["callId"] ?? callPayload["call_id"]) ?? "",
+      ]
+    )
+
+    DispatchQueue.main.async {
+      switch event {
+      case "call-start":
+        _ = VibeNativeCallEngine.shared.handleSignal(callPayload)
+        _ = VibeNativeCallManager.shared.handleRemoteNotification(userInfo: callPayload)
+      case "call-end":
+        var endPayload = callPayload
+        endPayload["remote"] = true
+        _ = VibeNativeCallEngine.shared.endCall(endPayload)
+        VibeNativeCallManager.shared.clearIncomingCallUi(
+          callId: self.normalizedString(callPayload["callId"] ?? callPayload["call_id"]))
+      default:
+        _ = VibeNativeCallEngine.shared.handleSignal(callPayload)
+      }
+    }
+    return true
   }
 
   @available(iOS 13.0, *)
