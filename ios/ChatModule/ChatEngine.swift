@@ -396,6 +396,7 @@ final class ChatEngine {
   private var pinnedFetchInFlightChatIds = Set<String>()
   private var historyRowsByChat: [String: [[String: Any]]] = [:]
   private var historyFullyLoadedChats = Set<String>()
+  private var historyRowsRestoredFromCacheChats = Set<String>()
   private var cachedSavedMessagesResponse: [[String: Any]]?
   private var historyLoadingChats = Set<String>()
   private let nativeCallSignalDemandMs = 60_000
@@ -422,6 +423,8 @@ final class ChatEngine {
   /// Time-to-live for the cached private key in memory (seconds).
   /// After this period of inactivity the key is cleared and re-derived from Keychain on next use.
   private let keyTTL: TimeInterval = 300
+  private let chatHistoryCacheKeyPrefix = "vibe.ios.chatHistory.rows.v1"
+  private let chatHistoryCacheRowLimit = 80
 
   private init() {
     queue.setSpecific(key: queueSpecificKey, value: queueSpecificValue)
@@ -1055,6 +1058,7 @@ final class ChatEngine {
       deletedMessageIdsByChat.removeAll()
       historyRowsByChat.removeAll()
       historyFullyLoadedChats.removeAll()
+      historyRowsRestoredFromCacheChats.removeAll()
       historyLoadingChats.removeAll()
       cachedSavedMessagesResponse = nil
       chatPeerUserIdsByChatId.removeAll()
@@ -1229,6 +1233,7 @@ final class ChatEngine {
     queue.async { [weak self] in
       guard let self else { return }
       guard let chatId = self.normalizedString(rawChatId), !chatId.isEmpty else { return }
+      _ = self.restoreCachedHistoryRowsLocked(chatId: chatId)
       guard !messages.isEmpty, !self.historyFullyLoadedChats.contains(chatId) else { return }
 
       let sortedMessages = messages.sorted { lhs, rhs in
@@ -1264,10 +1269,12 @@ final class ChatEngine {
     queue.sync {
       for (rawChatId, messagesArray) in histories {
         guard let chatId = normalizedString(rawChatId), !chatId.isEmpty else { continue }
+        _ = restoreCachedHistoryRowsLocked(chatId: chatId)
         // We only seed if the full history hasn't already been loaded.
         if !historyFullyLoadedChats.contains(chatId) {
           let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: messagesArray)
           historyRowsByChat[chatId] = rows
+          historyRowsRestoredFromCacheChats.remove(chatId)
           triggered += 1
         }
       }
@@ -2832,6 +2839,9 @@ final class ChatEngine {
       let token = authHeaderTokenLocked() ?? ""
 
       historyRowsByChat.removeValue(forKey: chatId)
+      historyFullyLoadedChats.remove(chatId)
+      historyRowsRestoredFromCacheChats.remove(chatId)
+      clearCachedHistoryRowsLocked(chatId: chatId)
       if chatId == "saved_messages" {
         self.cachedSavedMessagesResponse = nil
       }
@@ -3153,6 +3163,7 @@ final class ChatEngine {
     }
 
     return syncOnQueue {
+      _ = restoreCachedHistoryRowsLocked(chatId: chatId)
       let rows = historyRowsByChat[chatId] ?? []
       var totalMessages = 0
       var mediaCount = 0
@@ -3254,7 +3265,8 @@ final class ChatEngine {
     let chatId = normalizedString(payload["chatId"] ?? payload["chat_id"])
     guard let chatId else { return [] }
     return syncOnQueue {
-      historyRowsByChat[chatId] ?? []
+      _ = restoreCachedHistoryRowsLocked(chatId: chatId)
+      return historyRowsByChat[chatId] ?? []
     }
   }
 
@@ -3317,7 +3329,8 @@ final class ChatEngine {
   /// native rows can fully replace JS rows.
   func isChatHistoryLoaded(chatId: String) -> Bool {
     syncOnQueue {
-      historyFullyLoadedChats.contains(chatId)
+      _ = restoreCachedHistoryRowsLocked(chatId: chatId)
+      return historyFullyLoadedChats.contains(chatId)
     }
   }
 
@@ -6486,10 +6499,92 @@ final class ChatEngine {
     normalizedString(getConfigValueLocked("authToken") ?? getConfigValueLocked("token"))
   }
 
+  private func chatHistoryCacheUserIdLocked() -> String? {
+    normalizedString(configuredUserId)
+      ?? normalizedString(getConfigValueLocked("userId") ?? getConfigValueLocked("myUserId"))
+  }
+
+  private func chatHistoryCacheKeyLocked(chatId: String) -> String? {
+    guard let userId = chatHistoryCacheUserIdLocked(), !chatId.isEmpty else { return nil }
+    return "\(chatHistoryCacheKeyPrefix).\(cacheKeyComponent(userId)).\(cacheKeyComponent(chatId))"
+  }
+
+  private func restoreCachedHistoryRowsLocked(chatId: String) -> Bool {
+    guard !chatId.isEmpty else { return false }
+    if historyRowsByChat[chatId] != nil, historyFullyLoadedChats.contains(chatId) {
+      return true
+    }
+    guard let cacheKey = chatHistoryCacheKeyLocked(chatId: chatId),
+      let data = UserDefaults.standard.data(forKey: cacheKey),
+      let object = try? JSONSerialization.jsonObject(with: data, options: [.fragmentsAllowed]),
+      let rows = object as? [[String: Any]],
+      !rows.isEmpty
+    else {
+      return false
+    }
+
+    historyRowsByChat[chatId] = rows
+    historyFullyLoadedChats.insert(chatId)
+    historyRowsRestoredFromCacheChats.insert(chatId)
+    appendJournalLocked(
+      event: "native-chat-history-cache-restore",
+      payload: ["chatId": chatId, "rows": rows.count])
+    NSLog(
+      "[ChatEngine] restored cached chat history chatId=%@ rows=%d",
+      String(chatId.prefix(12)),
+      rows.count
+    )
+    return true
+  }
+
+  private func storeCachedHistoryRowsLocked(chatId: String, rows: [[String: Any]]) {
+    guard !chatId.isEmpty, !rows.isEmpty, let cacheKey = chatHistoryCacheKeyLocked(chatId: chatId)
+    else { return }
+    let limitedRows = Array(rows.suffix(chatHistoryCacheRowLimit))
+    guard JSONSerialization.isValidJSONObject(limitedRows),
+      let data = try? JSONSerialization.data(withJSONObject: limitedRows, options: [])
+    else {
+      appendJournalLocked(
+        event: "native-chat-history-cache-skip",
+        payload: ["chatId": chatId, "rows": rows.count, "reason": "invalid_json"])
+      return
+    }
+
+    UserDefaults.standard.set(data, forKey: cacheKey)
+    UserDefaults.standard.synchronize()
+    appendJournalLocked(
+      event: "native-chat-history-cache-store",
+      payload: ["chatId": chatId, "rows": limitedRows.count])
+    NSLog(
+      "[ChatEngine] stored cached chat history chatId=%@ rows=%d",
+      String(chatId.prefix(12)),
+      limitedRows.count
+    )
+  }
+
+  private func clearCachedHistoryRowsLocked(chatId: String) {
+    guard let cacheKey = chatHistoryCacheKeyLocked(chatId: chatId) else { return }
+    UserDefaults.standard.removeObject(forKey: cacheKey)
+    UserDefaults.standard.synchronize()
+  }
+
+  private func cacheKeyComponent(_ value: String) -> String {
+    let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    let mapped = trimmed.unicodeScalars.map { scalar -> Character in
+      CharacterSet.alphanumerics.contains(scalar) ? Character(scalar) : "_"
+    }
+    let resolved = String(mapped)
+    return resolved.isEmpty ? "default" : resolved
+  }
+
   private func loadChatHistoryIfNeededLocked(chatId: String, force: Bool = false) {
     guard !chatId.isEmpty else { return }
     if historyLoadingChats.contains(chatId) { return }
-    if !force, historyFullyLoadedChats.contains(chatId) { return }
+    if !force, historyFullyLoadedChats.contains(chatId),
+      !historyRowsRestoredFromCacheChats.contains(chatId)
+    {
+      return
+    }
     let isBridgeText = isBridgeTextModeLocked()
     let apiBase = apiBaseURLLocked()
     let bridgeURL = bridgeURLLocked("/bridge/v1/chat/history")
@@ -6650,6 +6745,8 @@ final class ChatEngine {
     let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: messagesArray)
     historyRowsByChat[chatId] = rows
     historyFullyLoadedChats.insert(chatId)
+    historyRowsRestoredFromCacheChats.remove(chatId)
+    storeCachedHistoryRowsLocked(chatId: chatId, rows: rows)
     state["updatedAt"] = nowMs()
     appendJournalLocked(
       event: "native-chat-history-load-ok",
@@ -6677,6 +6774,8 @@ final class ChatEngine {
       if historyRowsByChat[chatId] == nil {
         historyRowsByChat[chatId] = []
       }
+      historyRowsRestoredFromCacheChats.remove(chatId)
+      clearCachedHistoryRowsLocked(chatId: chatId)
       cachedSavedMessagesResponse = []
       let snapshot = statusSnapshotLocked()
       postChangeLocked(reason: "chatRowsReloaded", userInfo: ["chatId": chatId, "state": snapshot])
@@ -6687,6 +6786,8 @@ final class ChatEngine {
     let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: normalized)
     historyRowsByChat[chatId] = rows
     historyFullyLoadedChats.insert(chatId)
+    historyRowsRestoredFromCacheChats.remove(chatId)
+    storeCachedHistoryRowsLocked(chatId: chatId, rows: rows)
     state["updatedAt"] = nowMs()
     appendJournalLocked(
       event: "native-chat-history-load-ok",

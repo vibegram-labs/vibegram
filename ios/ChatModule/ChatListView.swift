@@ -5076,8 +5076,10 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     tempURL: URL? = nil
   ) -> URL {
     let fileManager = FileManager.default
-    let previewDir = fileManager.temporaryDirectory
-      .appendingPathComponent("vibe-chat-preview-docs", isDirectory: true)
+    let baseDir =
+      fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first
+      ?? fileManager.temporaryDirectory
+    let previewDir = baseDir.appendingPathComponent("vibe-chat-preview-docs", isDirectory: true)
     try? fileManager.createDirectory(at: previewDir, withIntermediateDirectories: true)
 
     let preferredName =
@@ -5098,7 +5100,7 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       (fileBaseName.isEmpty ? "document" : fileBaseName)
       .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
     let remoteKey = remoteMediaCacheKey(remoteURL: remoteURL, mediaKey: mediaKey)
-    let hashComponent = String(format: "%016llx", UInt64(bitPattern: Int64(remoteKey.hashValue)))
+    let hashComponent = chatStableCacheHash(remoteKey)
     let destinationName =
       "\(safeBase)-\(hashComponent)\(preferredExtension.isEmpty ? "" : ".\(preferredExtension)")"
     return previewDir.appendingPathComponent(destinationName, isDirectory: false)
@@ -6199,8 +6201,7 @@ extension ChatListView: ChatInputBarDelegate {
       if !fromPreferred.isEmpty { return fromPreferred }
       return normalizedURL.pathExtension.isEmpty ? "dat" : normalizedURL.pathExtension
     }()
-    let hashComponent = String(
-      format: "%016llx", UInt64(bitPattern: Int64(normalizedURL.absoluteString.hashValue)))
+    let hashComponent = chatStableCacheHash(normalizedURL.absoluteString)
     let destinationURL = importDir
       .appendingPathComponent("\(safeBase)-\(hashComponent)", isDirectory: false)
       .appendingPathExtension(ext)

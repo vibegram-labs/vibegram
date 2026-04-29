@@ -3209,13 +3209,13 @@ public final class ChatMainView: UIView,
 
     switch stateValue {
     case "connecting-native-presence":
-      return "waiting for network"
+      return nil
     case "configured", "configured-native-bootstrap", "native-config-missing":
       return "updating..."
     case "native-socket-closed", "disconnected":
       return "waiting for network"
     default:
-      if stateValue.contains("connect") { return "waiting for network" }
+      if stateValue.contains("connect") { return nil }
       if stateValue.contains("config") || stateValue.contains("bootstrap")
         || stateValue.contains("update")
       {

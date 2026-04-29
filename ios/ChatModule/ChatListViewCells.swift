@@ -23,6 +23,15 @@ private let chatMediaVideoExtensions: Set<String> = [
   "mp4", "mov", "m4v", "avi", "mkv", "webm",
 ]
 
+func chatStableCacheHash(_ value: String) -> String {
+  var hash: UInt64 = 14_695_981_039_346_656_037
+  for byte in value.utf8 {
+    hash ^= UInt64(byte)
+    hash = hash &* 1_099_511_628_211
+  }
+  return String(format: "%016llx", hash)
+}
+
 private func chatMediaDiskCacheDir() -> URL {
   let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
   let dir = caches.appendingPathComponent("chat-media-images", isDirectory: true)
@@ -53,12 +62,10 @@ private func chatMediaCacheKey(_ urlString: String, mediaKey: String?) -> String
 
 private func chatMediaDiskCacheKey(_ urlString: String) -> String {
   let normalized = chatMediaNormalizedKey(urlString)
-  // Stable hash — use SHA-like approach via hashValue but make it hex
-  let hash = UInt64(bitPattern: Int64(normalized.hashValue))
   // Preserve extension for correct UIImage decoding
   let ext = (urlString as NSString).pathExtension.lowercased()
   let suffix = ["jpg", "jpeg", "png", "gif", "webp", "heic"].contains(ext) ? ".\(ext)" : ".img"
-  return "v2-" + String(format: "%016llx", hash) + suffix
+  return "v3-" + chatStableCacheHash(normalized) + suffix
 }
 
 private func chatMediaShouldAnimate(urlString: String, messageType: String? = nil) -> Bool {
@@ -212,7 +219,7 @@ private func chatMediaVideoThumbnail(
     fileName: fileName,
     messageType: messageType
   )
-  let safeKey = String(format: "v-%016llx", UInt64(bitPattern: Int64(cacheKey.hashValue)))
+  let safeKey = "v-\(chatStableCacheHash(cacheKey))"
   let fileURL = chatMediaPreviewVideoCacheDir()
     .appendingPathComponent(safeKey)
     .appendingPathExtension(ext)
@@ -4741,13 +4748,16 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
     let ext =
       !(preferredExt?.isEmpty ?? true) ? preferredExt!
       : remoteExt == "enc" || remoteExt.isEmpty ? "m4a" : remoteExt
-    let filename = String(format: "%016llx", remoteURL.absoluteString.hashValue) + "." + ext
+    let filename = chatStableCacheHash(remoteURL.absoluteString) + "." + ext
     let preferred = cacheDir.appendingPathComponent(filename)
     if FileManager.default.fileExists(atPath: preferred.path) {
       return preferred
     }
-    let legacy = cacheDir.appendingPathComponent(String(format: "%016llx", remoteURL.absoluteString.hashValue) + ".m4a")
-    return FileManager.default.fileExists(atPath: legacy.path) ? legacy : preferred
+    let legacyStable = cacheDir.appendingPathComponent(chatStableCacheHash(remoteURL.absoluteString) + ".m4a")
+    if FileManager.default.fileExists(atPath: legacyStable.path) {
+      return legacyStable
+    }
+    return preferred
   }
 
   private func importedLocalAudioURL(for sourceURL: URL) -> URL? {
@@ -4768,8 +4778,7 @@ final class VoiceBubblePlaybackCoordinator: NSObject, AVAudioPlayerDelegate {
       (sourceName.isEmpty ? "audio" : sourceName)
       .replacingOccurrences(of: "[^A-Za-z0-9_-]+", with: "-", options: .regularExpression)
     let ext = normalizedURL.pathExtension.isEmpty ? "m4a" : normalizedURL.pathExtension
-    let hashComponent = String(
-      format: "%016llx", UInt64(bitPattern: Int64(normalizedURL.absoluteString.hashValue)))
+    let hashComponent = chatStableCacheHash(normalizedURL.absoluteString)
     let destinationURL = importDir
       .appendingPathComponent("\(safeBase)-\(hashComponent)", isDirectory: false)
       .appendingPathExtension(ext)

@@ -40,13 +40,14 @@ struct ChatRoute: Identifiable, Hashable {
   }
 
   init(row: ChatHomeListRow) {
+    let cachedRows = ChatEngine.shared.getChatRows(["chatId": row.chatId])
     self.init(
       chatId: row.chatId,
       title: row.title,
       peerUserId: row.peerUserId,
       avatarURI: row.avatarUri,
       isGroup: row.isGroup,
-      initialRows: row.previewRows
+      initialRows: cachedRows
     )
   }
 
