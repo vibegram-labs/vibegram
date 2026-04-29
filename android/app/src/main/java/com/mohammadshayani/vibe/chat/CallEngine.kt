@@ -7,20 +7,17 @@ import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 
 internal object NativeCallEngine {
   private val executor = Executors.newSingleThreadExecutor()
   @Volatile private var appContextRef: Context? = null
   @Volatile private var turnRefreshInFlight = false
-  private val state = ConcurrentHashMap<String, Any?>(
-    mapOf(
-      "state" to "idle",
-      "updatedAt" to 0L,
-      "turnState" to "idle",
-      "signalingState" to "idle",
-    )
+  private val state = linkedMapOf<String, Any?>(
+    "state" to "idle",
+    "updatedAt" to 0L,
+    "turnState" to "idle",
+    "signalingState" to "idle",
   )
 
   fun configure(context: Context, payload: Map<String, Any?>): Map<String, Any?> {
