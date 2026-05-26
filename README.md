@@ -1,4 +1,4 @@
-# Vibe
+# Vibegram
 
 > **A privacy-centric, decentralized communication platform featuring end-to-end encryption, native mobile architectures, and peer-to-peer connectivity.**
 
