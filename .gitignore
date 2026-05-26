@@ -6,16 +6,39 @@ node_modules/
 # Build outputs
 dist/
 build/
+*.apk
+*.aab
+*.apks
+*.jar
+
+# Build info and cache
+*.tsbuildinfo
+tsconfig.tsbuildinfo
+*.gradle
 
 # Environment and Secrets
 .env
 .env.local
 .env.*.local
+.env.example
+*.env.example
 server/.env
 ngrok_token.txt
 ngrok_domain.txt
 *.key
 *.pem
+*.p12
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+tor_data/
+
+# Shell scripts and deployment
+*.sh
+Dockerfile
+docker-compose.yml
+.dockerignore
 
 # Python
 __pycache__/
@@ -28,11 +51,14 @@ venv/
 *.db
 *.sqlite
 
-# Logs
+# Logs and build output
 *.log
+*.log.*
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+build*.log
+build*.txt
 
 # Tunnel logs and temporary files
 tunnel_logs/
@@ -62,11 +88,6 @@ android/.gradle/
 mobile/.local-build-artifacts/
 legacy/mobile-rn/.local-build-artifacts/
 legacy/mobile-rn/modules/vibe-chat-native/android/.gradle/
-*.apk
-*.aab
-*.apks
-*.jar
-*.keystore
 
 # Xcode user state
 *.xcuserstate
@@ -80,5 +101,6 @@ server/_build/
 tmp_trade_agent_bridge.patch
 tmp_trade_patch/
 
-# Misc
+# Misc temporary files
 *.tgz
+.claude/
