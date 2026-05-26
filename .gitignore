@@ -43,6 +43,8 @@ tor_data/
 Dockerfile
 docker-compose.yml
 .dockerignore
+server/Dockerfile
+docker-compose*.yml
 
 # Python
 __pycache__/
