@@ -108,3 +108,17 @@ tmp_trade_patch/
 # Misc temporary files
 *.tgz
 .claude/
+
+# Local config and temp files
+app.json
+config.json
+progress.txt
+tests.json
+railway.json
+*.log
+access.log
+error.log
+
+# Old/deprecated directories
+server_nodejs_old/
+.easignore
