@@ -117,11 +117,13 @@ tmp_trade_patch/
 app.json
 config.json
 progress.txt
+progress.*.txt
 tests.json
 railway.json
 *.log
 access.log
 error.log
+deployment.json
 
 # Old/deprecated directories
 server_nodejs_old/
