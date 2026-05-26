@@ -99,10 +99,28 @@ legacy/mobile-rn/modules/vibe-chat-native/android/.gradle/
 *.gradle.bak
 .gradletasknamecache
 
-# Xcode user state
+# Xcode user state and build artifacts
 *.xcuserstate
+*.xcuserdatad/
 ios/Vibe.xcodeproj/project.xcworkspace/xcuserdata/
 ios/Vibe.xcodeproj/xcuserdata/
+DerivedData/
+build/
+.build/
+
+# CocoaPods
+Pods/
+Podfile.lock
+.pods/
+
+# iOS build artifacts
+*.ipa
+*.app
+*.dSYM/
+
+# XCTest
+xctest_output/
+.xctestresults/
 
 # Elixir build outputs
 server/_build/
