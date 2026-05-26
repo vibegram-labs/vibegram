@@ -93,11 +93,13 @@ test_*.py
 parse_test.swift
 test_script.swift
 
-# Android Build Artifacts & Gradle
+# Android Build Artifacts & Gradle & Native Libraries
 .gradle/
 .gradle-local/
 android/.gradle/
 android/gradle/
+android/**/jniLibs/
+*.so
 mobile/.local-build-artifacts/
 legacy/mobile-rn/.local-build-artifacts/
 legacy/mobile-rn/modules/vibe-chat-native/android/.gradle/
@@ -122,13 +124,18 @@ Podfile.lock
 *.ipa
 *.app
 *.dSYM/
+*.framework/
 
 # XCTest
 xctest_output/
 .xctestresults/
 
-# Elixir build outputs
+# Elixir build outputs and compiled files
 server/_build/
+server/.mix/
+server/mix.lock
+*.beam
+*.erl
 
 # Local patch scratch files
 tmp_trade_agent_bridge.patch
