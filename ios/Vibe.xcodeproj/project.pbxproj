@@ -626,7 +626,7 @@
 					"$(SRCROOT)/Vendor/Packet/ios-sim-x86_64/libphantom_client.a",
 					"-lresolv",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.mohammadshayani.vibe.native;
+				PRODUCT_BUNDLE_IDENTIFIER = com.vibegram.app;
 				PRODUCT_NAME = Vibe;
 				SDKROOT = iphoneos;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
@@ -715,7 +715,7 @@
 					"$(SRCROOT)/Vendor/Packet/ios-sim-x86_64/libphantom_client.a",
 					"-lresolv",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.mohammadshayani.vibe.native;
+				PRODUCT_BUNDLE_IDENTIFIER = com.vibegram.app;
 				PRODUCT_NAME = Vibe;
 				SDKROOT = iphoneos;
 				SWIFT_COMPILATION_MODE = wholemodule;
