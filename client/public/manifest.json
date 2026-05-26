@@ -1,6 +1,6 @@
 {
-    "name": "Vibe",
-    "short_name": "Vibe",
+    "name": "Vibegram",
+    "short_name": "Vibegram",
     "description": "Secure End-to-End Encrypted Messenger",
     "start_url": "/",
     "display": "standalone",

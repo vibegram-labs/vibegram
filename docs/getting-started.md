@@ -98,7 +98,7 @@ open Vibe.xcworkspace
 ```
 
 **In Xcode:**
-1. Select "Vibe" scheme (top left)
+1. Select "Vibegram" scheme (top left)
 2. Choose simulator or connected device
 3. Press Cmd+R to build and run
 
