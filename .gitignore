@@ -15,6 +15,10 @@ build/
 *.tsbuildinfo
 tsconfig.tsbuildinfo
 *.gradle
+.swift-module-cache/
+
+# Agent files
+.agents/
 
 # Environment and Secrets
 .env
