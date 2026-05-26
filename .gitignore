@@ -86,12 +86,16 @@ Thumbs.db
 # Test
 coverage/
 
-# Android Build Artifacts
+# Android Build Artifacts & Gradle
+.gradle/
 .gradle-local/
 android/.gradle/
+android/gradle/
 mobile/.local-build-artifacts/
 legacy/mobile-rn/.local-build-artifacts/
 legacy/mobile-rn/modules/vibe-chat-native/android/.gradle/
+*.gradle.bak
+.gradletasknamecache
 
 # Xcode user state
 *.xcuserstate
