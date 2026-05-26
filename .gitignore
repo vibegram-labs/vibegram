@@ -159,5 +159,6 @@ deployment.json
 
 # Old/deprecated directories and documentation
 server_nodejs_old/
+legacy/
 .easignore
 docs/MESH_NETWORKING.md
