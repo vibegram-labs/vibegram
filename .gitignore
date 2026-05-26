@@ -85,8 +85,13 @@ server/uploads/*
 .DS_Store
 Thumbs.db
 
-# Test
+# Test files and scripts
 coverage/
+*_test.json
+test_*.py
+*_test.swift
+parse_test.swift
+test_script.swift
 
 # Android Build Artifacts & Gradle
 .gradle/
