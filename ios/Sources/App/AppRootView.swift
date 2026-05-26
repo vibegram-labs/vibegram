@@ -1,8 +1,142 @@
 import SwiftUI
 import UIKit
+import OSLog
+
+enum AppUITrace {
+  static let subsystem = "com.mohammadshayani.vibe.native"
+  private static let logger = Logger(subsystem: subsystem, category: "UITrace")
+
+  static func notice(_ message: String) {
+    logger.notice("\(message, privacy: .public)")
+  }
+
+  static func error(_ message: String) {
+    logger.error("\(message, privacy: .public)")
+    NSLog("[VibeUITrace][error] %@", message)
+  }
+
+  static func fault(_ message: String) {
+    logger.fault("\(message, privacy: .public)")
+    NSLog("[VibeUITrace][fault] %@", message)
+  }
+}
+
+final class AppUIStallWatchdog {
+  static let shared = AppUIStallWatchdog()
+
+  private let lock = NSLock()
+  private let queue = DispatchQueue(label: "com.mohammadshayani.vibe.ui-stall-watchdog", qos: .utility)
+  private let stallThresholdSeconds: TimeInterval = 2.0
+  private var timer: DispatchSourceTimer?
+  private var started = false
+  private var active = false
+  private var lastMainBeatAt = ProcessInfo.processInfo.systemUptime
+  private var latestContext = "launch"
+  private var lastReportedStallBucket = -1
+  private var wasStalled = false
+
+  private init() {}
+
+  func start(context: String) {
+    var shouldStart = false
+    locked {
+      latestContext = context
+      active = true
+      lastMainBeatAt = ProcessInfo.processInfo.systemUptime
+      if !started {
+        started = true
+        shouldStart = true
+      }
+    }
+    guard shouldStart else { return }
+    AppUITrace.notice("watchdog start thresholdMs=\(Int(stallThresholdSeconds * 1000)) context=\(context)")
+    scheduleMainBeat()
+
+    let source = DispatchSource.makeTimerSource(queue: queue)
+    source.schedule(deadline: .now() + 1.0, repeating: 0.75)
+    source.setEventHandler { [weak self] in
+      self?.checkForStall()
+    }
+    locked {
+      timer = source
+    }
+    source.resume()
+  }
+
+  func setActive(_ isActive: Bool, context: String) {
+    locked {
+      active = isActive
+      latestContext = context
+      lastMainBeatAt = ProcessInfo.processInfo.systemUptime
+      lastReportedStallBucket = -1
+      wasStalled = false
+    }
+    AppUITrace.notice("watchdog active=\(isActive ? "Y" : "N") context=\(context)")
+  }
+
+  func updateContext(_ context: String) {
+    locked {
+      latestContext = context
+    }
+  }
+
+  private func scheduleMainBeat() {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+      guard let self else { return }
+      self.recordMainBeat()
+      self.scheduleMainBeat()
+    }
+  }
+
+  private func recordMainBeat() {
+    let now = ProcessInfo.processInfo.systemUptime
+    let recovered: (blockedMs: Int, context: String)? = locked {
+      let elapsed = now - lastMainBeatAt
+      lastMainBeatAt = now
+      lastReportedStallBucket = -1
+      guard active, wasStalled else { return nil }
+      wasStalled = false
+      return (Int(elapsed * 1000), latestContext)
+    }
+    if let recovered {
+      AppUITrace.error(
+        "main-thread-recovered blockedMs=\(recovered.blockedMs) context=\(recovered.context)"
+      )
+    }
+  }
+
+  private func checkForStall() {
+    let now = ProcessInfo.processInfo.systemUptime
+    let stalled: (blockedMs: Int, context: String)? = locked {
+      guard active else { return nil }
+      let elapsed = now - lastMainBeatAt
+      guard elapsed >= stallThresholdSeconds else { return nil }
+      let bucket = Int(elapsed)
+      guard bucket != lastReportedStallBucket else { return nil }
+      lastReportedStallBucket = bucket
+      wasStalled = true
+      return (Int(elapsed * 1000), latestContext)
+    }
+    if let stalled {
+      AppUITrace.fault(
+        "main-thread-stall blockedMs=\(stalled.blockedMs) context=\(stalled.context)"
+      )
+    }
+  }
+
+  private func locked<T>(_ body: () -> T) -> T {
+    lock.lock()
+    defer { lock.unlock() }
+    return body()
+  }
+}
 
 private func appShellRouteLog(_ message: String) {
-  NSLog("[AppShellRoute] %@", message)
+  let tagged = "[AppShellRoute] \(message)"
+  if Thread.isMainThread {
+    AppUIStallWatchdog.shared.updateContext(tagged)
+  }
+  AppUITrace.notice(tagged)
 }
 
 enum AppShellTab: Hashable {
@@ -19,6 +153,7 @@ struct ChatRoute: Identifiable, Hashable {
   let peerUserId: String?
   let avatarURI: String?
   let isGroup: Bool
+  let unreadCount: Int
   let initialRows: [[String: Any]]
 
   var id: String { chatId }
@@ -29,6 +164,7 @@ struct ChatRoute: Identifiable, Hashable {
     peerUserId: String?,
     avatarURI: String?,
     isGroup: Bool,
+    unreadCount: Int = 0,
     initialRows: [[String: Any]]
   ) {
     self.chatId = chatId
@@ -36,17 +172,19 @@ struct ChatRoute: Identifiable, Hashable {
     self.peerUserId = peerUserId
     self.avatarURI = avatarURI
     self.isGroup = isGroup
+    self.unreadCount = max(0, unreadCount)
     self.initialRows = initialRows
   }
 
   init(row: ChatHomeListRow) {
-    let cachedRows = ChatEngine.shared.getChatRows(["chatId": row.chatId])
+    let cachedRows = row.initialMessages.isEmpty ? row.previewRows : row.initialMessages
     self.init(
       chatId: row.chatId,
       title: row.title,
       peerUserId: row.peerUserId,
       avatarURI: row.avatarUri,
       isGroup: row.isGroup,
+      unreadCount: row.unreadCount,
       initialRows: cachedRows
     )
   }
@@ -58,6 +196,7 @@ struct ChatRoute: Identifiable, Hashable {
       peerUserId: nil,
       avatarURI: nil,
       isGroup: false,
+      unreadCount: 0,
       initialRows: initialRows
     )
   }
@@ -77,6 +216,17 @@ struct PresentedChatRoute: Identifiable, Hashable {
   let route: ChatRoute
 
   var id: Int { requestID }
+}
+
+struct PresentedChatProfileRoute: Identifiable, Hashable {
+  let requestID: Int
+  let route: ChatRoute
+
+  var id: Int { requestID }
+}
+
+private enum AppChatNavigationAction {
+  case avatar
 }
 
 @MainActor
@@ -163,6 +313,11 @@ private final class VibeNativeCallOverlayPresenter {
     present(state: state, retryPayload: payload)
   }
 
+  func refreshFromEngine() {
+    startObserving()
+    applyEngineState(VibeNativeCallEngine.shared.getStatus())
+  }
+
   private func applyEngineState(_ state: [String: Any]) {
     let stateValue = normalizedString(state["state"]) ?? ""
     let direction = normalizedString(state["direction"]) ?? ""
@@ -177,6 +332,11 @@ private final class VibeNativeCallOverlayPresenter {
         else { return }
         self.hide()
       }
+      return
+    }
+
+    if direction == "incoming", stateValue == "ringing", UIApplication.shared.applicationState == .active {
+      VibeNativeCallManager.shared.presentForegroundIncomingBanner(state)
       return
     }
 
@@ -242,223 +402,98 @@ private final class VibeNativeCallOverlayPresenter {
   }
 }
 
-private final class VibeNativeCallOverlayController: UIViewController {
+@MainActor
+private final class VibeNativeCallOverlayModel: ObservableObject {
+  @Published var currentState: [String: Any] = [:]
+  @Published var retryPayload: [String: Any]?
+  @Published var inlineError: String?
+
   var onDismiss: (() -> Void)?
-
-  private let blurView = UIVisualEffectView(effect: UIBlurEffect(style: .systemUltraThinMaterialDark))
-  private let contentStack = UIStackView()
-  private let avatarView = UIImageView()
-  private let avatarInitialLabel = UILabel()
-  private let directionLabel = UILabel()
-  private let nameLabel = UILabel()
-  private let statusLabel = UILabel()
-  private let controlsStack = UIStackView()
-  private let closeButton = UIButton(type: .system)
-
-  private var currentState: [String: Any] = [:]
-  private var retryPayload: [String: Any]?
   private var timeoutWork: DispatchWorkItem?
-  private var avatarTask: URLSessionDataTask?
 
   var callId: String? {
     normalizedString(currentState["callId"] ?? currentState["call_id"])
   }
 
-  override func viewDidLoad() {
-    super.viewDidLoad()
-    view.backgroundColor = UIColor.black.withAlphaComponent(0.72)
+  var displayName: String {
+    normalizedString(currentState["toUserName"] ?? currentState["to_user_name"])
+      ?? normalizedString(currentState["fromUserName"] ?? currentState["from_user_name"])
+      ?? normalizedString(currentState["name"])
+      ?? "Vibe Call"
+  }
 
-    blurView.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(blurView)
-    NSLayoutConstraint.activate([
-      blurView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-      blurView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-      blurView.topAnchor.constraint(equalTo: view.topAnchor),
-      blurView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
-    ])
+  var initial: String {
+    displayName.trimmingCharacters(in: .whitespacesAndNewlines).first.map { String($0).uppercased() } ?? "V"
+  }
 
-    closeButton.translatesAutoresizingMaskIntoConstraints = false
-    closeButton.setImage(UIImage(systemName: "xmark"), for: .normal)
-    closeButton.tintColor = UIColor.white.withAlphaComponent(0.78)
-    closeButton.backgroundColor = UIColor.white.withAlphaComponent(0.12)
-    closeButton.layer.cornerRadius = 18
-    closeButton.addTarget(self, action: #selector(handleClose), for: .touchUpInside)
-    view.addSubview(closeButton)
+  var directionTitle: String {
+    let type = normalizedString(currentState["callType"] ?? currentState["call_type"]) == "video" ? "Video" : "Voice"
+    switch normalizedString(currentState["direction"]) {
+    case "incoming": return "Incoming \(type) Call"
+    case "outgoing": return "Outgoing \(type) Call"
+    default: return "\(type) Call"
+    }
+  }
 
-    contentStack.axis = .vertical
-    contentStack.alignment = .center
-    contentStack.spacing = 12
-    contentStack.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(contentStack)
+  var statusText: String {
+    if let inlineError { return inlineError }
+    switch normalizedString(currentState["state"]) ?? "ringing" {
+    case "ringing", "starting": return "Ringing..."
+    case "connecting": return "Connecting..."
+    case "active": return "Connected"
+    case "failed": return friendlyFailureText
+    case "ended": return "Call ended"
+    default: return "Connecting..."
+    }
+  }
 
-    avatarView.translatesAutoresizingMaskIntoConstraints = false
-    avatarView.backgroundColor = UIColor.white.withAlphaComponent(0.14)
-    avatarView.layer.cornerRadius = 52
-    avatarView.layer.masksToBounds = true
-    avatarView.contentMode = .scaleAspectFill
-    avatarView.addSubview(avatarInitialLabel)
-    avatarInitialLabel.translatesAutoresizingMaskIntoConstraints = false
-    avatarInitialLabel.font = .systemFont(ofSize: 34, weight: .semibold)
-    avatarInitialLabel.textColor = .white
-    avatarInitialLabel.textAlignment = .center
-
-    directionLabel.font = .systemFont(ofSize: 13, weight: .medium)
-    directionLabel.textColor = UIColor.white.withAlphaComponent(0.68)
-    directionLabel.textAlignment = .center
-
-    nameLabel.font = .systemFont(ofSize: 20, weight: .semibold)
-    nameLabel.textColor = .white
-    nameLabel.textAlignment = .center
-    nameLabel.numberOfLines = 2
-
-    statusLabel.font = .systemFont(ofSize: 15, weight: .regular)
-    statusLabel.textColor = UIColor.white.withAlphaComponent(0.78)
-    statusLabel.textAlignment = .center
-    statusLabel.numberOfLines = 3
-
-    controlsStack.axis = .horizontal
-    controlsStack.alignment = .center
-    controlsStack.distribution = .equalSpacing
-    controlsStack.spacing = 28
-    controlsStack.translatesAutoresizingMaskIntoConstraints = false
-    view.addSubview(controlsStack)
-
-    contentStack.addArrangedSubview(avatarView)
-    contentStack.setCustomSpacing(18, after: avatarView)
-    contentStack.addArrangedSubview(directionLabel)
-    contentStack.addArrangedSubview(nameLabel)
-    contentStack.addArrangedSubview(statusLabel)
-
-    NSLayoutConstraint.activate([
-      closeButton.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 18),
-      closeButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -18),
-      closeButton.widthAnchor.constraint(equalToConstant: 36),
-      closeButton.heightAnchor.constraint(equalToConstant: 36),
-
-      avatarView.widthAnchor.constraint(equalToConstant: 104),
-      avatarView.heightAnchor.constraint(equalToConstant: 104),
-      avatarInitialLabel.leadingAnchor.constraint(equalTo: avatarView.leadingAnchor),
-      avatarInitialLabel.trailingAnchor.constraint(equalTo: avatarView.trailingAnchor),
-      avatarInitialLabel.topAnchor.constraint(equalTo: avatarView.topAnchor),
-      avatarInitialLabel.bottomAnchor.constraint(equalTo: avatarView.bottomAnchor),
-
-      contentStack.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 28),
-      contentStack.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -28),
-      contentStack.centerYAnchor.constraint(equalTo: view.centerYAnchor, constant: -42),
-
-      controlsStack.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-      controlsStack.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -52),
-    ])
+  var actionSet: VibeNativeCallOverlayActionSet {
+    let stateValue = normalizedString(currentState["state"]) ?? "ringing"
+    let direction = normalizedString(currentState["direction"]) ?? ""
+    if stateValue == "failed" { return .failed }
+    if direction == "incoming", stateValue == "ringing" { return .incoming }
+    if stateValue == "ended" { return .ended }
+    return .active
   }
 
   func applyState(_ state: [String: Any], retryPayload: [String: Any]?) {
     currentState = mergedState(existing: currentState, incoming: state)
+    inlineError = nil
     if let retryPayload {
       self.retryPayload = retryPayload
     }
-
-    let name = displayName(from: currentState)
-    let stateValue = normalizedString(currentState["state"]) ?? "ringing"
-    nameLabel.text = name
-    directionLabel.text = directionTitle(from: currentState)
-    statusLabel.text = statusText(from: currentState)
-    avatarInitialLabel.text = initial(for: name)
-    loadAvatarIfNeeded(from: currentState)
-    closeButton.isHidden = !["failed", "ended"].contains(stateValue)
-    configureActions(for: currentState)
+    if self.retryPayload == nil, normalizedString(currentState["direction"]) == "outgoing" {
+      self.retryPayload = outgoingPayload(from: currentState)
+    }
     scheduleTimeoutIfNeeded()
   }
 
   func cancelTimers() {
     timeoutWork?.cancel()
     timeoutWork = nil
-    avatarTask?.cancel()
-    avatarTask = nil
   }
 
-  private func configureActions(for state: [String: Any]) {
-    controlsStack.arrangedSubviews.forEach { view in
-      controlsStack.removeArrangedSubview(view)
-      view.removeFromSuperview()
-    }
-
-    let stateValue = normalizedString(state["state"]) ?? "ringing"
-    let direction = normalizedString(state["direction"]) ?? ""
-
-    if stateValue == "failed" {
-      controlsStack.addArrangedSubview(actionView(title: "Close", systemImage: "xmark", fillColor: UIColor.white.withAlphaComponent(0.16), action: #selector(handleClose)))
-      controlsStack.addArrangedSubview(actionView(title: "Retry", systemImage: "arrow.clockwise", fillColor: UIColor.systemGreen, action: #selector(handleRetry)))
-      return
-    }
-
-    if direction == "incoming", stateValue == "ringing" {
-      controlsStack.addArrangedSubview(actionView(title: "Decline", systemImage: "phone.down.fill", fillColor: UIColor.systemRed, action: #selector(handleEnd)))
-      controlsStack.addArrangedSubview(actionView(title: "Accept", systemImage: "phone.fill", fillColor: UIColor.systemGreen, action: #selector(handleAccept)))
-      return
-    }
-
-    if stateValue != "ended" {
-      controlsStack.addArrangedSubview(actionView(title: "End", systemImage: "phone.down.fill", fillColor: UIColor.systemRed, action: #selector(handleEnd)))
-    }
-  }
-
-  private func actionView(
-    title: String,
-    systemImage: String,
-    fillColor: UIColor,
-    action: Selector
-  ) -> UIView {
-    let stack = UIStackView()
-    stack.axis = .vertical
-    stack.alignment = .center
-    stack.spacing = 8
-
-    let button = UIButton(type: .system)
-    button.translatesAutoresizingMaskIntoConstraints = false
-    button.setImage(UIImage(systemName: systemImage), for: .normal)
-    button.tintColor = .white
-    button.backgroundColor = fillColor
-    button.layer.cornerRadius = 30
-    button.addTarget(self, action: action, for: .touchUpInside)
-    NSLayoutConstraint.activate([
-      button.widthAnchor.constraint(equalToConstant: 60),
-      button.heightAnchor.constraint(equalToConstant: 60),
-    ])
-
-    let label = UILabel()
-    label.text = title
-    label.font = .systemFont(ofSize: 12, weight: .medium)
-    label.textColor = UIColor.white.withAlphaComponent(0.82)
-    label.textAlignment = .center
-
-    stack.addArrangedSubview(button)
-    stack.addArrangedSubview(label)
-    return stack
-  }
-
-  @objc private func handleAccept() {
+  func accept() {
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-    let status = VibeNativeCallEngine.shared.acceptIncoming(currentPayload())
-    applyState(status, retryPayload: nil)
+    applyState(VibeNativeCallEngine.shared.acceptIncoming(currentPayload()), retryPayload: nil)
   }
 
-  @objc private func handleEnd() {
+  func end() {
     UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-    let status = VibeNativeCallEngine.shared.endCall(currentPayload())
-    applyState(status, retryPayload: nil)
+    applyState(VibeNativeCallEngine.shared.endCall(currentPayload()), retryPayload: nil)
     DispatchQueue.main.asyncAfter(deadline: .now() + 0.45) { [weak self] in
       self?.onDismiss?()
     }
   }
 
-  @objc private func handleRetry() {
+  func retry() {
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
     guard var payload = retryPayload ?? outgoingPayload(from: currentState) else {
-      statusLabel.text = "Call could not start. Open the chat and try again."
+      inlineError = "Call could not start. Open the chat and try again."
       return
     }
     guard let config = AppSessionConfig.current else {
-      statusLabel.text = "Call could not start. Sign in again and retry."
+      inlineError = "Call could not start. Sign in again and retry."
       return
     }
     _ = VibeNativeCallEngine.shared.configure(config.payload)
@@ -466,36 +501,40 @@ private final class VibeNativeCallOverlayController: UIViewController {
     payload["event"] = "call-start"
     payload["callId"] = "call_\(now)_\(UUID().uuidString.prefix(8))"
     payload["direction"] = "outbound"
-    let status = VibeNativeCallEngine.shared.startOutgoing(payload)
     retryPayload = payload
-    applyState(status, retryPayload: payload)
+    applyState(VibeNativeCallEngine.shared.startOutgoing(payload), retryPayload: payload)
   }
 
-  @objc private func handleClose() {
+  func close() {
     UIImpactFeedbackGenerator(style: .light).impactOccurred()
     onDismiss?()
+  }
+
+  private var friendlyFailureText: String {
+    if let reason = normalizedString(currentState["failureReason"]) {
+      return reason
+    }
+    if boolValue(currentState["signalingQueued"]) {
+      return "Still waiting for the connection. You can retry the call."
+    }
+    return "Call could not start. Check the connection and try again."
   }
 
   private func scheduleTimeoutIfNeeded() {
     timeoutWork?.cancel()
     timeoutWork = nil
-
     let stateValue = normalizedString(currentState["state"]) ?? ""
     let direction = normalizedString(currentState["direction"]) ?? ""
-    guard direction == "outgoing", ["ringing", "starting"].contains(stateValue),
-      let callId = callId
-    else { return }
-
+    guard direction == "outgoing", ["ringing", "starting"].contains(stateValue), let callId else { return }
     let work = DispatchWorkItem { [weak self] in
       guard let self,
         self.callId == callId,
         ["ringing", "starting"].contains(self.normalizedString(self.currentState["state"]) ?? "")
       else { return }
-      let failed = VibeNativeCallEngine.shared.failCall(
-        self.currentPayload(),
-        reason: "No answer. You can retry the call."
+      self.applyState(
+        VibeNativeCallEngine.shared.failCall(self.currentPayload(), reason: "No answer. You can retry the call."),
+        retryPayload: self.retryPayload ?? self.outgoingPayload(from: self.currentState)
       )
-      self.applyState(failed, retryPayload: self.retryPayload ?? self.outgoingPayload(from: self.currentState))
     }
     timeoutWork = work
     DispatchQueue.main.asyncAfter(deadline: .now() + 40, execute: work)
@@ -503,7 +542,7 @@ private final class VibeNativeCallOverlayController: UIViewController {
 
   private func currentPayload() -> [String: Any] {
     var payload = currentState
-    if let callId = normalizedString(currentState["callId"] ?? currentState["call_id"]) {
+    if let callId {
       payload["callId"] = callId
     }
     if normalizedString(payload["toUserId"] ?? payload["to_user_id"]) == nil,
@@ -522,93 +561,16 @@ private final class VibeNativeCallOverlayController: UIViewController {
       "event": "call-start",
       "callType": normalizedString(state["callType"] ?? state["call_type"]) ?? "voice",
       "toUserId": toUserId,
-      "toUserName": displayName(from: state),
+      "toUserName": displayName,
       "toUserImage": normalizedString(state["toUserImage"] ?? state["to_user_image"]) ?? "",
       "chatId": normalizedString(state["chatId"] ?? state["chat_id"]) ?? "",
     ]
   }
 
-  private func directionTitle(from state: [String: Any]) -> String {
-    let callType = normalizedString(state["callType"] ?? state["call_type"]) == "video" ? "Video" : "Voice"
-    let direction = normalizedString(state["direction"]) ?? ""
-    if direction == "incoming" {
-      return "Incoming \(callType) Call"
-    }
-    if direction == "outgoing" {
-      return "Outgoing \(callType) Call"
-    }
-    return "\(callType) Call"
-  }
-
-  private func statusText(from state: [String: Any]) -> String {
-    let stateValue = normalizedString(state["state"]) ?? "ringing"
-    switch stateValue {
-    case "ringing", "starting":
-      return normalizedString(state["direction"]) == "incoming" ? "Ringing..." : "Ringing..."
-    case "connecting":
-      return "Connecting..."
-    case "active":
-      return "Connected"
-    case "failed":
-      return friendlyFailureText(from: state)
-    case "ended":
-      return "Call ended"
-    default:
-      return "Connecting..."
-    }
-  }
-
-  private func friendlyFailureText(from state: [String: Any]) -> String {
-    if let reason = normalizedString(state["failureReason"]), !reason.isEmpty {
-      return reason
-    }
-    if boolValue(state["signalingQueued"]) {
-      return "Still waiting for the connection. You can retry the call."
-    }
-    return "Call could not start. Check the connection and try again."
-  }
-
-  private func displayName(from state: [String: Any]) -> String {
-    normalizedString(state["toUserName"] ?? state["to_user_name"])
-      ?? normalizedString(state["fromUserName"] ?? state["from_user_name"])
-      ?? normalizedString(state["name"])
-      ?? "Vibe Call"
-  }
-
-  private func loadAvatarIfNeeded(from state: [String: Any]) {
-    avatarTask?.cancel()
-    avatarTask = nil
-    avatarView.image = nil
-    avatarInitialLabel.isHidden = false
-
-    guard let raw = normalizedString(
-      state["toUserImage"] ?? state["to_user_image"] ?? state["fromUserImage"] ?? state["from_user_image"]
-    ),
-      let url = URL(string: raw), ["http", "https"].contains(url.scheme?.lowercased() ?? "")
-    else { return }
-
-    avatarTask = URLSession.shared.dataTask(with: url) { [weak self] data, _, _ in
-      guard let self, let data, let image = UIImage(data: data) else { return }
-      DispatchQueue.main.async {
-        self.avatarView.image = image
-        self.avatarInitialLabel.isHidden = true
-      }
-    }
-    avatarTask?.resume()
-  }
-
-  private func initial(for name: String) -> String {
-    let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-    guard let first = trimmed.first else { return "V" }
-    return String(first).uppercased()
-  }
-
   private func mergedState(existing: [String: Any], incoming: [String: Any]) -> [String: Any] {
     var next = existing
-    for (key, value) in incoming {
-      if !(value is NSNull) {
-        next[key] = value
-      }
+    for (key, value) in incoming where !(value is NSNull) {
+      next[key] = value
     }
     return next
   }
@@ -621,16 +583,151 @@ private final class VibeNativeCallOverlayController: UIViewController {
 
   private func boolValue(_ value: Any?) -> Bool {
     switch value {
-    case let bool as Bool:
-      return bool
-    case let number as NSNumber:
-      return number.boolValue
+    case let bool as Bool: return bool
+    case let number as NSNumber: return number.boolValue
     case let string as String:
       let raw = string.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
       return raw == "true" || raw == "1" || raw == "yes"
-    default:
-      return false
+    default: return false
     }
+  }
+}
+
+private enum VibeNativeCallOverlayActionSet {
+  case incoming
+  case active
+  case failed
+  case ended
+}
+
+private struct VibeNativeCallOverlayView: View {
+  @ObservedObject var model: VibeNativeCallOverlayModel
+
+  var body: some View {
+    ZStack {
+      Color.black.opacity(0.62).ignoresSafeArea()
+      Rectangle().fill(.ultraThinMaterial).ignoresSafeArea()
+
+      VStack(spacing: 0) {
+        HStack {
+          Spacer()
+          if model.actionSet == .failed || model.actionSet == .ended {
+            Button(action: model.close) {
+              Image(systemName: "xmark")
+                .font(.system(size: 15, weight: .semibold))
+                .frame(width: 36, height: 36)
+            }
+            .buttonStyle(.bordered)
+            .clipShape(Circle())
+            .tint(.white.opacity(0.78))
+            .accessibilityLabel("Close")
+          }
+        }
+        .padding(.horizontal, 18)
+        .padding(.top, 18)
+
+        Spacer()
+
+        VStack(spacing: 12) {
+          Text(model.initial)
+            .font(.system(size: 34, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 104, height: 104)
+            .background(.white.opacity(0.14), in: Circle())
+            .padding(.bottom, 18)
+
+          Text(model.directionTitle)
+            .font(.system(size: 13, weight: .medium))
+            .foregroundStyle(.white.opacity(0.68))
+
+          Text(model.displayName)
+            .font(.system(size: 20, weight: .semibold))
+            .foregroundStyle(.white)
+            .multilineTextAlignment(.center)
+            .lineLimit(2)
+
+          Text(model.statusText)
+            .font(.system(size: 15))
+            .foregroundStyle(.white.opacity(0.78))
+            .multilineTextAlignment(.center)
+            .lineLimit(3)
+            .padding(.horizontal, 28)
+        }
+
+        Spacer()
+
+        VibeNativeCallOverlayActions(model: model)
+          .padding(.bottom, 52)
+      }
+    }
+  }
+}
+
+private struct VibeNativeCallOverlayActions: View {
+  @ObservedObject var model: VibeNativeCallOverlayModel
+
+  var body: some View {
+    HStack(spacing: 28) {
+      switch model.actionSet {
+      case .incoming:
+        action(title: "Decline", symbol: "phone.down.fill", tint: .red, action: model.end)
+        action(title: "Accept", symbol: "phone.fill", tint: .green, action: model.accept)
+      case .active:
+        action(title: "End", symbol: "phone.down.fill", tint: .red, action: model.end)
+      case .failed:
+        action(title: "Close", symbol: "xmark", tint: .white.opacity(0.16), action: model.close)
+        action(title: "Retry", symbol: "arrow.clockwise", tint: .green, action: model.retry)
+      case .ended:
+        EmptyView()
+      }
+    }
+  }
+
+  private func action(title: String, symbol: String, tint: Color, action: @escaping () -> Void) -> some View {
+    VStack(spacing: 8) {
+      Button(action: action) {
+        Image(systemName: symbol)
+          .font(.system(size: 22, weight: .semibold))
+          .foregroundStyle(.white)
+          .frame(width: 60, height: 60)
+      }
+      .buttonStyle(.borderedProminent)
+      .tint(tint)
+      .clipShape(Circle())
+      .accessibilityLabel(title)
+
+      Text(title)
+        .font(.system(size: 12, weight: .medium))
+        .foregroundStyle(.white.opacity(0.82))
+    }
+  }
+}
+
+private final class VibeNativeCallOverlayController: UIHostingController<VibeNativeCallOverlayView> {
+  private let model = VibeNativeCallOverlayModel()
+
+  var onDismiss: (() -> Void)? {
+    get { model.onDismiss }
+    set { model.onDismiss = newValue }
+  }
+
+  var callId: String? { model.callId }
+
+  init() {
+    super.init(rootView: VibeNativeCallOverlayView(model: model))
+    view.backgroundColor = .clear
+  }
+
+  @MainActor @preconcurrency required dynamic init?(coder aDecoder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  func applyState(_ state: [String: Any], retryPayload: [String: Any]?) {
+    model.applyState(state, retryPayload: retryPayload)
+  }
+
+  func cancelTimers() {
+    model.cancelTimers()
   }
 }
 
@@ -638,15 +735,12 @@ private final class VibeNativeCallOverlayController: UIViewController {
 final class AppShellCoordinator: ObservableObject {
   @Published var selectedTab: AppShellTab = .chats
   @Published var presentedChat: PresentedChatRoute?
+  @Published var presentedChatProfile: PresentedChatProfileRoute?
   @Published var chatOpenRequestID: Int = 0
+  @Published var chatProfileOpenRequestID: Int = 0
   @Published var chatSearchPresentationRequestID: Int = 0
-
-  private var activeRequestID: Int?
   private weak var activeChatController: ChatConversationController?
-  private var isChatPresentationTransitioning = false
-  private var deferredChatPresentation: PresentedChatRoute?
-  private var chatDismissWatchdog: DispatchWorkItem?
-  private let pushTransitionDelegate = ChatPushTransitionDelegate()
+  private var activeChatControllerRequestID: Int?
 
   func openChat(_ route: ChatRoute) {
     if let presentedChat, presentedChat.route == route {
@@ -659,14 +753,8 @@ final class AppShellCoordinator: ObservableObject {
     let requestID = chatOpenRequestID
     appShellRouteLog(
       "openChat requested requestId=\(requestID) chatId=\(route.chatId) title=\(route.title) fromTab=\(selectedTab)")
-    presentedChat = PresentedChatRoute(requestID: requestID, route: route)
-
-    // Schedule UIKit presentation AFTER SwiftUI's current update cycle completes.
-    // Calling present() synchronously during SwiftUI's body/update pass is silently
-    // ignored by UIKit, which was the root cause of the blank-screen bug.
-    DispatchQueue.main.async { [weak self] in
-      self?.presentChatController(route: route, requestID: requestID)
-    }
+    let presented = PresentedChatRoute(requestID: requestID, route: route)
+    presentedChat = presented
   }
 
   func closePresentedChat(requestID: Int? = nil) {
@@ -676,341 +764,224 @@ final class AppShellCoordinator: ObservableObject {
     }
     appShellRouteLog(
       "closeChat requested requestId=\(presentedChat.requestID) chatId=\(presentedChat.route.chatId) title=\(presentedChat.route.title)")
-    self.presentedChat = nil
-    deferredChatPresentation = nil
-    isChatPresentationTransitioning = true
-    armChatDismissWatchdog(source: "closePresentedChat")
-    dismissActiveChatController(animated: true) { [weak self] in
-      self?.finishChatDismissal(source: "closePresentedChat")
+    if presentedChatProfile?.route == presentedChat.route {
+      presentedChatProfile = nil
     }
+    if activeChatControllerRequestID == presentedChat.requestID {
+      activeChatController = nil
+      activeChatControllerRequestID = nil
+    }
+    self.presentedChat = nil
+  }
+
+  func openPresentedChatProfile(_ presented: PresentedChatRoute) {
+    guard presented.route.chatId != "saved_messages" else { return }
+    chatProfileOpenRequestID &+= 1
+    let requestID = chatProfileOpenRequestID
+    appShellRouteLog(
+      "openChatProfile requested requestId=\(requestID) chatRequestId=\(presented.requestID) chatId=\(presented.route.chatId) title=\(presented.route.title)"
+    )
+    presentedChatProfile = PresentedChatProfileRoute(requestID: requestID, route: presented.route)
+  }
+
+  func closePresentedChatProfile(requestID: Int? = nil) {
+    guard let presentedChatProfile else { return }
+    if let requestID, presentedChatProfile.requestID != requestID {
+      return
+    }
+    appShellRouteLog(
+      "closeChatProfile requested requestId=\(presentedChatProfile.requestID) chatId=\(presentedChatProfile.route.chatId)"
+    )
+    self.presentedChatProfile = nil
+  }
+
+  fileprivate func bindPresentedChatController(
+    _ controller: ChatConversationController,
+    requestID: Int
+  ) {
+    guard presentedChat?.requestID == requestID else { return }
+    activeChatController = controller
+    activeChatControllerRequestID = requestID
+  }
+
+  fileprivate func performPresentedChatNavigationAction(
+    _ action: AppChatNavigationAction,
+    requestID: Int
+  ) {
+    guard presentedChat?.requestID == requestID,
+      activeChatControllerRequestID == requestID,
+      let activeChatController
+    else { return }
+    activeChatController.handleNavigationAction(action)
   }
 
   func openChatSearch() {
-    selectedTab = .chats
     DispatchQueue.main.async { [weak self] in
+      self?.selectedTab = .chats
       self?.chatSearchPresentationRequestID &+= 1
     }
   }
+}
 
-  // MARK: - UIKit presentation
+private struct ChatConversationRootHost: UIViewControllerRepresentable {
+  let presented: PresentedChatRoute
+  let isDark: Bool
+  let coordinator: AppShellCoordinator
 
-  private func presentChatController(route: ChatRoute, requestID: Int) {
-    guard presentedChat?.requestID == requestID else {
-      appShellRouteLog(
-        "presentChatController ignored stale requestId=\(requestID) currentRequestId=\(presentedChat?.requestID.description ?? "nil")")
-      return
-    }
-
-    if isChatPresentationTransitioning {
-      deferredChatPresentation = PresentedChatRoute(requestID: requestID, route: route)
-      appShellRouteLog(
-        "presentChatController deferred requestId=\(requestID) chatId=\(route.chatId) reason=transitionInFlight")
-      return
-    }
-
-    if let activeChatController {
-      if activeChatController.represents(route) {
-        activeRequestID = requestID
-        appShellRouteLog(
-          "presentChatController reused active requestId=\(requestID) chatId=\(route.chatId)")
-        updateChatController(activeChatController, route: route, requestID: requestID)
-        return
-      }
-
-      appShellRouteLog(
-        "presentChatController replacing previous requestId=\(activeRequestID.map(String.init) ?? "nil") with requestId=\(requestID)")
-      isChatPresentationTransitioning = true
-      dismissActiveChatController(animated: false) { [weak self] in
-        guard let self else { return }
-        self.isChatPresentationTransitioning = false
-        self.presentChatController(route: route, requestID: requestID)
-      }
-      return
-    }
-
-    guard let window = Self.activeWindow() else {
-      appShellRouteLog("presentChatController FAILED requestId=\(requestID) reason=noWindow")
-      return
-    }
-
-    if let visibleChat = Self.visibleChatController(in: window) {
-      if visibleChat.represents(route) {
-        activeRequestID = requestID
-        activeChatController = visibleChat
-        appShellRouteLog(
-          "presentChatController recovered visible requestId=\(requestID) chatId=\(route.chatId)")
-        updateChatController(visibleChat, route: route, requestID: requestID)
-        return
-      }
-
-      appShellRouteLog(
-        "presentChatController dismissing visible stale chat before requestId=\(requestID) chatId=\(route.chatId)")
-      isChatPresentationTransitioning = true
-      visibleChat.dismiss(animated: false) { [weak self] in
-        guard let self else { return }
-        self.isChatPresentationTransitioning = false
-        self.presentChatController(route: route, requestID: requestID)
-      }
-      return
-    }
-
-    var top: UIViewController? = window.rootViewController
-    while let presented = top?.presentedViewController {
-      top = presented
-    }
-
-    guard let presenter = top else {
-      appShellRouteLog("presentChatController FAILED requestId=\(requestID) reason=noPresenter")
-      return
-    }
-    guard !presenter.isBeingPresented, !presenter.isBeingDismissed else {
-      deferredChatPresentation = PresentedChatRoute(requestID: requestID, route: route)
-      appShellRouteLog(
-        "presentChatController deferred requestId=\(requestID) chatId=\(route.chatId) reason=presenterTransitioning")
-      return
-    }
-
-    let isDark = window.traitCollection.userInterfaceStyle == .dark
+  func makeUIViewController(context: Context) -> ChatConversationController {
+    appShellRouteLog(
+      "ChatConversationRootHost make requestId=\(presented.requestID) chatId=\(presented.route.chatId)")
     let controller = ChatConversationController(
-      route: route,
+      route: presented.route,
       isDark: isDark,
-      onClose: { [weak self] in
-        self?.closePresentedChat(requestID: requestID)
+      onClose: {
+        coordinator.closePresentedChat(requestID: presented.requestID)
       }
     )
-    controller.modalPresentationStyle = .overFullScreen
-    controller.modalPresentationCapturesStatusBarAppearance = true
-    controller.transitioningDelegate = pushTransitionDelegate
-    activeRequestID = requestID
-    activeChatController = controller
-
+    coordinator.bindPresentedChatController(controller, requestID: presented.requestID)
     appShellRouteLog(
-      "presentChatController presenting requestId=\(requestID) chatId=\(route.chatId) presenter=\(String(describing: type(of: presenter)))")
-    isChatPresentationTransitioning = true
-    presenter.present(controller, animated: true) { [weak self] in
-      self?.completeChatPresentationTransition()
-    }
+      "ChatConversationRootHost made requestId=\(presented.requestID) chatId=\(presented.route.chatId)")
+    return controller
   }
 
-  private func updateChatController(
-    _ controller: ChatConversationController,
-    route: ChatRoute,
-    requestID: Int
-  ) {
-    let isDark = Self.activeWindow()?.traitCollection.userInterfaceStyle == .dark
-      || UITraitCollection.current.userInterfaceStyle == .dark
+  func updateUIViewController(_ controller: ChatConversationController, context: Context) {
+    // Skip updates if this route is no longer the active presentedChat.
+    // During the removal animation SwiftUI may call update one final time;
+    // allowing applyRoute to run at that point causes a main-thread deadlock
+    // because refreshHeaderState calls ChatEngine.shared.isTyping() which
+    // does queue.sync while the engine queue may be held by the previous
+    // closeChatChannel completing its postChangeLocked notification.
+    guard coordinator.presentedChat?.requestID == presented.requestID else {
+      let activePresentedId = coordinator.presentedChat?.requestID.description ?? "nil"
+      appShellRouteLog(
+        "ChatConversationRootHost update SKIPPED requestId=\(presented.requestID) chatId=\(presented.route.chatId) presentedRequestId=\(activePresentedId)")
+      return
+    }
+    appShellRouteLog(
+      "ChatConversationRootHost update requestId=\(presented.requestID) chatId=\(presented.route.chatId)")
+    coordinator.bindPresentedChatController(controller, requestID: presented.requestID)
     controller.update(
-      route: route,
+      route: presented.route,
       isDark: isDark,
-      onClose: { [weak self] in
-        self?.closePresentedChat(requestID: requestID)
+      onClose: {
+        coordinator.closePresentedChat(requestID: presented.requestID)
       }
     )
   }
 
-  private func dismissActiveChatController(animated: Bool, completion: (() -> Void)? = nil) {
-    guard let controller = activeChatController else {
-      activeRequestID = nil
-      if let window = Self.activeWindow(), let visibleChat = Self.visibleChatController(in: window),
-        visibleChat.presentingViewController != nil, !visibleChat.isBeingDismissed
-      {
-        appShellRouteLog(
-          "dismissActiveChatController dismissing recovered visible chat animated=\(animated)")
-        visibleChat.dismiss(animated: animated, completion: completion)
-      } else {
-        appShellRouteLog(
-          "dismissActiveChatController no active controller and no visible chat animated=\(animated)")
-        completion?()
-      }
-      return
-    }
-
-    let dismissedRequestID = activeRequestID
-    activeRequestID = nil
-    activeChatController = nil
-
-    if controller.presentingViewController != nil, !controller.isBeingDismissed {
-      appShellRouteLog(
-        "dismissActiveChatController dismissing active requestId=\(dismissedRequestID.map(String.init) ?? "nil") animated=\(animated) windowAttached=\(controller.view.window != nil)")
-      controller.dismiss(animated: animated, completion: completion)
-    } else {
-      appShellRouteLog(
-        "dismissActiveChatController active controller already detached requestId=\(dismissedRequestID.map(String.init) ?? "nil") windowAttached=\(controller.view.window != nil) presenting=\(controller.presentingViewController != nil)")
-      completion?()
-    }
+  static func dismantleUIViewController(
+    _ controller: ChatConversationController,
+    coordinator: ()
+  ) {
+    appShellRouteLog("ChatConversationRootHost dismantle")
+    controller.dismantle()
   }
+}
 
-  private func completeChatPresentationTransition() {
-    chatDismissWatchdog?.cancel()
-    chatDismissWatchdog = nil
-    isChatPresentationTransitioning = false
-    guard let deferred = deferredChatPresentation else { return }
-    deferredChatPresentation = nil
-    guard presentedChat?.requestID == deferred.requestID else {
-      appShellRouteLog(
-        "presentChatController dropped deferred requestId=\(deferred.requestID) currentRequestId=\(presentedChat?.requestID.description ?? "nil")")
-      return
-    }
-    DispatchQueue.main.async { [weak self] in
-      self?.presentChatController(route: deferred.route, requestID: deferred.requestID)
-    }
-  }
+private struct ChatProfileRootHost: UIViewControllerRepresentable {
+  let presented: PresentedChatProfileRoute
+  let isDark: Bool
+  let coordinator: AppShellCoordinator
 
-  private func armChatDismissWatchdog(source: String) {
-    chatDismissWatchdog?.cancel()
-    let work = DispatchWorkItem { [weak self] in
-      self?.finishChatDismissal(source: "\(source)-watchdog")
-    }
-    chatDismissWatchdog = work
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.75, execute: work)
-  }
-
-  private func finishChatDismissal(source: String) {
-    chatDismissWatchdog?.cancel()
-    chatDismissWatchdog = nil
-    activeRequestID = nil
-    activeChatController = nil
-    if presentedChat == nil {
-      deferredChatPresentation = nil
-    }
-    isChatPresentationTransitioning = false
-    Self.restoreWindowInteraction()
-    let hasVisibleChat = Self.activeWindow().flatMap { Self.visibleChatController(in: $0) } != nil
+  func makeUIViewController(context: Context) -> ChatProfileRootController {
     appShellRouteLog(
-      "finishChatDismissal source=\(source) visibleChat=\(hasVisibleChat) selectedTab=\(selectedTab)")
+      "ChatProfileRootHost make requestId=\(presented.requestID) chatId=\(presented.route.chatId)")
+    return ChatProfileRootController(
+      route: presented.route,
+      isDark: isDark,
+      onClose: {
+        coordinator.closePresentedChatProfile(requestID: presented.requestID)
+      }
+    )
   }
 
-  private static func activeWindow() -> UIWindow? {
-    for scene in UIApplication.shared.connectedScenes {
-      guard let windowScene = scene as? UIWindowScene else { continue }
-      if let keyWindow = windowScene.windows.first(where: { $0.isKeyWindow }) {
-        return keyWindow
+  func updateUIViewController(_ controller: ChatProfileRootController, context: Context) {
+    guard coordinator.presentedChatProfile?.requestID == presented.requestID else { return }
+    controller.update(
+      route: presented.route,
+      isDark: isDark,
+      onClose: {
+        coordinator.closePresentedChatProfile(requestID: presented.requestID)
       }
-    }
-    return nil
-  }
-
-  private static func restoreWindowInteraction() {
-    for scene in UIApplication.shared.connectedScenes {
-      guard let windowScene = scene as? UIWindowScene else { continue }
-      for window in windowScene.windows {
-        window.isUserInteractionEnabled = true
-        window.rootViewController?.view.isUserInteractionEnabled = true
-      }
-    }
-  }
-
-  private static func visibleChatController(in window: UIWindow) -> ChatConversationController? {
-    var current = window.rootViewController
-    while let presented = current?.presentedViewController {
-      if let chat = presented as? ChatConversationController {
-        return chat
-      }
-      current = presented
-    }
-    return nil
+    )
   }
 }
 
-// MARK: - Horizontal push/pop transition (mimics UINavigationController)
+private struct ChatConversationNavigationDestinationModifier: ViewModifier {
+  @Environment(\.colorScheme) private var colorScheme
+  @EnvironmentObject private var coordinator: AppShellCoordinator
+  @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
+    AppThemePlateOption.glacier.rawValue
 
-private final class ChatPushTransitionDelegate: NSObject, UIViewControllerTransitioningDelegate {
-  func animationController(
-    forPresented presented: UIViewController,
-    presenting: UIViewController,
-    source: UIViewController
-  ) -> UIViewControllerAnimatedTransitioning? {
-    ChatPushAnimator(isPresenting: true)
+  private var palette: AppThemePalette {
+    AppThemePalette.resolve(
+      for: colorScheme,
+      plate: AppThemePlateOption(rawValue: themePlateRaw) ?? .glacier
+    )
   }
 
-  func animationController(forDismissed dismissed: UIViewController)
-    -> UIViewControllerAnimatedTransitioning?
-  {
-    ChatPushAnimator(isPresenting: false)
-  }
-}
-
-private final class ChatPushAnimator: NSObject, UIViewControllerAnimatedTransitioning {
-  private let isPresenting: Bool
-
-  init(isPresenting: Bool) {
-    self.isPresenting = isPresenting
-    super.init()
-  }
-
-  func transitionDuration(using transitionContext: (any UIViewControllerContextTransitioning)?)
-    -> TimeInterval
-  {
-    0.20
-  }
-
-  func animateTransition(using transitionContext: any UIViewControllerContextTransitioning) {
-    let containerView = transitionContext.containerView
-    let duration = transitionDuration(using: transitionContext)
-
-    if isPresenting {
-      guard let toView = transitionContext.view(forKey: .to) else {
-        transitionContext.completeTransition(false)
-        return
-      }
-      let finalFrame = transitionContext.finalFrame(for: transitionContext.viewController(forKey: .to)!)
-      toView.frame = finalFrame.offsetBy(dx: finalFrame.width, dy: 0)
-      containerView.addSubview(toView)
-      toView.layer.shadowColor = UIColor.black.cgColor
-      toView.layer.shadowOpacity = 0.18
-      toView.layer.shadowRadius = 18
-      toView.layer.shadowOffset = CGSize(width: -8, height: 0)
-
-      UIView.animate(
-        withDuration: duration,
-        delay: 0,
-        options: [.curveEaseOut, .allowUserInteraction],
-        animations: {
-          toView.frame = finalFrame
-        },
-        completion: { finished in
-          let completed = !transitionContext.transitionWasCancelled
-          if !completed {
-            toView.removeFromSuperview()
-          }
-          toView.layer.shadowOpacity = 0
-          transitionContext.completeTransition(completed)
-        }
+  func body(content: Content) -> some View {
+    content
+      .modifier(
+        ChatConversationChromeSuppressionModifier(
+          isPresented: coordinator.presentedChat != nil
+        )
       )
+      .navigationDestination(item: $coordinator.presentedChat) { presented in
+        ChatConversationRootHost(
+          presented: presented,
+          isDark: colorScheme == .dark,
+          coordinator: coordinator
+        )
+        .id(presented.requestID)
+        .background(palette.background.ignoresSafeArea())
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
+        .ignoresSafeArea(.keyboard, edges: .bottom)
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
+        .navigationBarBackButtonHidden(true)
+        .tint(palette.text)
+        .toolbar(.hidden, for: .tabBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbar {
+          ToolbarItem(placement: .topBarLeading) {
+            AppChatNavigationBackButton(
+              unreadCount: presented.route.unreadCount,
+              palette: palette
+            ) {
+              coordinator.closePresentedChat(requestID: presented.requestID)
+            }
+          }
+          ToolbarItem(placement: .principal) {
+            AppChatNavigationHeaderView(route: presented.route, palette: palette)
+          }
+          ToolbarItem(placement: .topBarTrailing) {
+            AppChatNavigationAvatarButton(route: presented.route, palette: palette) {
+              coordinator.openPresentedChatProfile(presented)
+            }
+          }
+        }
+      }
+  }
+}
+
+private struct ChatConversationChromeSuppressionModifier: ViewModifier {
+  let isPresented: Bool
+
+  @ViewBuilder
+  func body(content: Content) -> some View {
+    if isPresented {
+      content
+        .toolbar(.hidden, for: .tabBar)
     } else {
-      guard let fromView = transitionContext.view(forKey: .from) else {
-        transitionContext.completeTransition(false)
-        return
-      }
-      let toView = transitionContext.view(forKey: .to)
-      let initialFrame = fromView.frame
-
-      if let toView {
-        toView.frame = initialFrame
-        containerView.insertSubview(toView, belowSubview: fromView)
-      }
-      fromView.layer.shadowColor = UIColor.black.cgColor
-      fromView.layer.shadowOpacity = 0.16
-      fromView.layer.shadowRadius = 18
-      fromView.layer.shadowOffset = CGSize(width: -8, height: 0)
-
-      UIView.animate(
-        withDuration: duration,
-        delay: 0,
-        options: [.curveEaseIn, .allowUserInteraction],
-        animations: {
-          fromView.frame = initialFrame.offsetBy(dx: initialFrame.width, dy: 0)
-        },
-        completion: { finished in
-          let completed = !transitionContext.transitionWasCancelled
-          if !completed {
-            fromView.frame = initialFrame
-          }
-          fromView.layer.shadowOpacity = 0
-          transitionContext.completeTransition(completed)
-        }
-      )
+      content
     }
+  }
+}
+
+private extension View {
+  func chatConversationNavigationDestination() -> some View {
+    modifier(ChatConversationNavigationDestinationModifier())
   }
 }
 
@@ -1030,10 +1001,12 @@ private final class ChatsViewModel: ObservableObject {
 
   func loadIfNeeded() async {
     guard !hasLoaded else { return }
+    AppUITrace.notice("ChatsViewModel loadIfNeeded start rows=\(rows.count)")
     guard let config = AppSessionConfig.current else {
       if rows.isEmpty {
         errorMessage = "The current session is unavailable."
       }
+      AppUITrace.error("ChatsViewModel loadIfNeeded missingSession rows=\(rows.count)")
       return
     }
 
@@ -1045,7 +1018,9 @@ private final class ChatsViewModel: ObservableObject {
       isWaitingForNetwork = false
       errorMessage = nil
       warmCachedRows(cachedRows, shouldFetchHistory: false)
-      NSLog("[ChatsViewModel] restored cached rows count=%d; scheduling background refresh", cachedRows.count)
+      AppUITrace.notice(
+        "ChatsViewModel restored-cache rows=\(cachedRows.count) schedulingBackgroundRefresh=Y"
+      )
       scheduleBackgroundRefreshAfterCachedStart()
       return
     }
@@ -1060,10 +1035,18 @@ private final class ChatsViewModel: ObservableObject {
   }
 
   private func refresh(preserveRows: Bool) async {
+    let startedAt = ProcessInfo.processInfo.systemUptime
+    AppUITrace.notice(
+      "ChatsViewModel refresh start preserveRows=\(preserveRows ? "Y" : "N") currentRows=\(rows.count)"
+    )
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatsViewModel refresh preserveRows=\(preserveRows ? "Y" : "N") rows=\(rows.count)"
+    )
     guard let config = AppSessionConfig.current else {
       if rows.isEmpty {
         errorMessage = "The current session is unavailable."
       }
+      AppUITrace.error("ChatsViewModel refresh missingSession rows=\(rows.count)")
       return
     }
 
@@ -1076,9 +1059,13 @@ private final class ChatsViewModel: ObservableObject {
       let nextRows = try await ChatHomeService.fetchChats(config: config)
       if Self.rowsSnapshotSignature(nextRows) != Self.rowsSnapshotSignature(rows) {
         rows = nextRows
-        NSLog("[ChatsViewModel] applied remote rows count=%d preserveRows=%@", nextRows.count, preserveRows ? "Y" : "N")
+        AppUITrace.notice(
+          "ChatsViewModel refresh applied rows=\(nextRows.count) preserveRows=\(preserveRows ? "Y" : "N") durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))"
+        )
       } else {
-        NSLog("[ChatsViewModel] skipped identical remote rows count=%d preserveRows=%@", nextRows.count, preserveRows ? "Y" : "N")
+        AppUITrace.notice(
+          "ChatsViewModel refresh skipped-identical rows=\(nextRows.count) preserveRows=\(preserveRows ? "Y" : "N") durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))"
+        )
       }
       hasLoaded = true
       isWaitingForNetwork = false
@@ -1092,11 +1079,15 @@ private final class ChatsViewModel: ObservableObject {
         errorMessage = nil
       }
       hasLoaded = true
+      AppUITrace.error(
+        "ChatsViewModel refresh error offline=\(offline ? "Y" : "N") rows=\(rows.count) durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)) error=\(error.localizedDescription)"
+      )
     }
   }
 
   private func scheduleBackgroundRefreshAfterCachedStart() {
     backgroundRefreshTask?.cancel()
+    AppUITrace.notice("ChatsViewModel scheduleBackgroundRefreshAfterCachedStart")
     backgroundRefreshTask = Task { [weak self] in
       do {
         try await Task.sleep(nanoseconds: 450_000_000)
@@ -1119,6 +1110,9 @@ private final class ChatsViewModel: ObservableObject {
 
     guard shouldFetchHistory else { return }
     let preloadChatIds = visibleRows.prefix(2).map(\.chatId)
+    AppUITrace.notice(
+      "ChatsViewModel warmCachedRows rows=\(rows.count) preload=\(preloadChatIds.map { String($0.prefix(12)) }.joined(separator: ","))"
+    )
     ChatEngine.shared.prefetchChatHistories(chatIds: preloadChatIds)
   }
 
@@ -1143,12 +1137,14 @@ private final class ChatsViewModel: ObservableObject {
 
 struct AppRootView: View {
   @Environment(\.colorScheme) private var colorScheme
+  @Environment(\.scenePhase) private var scenePhase
   @AppStorage(AppThemePlateController.storageKey) private var themePlateRaw =
     AppThemePlateOption.glacier.rawValue
   @StateObject private var coordinator = AppShellCoordinator()
   @StateObject private var toastController = AppToastController.shared
   @StateObject private var profileController = AppProfileController.shared
   @State private var settingsTabAvatarImage: UIImage?
+  @State private var settingsTabUIImage: UIImage?
 
   private var palette: AppThemePalette {
     AppThemePalette.resolve(
@@ -1157,17 +1153,10 @@ struct AppRootView: View {
     )
   }
 
-  private var settingsTabUIImage: UIImage {
-    Self.renderCircularTabAvatar(
-      source: settingsTabAvatarImage,
-      size: 26
-    )
-  }
-
   @ViewBuilder
   private var settingsTabIcon: some View {
-    if settingsTabAvatarImage != nil {
-      Image(uiImage: settingsTabUIImage)
+    if let uiImage = settingsTabUIImage {
+      Image(uiImage: uiImage)
         .renderingMode(.original)
     } else {
       Image(systemName: "person.circle.fill")
@@ -1209,7 +1198,19 @@ struct AppRootView: View {
         }
       }
       .tint(palette.accent)
-      .background(palette.background.ignoresSafeArea())
+
+      if let presented = coordinator.presentedChatProfile {
+        ChatProfileRootHost(
+          presented: presented,
+          isDark: colorScheme == .dark,
+          coordinator: coordinator
+        )
+        .id(presented.requestID)
+        .background(palette.background.ignoresSafeArea())
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
+        .transition(.move(edge: .trailing))
+        .zIndex(50)
+      }
     }
     .onChange(of: coordinator.presentedChat?.requestID) { previousRequestID, _ in
       if let presented = coordinator.presentedChat {
@@ -1221,8 +1222,19 @@ struct AppRootView: View {
       }
     }
     .onAppear {
+      let appearance = UINavigationBarAppearance()
+      appearance.configureWithTransparentBackground()
+      appearance.shadowColor = .clear
+      appearance.backgroundColor = .clear
+      UINavigationBar.appearance().standardAppearance = appearance
+      UINavigationBar.appearance().scrollEdgeAppearance = appearance
+      UINavigationBar.appearance().compactAppearance = appearance
+
       AppAppearanceController.applyStoredPreference()
+      AppUITrace.notice("AppRootView onAppear tab=\(coordinator.selectedTab)")
+      AppUIStallWatchdog.shared.start(context: "AppRootView appear tab=\(coordinator.selectedTab)")
       VibeNativeCallOverlayPresenter.shared.startObserving()
+      VibeNativeCallOverlayPresenter.shared.refreshFromEngine()
     }
     .task {
       await profileController.loadIfNeeded()
@@ -1231,9 +1243,23 @@ struct AppRootView: View {
     .onChange(of: profileController.profile?.profileImage) { _, _ in
       Task { await loadSettingsTabAvatar() }
     }
-    .onChange(of: coordinator.selectedTab) { _, newTab in
+    .onChange(of: settingsTabAvatarImage) { _, image in
+      settingsTabUIImage = Self.renderCircularTabAvatar(source: image, size: 26)
+    }
+    .onChange(of: coordinator.selectedTab) { previousTab, newTab in
+      AppUITrace.notice("tab-change from=\(previousTab) to=\(newTab)")
+      AppUIStallWatchdog.shared.updateContext("tab-change from=\(previousTab) to=\(newTab)")
       guard newTab == .search else { return }
       coordinator.openChatSearch()
+    }
+    .onChange(of: scenePhase) { _, newPhase in
+      AppUITrace.notice("scene-phase \(newPhase)")
+      AppUIStallWatchdog.shared.setActive(
+        newPhase == .active,
+        context: "scene-phase \(newPhase) tab=\(coordinator.selectedTab)"
+      )
+      guard newPhase == .active else { return }
+      VibeNativeCallOverlayPresenter.shared.refreshFromEngine()
     }
     .overlay(alignment: .bottom) {
       if let message = toastController.message {
@@ -1243,18 +1269,26 @@ struct AppRootView: View {
           .transition(.move(edge: .bottom).combined(with: .opacity))
       }
     }
-    .animation(.easeInOut(duration: 0.22), value: coordinator.presentedChat?.requestID)
     .animation(.spring(response: 0.3, dampingFraction: 0.82), value: toastController.message)
+    .animation(.easeInOut(duration: 0.24), value: coordinator.presentedChatProfile?.requestID)
     .environmentObject(coordinator)
   }
 
   @MainActor
   private func loadSettingsTabAvatar() async {
     guard let uri = profileController.profile?.profileImage else {
+      AppUITrace.notice("AppRootView settingsTabAvatar clear")
       settingsTabAvatarImage = nil
       return
     }
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    AppUITrace.notice("AppRootView settingsTabAvatar load start")
+    AppUIStallWatchdog.shared.updateContext("AppRootView settingsTabAvatar load")
     settingsTabAvatarImage = await SettingsAvatarImageLoader.load(from: uri)
+    let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+    AppUITrace.notice(
+      "AppRootView settingsTabAvatar load done success=\(settingsTabAvatarImage != nil) durationMs=\(durationMs)"
+    )
   }
 
   private static func renderCircularTabAvatar(
@@ -1329,6 +1363,7 @@ private struct ContactsRootView: View {
   var body: some View {
     NavigationStack {
       ContactsPageView()
+        .chatConversationNavigationDestination()
     }
   }
 }
@@ -1337,6 +1372,7 @@ private struct CallsRootView: View {
   var body: some View {
     NavigationStack {
       CallsPageView()
+        .chatConversationNavigationDestination()
     }
   }
 }
@@ -1387,6 +1423,12 @@ private struct ChatsRootView: View {
               isEditing: isEditingHome,
               selectedChatIDs: selectedChatIDs,
               onSelect: { row in
+                AppUITrace.notice(
+                  "ChatsRootView select chatId=\(String(row.chatId.prefix(12))) title=\(row.title) rows=\(model.rows.count) initialMessages=\(row.initialMessages.count)"
+                )
+                AppUIStallWatchdog.shared.updateContext(
+                  "ChatsRootView select chatId=\(String(row.chatId.prefix(12))) rows=\(model.rows.count)"
+                )
                 if !row.initialMessages.isEmpty {
                   ChatEngine.shared.seedRecentChatHistory(
                     chatId: row.chatId,
@@ -1408,56 +1450,50 @@ private struct ChatsRootView: View {
             )
           }
         }
-        .safeAreaInset(edge: .bottom) {
-          if isEditingHome {
-            ChatHomeEditActionBar(
-              selectedCount: selectedChatIDs.count,
-              palette: palette,
-              onMarkRead: {
-                Task {
-                  await performHomeEditAction(.markRead)
-                }
-              },
-              onMute: {
-                Task {
-                  await performHomeEditAction(.mute)
-                }
-              },
-              onDelete: {
-                Task {
-                  await performHomeEditAction(.delete)
-                }
-              }
-            )
-            .transition(.move(edge: .bottom).combined(with: .opacity))
-          }
-        }
         .background(palette.background.ignoresSafeArea())
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
         .navigationBarTitleDisplayMode(.inline)
-        .toolbarBackground(palette.background, for: .navigationBar)
-        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .navigationBar)
+        .toolbarBackground(.hidden, for: .tabBar)
+
         .toolbar(isShowingStoryCamera || isEditingHome ? .hidden : .visible, for: .tabBar)
         .toolbar {
           ToolbarItem(placement: .topBarLeading) {
-            Button(isEditingHome ? "Done" : "Edit") {
+            Button {
+              AppUITrace.notice(
+                "ChatsRootView editToggle next=\(!isEditingHome ? "editing" : "normal") selected=\(selectedChatIDs.count) rows=\(model.rows.count)"
+              )
               withAnimation(.easeInOut(duration: 0.18)) {
                 isEditingHome.toggle()
                 if !isEditingHome {
                   selectedChatIDs.removeAll()
                 }
               }
+            } label: {
+              Text(isEditingHome ? "Done" : "Edit")
+                .font(.system(size: 17))
+                .foregroundStyle(palette.text)
+                .frame(width: 48, height: 44, alignment: .center)
+                .contentShape(Rectangle())
             }
-            .foregroundStyle(palette.secondaryText)
+            .buttonStyle(.plain)
             .disabled(model.rows.isEmpty)
+            .transaction { transaction in
+              transaction.disablesAnimations = true
+            }
           }
           ToolbarItem(placement: .principal) {
             AppHomeStatusHeaderView(
               state: model.isWaitingForNetwork ? .waitingForNetwork : .ready,
               palette: palette
             )
+            .transaction { transaction in
+              transaction.disablesAnimations = true
+            }
           }
           ToolbarItemGroup(placement: .topBarTrailing) {
             Button {
+              AppUITrace.notice("ChatsRootView story open rows=\(model.rows.count)")
               withAnimation(.easeInOut(duration: 0.24)) {
                 isShowingStoryCamera = true
               }
@@ -1467,6 +1503,7 @@ private struct ChatsRootView: View {
             }
 
             Button {
+              AppUITrace.notice("ChatsRootView compose/search open rows=\(model.rows.count)")
               isShowingSearch = true
             } label: {
               AppVectorIcon(glyph: .compose, tint: palette.secondaryText)
@@ -1475,12 +1512,20 @@ private struct ChatsRootView: View {
           }
         }
         .task {
+          AppUITrace.notice("ChatsRootView task loadIfNeeded")
           await model.loadIfNeeded()
         }
         .onAppear {
+          AppUITrace.notice(
+            "ChatsRootView onAppear rows=\(model.rows.count) searchRequest=\(coordinator.chatSearchPresentationRequestID)"
+          )
+          AppUIStallWatchdog.shared.updateContext("ChatsRootView appear rows=\(model.rows.count)")
           presentSearchIfRequested()
         }
         .onChange(of: coordinator.chatSearchPresentationRequestID) { _, _ in
+          AppUITrace.notice(
+            "ChatsRootView searchRequest changed requestId=\(coordinator.chatSearchPresentationRequestID) selectedTab=\(coordinator.selectedTab)"
+          )
           presentSearchIfRequested()
         }
         .sheet(isPresented: $isShowingSearch) {
@@ -1492,10 +1537,12 @@ private struct ChatsRootView: View {
             }
           }
         }
+        .chatConversationNavigationDestination()
       }
 
       if isShowingStoryCamera {
         AppNativeStoryCameraPage {
+          AppUITrace.notice("ChatsRootView story close")
           withAnimation(.easeInOut(duration: 0.24)) {
             isShowingStoryCamera = false
           }
@@ -1512,10 +1559,14 @@ private struct ChatsRootView: View {
     guard coordinator.selectedTab == .chats else { return }
     guard requestID > lastHandledSearchRequestID else { return }
     lastHandledSearchRequestID = requestID
+    AppUITrace.notice("ChatsRootView presentSearch requestId=\(requestID)")
     isShowingSearch = true
   }
 
   private func toggleHomeSelection(_ chatID: String) {
+    AppUITrace.notice(
+      "ChatsRootView toggleSelection chatId=\(String(chatID.prefix(12))) selectedBefore=\(selectedChatIDs.count)"
+    )
     if selectedChatIDs.contains(chatID) {
       selectedChatIDs.remove(chatID)
     } else {
@@ -1532,12 +1583,17 @@ private struct ChatsRootView: View {
     }
 
     let chatIDs = Array(selectedChatIDs)
+    AppUITrace.notice(
+      "ChatsRootView bulkAction start action=\(action) selected=\(chatIDs.count)"
+    )
     do {
       try await ChatHomeEditService.apply(action: action, chatIDs: chatIDs, config: config)
       selectedChatIDs.removeAll()
       isEditingHome = false
       await model.refresh()
+      AppUITrace.notice("ChatsRootView bulkAction done action=\(action)")
     } catch {
+      AppUITrace.error("ChatsRootView bulkAction error action=\(action) error=\(error.localizedDescription)")
       AppToastController.shared.show(error.localizedDescription)
     }
   }
@@ -1642,6 +1698,7 @@ private struct SettingsRootView: View {
   var body: some View {
     NavigationStack {
       SettingsView()
+        .chatConversationNavigationDestination()
     }
   }
 }
@@ -1846,6 +1903,7 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
 
   override func viewDidLoad() {
     super.viewDidLoad()
+    AppUITrace.notice("ChatHomeNativeListController viewDidLoad")
     view.backgroundColor = .clear
 
     tableView.translatesAutoresizingMaskIntoConstraints = false
@@ -1867,6 +1925,37 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
       tableView.topAnchor.constraint(equalTo: view.topAnchor),
       tableView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
     ])
+
+    if !rows.isEmpty {
+      tableView.reloadData()
+    }
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatHomeNativeListController viewDidLoad rows=\(rows.count)"
+    )
+  }
+
+  override func viewWillAppear(_ animated: Bool) {
+    super.viewWillAppear(animated)
+    AppUITrace.notice(
+      "ChatHomeNativeListController viewWillAppear rows=\(rows.count) editing=\(isEditingMode ? "Y" : "N")"
+    )
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatHomeNativeListController viewWillAppear rows=\(rows.count)"
+    )
+  }
+
+  override func viewDidAppear(_ animated: Bool) {
+    super.viewDidAppear(animated)
+    AppUITrace.notice(
+      "ChatHomeNativeListController viewDidAppear rows=\(rows.count) contentSize=\(Int(tableView.contentSize.height)) offsetY=\(Int(tableView.contentOffset.y))"
+    )
+  }
+
+  override func viewDidDisappear(_ animated: Bool) {
+    super.viewDidDisappear(animated)
+    AppUITrace.notice(
+      "ChatHomeNativeListController viewDidDisappear rows=\(rows.count) offsetY=\(Int(tableView.contentOffset.y))"
+    )
   }
 
   func apply(
@@ -1882,17 +1971,36 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
       selectedChatIDs: selectedChatIDs
     )
     guard nextSignature != lastAppliedSignature else { return }
+    let startedAt = ProcessInfo.processInfo.systemUptime
     let previousRowCount = self.rows.count
     let previousContentOffset = tableView.contentOffset
+    AppUITrace.notice(
+      "ChatHomeNativeListController apply start previousRows=\(previousRowCount) nextRows=\(rows.count) editing=\(isEditing ? "Y" : "N") selected=\(selectedChatIDs.count) offsetY=\(Int(previousContentOffset.y))"
+    )
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatHomeNativeListController apply nextRows=\(rows.count) previousRows=\(previousRowCount)"
+    )
     lastAppliedSignature = nextSignature
     self.rows = rows
     self.isDark = isDark
     self.isEditingMode = isEditing
     self.selectedChatIDs = selectedChatIDs
+
+    guard isViewLoaded else {
+      AppUITrace.notice(
+        "ChatHomeNativeListController apply storedUntilViewLoad rows=\(rows.count) durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))"
+      )
+      AppUIStallWatchdog.shared.updateContext(
+        "ChatHomeNativeListController apply stored rows=\(rows.count)"
+      )
+      return
+    }
+
+    let shouldPreserveOffset = previousRowCount == rows.count && !rows.isEmpty && view.window != nil
     UIView.performWithoutAnimation {
       tableView.reloadData()
-      tableView.layoutIfNeeded()
-      if previousRowCount == rows.count, !rows.isEmpty {
+      if shouldPreserveOffset {
+        tableView.layoutIfNeeded()
         let minY = -tableView.adjustedContentInset.top
         let maxY = max(
           minY,
@@ -1902,6 +2010,12 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
         tableView.setContentOffset(CGPoint(x: previousContentOffset.x, y: y), animated: false)
       }
     }
+    AppUITrace.notice(
+      "ChatHomeNativeListController apply done rows=\(rows.count) durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)) contentSize=\(Int(tableView.contentSize.height)) offsetY=\(Int(tableView.contentOffset.y))"
+    )
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatHomeNativeListController apply done rows=\(rows.count)"
+    )
   }
 
   private static func signature(
@@ -1936,11 +2050,17 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
   @objc private func handleRefresh() {
     guard !isRunningRefresh else { return }
     isRunningRefresh = true
+    AppUITrace.notice("ChatHomeNativeListController refresh start rows=\(rows.count)")
+    AppUIStallWatchdog.shared.updateContext("ChatHomeNativeListController refresh rows=\(rows.count)")
     Task { @MainActor [weak self] in
       guard let self else { return }
+      let startedAt = ProcessInfo.processInfo.systemUptime
       await onRefresh?()
       isRunningRefresh = false
       refreshControl.endRefreshing()
+      AppUITrace.notice(
+        "ChatHomeNativeListController refresh done rows=\(rows.count) durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))"
+      )
     }
   }
 
@@ -1979,6 +2099,12 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
     openSwipeCell?.closeSwipe(animated: true)
     openSwipeCell = nil
     let row = rows[indexPath.row]
+    AppUITrace.notice(
+      "ChatHomeNativeListController didSelect row=\(indexPath.row) chatId=\(String(row.chatId.prefix(12))) title=\(row.title) editing=\(isEditingMode ? "Y" : "N") rows=\(rows.count)"
+    )
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatHomeNativeListController didSelect chatId=\(String(row.chatId.prefix(12))) row=\(indexPath.row)"
+    )
     if let cell = tableView.cellForRow(at: indexPath) as? ChatHomeCardCell {
       cell.flashPressedFeedback()
     }
@@ -2007,6 +2133,9 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
   ) -> UIContextMenuConfiguration? {
     guard !isEditingMode, rows.indices.contains(indexPath.row) else { return nil }
     let row = rows[indexPath.row]
+    AppUITrace.notice(
+      "ChatHomeNativeListController contextMenu row=\(indexPath.row) chatId=\(String(row.chatId.prefix(12)))"
+    )
     return UIContextMenuConfiguration(identifier: row.chatId as NSString, previewProvider: nil) {
       [weak self] _ in
       let openAction = UIAction(
@@ -2061,11 +2190,21 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
   }
 
   func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
+    AppUITrace.notice(
+      "ChatHomeNativeListController scrollBegin rows=\(rows.count) offsetY=\(Int(scrollView.contentOffset.y))"
+    )
     openSwipeCell?.closeSwipe(animated: true)
     openSwipeCell = nil
   }
 
   func homeCardCellDidBeginSwipe(_ cell: ChatHomeCardCell) {
+    if let indexPath = tableView.indexPath(for: cell), rows.indices.contains(indexPath.row) {
+      AppUITrace.notice(
+        "ChatHomeNativeListController swipeBegin row=\(indexPath.row) chatId=\(String(rows[indexPath.row].chatId.prefix(12)))"
+      )
+    } else {
+      AppUITrace.notice("ChatHomeNativeListController swipeBegin row=unknown")
+    }
     if openSwipeCell !== cell {
       openSwipeCell?.closeSwipe(animated: true)
     }
@@ -2086,6 +2225,9 @@ private final class ChatHomeNativeListController: UIViewController, UITableViewD
     if openSwipeCell === cell {
       openSwipeCell = nil
     }
+    AppUITrace.notice(
+      "ChatHomeNativeListController swipeAction event=\(eventType) chatId=\(String(chatId.prefix(12)))"
+    )
     onUnavailableAction("Home actions are not wired into this shell yet.")
   }
 
@@ -2181,10 +2323,15 @@ private struct ContactsPageView: View {
       }
     }
     .background(palette.background.ignoresSafeArea())
-    .navigationTitle("Contacts")
+    .ignoresSafeArea(.container, edges: .top)
     .navigationBarTitleDisplayMode(.inline)
     .toolbarBackground(.hidden, for: .navigationBar)
     .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Text("Contacts")
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundStyle(palette.text)
+      }
       ToolbarItem(placement: .topBarTrailing) {
         Button {
           isShowingSearch = true
@@ -2323,9 +2470,15 @@ private struct CallsPageView: View {
       action: nil
     )
     .background(palette.background.ignoresSafeArea())
-    .navigationTitle("Calls")
-    .navigationBarTitleDisplayMode(.inline)
+    .ignoresSafeArea(.container, edges: .top)
     .toolbarBackground(.hidden, for: .navigationBar)
+    .toolbar {
+      ToolbarItem(placement: .topBarLeading) {
+        Text("Calls")
+          .font(.system(size: 17, weight: .semibold))
+          .foregroundStyle(palette.text)
+      }
+    }
   }
 }
 
@@ -2339,7 +2492,147 @@ private enum ChatConversationPage: String {
   case agent
 }
 
+private final class ChatProfileRootController: UIViewController {
+  private let profileView = ChatProfileMainView()
+  private var route: ChatRoute
+  private var isDark: Bool
+  private var onClose: (() -> Void)?
+
+  init(route: ChatRoute, isDark: Bool, onClose: (() -> Void)?) {
+    self.route = route
+    self.isDark = isDark
+    self.onClose = onClose
+    super.init(nibName: nil, bundle: nil)
+    appShellRouteLog("ChatProfileRootController init chatId=\(route.chatId) title=\(route.title)")
+  }
+
+  required init?(coder: NSCoder) {
+    fatalError("init(coder:) has not been implemented")
+  }
+
+  override func viewDidLoad() {
+    super.viewDidLoad()
+    view.backgroundColor = Self.backgroundColor(isDark: isDark)
+    profileView.translatesAutoresizingMaskIntoConstraints = false
+    view.addSubview(profileView)
+    NSLayoutConstraint.activate([
+      profileView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+      profileView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+      profileView.topAnchor.constraint(equalTo: view.topAnchor),
+      profileView.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+    ])
+    profileView.onNativeEvent.handler = { [weak self] payload in
+      self?.handleNativeEvent(payload)
+    }
+    applyRoute()
+  }
+
+  func update(route: ChatRoute, isDark: Bool, onClose: (() -> Void)?) {
+    let routeChanged = self.route != route
+    let themeChanged = self.isDark != isDark
+    self.route = route
+    self.isDark = isDark
+    self.onClose = onClose
+    if themeChanged {
+      view.backgroundColor = Self.backgroundColor(isDark: isDark)
+    }
+    if routeChanged || themeChanged {
+      applyRoute()
+    }
+  }
+
+  private func applyRoute() {
+    let surfaceId = "native_profile_\(route.chatId)"
+    view.backgroundColor = Self.backgroundColor(isDark: isDark)
+    profileView.surfaceId = surfaceId
+    profileView.setProfileOnly(true)
+    profileView.setEngineSurfaceId(surfaceId)
+    profileView.setEngineChatId(route.chatId)
+    profileView.setEnginePeerUserId(route.peerUserId ?? "")
+    if let myUserId = Self.normalizedString(
+      ChatEngineStore.shared.getConfig()["myUserId"] ?? ChatEngineStore.shared.getConfig()["userId"]
+    ) {
+      profileView.setEngineMyUserId(myUserId)
+    }
+    profileView.setAppearance(Self.resolvedAppearance(isDark: isDark))
+    profileView.setHeaderTitle(route.title)
+    profileView.setHeaderSubtitle(Self.routeOnlyHeaderSubtitle(for: route))
+    profileView.setProfileName(route.title)
+    profileView.setProfileHandle(Self.profileHandle(for: route))
+    profileView.setProfileBio("")
+    profileView.setAvatarUri(route.avatarURI)
+    profileView.setIsGroupOrChannel(route.isGroup)
+    profileView.setRows(route.initialRows)
+  }
+
+  private func handleNativeEvent(_ payload: [String: Any]) {
+    let type = Self.normalizedString(payload["type"]) ?? ""
+    appShellRouteLog("ChatProfileRootController nativeEvent chatId=\(route.chatId) type=\(type)")
+    switch type {
+    case "headerBack":
+      onClose?()
+    case "headerSearchPressed":
+      AppToastController.shared.show("Search stays in the chat page.")
+    case "headerAudioCallPressed":
+      NativeCallRouteBridge.startOutgoing(route: route, callType: "voice")
+    case "headerVideoCallPressed":
+      NativeCallRouteBridge.startOutgoing(route: route, callType: "video")
+    default:
+      break
+    }
+  }
+
+  private static func backgroundColor(isDark: Bool) -> UIColor {
+    isDark
+      ? UIColor(red: 18.0 / 255.0, green: 18.0 / 255.0, blue: 18.0 / 255.0, alpha: 1.0)
+      : UIColor(red: 245.0 / 255.0, green: 244.0 / 255.0, blue: 241.0 / 255.0, alpha: 1.0)
+  }
+
+  private static func resolvedAppearance(isDark: Bool) -> [String: Any] {
+    [
+      "theme": isDark ? "dark" : "light",
+      "backgroundMode": "gradient",
+      "wallpaperOpacity": 1.0,
+      "nativeThemeId": AppThemePlateController.currentOption.rawValue,
+      "nativeThemeIsDark": isDark,
+    ]
+  }
+
+  private static func routeOnlyHeaderSubtitle(for route: ChatRoute) -> String {
+    if route.chatId == "saved_messages" {
+      return "Saved Messages"
+    }
+    if route.isGroup {
+      return "group"
+    }
+    return route.peerUserId == nil ? "" : "last seen recently"
+  }
+
+  private static func profileHandle(for route: ChatRoute) -> String {
+    if route.chatId == "saved_messages" {
+      return "Personal notes and media"
+    }
+    if let peerUserId = normalizedString(route.peerUserId) {
+      return peerUserId
+    }
+    return route.isGroup ? "Group chat" : ""
+  }
+
+  private static func normalizedString(_ value: Any?) -> String? {
+    if let value = value as? String {
+      let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+      return trimmed.isEmpty ? nil : trimmed
+    }
+    if let value = value as? NSNumber {
+      return value.stringValue
+    }
+    return nil
+  }
+}
+
 private final class ChatConversationController: UIViewController {
+  private static let postPresentationActivationDelay: TimeInterval = 0.28
+
   private let mainView = ChatMainView()
   private var profileView: ChatProfileMainView?
   private var route: ChatRoute
@@ -2347,6 +2640,7 @@ private final class ChatConversationController: UIViewController {
   private var onClose: (() -> Void)?
   private var currentPage: ChatConversationPage = .chat
   private var openedChatId: String?
+  private var openedChatIdUsesEngineChannel = false
   private var didInitialScroll = false
   private var rowsRefreshGeneration: UInt = 0
   private var lastLayoutSignature: String?
@@ -2354,6 +2648,18 @@ private final class ChatConversationController: UIViewController {
   private var pendingDeferredEngineStateRefresh = false
   private var deferredEngineRowsReadyChatId: String?
   private var latestProfileRows: [[String: Any]] = []
+  private var pendingRowsForAttachment: [[String: Any]]?
+  private var isDismantled = false
+  private var pendingRowsForAttachmentChatId: String?
+  private var pendingRowsForAttachmentSource: String?
+  private var lastAppliedRowsToSurfaceCount = 0
+  private var postPresentationActivationWorkItem: DispatchWorkItem?
+  private var didRunPostPresentationActivation = false
+  private var pendingEngineBinding = false
+  private var engineBindingKey: String?
+  private var engineBindingUserId: String?
+  private var pendingAppearanceForAttachment: [String: Any]?
+  private var pendingInputActivationForAttachment = false
 
   init(route: ChatRoute, isDark: Bool, onClose: (() -> Void)?) {
     self.route = route
@@ -2385,6 +2691,7 @@ private final class ChatConversationController: UIViewController {
     mainView.onNativeEvent.handler = { [weak self] payload in
       self?.handleNativeEvent(payload)
     }
+    mainView.setExternalNavigationHeaderEnabled(true)
 
     NotificationCenter.default.addObserver(
       self,
@@ -2404,15 +2711,22 @@ private final class ChatConversationController: UIViewController {
 
   override func viewDidAppear(_ animated: Bool) {
     super.viewDidAppear(animated)
+    guard !isDismantled else { return }
     hasAppeared = true
     logLifecycle("viewDidAppear")
     logVisualState("viewDidAppear", force: true)
+    applyPendingAppearanceAfterAttachment(reason: "viewDidAppear")
+    applyPendingInputActivationAfterAttachment(reason: "viewDidAppear")
+    applyPendingRowsAfterAttachment(reason: "viewDidAppear")
     settleInitialBottomIfNeeded(reason: "viewDidAppear")
-    completeDeferredEngineStateRefreshIfNeeded(chatId: route.chatId)
+    schedulePostPresentationActivation(reason: "viewDidAppear")
   }
 
   override func viewDidLayoutSubviews() {
     super.viewDidLayoutSubviews()
+    applyPendingAppearanceAfterAttachment(reason: "viewDidLayoutSubviews")
+    applyPendingInputActivationAfterAttachment(reason: "viewDidLayoutSubviews")
+    applyPendingRowsAfterAttachment(reason: "viewDidLayoutSubviews")
     settleInitialBottomIfNeeded(reason: "viewDidLayoutSubviews")
     logVisualState("viewDidLayoutSubviews")
   }
@@ -2435,6 +2749,15 @@ private final class ChatConversationController: UIViewController {
       name: ChatEngine.didChangeNotification,
       object: nil
     )
+    postPresentationActivationWorkItem?.cancel()
+    closeOpenedChatChannel()
+  }
+
+  func dismantle() {
+    logLifecycle("dismantle")
+    isDismantled = true
+    postPresentationActivationWorkItem?.cancel()
+    postPresentationActivationWorkItem = nil
     closeOpenedChatChannel()
   }
 
@@ -2448,8 +2771,19 @@ private final class ChatConversationController: UIViewController {
     self.onClose = onClose
     applyRoute(forceChannelRefresh: chatChanged)
     if themeChanged {
-      mainView.setAppearance(Self.resolvedAppearance(isDark: isDark))
-      profileView?.setAppearance(Self.resolvedAppearance(isDark: isDark))
+      applySurfaceAppearance(
+        Self.resolvedAppearance(isDark: isDark),
+        reason: "themeChanged",
+        allowDeferUntilAttached: true
+      )
+    }
+  }
+
+  func handleNavigationAction(_ action: AppChatNavigationAction) {
+    switch action {
+    case .avatar:
+      guard route.chatId != "saved_messages" else { return }
+      showProfileView(animated: true)
     }
   }
 
@@ -2463,96 +2797,298 @@ private final class ChatConversationController: UIViewController {
     appShellRouteLog(
       "ChatConversationController applyRoute chatId=\(route.chatId) title=\(route.title) forceRefresh=\(forceChannelRefresh) initialRows=\(route.initialRows.count)")
 
-    let deferEngineStateRefreshes = view.window == nil && !hasAppeared
-    if deferEngineStateRefreshes {
-      pendingDeferredEngineStateRefresh = true
-      deferredEngineRowsReadyChatId = nil
+    let deferSurfaceUntilAttached = view.window == nil && !hasAppeared
+    postPresentationActivationWorkItem?.cancel()
+    postPresentationActivationWorkItem = nil
+    didRunPostPresentationActivation = false
+    pendingEngineBinding = true
+    pendingDeferredEngineStateRefresh = true
+    deferredEngineRowsReadyChatId = nil
+    if deferSurfaceUntilAttached {
       appShellRouteLog(
         "ChatConversationController deferEngineState chatId=\(route.chatId) reason=prePresentation")
     } else {
-      pendingDeferredEngineStateRefresh = false
-      deferredEngineRowsReadyChatId = nil
+      appShellRouteLog(
+        "ChatConversationController deferEngineState chatId=\(route.chatId) reason=routeActivation")
     }
 
     let surfaceId = "native_chat_\(route.chatId)"
     latestProfileRows = route.initialRows
+    lastAppliedRowsToSurfaceCount = 0
     mainView.surfaceId = surfaceId
-    mainView.setDefersEngineStateRefreshes(deferEngineStateRefreshes)
+    mainView.setDefersEngineStateRefreshes(true)
+    mainView.setStatusAuthorityEnabled(false)
     mainView.setEngineChannelBindingEnabled(false)
-    mainView.setStatusAuthorityEnabled(!deferEngineStateRefreshes)
-    mainView.setEngineSurfaceId(surfaceId)
-    mainView.setEngineChatId(route.chatId)
-    mainView.setEnginePeerUserId(route.peerUserId ?? "")
-    if let myUserId = Self.normalizedString(
-      ChatEngineStore.shared.getConfig()["myUserId"] ?? ChatEngineStore.shared.getConfig()["userId"]
-    ) {
-      mainView.setEngineMyUserId(myUserId)
+    if deferSurfaceUntilAttached {
+      appShellRouteLog(
+        "ChatConversationController deferEngineBinding chatId=\(route.chatId) reason=prePresentation")
+    } else {
+      configureEngineBindingIfNeeded(reason: "applyRoute", enableStatusAuthority: false)
     }
-    mainView.setAppearance(Self.resolvedAppearance(isDark: isDark))
+    applySurfaceAppearance(
+      Self.resolvedAppearance(isDark: isDark),
+      reason: "applyRoute",
+      allowDeferUntilAttached: deferSurfaceUntilAttached
+    )
+    appShellRouteLog(
+      "ChatConversationController configureRouteSurfaceStart chatId=\(route.chatId) reason=applyRoute")
+    markRouteSurfaceStep("header")
     mainView.setHeaderMode(route.chatId == "saved_messages" ? "savedmessages" : "default")
     mainView.setHeaderTitle(route.title)
+    mainView.setHeaderUnreadCount(route.unreadCount)
     mainView.setProfileName(route.title)
     mainView.setProfileHandle(Self.profileHandle(for: route))
     mainView.setProfileBio("")
+    markRouteSurfaceStep("avatar")
     mainView.setAvatarUri(route.avatarURI)
+    markRouteSurfaceStep("groupAndInput")
     mainView.setIsGroupOrChannel(route.isGroup)
     mainView.setInputPlaceholder(route.chatId == "saved_messages" ? "Saved Message" : "Message")
-    mainView.setInputBarEnabled(true)
-    mainView.setNativeSendEnabled(true)
+    if deferSurfaceUntilAttached {
+      pendingInputActivationForAttachment = true
+      appShellRouteLog(
+        "ChatConversationController deferInputActivation chatId=\(route.chatId) reason=prePresentation")
+    } else {
+      applyInputActivation(reason: "applyRoute")
+    }
+    markRouteSurfaceStep("page")
     mainView.setStandaloneProfileMode(false)
     mainView.setPage(ChatConversationPage.chat.rawValue, animated: false)
     removeProfileView(animated: false)
     appShellRouteLog(
       "ChatConversationController configuredSurface chatId=\(route.chatId) surfaceId=\(surfaceId) peerUserId=\(route.peerUserId ?? "") isGroup=\(route.isGroup) headerMode=\(route.chatId == "saved_messages" ? "savedmessages" : "default") windowAttached=\(view.window != nil)")
 
-    if deferEngineStateRefreshes {
-      refreshRouteOnlyHeaderState()
-    } else {
-      refreshHeaderState()
-    }
+    refreshRouteOnlyHeaderState()
     refreshRows(preferInitialRows: true)
     logVisualState("afterApplyRoute", force: true)
 
     if forceChannelRefresh {
       closeOpenedChatChannel()
     }
-    openChatChannelIfNeeded()
+    if hasAppeared, view.window != nil {
+      schedulePostPresentationActivation(reason: "applyRouteAttached")
+    } else {
+      appShellRouteLog(
+        "ChatConversationController deferOpenChatChannel chatId=\(route.chatId) reason=prePresentation hasAppeared=\(hasAppeared) windowAttached=\(view.window != nil)")
+    }
   }
 
-  private func openChatChannelIfNeeded() {
-    guard openedChatId != route.chatId else { return }
-    let chatId = route.chatId
-    let peerUserId = route.peerUserId ?? ""
-    openedChatId = chatId
+  private func markRouteSurfaceStep(_ step: String) {
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatConversationController configureRouteSurface.\(step) chatId=\(route.chatId) reason=applyRoute"
+    )
+  }
+
+  private func applySurfaceAppearance(
+    _ appearance: [String: Any],
+    reason: String,
+    allowDeferUntilAttached: Bool
+  ) {
+    if allowDeferUntilAttached, view.window == nil {
+      pendingAppearanceForAttachment = appearance
+      appShellRouteLog(
+        "ChatConversationController deferAppearance chatId=\(route.chatId) reason=\(reason) windowAttached=false")
+      return
+    }
+    pendingAppearanceForAttachment = nil
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatConversationController setAppearance chatId=\(route.chatId) reason=\(reason)"
+    )
     appShellRouteLog(
-      "ChatConversationController openChatChannel chatId=\(chatId) peerUserId=\(peerUserId)")
-    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-      guard self != nil else { return }
-      let snapshot = ChatEngine.shared.openChatChannel([
-        "chatId": chatId,
-        "peerUserId": peerUserId,
-      ])
+      "ChatConversationController setAppearanceStart chatId=\(route.chatId) reason=\(reason)")
+    mainView.setAppearance(appearance)
+    profileView?.setAppearance(appearance)
+    let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+    appShellRouteLog(
+      "ChatConversationController setAppearanceDone chatId=\(route.chatId) reason=\(reason) durationMs=\(durationMs)")
+  }
+
+  private func applyPendingAppearanceAfterAttachment(reason: String) {
+    guard view.window != nil, let appearance = pendingAppearanceForAttachment else { return }
+    appShellRouteLog(
+      "ChatConversationController applyDeferredAppearance chatId=\(route.chatId) reason=\(reason)")
+    applySurfaceAppearance(
+      appearance,
+      reason: "\(reason)-deferred",
+      allowDeferUntilAttached: false
+    )
+  }
+
+  private func applyInputActivation(reason: String) {
+    pendingInputActivationForAttachment = false
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatConversationController inputActivation chatId=\(route.chatId) reason=\(reason)"
+    )
+    appShellRouteLog(
+      "ChatConversationController inputActivationStart chatId=\(route.chatId) reason=\(reason)")
+    mainView.setInputBarEnabled(true)
+    mainView.setNativeSendEnabled(true)
+    let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+    appShellRouteLog(
+      "ChatConversationController inputActivationDone chatId=\(route.chatId) reason=\(reason) durationMs=\(durationMs)")
+  }
+
+  private func applyPendingInputActivationAfterAttachment(reason: String) {
+    guard view.window != nil, pendingInputActivationForAttachment else { return }
+    applyInputActivation(reason: "\(reason)-deferred")
+  }
+
+  private func schedulePostPresentationActivation(reason: String) {
+    guard view.window != nil, hasAppeared else { return }
+    guard !didRunPostPresentationActivation else {
+      openChatChannelIfNeeded(reason: "\(reason)-alreadyActivated")
+      return
+    }
+    let chatId = route.chatId
+    postPresentationActivationWorkItem?.cancel()
+    appShellRouteLog(
+      "ChatConversationController schedulePostPresentationActivation chatId=\(chatId) reason=\(reason) delayMs=\(Int(Self.postPresentationActivationDelay * 1000))")
+    let work = DispatchWorkItem { [weak self] in
+      guard let self, self.route.chatId == chatId, self.view.window != nil, self.hasAppeared else {
+        return
+      }
+      self.didRunPostPresentationActivation = true
+      appShellRouteLog(
+        "ChatConversationController postPresentationActivation chatId=\(chatId) reason=\(reason)")
+      self.configureEngineBindingIfNeeded(
+        reason: "\(reason)-postTransition",
+        enableStatusAuthority: false
+      )
+      self.completeDeferredEngineStateRefreshIfNeeded(chatId: chatId)
+      self.openChatChannelIfNeeded(reason: "\(reason)-postTransition")
+      AppUIStallWatchdog.shared.updateContext(
+        "ChatConversationController postPresentationActivation DONE chatId=\(chatId)"
+      )
+    }
+    postPresentationActivationWorkItem = work
+    DispatchQueue.main.asyncAfter(
+      deadline: .now() + Self.postPresentationActivationDelay,
+      execute: work
+    )
+  }
+
+  private func configureEngineBindingIfNeeded(reason: String, enableStatusAuthority: Bool) {
+    if route.chatId == "saved_messages" {
+      let bindingKey = [
+        "local_saved_messages",
+        route.chatId,
+        "deferred",
+      ].joined(separator: "|")
+      guard pendingEngineBinding || engineBindingKey != bindingKey else { return }
+      pendingEngineBinding = false
+      engineBindingKey = bindingKey
+      appShellRouteLog(
+        "ChatConversationController engineBindingStart chatId=\(route.chatId) reason=\(reason) statusAuthority=N savedMessages=Y")
+      mainView.setEngineChannelBindingEnabled(false)
+      mainView.setStatusAuthorityEnabled(false)
+      appShellRouteLog(
+        "ChatConversationController engineBindingSkipSurface chatId=\(route.chatId) reason=\(reason) savedMessages=Y")
+      mainView.setEngineSurfaceId("")
+      mainView.setEngineChatId(route.chatId)
+      mainView.setEnginePeerUserId("")
+      loadEngineBindingUserId(chatId: route.chatId, reason: reason)
+      appShellRouteLog(
+        "ChatConversationController engineBindingDone chatId=\(route.chatId) reason=\(reason) statusAuthority=N savedMessages=Y")
+      return
+    }
+
+    let surfaceId = "native_chat_\(route.chatId)"
+    let bindingKey = [
+      surfaceId,
+      route.chatId,
+      route.peerUserId ?? "",
+      enableStatusAuthority ? "status" : "deferred",
+    ].joined(separator: "|")
+    guard pendingEngineBinding || engineBindingKey != bindingKey else { return }
+    pendingEngineBinding = false
+    engineBindingKey = bindingKey
+    appShellRouteLog(
+      "ChatConversationController engineBindingStart chatId=\(route.chatId) reason=\(reason) statusAuthority=\(enableStatusAuthority ? "Y" : "N")")
+    mainView.setEngineChannelBindingEnabled(false)
+    mainView.setStatusAuthorityEnabled(false)
+    appShellRouteLog(
+      "ChatConversationController engineBindingSetSurface chatId=\(route.chatId) reason=\(reason)")
+    mainView.setEngineSurfaceId(surfaceId)
+    appShellRouteLog(
+      "ChatConversationController engineBindingSetChatId chatId=\(route.chatId) reason=\(reason)")
+    mainView.setEngineChatId(route.chatId)
+    appShellRouteLog(
+      "ChatConversationController engineBindingSetPeer chatId=\(route.chatId) reason=\(reason)")
+    mainView.setEnginePeerUserId(route.peerUserId ?? "")
+    if enableStatusAuthority {
+      appShellRouteLog(
+        "ChatConversationController engineBindingEnableStatus chatId=\(route.chatId) reason=\(reason)")
+      mainView.setStatusAuthorityEnabled(true)
+    }
+    loadEngineBindingUserId(chatId: route.chatId, reason: reason)
+    appShellRouteLog(
+      "ChatConversationController engineBindingDone chatId=\(route.chatId) reason=\(reason) statusAuthority=\(enableStatusAuthority ? "Y" : "N")")
+  }
+
+  private func loadEngineBindingUserId(chatId: String, reason: String) {
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      let config = ChatEngineStore.shared.getConfig()
+      let myUserId =
+        Self.normalizedString(config["myUserId"])
+        ?? Self.normalizedString(config["userId"])
+      guard let myUserId else { return }
       DispatchQueue.main.async { [weak self] in
-        guard let self else {
-          DispatchQueue.global(qos: .utility).async {
-            _ = ChatEngine.shared.closeChatChannel(["chatId": chatId])
-          }
-          return
-        }
-        guard self.openedChatId == chatId else {
-          DispatchQueue.global(qos: .utility).async {
-            _ = ChatEngine.shared.closeChatChannel(["chatId": chatId])
-          }
-          return
-        }
-        self.appRouteLogOpenResult(chatId: chatId, snapshot: snapshot)
-        self.refreshRows()
+        guard let self, self.route.chatId == chatId else { return }
+        guard self.engineBindingUserId != myUserId else { return }
+        self.engineBindingUserId = myUserId
+        AppUIStallWatchdog.shared.updateContext(
+          "[AppShellRoute] ChatConversationController engineBindingApplyUserId chatId=\(chatId) reason=\(reason)"
+        )
+        self.mainView.setEngineMyUserId(myUserId)
+        AppUITrace.notice(
+          "[AppShellRoute] ChatConversationController engineBindingUserIdApplied chatId=\(chatId) reason=\(reason)"
+        )
+        AppUIStallWatchdog.shared.updateContext("")
       }
     }
   }
 
+  private func openChatChannelIfNeeded(reason: String) {
+    guard openedChatId != route.chatId else { return }
+    let chatId = route.chatId
+    let peerUserId = route.peerUserId ?? ""
+    openedChatId = chatId
+    if chatId == "saved_messages" {
+      openedChatIdUsesEngineChannel = false
+      appShellRouteLog(
+        "ChatConversationController openChatChannel skipped chatId=\(chatId) reason=\(reason) savedMessages=Y")
+      return
+    }
+    openedChatIdUsesEngineChannel = true
+    appShellRouteLog(
+      "ChatConversationController openChatChannel scheduled chatId=\(chatId) peerUserId=\(peerUserId) reason=\(reason) windowAttached=\(view.window != nil) hasAppeared=\(hasAppeared)")
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+      guard let self else { return }
+      let startedAt = CFAbsoluteTimeGetCurrent()
+      appShellRouteLog(
+        "ChatConversationController openChatChannel backgroundStart chatId=\(chatId) reason=\(reason)")
+      let snapshot = ChatEngine.shared.openChatChannel([
+        "chatId": chatId,
+        "peerUserId": peerUserId,
+      ])
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      appShellRouteLog(
+        "ChatConversationController openChatChannel backgroundDone chatId=\(chatId) reason=\(reason) durationMs=\(durationMs)")
+      self.appRouteLogOpenResult(chatId: chatId, snapshot: snapshot)
+    }
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatConversationController openChatChannelIfNeeded DONE chatId=\(chatId)"
+    )
+  }
+
   private func closeOpenedChatChannel() {
     guard let openedChatId else { return }
+    let usesEngineChannel = openedChatIdUsesEngineChannel
+    self.openedChatId = nil
+    openedChatIdUsesEngineChannel = false
+    guard usesEngineChannel else { return }
     let windowAttachedAtSchedule: Bool?
     if Thread.isMainThread {
       windowAttachedAtSchedule = view.window != nil
@@ -2562,7 +3098,6 @@ private final class ChatConversationController: UIViewController {
     let windowAttachedLabel = windowAttachedAtSchedule.map { String($0) } ?? "unknown"
     appShellRouteLog(
       "ChatConversationController closeChatChannel scheduled chatId=\(openedChatId) windowAttached=\(windowAttachedLabel) mainThread=\(Thread.isMainThread)")
-    self.openedChatId = nil
     DispatchQueue.global(qos: .utility).async {
       let snapshot = ChatEngine.shared.closeChatChannel(["chatId": openedChatId])
       let state = Self.normalizedString(snapshot["state"]) ?? "nil"
@@ -2584,12 +3119,18 @@ private final class ChatConversationController: UIViewController {
         ?? "nil"
       appShellRouteLog(
         "ChatConversationController refreshRows immediate chatId=\(chatId) rows=\(initialRows.count) source=initial firstRowId=\(firstRowID)")
-      mainView.setRows(initialRows)
-      latestProfileRows = initialRows
-      if currentPage == .profile {
-        profileView?.setRows(initialRows)
+      let didApply = applyRowsToSurface(
+        initialRows,
+        chatId: chatId,
+        source: "initial",
+        firstRowID: firstRowID,
+        allowDeferUntilAttached: true
+      )
+      if didApply {
+        deferredEngineRowsReadyChatId = chatId
+        completeDeferredEngineStateRefreshIfNeeded(chatId: chatId)
+        settleInitialBottomIfNeeded(reason: "initialRows")
       }
-      settleInitialBottomIfNeeded(reason: "initialRows")
     }
 
     DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -2605,20 +3146,89 @@ private final class ChatConversationController: UIViewController {
           ?? "nil"
         appShellRouteLog(
           "ChatConversationController refreshRows chatId=\(chatId) rows=\(rows.count) nativeRows=\(nativeRows.count) initialRows=\(initialRows.count) source=\(nativeRows.isEmpty ? "initial" : "native") firstRowId=\(firstRowID)")
-        self.mainView.setRows(rows)
-        self.latestProfileRows = rows
-        if self.currentPage == .profile {
-          self.profileView?.setRows(rows)
+        let didApply = self.applyRowsToSurface(
+          rows,
+          chatId: chatId,
+          source: nativeRows.isEmpty ? "initial" : "native",
+          firstRowID: firstRowID,
+          allowDeferUntilAttached: true
+        )
+        if didApply {
+          self.deferredEngineRowsReadyChatId = chatId
+          self.completeDeferredEngineStateRefreshIfNeeded(chatId: chatId)
+          self.settleInitialBottomIfNeeded(reason: "refreshRows")
+          self.logVisualState("afterRefreshRows")
         }
-        self.deferredEngineRowsReadyChatId = chatId
-        self.completeDeferredEngineStateRefreshIfNeeded(chatId: chatId)
-        self.settleInitialBottomIfNeeded(reason: "refreshRows")
-        self.logVisualState("afterRefreshRows")
       }
     }
   }
 
+  @discardableResult
+  private func applyRowsToSurface(
+    _ rows: [[String: Any]],
+    chatId: String,
+    source: String,
+    firstRowID: String,
+    allowDeferUntilAttached: Bool
+  ) -> Bool {
+    latestProfileRows = rows
+    guard route.chatId == chatId else { return false }
+    if allowDeferUntilAttached, view.window == nil {
+      pendingRowsForAttachment = rows
+      pendingRowsForAttachmentChatId = chatId
+      pendingRowsForAttachmentSource = source
+      appShellRouteLog(
+        "ChatConversationController deferRowsUntilAttached chatId=\(chatId) rows=\(rows.count) source=\(source) firstRowId=\(firstRowID) hasAppeared=\(hasAppeared)")
+      return false
+    }
+
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatConversationController setRows chatId=\(chatId) rows=\(rows.count) source=\(source)"
+    )
+    mainView.setRows(rows)
+    lastAppliedRowsToSurfaceCount = rows.count
+    if currentPage == .profile {
+      profileView?.setRows(rows)
+    }
+    let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+    appShellRouteLog(
+      "ChatConversationController setRowsApplied chatId=\(chatId) rows=\(rows.count) source=\(source) durationMs=\(durationMs) firstRowId=\(firstRowID)")
+    return true
+  }
+
+  private func applyPendingRowsAfterAttachment(reason: String) {
+    guard view.window != nil else { return }
+    guard let rows = pendingRowsForAttachment,
+      let chatId = pendingRowsForAttachmentChatId,
+      chatId == route.chatId
+    else { return }
+    let source = pendingRowsForAttachmentSource ?? "pending"
+    pendingRowsForAttachment = nil
+    pendingRowsForAttachmentChatId = nil
+    pendingRowsForAttachmentSource = nil
+    let firstRowID =
+      Self.normalizedString(rows.first?["id"])
+      ?? Self.normalizedString(rows.first?["messageId"])
+      ?? "nil"
+    appShellRouteLog(
+      "ChatConversationController applyDeferredRows reason=\(reason) chatId=\(chatId) rows=\(rows.count) source=\(source)")
+    let didApply = applyRowsToSurface(
+      rows,
+      chatId: chatId,
+      source: "\(source)-deferred",
+      firstRowID: firstRowID,
+      allowDeferUntilAttached: false
+    )
+    if didApply {
+      deferredEngineRowsReadyChatId = chatId
+      completeDeferredEngineStateRefreshIfNeeded(chatId: chatId)
+      logVisualState("afterApplyDeferredRows", force: true)
+    }
+  }
+
   private func completeDeferredEngineStateRefreshIfNeeded(chatId: String) {
+    guard didRunPostPresentationActivation else { return }
     guard hasAppeared, pendingDeferredEngineStateRefresh, route.chatId == chatId,
       deferredEngineRowsReadyChatId == chatId
     else { return }
@@ -2626,34 +3236,65 @@ private final class ChatConversationController: UIViewController {
     deferredEngineRowsReadyChatId = nil
     appShellRouteLog(
       "ChatConversationController completeDeferredEngineState chatId=\(chatId)")
+    configureEngineBindingIfNeeded(reason: "completeDeferredEngineState", enableStatusAuthority: false)
     mainView.setDefersEngineStateRefreshes(false)
-    mainView.setStatusAuthorityEnabled(true)
     mainView.refreshEngineStateAfterDeferredRouteOpen()
     refreshHeaderState()
   }
 
   private func appRouteLogOpenResult(chatId: String, snapshot: [String: Any]) {
-    appShellRouteLog(
-      "ChatConversationController openChatChannelResult chatId=\(chatId) snapshotState=\(Self.normalizedString(snapshot["state"]) ?? "nil") connected=\(snapshot["connected"] as? Bool == true) snapshotKeys=\(snapshot.keys.sorted())")
+    let state = Self.normalizedString(snapshot["state"]) ?? "nil"
+    let openCount = snapshot["openChatChannelCount"] as? Int ?? -1
+    let joinedCount = snapshot["nativeJoinedChatCount"] as? Int ?? -1
+    let boundSurfaceCount = snapshot["boundSurfaceCount"] as? Int ?? -1
+    AppUITrace.notice(
+      "[AppShellRoute] ChatConversationController openChatChannelResult chatId=\(chatId) state=\(state) connected=\(snapshot["connected"] as? Bool == true ? "true" : "false") openChatCount=\(openCount) joinedChatCount=\(joinedCount) boundSurfaceCount=\(boundSurfaceCount) keyCount=\(snapshot.count)"
+    )
   }
 
   private func settleInitialBottomIfNeeded(reason: String) {
     guard !didInitialScroll else { return }
     guard view.bounds.width > 0.0, view.bounds.height > 0.0 else { return }
+    guard lastAppliedRowsToSurfaceCount > 0 else {
+      appShellRouteLog(
+        "ChatConversationController deferInitialScroll reason=\(reason) chatId=\(route.chatId) rowsReady=false")
+      return
+    }
+    guard view.window != nil else {
+      appShellRouteLog(
+        "ChatConversationController deferInitialScroll reason=\(reason) chatId=\(route.chatId) windowAttached=false")
+      return
+    }
     didInitialScroll = true
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    AppUIStallWatchdog.shared.updateContext(
+      "ChatConversationController initialScroll chatId=\(route.chatId) reason=\(reason)"
+    )
     mainView.layoutIfNeeded()
     mainView.scrollToBottom(animated: false)
+    let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+    appShellRouteLog(
+      "ChatConversationController initialScrollToBottomCompleted reason=\(reason) chatId=\(route.chatId) durationMs=\(durationMs)")
     logLifecycle("initialScrollToBottom reason=\(reason)")
     logVisualState("afterInitialScroll", force: true)
   }
 
   private func refreshHeaderState() {
-    mainView.setHeaderSubtitle(Self.headerSubtitle(for: route))
-    mainView.setIsOnline(Self.isOnline(for: route))
-    mainView.setProfileHandle(Self.profileHandle(for: route))
-    profileView?.setHeaderSubtitle(Self.headerSubtitle(for: route))
-    profileView?.setIsOnline(Self.isOnline(for: route))
-    profileView?.setProfileHandle(Self.profileHandle(for: route))
+    let route = route
+    let handle = Self.profileHandle(for: route)
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      let subtitle = Self.headerSubtitle(for: route)
+      let isOnline = Self.isOnline(for: route)
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.route == route else { return }
+        self.mainView.setHeaderSubtitle(subtitle)
+        self.mainView.setIsOnline(isOnline)
+        self.mainView.setProfileHandle(handle)
+        self.profileView?.setHeaderSubtitle(subtitle)
+        self.profileView?.setIsOnline(isOnline)
+        self.profileView?.setProfileHandle(handle)
+      }
+    }
   }
 
   private func refreshRouteOnlyHeaderState() {
@@ -2734,7 +3375,7 @@ private final class ChatConversationController: UIViewController {
       options: [.curveEaseOut, .beginFromCurrentState]
     ) {
       profileView.transform = .identity
-      self.mainView.transform = CGAffineTransform(translationX: -width * 0.18, y: 0.0)
+      self.mainView.transform = .identity
     } completion: { _ in
       self.mainView.transform = .identity
     }
@@ -2817,6 +3458,11 @@ private final class ChatConversationController: UIViewController {
       showProfileView(animated: true)
     case "headerAgentPressed":
       return
+    case "headerSearchPressed":
+      if currentPage == .profile {
+        hideProfileView(animated: true)
+      }
+      mainView.openHeaderSearch()
     case "headerAudioCallPressed":
       NativeCallRouteBridge.startOutgoing(route: route, callType: "voice")
     case "headerVideoCallPressed":
@@ -2850,22 +3496,32 @@ private final class ChatConversationController: UIViewController {
         "ChatConversationController engineChanged ignoredDismissing chatId=\(route.chatId) reason=\(Self.normalizedString(notification.userInfo?["reason"]) ?? "unknown")")
       return
     }
+    if isDismantled {
+      appShellRouteLog(
+        "ChatConversationController engineChanged ignoredDismantled chatId=\(route.chatId) reason=\(Self.normalizedString(notification.userInfo?["reason"]) ?? "unknown")")
+      return
+    }
 
     let changedChatId = Self.normalizedString(notification.userInfo?["chatId"])
+    let changeReason = Self.normalizedString(notification.userInfo?["reason"]) ?? "unknown"
+    if changeReason == "surfaceBindingChanged", changedChatId == nil {
+      return
+    }
+    if route.chatId == "saved_messages", changedChatId == nil {
+      return
+    }
     guard changedChatId == route.chatId || changedChatId == nil else { return }
     appShellRouteLog(
-      "ChatConversationController engineChanged routeChatId=\(route.chatId) changedChatId=\(changedChatId ?? "nil") reason=\(Self.normalizedString(notification.userInfo?["reason"]) ?? "unknown")")
+      "ChatConversationController engineChanged routeChatId=\(route.chatId) changedChatId=\(changedChatId ?? "nil") reason=\(changeReason)")
 
     if pendingDeferredEngineStateRefresh {
       refreshRouteOnlyHeaderState()
-    } else {
-      refreshHeaderState()
     }
 
-    switch Self.normalizedString(notification.userInfo?["reason"]) ?? "" {
+    switch changeReason {
     case "chatRowsReloaded", "chatMessageInserted", "chatMessageEdited", "chatMessageDeleted",
       "chatMessageChanged", "messageStatusChanged", "presenceChanged", "peerTyping",
-      "chatChannelStateChanged":
+      "chatMuteChanged":
       refreshRows()
     default:
       break
@@ -3088,11 +3744,13 @@ private struct ChatAvatarView: View {
     }
   }
 
+  @ViewBuilder
   private var fallbackAvatar: some View {
+    let gradientColors = rowAvatarGradientColors(row: row, palette: palette)
     Circle()
       .fill(
         LinearGradient(
-          colors: [palette.accent.opacity(0.9), palette.button.opacity(0.72)],
+          colors: gradientColors,
           startPoint: .topLeading,
           endPoint: .bottomTrailing
         )
@@ -3109,6 +3767,200 @@ private struct ChatAvatarView: View {
         }
         .foregroundStyle(palette.buttonText)
       )
+  }
+
+
+  private func rowAvatarGradientColors(row: ChatHomeListRow, palette: AppThemePalette) -> [Color] {
+    let startRaw = row.avatarGradientStartLight ?? row.avatarGradientStartDark
+    let endRaw = row.avatarGradientEndLight ?? row.avatarGradientEndDark
+    if let startRaw, let endRaw,
+      let start = Color(hexString: startRaw),
+      let end = Color(hexString: endRaw)
+    {
+      return [start, end]
+    }
+    return [palette.accent.opacity(0.9), palette.button.opacity(0.72)]
+  }
+}
+
+private struct AppChatNavigationHeaderView: View {
+  let route: ChatRoute
+  let palette: AppThemePalette
+
+  private var subtitle: String {
+    if route.chatId == "saved_messages" {
+      return "Saved Messages"
+    }
+    if route.isGroup {
+      return "group"
+    }
+    return route.peerUserId == nil ? "" : "last seen recently"
+  }
+
+  var body: some View {
+    GlassEffectContainer(spacing: 0.0) {
+      headerContent
+        .padding(.horizontal, 12)
+        .padding(.vertical, 4)
+        .frame(width: 172, height: 44)
+        .glassEffect(.regular.interactive(true), in: .capsule)
+    }
+      .frame(width: 172, height: 44)
+      .transaction { transaction in
+        transaction.disablesAnimations = true
+      }
+  }
+
+  private var headerContent: some View {
+    VStack(alignment: .center, spacing: 0) {
+      Text(route.title.isEmpty ? "Chat" : route.title)
+        .font(.system(size: 16, weight: .semibold))
+        .foregroundStyle(palette.text)
+        .multilineTextAlignment(.center)
+        .lineLimit(1)
+        .truncationMode(.tail)
+
+      if !subtitle.isEmpty {
+        Text(subtitle)
+          .font(.system(size: 12, weight: .medium))
+          .foregroundStyle(palette.secondaryText)
+          .multilineTextAlignment(.center)
+          .lineLimit(1)
+          .truncationMode(.tail)
+      }
+    }
+  }
+}
+
+private struct AppChatNavigationBackButton: View {
+  let unreadCount: Int
+  let palette: AppThemePalette
+  let action: () -> Void
+
+  private var displayedUnreadCount: Int {
+    min(max(0, unreadCount), 99)
+  }
+
+  var body: some View {
+    Button(action: action) {
+      Image(systemName: "chevron.left")
+        .font(.system(size: 17, weight: .semibold))
+        .foregroundStyle(palette.text)
+        .frame(width: 36, height: 44, alignment: .center)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .transaction { transaction in
+      transaction.disablesAnimations = true
+    }
+    .accessibilityLabel(
+      displayedUnreadCount > 0 ? "Back, \(unreadCount) unread messages" : "Back"
+    )
+  }
+}
+
+private struct AppChatNavigationAvatarButton: View {
+  let route: ChatRoute
+  let palette: AppThemePalette
+  let action: () -> Void
+
+  private var fallbackText: String {
+    let trimmed = route.title.trimmingCharacters(in: .whitespacesAndNewlines)
+    return trimmed.isEmpty ? "U" : String(trimmed.prefix(1)).uppercased()
+  }
+
+  var body: some View {
+    Button {
+      guard route.chatId != "saved_messages" else { return }
+      action()
+    } label: {
+      ZStack {
+        avatarContent
+          .frame(width: 30, height: 30)
+          .clipShape(Circle())
+          .overlay(Circle().stroke(palette.secondaryText.opacity(0.16), lineWidth: 0.5))
+      }
+        .frame(width: 36, height: 44)
+        .contentShape(Rectangle())
+    }
+    .buttonStyle(.plain)
+    .disabled(route.chatId == "saved_messages")
+    .transaction { transaction in
+      transaction.disablesAnimations = true
+    }
+    .accessibilityLabel(route.chatId == "saved_messages" ? "Saved Messages" : "Open profile")
+  }
+
+  @ViewBuilder
+  private var avatarContent: some View {
+    if route.chatId == "saved_messages" {
+      ZStack {
+        LinearGradient(
+          colors: [
+            Color(red: 43 / 255, green: 165 / 255, blue: 181 / 255),
+            Color(red: 0 / 255, green: 122 / 255, blue: 124 / 255),
+          ],
+          startPoint: .top,
+          endPoint: .bottom
+        )
+        Image(systemName: "bookmark.fill")
+          .font(.system(size: 15, weight: .semibold))
+          .foregroundStyle(.white)
+      }
+    } else if let rawURI = route.avatarURI,
+      let url = URL(string: rawURI)
+    {
+      AsyncImage(url: url) { phase in
+        switch phase {
+        case .success(let image):
+          image.resizable().scaledToFill()
+        default:
+          fallbackAvatar
+        }
+      }
+    } else {
+      fallbackAvatar
+    }
+  }
+    @ViewBuilder
+    private var fallbackAvatar: some View {
+      let colors = routeAvatarGradientColors(route: route)
+      ZStack {
+        LinearGradient(colors: colors, startPoint: .topLeading, endPoint: .bottomTrailing)
+        Image(systemName: "person.fill")
+          .font(.system(size: 14, weight: .semibold))
+          .foregroundStyle(.white)
+      }
+    }
+
+  private func routeAvatarGradientColors(route: ChatRoute) -> [Color] {
+    let seed =
+      [route.peerUserId, route.title, route.chatId]
+      .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+      .first { !$0.isEmpty } ?? "user"
+    let palettes: [[Color]] = [
+      [Color(red: 91 / 255, green: 141 / 255, blue: 239 / 255), Color(red: 61 / 255, green: 107 / 255, blue: 198 / 255)],
+      [Color(red: 31 / 255, green: 169 / 255, blue: 122 / 255), Color(red: 22 / 255, green: 122 / 255, blue: 96 / 255)],
+      [Color(red: 214 / 255, green: 106 / 255, blue: 90 / 255), Color(red: 175 / 255, green: 73 / 255, blue: 63 / 255)],
+      [Color(red: 160 / 255, green: 106 / 255, blue: 216 / 255), Color(red: 124 / 255, green: 78 / 255, blue: 178 / 255)],
+      [Color(red: 213 / 255, green: 154 / 255, blue: 46 / 255), Color(red: 175 / 255, green: 116 / 255, blue: 29 / 255)],
+      [Color(red: 47 / 255, green: 154 / 255, blue: 168 / 255), Color(red: 32 / 255, green: 117 / 255, blue: 133 / 255)],
+    ]
+    let index = abs(seed.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }) % palettes.count
+    return palettes[index]
+  }
+}
+
+private extension Color {
+  init?(hexString: String) {
+    var hex = hexString.trimmingCharacters(in: .whitespacesAndNewlines)
+    if hex.hasPrefix("#") { hex.removeFirst() }
+    guard hex.count == 6, let value = UInt64(hex, radix: 16) else { return nil }
+    self.init(
+      red: Double((value >> 16) & 0xFF) / 255.0,
+      green: Double((value >> 8) & 0xFF) / 255.0,
+      blue: Double(value & 0xFF) / 255.0
+    )
   }
 }
 

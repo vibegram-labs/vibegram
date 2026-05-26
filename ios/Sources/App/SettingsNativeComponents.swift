@@ -1,5 +1,17 @@
+import ImageIO
+import OSLog
 import SwiftUI
 import UIKit
+
+private let settingsNativeUITraceLogger = Logger(
+  subsystem: "com.mohammadshayani.vibe.native",
+  category: "UITrace"
+)
+
+private func settingsNativeUITrace(_ message: String) {
+  settingsNativeUITraceLogger.notice("\(message, privacy: .public)")
+  NSLog("[VibeUITrace] %@", message)
+}
 
 enum SettingsNativeRowKind {
   case link
@@ -19,7 +31,7 @@ struct SettingsNativeRow: Identifiable, Equatable {
 }
 
 struct SettingsNativeSection: Identifiable, Equatable {
-  let id = UUID()
+  var id: String { title ?? "section_\(rows.first?.id ?? UUID().uuidString)" }
   let title: String?
   let rows: [SettingsNativeRow]
 }
@@ -449,38 +461,119 @@ enum SettingsAvatarImageLoader {
     guard let rawValue else { return nil }
     let value = rawValue.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !value.isEmpty else { return nil }
+    let startedAt = CFAbsoluteTimeGetCurrent()
 
     if value.hasPrefix("data:"), let commaIndex = value.firstIndex(of: ",") {
       let base64 = String(value[value.index(after: commaIndex)...])
-      guard let data = Data(base64Encoded: base64, options: [.ignoreUnknownCharacters]) else {
-        return nil
-      }
-      return UIImage(data: data)
-    }
-
-    if let data = Data(base64Encoded: value, options: [.ignoreUnknownCharacters]) {
-      return UIImage(data: data)
+      return await decodeBase64Image(base64, source: "data-uri", startedAt: startedAt)
     }
 
     if value.hasPrefix("/") {
-      return UIImage(contentsOfFile: value)
+      return await decodeImageFile(URL(fileURLWithPath: value), source: "file-path", startedAt: startedAt)
     }
 
-    guard let url = URL(string: value) else { return nil }
-    if url.isFileURL {
+    if let url = URL(string: value), let scheme = url.scheme?.lowercased() {
+      if url.isFileURL {
+        return await decodeImageFile(url, source: "file-url", startedAt: startedAt)
+      }
+
+      guard scheme == "http" || scheme == "https" else {
+        return nil
+      }
+
+      do {
+        let (data, _) = try await URLSession.shared.data(from: url)
+        settingsNativeUITrace("SettingsAvatarImageLoader fetched source=remote bytes=\(data.count)")
+        return await decodeImageData(data, source: "remote", startedAt: startedAt)
+      } catch {
+        settingsNativeUITrace("SettingsAvatarImageLoader fetch error source=remote error=\(error.localizedDescription)")
+        return nil
+      }
+    }
+
+    return await decodeBase64Image(value, source: "base64", startedAt: startedAt)
+  }
+
+  private static func decodeImageData(
+    _ data: Data,
+    source: String,
+    startedAt: CFAbsoluteTime,
+    maxPixelSize: CGFloat = 512
+  ) async -> UIImage? {
+    await Task.detached(priority: .utility) {
+      let image = downsampleImage(data: data, maxPixelSize: maxPixelSize)
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      settingsNativeUITrace(
+        "SettingsAvatarImageLoader decode source=\(source) bytes=\(data.count) success=\(image != nil) durationMs=\(durationMs)"
+      )
+      return image
+    }.value
+  }
+
+  private static func decodeBase64Image(
+    _ value: String,
+    source: String,
+    startedAt: CFAbsoluteTime,
+    maxPixelSize: CGFloat = 512
+  ) async -> UIImage? {
+    await Task.detached(priority: .utility) {
+      guard let data = Data(base64Encoded: value, options: [.ignoreUnknownCharacters]) else {
+        settingsNativeUITrace("SettingsAvatarImageLoader decode source=\(source) invalidBase64=Y")
+        return nil
+      }
+      let image = downsampleImage(data: data, maxPixelSize: maxPixelSize)
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      settingsNativeUITrace(
+        "SettingsAvatarImageLoader decode source=\(source) bytes=\(data.count) success=\(image != nil) durationMs=\(durationMs)"
+      )
+      return image
+    }.value
+  }
+
+  private static func decodeImageFile(
+    _ url: URL,
+    source: String,
+    startedAt: CFAbsoluteTime,
+    maxPixelSize: CGFloat = 512
+  ) async -> UIImage? {
+    await Task.detached(priority: .utility) {
+      let image = downsampleImage(url: url, maxPixelSize: maxPixelSize)
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      settingsNativeUITrace(
+        "SettingsAvatarImageLoader decode source=\(source) success=\(image != nil) durationMs=\(durationMs)"
+      )
+      return image
+    }.value
+  }
+
+  private static func downsampleImage(data: Data, maxPixelSize: CGFloat) -> UIImage? {
+    let options = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let source = CGImageSourceCreateWithData(data as CFData, options) else {
+      return UIImage(data: data)
+    }
+    return downsampleImage(source: source, maxPixelSize: maxPixelSize) ?? UIImage(data: data)
+  }
+
+  private static func downsampleImage(url: URL, maxPixelSize: CGFloat) -> UIImage? {
+    let options = [kCGImageSourceShouldCache: false] as CFDictionary
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, options) else {
       return UIImage(contentsOfFile: url.path)
     }
+    return downsampleImage(source: source, maxPixelSize: maxPixelSize)
+      ?? UIImage(contentsOfFile: url.path)
+  }
 
-    guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https" else {
+  private static func downsampleImage(source: CGImageSource, maxPixelSize: CGFloat) -> UIImage? {
+    let options = [
+      kCGImageSourceCreateThumbnailFromImageAlways: true,
+      kCGImageSourceCreateThumbnailWithTransform: true,
+      kCGImageSourceShouldCacheImmediately: true,
+      kCGImageSourceThumbnailMaxPixelSize: Int(maxPixelSize),
+    ] as CFDictionary
+    guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options) else {
       return nil
     }
-
-    do {
-      let (data, _) = try await URLSession.shared.data(from: url)
-      return UIImage(data: data)
-    } catch {
-      return nil
-    }
+    return UIImage(cgImage: cgImage, scale: 1.0, orientation: .up)
   }
 }
 
@@ -694,6 +787,21 @@ final class SettingsNativeAvatarView: UIView {
   private let model = SettingsAvatarModel()
   private let hostingController: UIHostingController<AnyView>
   private var isHostingControllerAttached = false
+  private var currentImageURI: String?
+  private var currentFallbackText: String = "U"
+  private var currentExpandedSize: CGFloat = 100.0
+  private var currentCollapsedSize: CGFloat = 32.0
+  private var currentExpandedTopInset: CGFloat = 80.0
+  private var currentCollapsedTopInset: CGFloat = 0.0
+  private var currentScrollOffset: CGFloat = 0.0
+  private var currentIslandCoverColor: UIColor = UIColor(red: 0.071, green: 0.071, blue: 0.075, alpha: 1.0)
+  private var currentFallbackBackgroundColor: UIColor = UIColor(
+    red: 222 / 255,
+    green: 230 / 255,
+    blue: 243 / 255,
+    alpha: 1.0
+  )
+  private var currentFallbackIconTintColor: UIColor = UIColor.darkText
 
   override init(frame: CGRect) {
     hostingController = UIHostingController(
@@ -753,7 +861,10 @@ final class SettingsNativeAvatarView: UIView {
   }
 
   func setImageURI(_ value: String?) {
-    model.setImageURI(value)
+    let nextValue = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard currentImageURI != nextValue else { return }
+    currentImageURI = nextValue
+    publishModelChange { $0.setImageURI(nextValue) }
   }
 
   func setFallbackText(_ value: String?) {
@@ -761,53 +872,69 @@ final class SettingsNativeAvatarView: UIView {
       (value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
         ? value
         : "U") ?? "U"
-    guard model.fallbackText != nextValue else { return }
-    model.fallbackText = nextValue
+    guard currentFallbackText != nextValue else { return }
+    currentFallbackText = nextValue
+    publishModelChange { $0.fallbackText = nextValue }
   }
 
   func setExpandedSize(_ value: CGFloat) {
     let resolved = max(1.0, value)
-    guard model.expandedSize != resolved else { return }
-    model.expandedSize = resolved
+    guard currentExpandedSize != resolved else { return }
+    currentExpandedSize = resolved
+    publishModelChange { $0.expandedSize = resolved }
   }
 
   func setCollapsedSize(_ value: CGFloat) {
     let resolved = max(1.0, value)
-    guard model.collapsedSize != resolved else { return }
-    model.collapsedSize = resolved
+    guard currentCollapsedSize != resolved else { return }
+    currentCollapsedSize = resolved
+    publishModelChange { $0.collapsedSize = resolved }
   }
 
   func setExpandedTopInset(_ value: CGFloat) {
     let resolved = max(0.0, value)
-    guard model.expandedTopInset != resolved else { return }
-    model.expandedTopInset = resolved
+    guard currentExpandedTopInset != resolved else { return }
+    currentExpandedTopInset = resolved
+    publishModelChange { $0.expandedTopInset = resolved }
   }
 
   func setCollapsedTopInset(_ value: CGFloat) {
     let resolved = max(0.0, value)
-    guard model.collapsedTopInset != resolved else { return }
-    model.collapsedTopInset = resolved
+    guard currentCollapsedTopInset != resolved else { return }
+    currentCollapsedTopInset = resolved
+    publishModelChange { $0.collapsedTopInset = resolved }
   }
 
   func setScrollOffset(_ value: CGFloat) {
     let resolved = max(0.0, value)
-    guard model.scrollOffset != resolved else { return }
-    model.scrollOffset = resolved
+    guard currentScrollOffset != resolved else { return }
+    currentScrollOffset = resolved
+    publishModelChange { $0.scrollOffset = resolved }
   }
 
   func setIslandCoverColor(_ value: UIColor) {
-    guard model.islandCoverColor != value else { return }
-    model.islandCoverColor = value
+    guard currentIslandCoverColor != value else { return }
+    currentIslandCoverColor = value
+    publishModelChange { $0.islandCoverColor = value }
   }
 
   func setFallbackBackgroundColor(_ value: UIColor) {
-    guard model.fallbackBackgroundColor != value else { return }
-    model.fallbackBackgroundColor = value
+    guard currentFallbackBackgroundColor != value else { return }
+    currentFallbackBackgroundColor = value
+    publishModelChange { $0.fallbackBackgroundColor = value }
   }
 
   func setFallbackIconTintColor(_ value: UIColor) {
-    guard model.fallbackIconTintColor != value else { return }
-    model.fallbackIconTintColor = value
+    guard currentFallbackIconTintColor != value else { return }
+    currentFallbackIconTintColor = value
+    publishModelChange { $0.fallbackIconTintColor = value }
+  }
+
+  private func publishModelChange(_ update: @escaping (SettingsAvatarModel) -> Void) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      update(self.model)
+    }
   }
 }
 
@@ -1044,7 +1171,6 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     onSignOut: (() -> Void)?
   ) {
     theme = SettingsNativeTheme(palette: palette, isDark: isDark)
-    self.sections = sections
     self.onRowPress = onRowPress
     self.onRowToggle = onRowToggle
     self.onSignOut = onSignOut
@@ -1060,7 +1186,12 @@ final class SettingsNativeMainView: UIView, UIScrollViewDelegate {
     avatarView.setFallbackIconTintColor(palette.textUIColor)
 
     applyTheme()
-    rebuildSections()
+    
+    let needsRebuild = self.sections != sections || contentStack.arrangedSubviews.count <= 2
+    if needsRebuild {
+      self.sections = sections
+      rebuildSections()
+    }
     updateMetrics()
     updateScrollAnimations(offsetY: scrollView.contentOffset.y)
   }

@@ -4,7 +4,6 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
-import android.content.Intent
 import android.media.RingtoneManager
 import android.media.AudioAttributes
 import android.os.Build
@@ -38,20 +37,31 @@ internal object VibeIncomingCallNotification {
     val callType = (payload["callType"] ?: "voice").lowercase()
     val notifId = notificationIdFor(callId)
 
-    val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)?.apply {
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-      putExtra("vibeNativeCall", true)
-      payload.forEach { (key, value) -> putExtra(key, value) }
-    }
-
-    val fullScreenIntent = launchIntent?.let { intent ->
-      PendingIntent.getActivity(
-        context,
-        notifId,
-        intent,
-        PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentImmutableFlag(),
+    VibeNativeCallUiBridge.setState(
+      mapOf(
+        "visible" to true,
+        "mode" to "incoming",
+        "callStatus" to "ringing",
+        "callId" to callId,
+        "callType" to callType,
+        "remoteUserName" to callerName,
+        "remoteUserImage" to payload["fromUserImage"].orEmpty(),
+        "isMuted" to false,
+        "isSpeakerOn" to false,
+        "isVideoEnabled" to (callType == "video"),
+        "canFlipCamera" to (callType == "video"),
+        "callDuration" to 0L,
       )
-    }
+    )
+
+    val fullScreenIntent = PendingIntent.getActivity(
+      context,
+      notifId,
+      android.content.Intent(context, VibeNativeCallUiActivity::class.java).apply {
+        addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK or android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP or android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP)
+      },
+      PendingIntent.FLAG_UPDATE_CURRENT or pendingIntentImmutableFlag(),
+    )
 
     val answerIntent = PendingIntent.getBroadcast(
       context,

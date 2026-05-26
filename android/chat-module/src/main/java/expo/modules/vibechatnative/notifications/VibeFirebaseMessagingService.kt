@@ -13,6 +13,7 @@ class VibeFirebaseMessagingService : ExpoFirebaseMessagingService() {
     super.onNewToken(token)
     VibeNativeCallStore.setFcmToken(this, token)
     Log.d("VibeNativeCall", "FCM onNewToken len=${token.length}")
+    VibePushTokenSync.syncStoredPushTokens(this, reason = "fcm-new-token")
   }
 
   override fun onMessageReceived(remoteMessage: com.google.firebase.messaging.RemoteMessage) {

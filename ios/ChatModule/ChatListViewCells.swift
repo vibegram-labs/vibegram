@@ -639,7 +639,15 @@ final class BubbleBackgroundView: UIView {
     )
     blurView.isHidden = hidden
     blurView.effect = UIBlurEffect(style: isMe ? .systemThinMaterialDark : .systemMaterialDark)
-    blurView.alpha = hasWallpaperBackdrop ? 0.0 : (isMe ? 0.34 : 0.44)
+    let materialAlpha: CGFloat
+    if hasWallpaperBackdrop {
+      materialAlpha = 0.0
+    } else if isMe {
+      materialAlpha = 0.34
+    } else {
+      materialAlpha = appearance.isDark ? 0.44 : 0.0
+    }
+    blurView.alpha = materialAlpha
     if hasWallpaperBackdrop {
       gradientLayer.isHidden = true
       gradientLayer.opacity = 0.0
@@ -8416,7 +8424,15 @@ final class BubbleTailView: UIView {
         : 1.0
     )
     blurView.effect = UIBlurEffect(style: isMe ? .systemThinMaterialDark : .systemMaterialDark)
-    blurView.alpha = hasWallpaperBackdrop ? 0.0 : (isMe ? 0.34 : 0.44)
+    let materialAlpha: CGFloat
+    if hasWallpaperBackdrop {
+      materialAlpha = 0.0
+    } else if isMe {
+      materialAlpha = 0.34
+    } else {
+      materialAlpha = appearance.isDark ? 0.44 : 0.0
+    }
+    blurView.alpha = materialAlpha
     if hasWallpaperBackdrop {
       gradientLayer.isHidden = true
       gradientLayer.opacity = 0.0

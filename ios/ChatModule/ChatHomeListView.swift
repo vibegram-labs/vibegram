@@ -1,5 +1,16 @@
 import ExpoModulesCore
+import OSLog
 import UIKit
+
+private let chatHomeUITraceLogger = Logger(
+  subsystem: "com.mohammadshayani.vibe.native",
+  category: "UITrace"
+)
+
+private func chatHomeUITrace(_ message: String) {
+  chatHomeUITraceLogger.notice("\(message, privacy: .public)")
+  NSLog("[VibeUITrace] %@", message)
+}
 
 private struct ChatNativeHomeUndoBannerPayload {
   let visible: Bool
@@ -74,6 +85,7 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
   }
 
   func setRows(_ rawRows: [[String: Any]]) {
+    let startedAt = ProcessInfo.processInfo.systemUptime
     let previousChatIds = Set(rows.map(\.chatId))
     openSwipeCell?.closeSwipe(animated: false)
     openSwipeCell = nil
@@ -87,6 +99,9 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
     let removedChatIds = Array(previousChatIds.subtracting(currentChatIds)).sorted()
     print(
       "[ChatNativeHomeListView] setRows rows=\(rows.count) added=\(summarizeChatIdsForLog(addedChatIds)) removed=\(summarizeChatIdsForLog(removedChatIds))"
+    )
+    chatHomeUITrace(
+      "ChatNativeHomeListView setRows rows=\(rows.count) raw=\(rawRows.count) added=\(summarizeChatIdsForLog(addedChatIds)) removed=\(summarizeChatIdsForLog(removedChatIds)) durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))"
     )
     if previousChatIds != currentChatIds {
       mediaPrefetchedChatIds.removeAll()
@@ -358,12 +373,18 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
         print(
           "[ChatNativeHomeListView] didChange reason=\(reason) chatId=<empty> rows=\(rows.count) -> reloadData"
         )
+        chatHomeUITrace(
+          "ChatNativeHomeListView didChange reason=\(reason) chatId=<empty> rows=\(rows.count) reloadData=Y"
+        )
         tableView.reloadData()
         return
       }
       if let rowIndex = rows.firstIndex(where: { $0.chatId == changedChatId }) {
         print(
           "[ChatNativeHomeListView] didChange reason=\(reason) chatId=\(summarizeChatIdForLog(changedChatId)) rowIndex=\(rowIndex)"
+        )
+        chatHomeUITrace(
+          "ChatNativeHomeListView didChange reason=\(reason) chatId=\(summarizeChatIdForLog(changedChatId)) rowIndex=\(rowIndex)"
         )
         tableView.reloadRows(
           at: [IndexPath(row: rowIndex, section: 0)],
@@ -374,12 +395,16 @@ public final class ChatNativeHomeListView: ExpoView, UITableViewDataSource, UITa
         print(
           "[ChatNativeHomeListView] didChange reason=\(reason) chatId=\(summarizeChatIdForLog(changedChatId)) missingRow visibleRows=\(summarizeChatIdsForLog(visibleChatIds))"
         )
+        chatHomeUITrace(
+          "ChatNativeHomeListView didChange reason=\(reason) chatId=\(summarizeChatIdForLog(changedChatId)) missingRow visibleRows=\(summarizeChatIdsForLog(visibleChatIds))"
+        )
       }
       return
     }
 
     if reason == "presenceChanged" {
       print("[ChatNativeHomeListView] didChange reason=presenceChanged rows=\(rows.count) -> reloadData")
+      chatHomeUITrace("ChatNativeHomeListView didChange reason=presenceChanged rows=\(rows.count) reloadData=Y")
       tableView.reloadData()
     }
   }

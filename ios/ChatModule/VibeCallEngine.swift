@@ -66,6 +66,7 @@ public final class VibeNativeCallEngine {
       return next
     }
     refreshTurnConfig(force: true)
+    VibeNativeCallManager.shared.syncStoredPushTokens(reason: "call-engine-configure")
     return result
   }
 

@@ -89,10 +89,11 @@ defmodule VibeWeb.UserController do
           |> Map.merge(if Map.has_key?(params, "dateOfBirth"), do: %{date_of_birth: params["dateOfBirth"]}, else: %{})
 
         with user when not is_nil(user) <- Accounts.get_user(id),
-             {:ok, updated_user} <- Accounts.update_user(user, update_attrs) do
-          if Map.has_key?(update_attrs, :push_token) do
+             merged_update_attrs <- merge_existing_push_token_update(update_attrs, user),
+             {:ok, updated_user} <- Accounts.update_user(user, merged_update_attrs) do
+          if Map.has_key?(merged_update_attrs, :push_token) do
             Logger.info(
-              "[UserController] push_token updated user_id=#{updated_user.id} token_present=#{is_binary(updated_user.push_token) and String.trim(updated_user.push_token) != ""}"
+              "[UserController] push_token updated user_id=#{updated_user.id} targets=#{inspect(push_token_target_summary(updated_user.push_token))}"
             )
           end
 
@@ -213,6 +214,63 @@ defmodule VibeWeb.UserController do
   end
 
   defp maybe_put_token(acc, _key, _value), do: acc
+
+  defp merge_existing_push_token_update(update_attrs, user) do
+    case Map.fetch(update_attrs, :push_token) do
+      {:ok, push_token_update} when is_binary(push_token_update) ->
+        existing = push_token_to_map(user.push_token)
+        incoming = push_token_to_map(push_token_update)
+
+        merged =
+          existing
+          |> Map.merge(incoming)
+          |> Enum.reject(fn {_key, value} -> !is_binary(value) or String.trim(value) == "" end)
+          |> Map.new()
+
+        if map_size(merged) > 0 do
+          Map.put(update_attrs, :push_token, Jason.encode!(merged))
+        else
+          update_attrs
+        end
+
+      _ ->
+        update_attrs
+    end
+  end
+
+  defp push_token_to_map(token) when is_binary(token) do
+    trimmed = String.trim(token)
+
+    cond do
+      trimmed == "" ->
+        %{}
+
+      String.starts_with?(trimmed, "{") ->
+        case Jason.decode(trimmed) do
+          {:ok, decoded} when is_map(decoded) ->
+            %{}
+            |> maybe_put_token("expo", decoded["expo"] || decoded["expoPushToken"])
+            |> maybe_put_token("fcm", decoded["fcm"] || decoded["fcmPushToken"])
+            |> maybe_put_token("apns", decoded["apns"] || decoded["apnsToken"])
+            |> maybe_put_token("apns_voip", decoded["apns_voip"] || decoded["voip"] || decoded["voipPushToken"])
+
+          _ ->
+            %{}
+        end
+
+      true ->
+        %{"expo" => trimmed}
+    end
+  end
+
+  defp push_token_to_map(_), do: %{}
+
+  defp push_token_target_summary(token) do
+    token
+    |> push_token_to_map()
+    |> Enum.map(fn {key, value} -> {key, String.length(value)} end)
+    |> Map.new()
+  end
 
   def delete(conn, _params) do
     id = conn.assigns.current_user.id

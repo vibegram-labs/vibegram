@@ -197,6 +197,21 @@ final class NativeProfileAvatarView: UIView {
   private let model = NativeProfileAvatarModel()
   private let hostingController: UIHostingController<AnyView>
   private var isHostingControllerAttached = false
+  private var currentImageUri: String?
+  private var currentFallbackText: String = "U"
+  private var currentExpandedSize: CGFloat = 100.0
+  private var currentCollapsedSize: CGFloat = 40.0
+  private var currentExpandedTopInset: CGFloat = 0.0
+  private var currentCollapsedTopInset: CGFloat = 0.0
+  private var currentScrollOffset: CGFloat = 0.0
+  private var currentIslandCoverColor: UIColor = UIColor(red: 0.071, green: 0.071, blue: 0.075, alpha: 1.0)
+  private var currentFallbackBackgroundColor: UIColor = UIColor(
+    red: 222 / 255,
+    green: 230 / 255,
+    blue: 243 / 255,
+    alpha: 1.0
+  )
+  private var currentFallbackIconTintColor: UIColor = UIColor.darkText
 
   override init(frame: CGRect) {
     hostingController = UIHostingController(
@@ -256,56 +271,80 @@ final class NativeProfileAvatarView: UIView {
   }
 
   func setImageUri(_ value: String?) {
-    model.setImageUri(value)
+    let nextValue = value?
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+      .nilIfEmpty
+    guard currentImageUri != nextValue else { return }
+    currentImageUri = nextValue
+    publishModelChange { $0.setImageUri(nextValue) }
   }
 
   func setFallbackText(_ value: String?) {
     let nextValue =
       (value?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false ? value : "U") ?? "U"
-    guard model.fallbackText != nextValue else { return }
-    model.fallbackText = nextValue
+    guard currentFallbackText != nextValue else { return }
+    currentFallbackText = nextValue
+    publishModelChange { $0.fallbackText = nextValue }
   }
 
   func setExpandedSize(_ value: CGFloat?) {
     let resolved = max(1.0, value ?? 100.0)
-    guard model.expandedSize != resolved else { return }
-    model.expandedSize = resolved
+    guard currentExpandedSize != resolved else { return }
+    currentExpandedSize = resolved
+    publishModelChange { $0.expandedSize = resolved }
   }
 
   func setCollapsedSize(_ value: CGFloat?) {
     let resolved = max(1.0, value ?? 40.0)
-    guard model.collapsedSize != resolved else { return }
-    model.collapsedSize = resolved
+    guard currentCollapsedSize != resolved else { return }
+    currentCollapsedSize = resolved
+    publishModelChange { $0.collapsedSize = resolved }
   }
 
   func setExpandedTopInset(_ value: CGFloat?) {
     let resolved = max(0.0, value ?? 0.0)
-    guard model.expandedTopInset != resolved else { return }
-    model.expandedTopInset = resolved
+    guard currentExpandedTopInset != resolved else { return }
+    currentExpandedTopInset = resolved
+    publishModelChange { $0.expandedTopInset = resolved }
   }
 
   func setCollapsedTopInset(_ value: CGFloat?) {
     let resolved = max(0.0, value ?? 0.0)
-    guard model.collapsedTopInset != resolved else { return }
-    model.collapsedTopInset = resolved
+    guard currentCollapsedTopInset != resolved else { return }
+    currentCollapsedTopInset = resolved
+    publishModelChange { $0.collapsedTopInset = resolved }
   }
 
   func setScrollOffset(_ value: CGFloat?) {
     let resolved = max(0.0, value ?? 0.0)
-    guard model.scrollOffset != resolved else { return }
-    model.scrollOffset = resolved
+    guard currentScrollOffset != resolved else { return }
+    currentScrollOffset = resolved
+    publishModelChange { $0.scrollOffset = resolved }
   }
 
   func setIslandCoverUIColor(_ value: UIColor) {
-    model.islandCoverColor = value
+    guard currentIslandCoverColor != value else { return }
+    currentIslandCoverColor = value
+    publishModelChange { $0.islandCoverColor = value }
   }
 
   func setFallbackBackgroundUIColor(_ value: UIColor) {
-    model.fallbackBackgroundColor = value
+    guard currentFallbackBackgroundColor != value else { return }
+    currentFallbackBackgroundColor = value
+    publishModelChange { $0.fallbackBackgroundColor = value }
   }
 
   func setFallbackIconTintUIColor(_ value: UIColor) {
-    model.fallbackIconTintColor = value
+    guard currentFallbackIconTintColor != value else { return }
+    currentFallbackIconTintColor = value
+    publishModelChange { $0.fallbackIconTintColor = value }
+  }
+
+  private func publishModelChange(_ update: @escaping (NativeProfileAvatarModel) -> Void) {
+    DispatchQueue.main.async { [weak self] in
+      guard let self else { return }
+      update(self.model)
+    }
   }
 }
 
@@ -1081,6 +1120,7 @@ final class ChatProfileMainView: UIView, UITableViewDataSource, UITableViewDeleg
   private var headerTitle = "Profile"
   private var headerSubtitle = ""
   private var avatarUri: String?
+  private var avatarResolveGeneration: UInt = 0
   private var isChatMuted = false
   private var isGroupOrChannel = false
   private var isOnline = false
@@ -1733,17 +1773,32 @@ final class ChatProfileMainView: UIView, UITableViewDataSource, UITableViewDeleg
   }
 
   private func refreshAvatar() {
+    avatarResolveGeneration &+= 1
+    let generation = avatarResolveGeneration
     floatingAvatarView.setFallbackText(resolvedAvatarFallbackText())
-    floatingAvatarView.setImageUri(resolvedAvatarUri())
-  }
+    floatingAvatarView.setImageUri(nil)
 
-  private func resolvedAvatarUri() -> String? {
-    return ChatAvatarURLResolver.resolve(
-      rawAvatar: avatarUri,
-      peerUserId: enginePeerUserId,
-      chatId: engineChatId,
-      preferPushAvatar: !isGroupOrChannel
-    )
+    let rawAvatar = avatarUri
+    let peerUserId = enginePeerUserId
+    let chatId = engineChatId
+    let preferPushAvatar = !isGroupOrChannel
+    let hasRawAvatar =
+      rawAvatar?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false
+    let hasPeerUser = !peerUserId.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    guard hasRawAvatar || (preferPushAvatar && hasPeerUser) else { return }
+
+    DispatchQueue.global(qos: .utility).async { [rawAvatar, peerUserId, chatId, preferPushAvatar, generation] in
+      let resolvedUri = ChatAvatarURLResolver.resolve(
+        rawAvatar: rawAvatar,
+        peerUserId: peerUserId,
+        chatId: chatId,
+        preferPushAvatar: preferPushAvatar
+      )
+      DispatchQueue.main.async { [weak self] in
+        guard let self, self.avatarResolveGeneration == generation else { return }
+        self.floatingAvatarView.setImageUri(resolvedUri)
+      }
+    }
   }
 
   private func resolvedAvatarFallbackText() -> String {

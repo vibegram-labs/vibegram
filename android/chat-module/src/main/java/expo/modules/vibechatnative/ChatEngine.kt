@@ -8,6 +8,7 @@ import android.provider.OpenableColumns
 import android.util.Base64
 import android.util.Log
 import expo.modules.vibechatnative.notifications.VibeNativeCallStore
+import expo.modules.vibechatnative.notifications.VibePushTokenSync
 import okhttp3.Call
 import okhttp3.Callback
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -54,6 +55,7 @@ private val chatEngineOaepSpec = OAEPParameterSpec(
 private const val minimumNativeUploadProgress = 0.027f
 private const val uploadProgressFrameIntervalMs = 33L
 private const val uploadProgressStep = 0.01f
+private const val chatHistoryFetchLimit = 100
 
 private fun chatEngineDecodePem(pem: String): ByteArray {
   val sanitized = pem
@@ -607,6 +609,7 @@ internal object ChatEngine {
       result
     }
     ensureNativeTransport("configure")
+    VibePushTokenSync.syncStoredPushTokens(context, payload, "chat-engine-configure")
     return snapshot
   }
 
@@ -2839,7 +2842,7 @@ internal object ChatEngine {
       )
     }
     return synchronized(lock) {
-      val rows = historyRowsByChat[chatId].orEmpty()
+      val rows = mergedChatRowsLocked(chatId)
       var totalMessages = 0
       var mediaCount = 0
       var fileCount = 0
@@ -2868,7 +2871,7 @@ internal object ChatEngine {
           }
         }
 
-        if (containsLinkCandidate(text) || containsLinkCandidate(caption) || containsLinkCandidate(mediaUrl)) {
+        if (containsLinkCandidate(text) || containsLinkCandidate(caption)) {
           linkCount += 1
         }
       }
@@ -2910,7 +2913,7 @@ internal object ChatEngine {
   fun getChatRows(payload: Map<String, Any?>): List<Map<String, Any?>> {
     val chatId = normalized(payload["chatId"] ?: payload["chat_id"]) ?: return emptyList()
     synchronized(lock) {
-      return historyRowsByChat[chatId]?.toList() ?: emptyList()
+      return mergedChatRowsLocked(chatId)
     }
   }
 
@@ -3394,6 +3397,92 @@ internal object ChatEngine {
   private fun formatMessageTimeLabel(timestampMs: Long): String {
     val formatter = SimpleDateFormat("HH:mm", Locale.getDefault())
     return formatter.format(Date(timestampMs))
+  }
+
+  private fun messageIdFromRow(row: Map<String, Any?>): String? {
+    if (normalized(row["kind"]) != "message") return null
+    val message = row["message"] as? Map<*, *> ?: return null
+    return normalized(message["id"])
+  }
+
+  private fun messageTimestampMsFromRow(row: Map<String, Any?>): Long {
+    val message = row["message"] as? Map<*, *> ?: return 0L
+    return parseLongValue(message["timestampMs"] ?: message["timestamp_ms"] ?: message["timestamp"]) ?: 0L
+  }
+
+  private fun mergedChatRowsLocked(chatId: String): List<Map<String, Any?>> {
+    val historyRows = historyRowsByChat[chatId].orEmpty()
+    val liveRows = liveMessageRowsByChat[chatId].orEmpty()
+    val deletedIds = deletedMessageIdsByChat[chatId].orEmpty()
+    if (historyRows.isEmpty() && liveRows.isEmpty()) return emptyList()
+
+    val mergedById = linkedMapOf<String, Map<String, Any?>>()
+    val rowsWithoutIds = ArrayList<Map<String, Any?>>()
+    for (row in historyRows) {
+      val messageId = messageIdFromRow(row)
+      if (messageId == null) {
+        rowsWithoutIds.add(row)
+        continue
+      }
+      if (deletedIds.contains(messageId)) continue
+      mergedById[messageId] = liveRows[messageId] ?: row
+    }
+
+    for ((messageId, row) in liveRows) {
+      if (deletedIds.contains(messageId) || mergedById.containsKey(messageId)) continue
+      mergedById[messageId] = row
+    }
+
+    val mergedRows = ArrayList<Map<String, Any?>>(mergedById.values)
+    mergedRows.sortWith(
+      compareBy<Map<String, Any?>> { messageTimestampMsFromRow(it) }
+        .thenBy { messageIdFromRow(it).orEmpty() },
+    )
+    if (rowsWithoutIds.isNotEmpty()) {
+      mergedRows.addAll(0, rowsWithoutIds)
+    }
+    return mergedRows
+  }
+
+  private fun mergedStoredHistoryRowsLocked(
+    chatId: String,
+    remoteRows: List<Map<String, Any?>>,
+  ): List<Map<String, Any?>> {
+    val existingRows = historyRowsByChat[chatId].orEmpty()
+    val deletedIds = deletedMessageIdsByChat[chatId].orEmpty()
+    if (existingRows.isEmpty() && remoteRows.isEmpty()) return emptyList()
+
+    val mergedById = linkedMapOf<String, Map<String, Any?>>()
+    val rowsWithoutIds = ArrayList<Map<String, Any?>>()
+    for (row in existingRows) {
+      val messageId = messageIdFromRow(row)
+      if (messageId == null) {
+        rowsWithoutIds.add(row)
+        continue
+      }
+      if (deletedIds.contains(messageId)) continue
+      mergedById[messageId] = row
+    }
+
+    for (row in remoteRows) {
+      val messageId = messageIdFromRow(row)
+      if (messageId == null) {
+        rowsWithoutIds.add(row)
+        continue
+      }
+      if (deletedIds.contains(messageId)) continue
+      mergedById[messageId] = row
+    }
+
+    val mergedRows = ArrayList<Map<String, Any?>>(mergedById.values)
+    mergedRows.sortWith(
+      compareBy<Map<String, Any?>> { messageTimestampMsFromRow(it) }
+        .thenBy { messageIdFromRow(it).orEmpty() },
+    )
+    if (rowsWithoutIds.isNotEmpty()) {
+      mergedRows.addAll(0, rowsWithoutIds)
+    }
+    return mergedRows
   }
 
   private fun upsertLiveMessageRowLocked(chatId: String, messageId: String, row: Map<String, Any?>) {
@@ -4124,7 +4213,7 @@ internal object ChatEngine {
     historyLoadingChats.add(chatId)
     appendJournalLocked("native-chat-history-load-start", mapOf("chatId" to chatId))
 
-    val directHistoryUrl = "$apiBaseUrl/api/chat/$chatId/messages?limit=15"
+    val directHistoryUrl = "$apiBaseUrl/api/chat/$chatId/messages?limit=$chatHistoryFetchLimit"
     val requestBuilder = Request.Builder()
       .url(if (isBridgeText) bridgeUrl!! else directHistoryUrl)
       .header("Accept", "application/json")
@@ -4136,7 +4225,7 @@ internal object ChatEngine {
             mapOf(
               "chatId" to chatId,
               "userId" to userId,
-              "limit" to 15,
+              "limit" to chatHistoryFetchLimit,
             ),
           ).toString().toRequestBody("application/json".toMediaTypeOrNull()),
         )
@@ -4186,12 +4275,27 @@ internal object ChatEngine {
         val json = JSONObject(bodyString)
         (json.optJSONArray("messages") ?: json.optJSONArray("data") ?: JSONArray())
       }
-      val rows = buildHistoryRowsLocked(chatId, messages)
+      val remoteRows = buildHistoryRowsLocked(chatId, messages)
+      val existingRowsCount = historyRowsByChat[chatId]?.size ?: 0
+      val liveRowsCount = liveMessageRowsByChat[chatId]?.size ?: 0
+      val rows = mergedStoredHistoryRowsLocked(chatId, remoteRows)
       historyRowsByChat[chatId] = rows.toMutableList()
       state["updatedAt"] = System.currentTimeMillis()
+      Log.i(
+        "ChatEngine",
+        "loadChatHistory MERGE chatId=$chatId limit=$chatHistoryFetchLimit remoteRows=${remoteRows.size} existingRows=$existingRowsCount liveRows=$liveRowsCount mergedRows=${rows.size}",
+      )
       appendJournalLocked(
         "native-chat-history-load-ok",
-        mapOf("chatId" to chatId, "rows" to rows.size, "messages" to messages.length()),
+        mapOf(
+          "chatId" to chatId,
+          "rows" to rows.size,
+          "remoteRows" to remoteRows.size,
+          "existingRows" to existingRowsCount,
+          "liveRows" to liveRowsCount,
+          "messages" to messages.length(),
+          "limit" to chatHistoryFetchLimit,
+        ),
       )
       scheduleReplayQueuedOutboundLocked(chatId, "history_loaded")
       emitChangeLocked("chatRowsReloaded", chatId, null)

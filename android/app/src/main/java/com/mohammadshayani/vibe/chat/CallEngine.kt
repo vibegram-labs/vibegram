@@ -3,6 +3,7 @@ package com.mohammadshayani.vibe.chat
 import android.content.Context
 import android.util.Log
 import com.mohammadshayani.vibe.chat.notifications.VibeNativeCallStore
+import com.mohammadshayani.vibe.chat.notifications.VibePushTokenSync
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -37,6 +38,8 @@ internal object NativeCallEngine {
       Log.d("VibeNativeCall", "Engine.configure keys=${payload.keys.sorted().joinToString(",")}")
       val result = LinkedHashMap(state)
       refreshTurnConfig(context, force = true)
+      VibePushTokenSync.refreshFirebaseTokenIfAvailable(context, "call-engine-configure")
+      VibePushTokenSync.syncStoredPushTokens(context, payload, "call-engine-configure")
       return result
     }
   }

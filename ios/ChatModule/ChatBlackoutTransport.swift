@@ -61,11 +61,10 @@ final class ChatBlackoutTransport: NSObject, ChatRealtimeTransport {
   private let userId: String
   private let activeBridgeId: String?
   private let queue = DispatchQueue(label: "vibe.chat.blackout.transport")
+  private let refLock = NSLock()
   private let requestTimeout: TimeInterval = 32
   private let pollBackoffMs: Int = 1200
   private let fatalFailureThreshold = 3
-  private let queueSpecificKey = DispatchSpecificKey<UInt8>()
-  private let queueSpecificValue: UInt8 = 1
   private var bridges: [BridgeTarget]
   private var currentBridgeIndex = 0
   private var sessionId: String?
@@ -95,7 +94,6 @@ final class ChatBlackoutTransport: NSObject, ChatRealtimeTransport {
       bridgeBundle: bridgeBundle
     )
     super.init()
-    queue.setSpecific(key: queueSpecificKey, value: queueSpecificValue)
   }
 
   func connect() {
@@ -507,10 +505,9 @@ final class ChatBlackoutTransport: NSObject, ChatRealtimeTransport {
   }
 
   private func nextRef() -> String {
-    if DispatchQueue.getSpecific(key: queueSpecificKey) == queueSpecificValue {
-      return nextRefLocked()
-    }
-    return queue.sync { nextRefLocked() }
+    refLock.lock()
+    defer { refLock.unlock() }
+    return nextRefLocked()
   }
 
   private func nextRefLocked() -> String {

@@ -32,23 +32,14 @@ final class ChatEngineStore {
 
   func updateConfig(_ changes: [String: Any?]) {
     queue.sync {
-      var current = loadConfigLocked()
-      for (key, value) in changes {
-        if let value {
-          current[key] = value
-        } else {
-          current.removeValue(forKey: key)
-          if SecureKeyStore.sensitiveKeys.contains(key) {
-            SecureKeyStore.shared.deleteSecret(key: key)
-          }
-        }
-      }
+      updateConfigLocked(changes)
+    }
+  }
 
-      let sanitized = SecureKeyStore.shared.migrateAndSanitize(current)
-      guard JSONSerialization.isValidJSONObject(sanitized),
-            let data = try? JSONSerialization.data(withJSONObject: sanitized)
-      else { return }
-      defaults.set(data, forKey: configKey)
+  func updateConfigAsync(_ changes: [String: Any?], completion: (() -> Void)? = nil) {
+    queue.async {
+      self.updateConfigLocked(changes)
+      completion?()
     }
   }
 
@@ -122,6 +113,26 @@ final class ChatEngineStore {
           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     else { return [:] }
     return SecureKeyStore.shared.reassemble(obj)
+  }
+
+  private func updateConfigLocked(_ changes: [String: Any?]) {
+    var current = loadConfigLocked()
+    for (key, value) in changes {
+      if let value {
+        current[key] = value
+      } else {
+        current.removeValue(forKey: key)
+        if SecureKeyStore.sensitiveKeys.contains(key) {
+          SecureKeyStore.shared.deleteSecret(key: key)
+        }
+      }
+    }
+
+    let sanitized = SecureKeyStore.shared.migrateAndSanitize(current)
+    guard JSONSerialization.isValidJSONObject(sanitized),
+          let data = try? JSONSerialization.data(withJSONObject: sanitized)
+    else { return }
+    defaults.set(data, forKey: configKey)
   }
 
   private func saveJournalLocked(_ items: [[String: Any]]) {

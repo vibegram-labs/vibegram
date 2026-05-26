@@ -63,12 +63,16 @@ class NativeCallActivity : AppCompatActivity() {
       }
     }
 
-    private fun start(context: Context, state: Map<String, Any?>) {
-      val intent = Intent(context, NativeCallActivity::class.java).apply {
+    fun intent(context: Context, state: Map<String, Any?>): Intent {
+      return Intent(context, NativeCallActivity::class.java).apply {
         putCallExtras(state)
         if (context !is Activity) addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+        addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP)
       }
+    }
+
+    private fun start(context: Context, state: Map<String, Any?>) {
+      val intent = intent(context, state)
       context.startActivity(intent)
     }
 

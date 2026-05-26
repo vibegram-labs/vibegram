@@ -22,6 +22,7 @@ final class ChatMainProfileActionNode: UIControl {
 
     glassView.clipsToBounds = true
     glassView.layer.cornerCurve = .continuous
+    glassView.isUserInteractionEnabled = false
     addSubview(glassView)
 
     iconView.contentMode = .scaleAspectFit

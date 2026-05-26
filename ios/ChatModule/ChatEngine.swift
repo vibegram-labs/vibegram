@@ -1,7 +1,18 @@
 import CryptoKit
 import Foundation
+import OSLog
 import Security
 import UIKit
+
+private let chatEngineUITraceLogger = Logger(
+  subsystem: "com.mohammadshayani.vibe.native",
+  category: "UITrace"
+)
+
+private func chatEngineUITrace(_ message: String) {
+  chatEngineUITraceLogger.notice("\(message, privacy: .public)")
+  NSLog("[VibeUITrace] %@", message)
+}
 
 private struct ChatEngineHybridPayload: Decodable {
   let iv: String
@@ -330,7 +341,7 @@ final class ChatEngine {
   static let shared = ChatEngine()
   static let didChangeNotification = Notification.Name("Vibe.ChatEngine.didChange")
 
-  private struct SurfaceBinding {
+  private struct SurfaceBinding: Equatable {
     let surfaceId: String
     let chatId: String?
     let myUserId: String?
@@ -363,6 +374,7 @@ final class ChatEngine {
     "updatedAt": 0,
     "note": "ChatEngine scaffold (shadow mode)",
   ]
+  private var journalEntryCount = 0
   private var onlineUsers = Set<String>()
   private var lastSeenByUserId: [String: Int64] = [:]
   private var surfaceBindings: [String: SurfaceBinding] = [:]
@@ -424,7 +436,8 @@ final class ChatEngine {
   /// After this period of inactivity the key is cleared and re-derived from Keychain on next use.
   private let keyTTL: TimeInterval = 300
   private let chatHistoryCacheKeyPrefix = "vibe.ios.chatHistory.rows.v1"
-  private let chatHistoryCacheRowLimit = 80
+  private let chatHistoryFetchLimit = 100
+  private let chatHistoryCacheRowLimit = 120
 
   private init() {
     queue.setSpecific(key: queueSpecificKey, value: queueSpecificValue)
@@ -1099,15 +1112,25 @@ final class ChatEngine {
       normalizedString(payload["peerAgentId"] ?? payload["peer_agent_id"])
     guard !surfaceId.isEmpty else { return getStatus() }
 
-    let snapshot = queue.sync {
-      surfaceBindings[surfaceId] = SurfaceBinding(
+    let result = queue.sync { () -> (snapshot: [String: Any], shouldEnsureTransport: Bool) in
+      let nextBinding = SurfaceBinding(
         surfaceId: surfaceId,
         chatId: chatId,
         myUserId: myUserId,
         peerUserId: peerUserId,
         peerAgentId: peerAgentId
       )
-      if let chatId, !chatId.isEmpty, let peerUserId, !peerUserId.isEmpty {
+      let previousBinding = surfaceBindings[surfaceId]
+      guard previousBinding != nextBinding else {
+        return (statusSnapshotLocked(), false)
+      }
+
+      surfaceBindings[surfaceId] = nextBinding
+      let peerBindingChanged =
+        previousBinding?.chatId != nextBinding.chatId
+        || previousBinding?.peerUserId != nextBinding.peerUserId
+        || previousBinding?.peerAgentId != nextBinding.peerAgentId
+      if peerBindingChanged, let chatId, !chatId.isEmpty, let peerUserId, !peerUserId.isEmpty {
         chatPeerUserIdsByChatId[chatId] = peerUserId
         if let peerAgentId, !peerAgentId.isEmpty {
           chatPeerAgentIdsByChatId[chatId] = peerAgentId
@@ -1130,11 +1153,15 @@ final class ChatEngine {
           "peerAgentId": peerAgentId as Any,
         ])
       let snapshot = statusSnapshotLocked()
-      postChangeLocked(reason: "surfaceBindingChanged", userInfo: ["surfaceId": surfaceId])
-      return snapshot
+      if peerBindingChanged {
+        postChangeLocked(reason: "surfaceBindingChanged", userInfo: ["surfaceId": surfaceId])
+      }
+      return (snapshot, peerBindingChanged)
     }
-    ensureNativeTransport(trigger: "bind_surface")
-    return snapshot
+    if result.shouldEnsureTransport {
+      ensureNativeTransport(trigger: "bind_surface")
+    }
+    return result.snapshot
   }
 
   func unbindSurface(_ payload: [String: Any]) -> [String: Any] {
@@ -1174,13 +1201,10 @@ final class ChatEngine {
           chatId == "saved_messages" ? "Y" : "N"
         )
         joinNativeChatTopicIfNeededLocked(chatId: chatId)
-        // Eagerly fetch history so messages appear instantly when the chat view renders.
-        loadChatHistoryIfNeededLocked(chatId: chatId)
       }
       appendJournalLocked(event: "open-chat-channel", payload: payload)
       state["updatedAt"] = nowMs()
       let snapshot = statusSnapshotLocked()
-      postChangeLocked(reason: "chatChannelStateChanged", userInfo: ["chatId": chatId as Any])
       return snapshot
     }
     ensureNativeTransport(trigger: "open_chat_channel")
@@ -3019,17 +3043,20 @@ final class ChatEngine {
         fetchPinnedMessagesLocked(chatId: chatId, trigger: "on_demand")
       }
       let cachedPins = pinnedMessagesByChatId[chatId] ?? []
-      NSLog(
-        "[ChatEngine][Pin] getPinnedMessages chatId=%@ refresh=%@ hasCache=%@ loading=%@ count=%@",
-        chatId,
-        shouldRefresh ? "true" : "false",
-        hasCache ? "true" : "false",
-        pinnedFetchInFlightChatIds.contains(chatId) ? "true" : "false",
-        String(cachedPins.count)
-      )
+      let isLoading = pinnedFetchInFlightChatIds.contains(chatId)
+      if shouldRefresh || !hasCache || isLoading || !cachedPins.isEmpty {
+        NSLog(
+          "[ChatEngine][Pin] getPinnedMessages chatId=%@ refresh=%@ hasCache=%@ loading=%@ count=%@",
+          chatId,
+          shouldRefresh ? "true" : "false",
+          hasCache ? "true" : "false",
+          isLoading ? "true" : "false",
+          String(cachedPins.count)
+        )
+      }
       return [
         "chatId": chatId,
-        "loading": pinnedFetchInFlightChatIds.contains(chatId),
+        "loading": isLoading,
         "data": cachedPins,
       ]
     }
@@ -3236,6 +3263,7 @@ final class ChatEngine {
   func clearJournal() -> [String: Any] {
     store.clearJournal()
     return queue.sync {
+      journalEntryCount = 0
       state["updatedAt"] = nowMs()
       state["journalCount"] = 0
       let snapshot = statusSnapshotLocked()
@@ -3704,7 +3732,7 @@ final class ChatEngine {
     snapshot["agentProgressChatCount"] = agentProgressByChatId.count
     snapshot["pinnedChatCount"] = pinnedMessagesByChatId.count
     snapshot["pinnedMessageCount"] = pinnedMessagesByChatId.values.reduce(0) { $0 + $1.count }
-    snapshot["journalCount"] = store.getJournal(limit: nil).count
+    snapshot["journalCount"] = journalEntryCount
     return snapshot
   }
 
@@ -4085,10 +4113,15 @@ final class ChatEngine {
       switch event {
       case "call-start":
         _ = VibeNativeCallEngine.shared.handleSignal(callPayload)
-        let notificationPayload = callPayload.reduce(into: [AnyHashable: Any]()) { out, item in
-          out[item.key] = item.value
+        if UIApplication.shared.applicationState != .active {
+          let notificationPayload = callPayload.reduce(into: [AnyHashable: Any]()) { out, item in
+            out[item.key] = item.value
+          }
+          _ = VibeNativeCallManager.shared.handleRemoteNotification(
+            userInfo: notificationPayload,
+            preferSystemUI: true
+          )
         }
-        _ = VibeNativeCallManager.shared.handleRemoteNotification(userInfo: notificationPayload)
       case "call-end":
         var endPayload = callPayload
         endPayload["remote"] = true
@@ -4138,11 +4171,6 @@ final class ChatEngine {
             )
           }
           self.state["updatedAt"] = self.nowMs()
-          let snapshot = self.statusSnapshotLocked()
-          self.postChangeLocked(
-            reason: "chatChannelStateChanged",
-            userInfo: ["chatId": chatId, "state": snapshot]
-          )
           return
         }
 
@@ -5093,6 +5121,47 @@ final class ChatEngine {
     return rowsByApplyingBubbleSequenceShapes(mergedRows)
   }
 
+  private func mergedStoredHistoryRowsLocked(
+    chatId: String,
+    remoteRows: [[String: Any]]
+  ) -> [[String: Any]] {
+    let existingRows = historyRowsByChat[chatId] ?? []
+    let deletedIds = deletedMessageIdsByChat[chatId] ?? []
+    guard !existingRows.isEmpty || !remoteRows.isEmpty else { return [] }
+
+    var mergedById: [String: [String: Any]] = [:]
+    var rowsWithoutIds: [[String: Any]] = []
+    for row in existingRows {
+      guard let messageId = messageId(fromRow: row) else {
+        rowsWithoutIds.append(row)
+        continue
+      }
+      guard !deletedIds.contains(messageId) else { continue }
+      mergedById[messageId] = row
+    }
+
+    for row in remoteRows {
+      guard let messageId = messageId(fromRow: row) else {
+        rowsWithoutIds.append(row)
+        continue
+      }
+      guard !deletedIds.contains(messageId) else { continue }
+      mergedById[messageId] = row
+    }
+
+    var mergedRows = Array(mergedById.values)
+    mergedRows.sort { lhs, rhs in
+      let lt = messageTimestampMs(fromRow: lhs)
+      let rt = messageTimestampMs(fromRow: rhs)
+      if lt == rt {
+        return (messageId(fromRow: lhs) ?? "") < (messageId(fromRow: rhs) ?? "")
+      }
+      return lt < rt
+    }
+    mergedRows.insert(contentsOf: rowsWithoutIds, at: 0)
+    return rowsByApplyingBubbleSequenceShapes(mergedRows)
+  }
+
   private func storeMergedChatHistoryIfLoadedLocked(chatId: String) {
     guard historyFullyLoadedChats.contains(chatId) else { return }
     let rows = mergedChatRowsLocked(chatId: chatId)
@@ -5919,9 +5988,6 @@ final class ChatEngine {
 
   private func joinNativeChatTopicIfNeededLocked(chatId: String) {
     guard !chatId.isEmpty else { return }
-    // Always start HTTP history fetch immediately — do NOT gate behind socket state.
-    // This ensures messages load fast even before WebSocket is connected.
-    loadChatHistoryIfNeededLocked(chatId: chatId)
     guard chatId != "saved_messages" else {
       NSLog("[ChatEngine][Route] skip realtime join for saved_messages")
       return
@@ -6011,10 +6077,10 @@ final class ChatEngine {
 
   private func scheduleReplayQueuedOutboundLocked(chatId: String, trigger: String) {
     let ids = pendingOutboundQueueByChat[chatId] ?? []
+    guard !ids.isEmpty else { return }
     NSLog(
       "[ChatEngine] scheduleReplayQueuedOutboundLocked chatId=%@ trigger=%@ count=%d", chatId,
       trigger, ids.count)
-    guard !ids.isEmpty else { return }
     var drafts: [[String: Any]] = []
     for messageId in ids {
       if nativePendingMessagePushRefs.values.contains(where: {
@@ -6673,7 +6739,7 @@ final class ChatEngine {
         withJSONObject: [
           "chatId": chatId,
           "userId": userId,
-          "limit": 15,
+          "limit": chatHistoryFetchLimit,
           "savedMessages": isSavedMessages,
         ],
         options: []
@@ -6687,7 +6753,7 @@ final class ChatEngine {
       let baseMessageUrl = apiBase.appendingPathComponent("api").appendingPathComponent("chat")
         .appendingPathComponent(chatId).appendingPathComponent("messages")
       var urlComponents = URLComponents(url: baseMessageUrl, resolvingAgainstBaseURL: false)
-      urlComponents?.queryItems = [URLQueryItem(name: "limit", value: "15")]
+      urlComponents?.queryItems = [URLQueryItem(name: "limit", value: "\(chatHistoryFetchLimit)")]
       finalUrl = urlComponents?.url ?? baseMessageUrl
       request = URLRequest(url: finalUrl)
       request.httpMethod = "GET"
@@ -6702,7 +6768,9 @@ final class ChatEngine {
     }
     let fetchStartMs = self.nowMs()
     NSLog(
-      "[ChatEngine] loadChatHistory START chatId=%@ url=%@", String(chatId.prefix(12)),
+      "[ChatEngine] loadChatHistory START chatId=%@ limit=%d url=%@",
+      String(chatId.prefix(12)),
+      chatHistoryFetchLimit,
       request.url?.absoluteString ?? "nil")
     appendJournalLocked(event: "native-chat-history-load-start", payload: ["chatId": chatId])
 
@@ -6796,7 +6864,10 @@ final class ChatEngine {
       return
     }
 
-    let rows = buildHistoryRowsLocked(chatId: chatId, rawMessages: messagesArray)
+    let remoteRows = buildHistoryRowsLocked(chatId: chatId, rawMessages: messagesArray)
+    let existingRowsCount = historyRowsByChat[chatId]?.count ?? 0
+    let liveRowsCount = liveMessageRowsByChat[chatId]?.count ?? 0
+    let rows = mergedStoredHistoryRowsLocked(chatId: chatId, remoteRows: remoteRows)
     historyRowsByChat[chatId] = rows
     historyFullyLoadedChats.insert(chatId)
     historyRowsRestoredFromCacheChats.remove(chatId)
@@ -6807,8 +6878,19 @@ final class ChatEngine {
       payload: [
         "chatId": chatId,
         "rows": rows.count,
+        "remoteRows": remoteRows.count,
+        "existingRows": existingRowsCount,
+        "liveRows": liveRowsCount,
         "messages": messagesArray.count,
       ])
+    NSLog(
+      "[ChatEngine] loadChatHistory MERGE chatId=%@ remoteRows=%d existingRows=%d liveRows=%d mergedRows=%d",
+      String(chatId.prefix(12)),
+      remoteRows.count,
+      existingRowsCount,
+      liveRowsCount,
+      rows.count
+    )
     scheduleReplayQueuedOutboundLocked(chatId: chatId, trigger: "history_loaded")
     let snapshot = statusSnapshotLocked()
     postChangeLocked(reason: "chatRowsReloaded", userInfo: ["chatId": chatId, "state": snapshot])
@@ -7013,6 +7095,8 @@ final class ChatEngine {
   }
 
   private func appendJournalLocked(event: String, payload: [String: Any]) {
+    journalEntryCount = min(journalEntryCount + 1, 300)
+    state["journalCount"] = journalEntryCount
     store.appendJournal([
       "event": event,
       "timestamp": nowMs(),
@@ -7049,8 +7133,22 @@ final class ChatEngine {
       print(
         "[ChatEngine] didChange reason=\(reason) chatId=\(chatId.isEmpty ? "<empty>" : chatId)"
       )
+      chatEngineUITrace(
+        "ChatEngine didChange reason=\(reason) chatId=\(chatId.isEmpty ? "<empty>" : chatId)"
+      )
     }
-    NotificationCenter.default.post(name: Self.didChangeNotification, object: self, userInfo: info)
+    // Always dispatch the notification asynchronously so the engine queue is
+    // released before any observer runs. Posting synchronously while holding
+    // the queue lock can deadlock: if the main thread is blocked in queue.sync
+    // (e.g. from ChatEngine.isTyping called inside refreshHeaderState) while
+    // the engine queue is running postChangeLocked, any observer that tries to
+    // dispatch work back to the main thread creates a cross-thread lock
+    // inversion that stalls the app for up to 40 seconds (the upload semaphore
+    // timeout).
+    let notification = Notification(name: Self.didChangeNotification, object: self, userInfo: info)
+    DispatchQueue.main.async {
+      NotificationCenter.default.post(notification)
+    }
   }
 
   private func nowMs() -> Int {
@@ -7061,7 +7159,17 @@ final class ChatEngine {
     if DispatchQueue.getSpecific(key: queueSpecificKey) == queueSpecificValue {
       return work()
     }
-    return queue.sync(execute: work)
+    let isMain = Thread.isMainThread
+    let start = isMain ? CFAbsoluteTimeGetCurrent() : 0
+    let result = queue.sync(execute: work)
+    if isMain {
+      let elapsedMs = Int((CFAbsoluteTimeGetCurrent() - start) * 1000)
+      if elapsedMs > 50 {
+        let symbols = Thread.callStackSymbols.prefix(8).joined(separator: "\n")
+        NSLog("[ChatEngine][MAIN-THREAD-SYNC-STALL] syncOnQueue blocked main thread for %dms\n%@", elapsedMs, symbols)
+      }
+    }
+    return result
   }
 
   private func normalizedString(_ value: Any?) -> String? {
@@ -7360,22 +7468,22 @@ final class ChatEngine {
   }
 
   func sendSavedMessage(_ payload: [String: Any], completion: @escaping ([String: Any]) -> Void) {
-    queue.async { [weak self] in
+    DispatchQueue.global(qos: .userInitiated).async { [weak self] in
       guard let self else { return }
       guard let (apiBase, token) = self.requestContext else {
         DispatchQueue.main.async { completion(["success": false, "reason": "missing_config"]) }
         return
       }
-      guard let userId = normalizedString(getConfigValueLocked("userId")) else {
+      guard let userId = syncOnQueue({ self.normalizedString(self.getConfigValueLocked("userId")) }) else {
         DispatchQueue.main.async { completion(["success": false, "reason": "missing_user_id"]) }
         return
       }
 
-      let type = normalizedString(payload["type"])?.lowercased() ?? "text"
-      let text = normalizedString(payload["text"]) ?? ""
-      let transportMode = transportModeLocked()
+      let type = self.normalizedString(payload["type"])?.lowercased() ?? "text"
+      let text = self.normalizedString(payload["text"]) ?? ""
+      let transportMode = syncOnQueue { self.transportModeLocked() }
       let messageId =
-        normalizedString(payload["messageId"] ?? payload["message_id"] ?? payload["id"])
+        self.normalizedString(payload["messageId"] ?? payload["message_id"] ?? payload["id"])
         ?? UUID().uuidString.lowercased()
       NSLog(
         "[ChatEngine] sendSavedMessage START messageId=%@ type=%@ hasText=%@",
@@ -7384,33 +7492,33 @@ final class ChatEngine {
         text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? "false" : "true")
       let metadata = (payload["metadata"] as? [String: Any]) ?? [:]
       var mediaUrl =
-        normalizedString(
+        self.normalizedString(
           metadata["mediaUrl"] ?? metadata["media_url"] ?? payload["mediaUrl"]
             ?? payload["media_url"])
       var fileName =
-        normalizedString(metadata["fileName"] ?? metadata["file_name"] ?? payload["fileName"])
-      var fileSize = parseLongValue(
+        self.normalizedString(metadata["fileName"] ?? metadata["file_name"] ?? payload["fileName"])
+      var fileSize = self.parseLongValue(
         metadata["fileSize"] ?? metadata["file_size"] ?? payload["fileSize"])
-      let latitude = parseDoubleValue(metadata["latitude"] ?? payload["latitude"])
-      let longitude = parseDoubleValue(metadata["longitude"] ?? payload["longitude"])
-      let duration = parseDoubleValue(metadata["duration"] ?? payload["duration"])
-      let width = parseLongValue(metadata["width"] ?? payload["width"])
-      let height = parseLongValue(metadata["height"] ?? payload["height"])
-      var mediaKey = normalizedString(metadata["mediaKey"] ?? metadata["media_key"] ?? payload["mediaKey"])
+      let latitude = self.parseDoubleValue(metadata["latitude"] ?? payload["latitude"])
+      let longitude = self.parseDoubleValue(metadata["longitude"] ?? payload["longitude"])
+      let duration = self.parseDoubleValue(metadata["duration"] ?? payload["duration"])
+      let width = self.parseLongValue(metadata["width"] ?? payload["width"])
+      let height = self.parseLongValue(metadata["height"] ?? payload["height"])
+      var mediaKey = self.normalizedString(metadata["mediaKey"] ?? metadata["media_key"] ?? payload["mediaKey"])
       let replyToId =
-        normalizedString(metadata["replyToId"] ?? metadata["reply_to_id"] ?? payload["replyToId"])
+        self.normalizedString(metadata["replyToId"] ?? metadata["reply_to_id"] ?? payload["replyToId"])
       let contact = metadata["contact"] ?? payload["contact"]
       let isVideoNote = metadata["isVideoNote"] ?? payload["isVideoNote"]
-      let stickerId = normalizedString(metadata["stickerId"] ?? payload["stickerId"])
-      let stickerPackId = normalizedString(
+      let stickerId = self.normalizedString(metadata["stickerId"] ?? payload["stickerId"])
+      let stickerPackId = self.normalizedString(
         metadata["stickerPackId"] ?? metadata["packId"] ?? payload["stickerPackId"]
           ?? payload["packId"])
-      let stickerBundleFileName = normalizedString(
+      let stickerBundleFileName = self.normalizedString(
         metadata["stickerBundleFileName"] ?? metadata["bundleFileName"]
           ?? payload["stickerBundleFileName"] ?? payload["bundleFileName"])
-      let stickerEmoji = normalizedString(metadata["emoji"] ?? payload["emoji"])
-      let myPublicKeyPem = normalizedString(
-        getConfigValueLocked("publicKeyPem") ?? getConfigValueLocked("publicKey"))
+      let stickerEmoji = self.normalizedString(metadata["emoji"] ?? payload["emoji"])
+      let myPublicKeyPem = syncOnQueue { self.normalizedString(
+        self.getConfigValueLocked("publicKeyPem") ?? self.getConfigValueLocked("publicKey")) }
 
       if type == "text" && text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
         DispatchQueue.main.async { completion(["success": false, "reason": "empty_text"]) }
@@ -7431,9 +7539,9 @@ final class ChatEngine {
 
       let uploadableTypes: Set<String> = ["image", "voice", "video", "file", "sticker", "music"]
       if let currentMediaUrl = mediaUrl, uploadableTypes.contains(type),
-        isLocalMediaURI(currentMediaUrl)
+        self.isLocalMediaURI(currentMediaUrl)
       {
-        let uploadOutcome = uploadLocalMediaLocked(
+        let uploadOutcome = self.uploadLocalMediaLocked(
           localUri: currentMediaUrl,
           messageType: type,
           fileNameHint: fileName,
@@ -7479,7 +7587,7 @@ final class ChatEngine {
         }
         if let stickerEmoji { encryptedPayload["emoji"] = stickerEmoji }
         if let payloadString = try? JSONSerialization.data(
-          withJSONObject: makeJSONSafeMap(encryptedPayload), options: []),
+          withJSONObject: self.makeJSONSafeMap(encryptedPayload), options: []),
           let messageString = String(data: payloadString, encoding: .utf8),
           let sealed = try? chatEngineEncryptHybridMessage(
             recipientPublicKeyPem: myPublicKeyPem,
@@ -7512,7 +7620,7 @@ final class ChatEngine {
       }
       if let stickerEmoji { extraPayload["emoji"] = stickerEmoji }
 
-      let requestBody = makeJSONSafeMap([
+      let requestBody = self.makeJSONSafeMap([
         "user_id": userId,
         "original_message_id": messageId,
         "chat_id": "saved_messages",
@@ -7521,7 +7629,7 @@ final class ChatEngine {
         "content": "",
         "type": type,
         "media_url": NSNull(),
-        "timestamp": Int64(nowMs()),
+        "timestamp": Int64(self.nowMs()),
         "extra": String(
           data: (try? JSONSerialization.data(withJSONObject: extraPayload, options: []))
             ?? Data("{}".utf8),

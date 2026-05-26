@@ -1010,20 +1010,32 @@ final class ChatHomeCardCell: UITableViewCell {
 
   private func loadAvatarImage(urlString: String?) {
     let normalizedURL = (urlString ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-    if normalizedURL == lastAvatarURLString,
-      avatarImageView.image != nil
-    {
-      avatarFallbackIconView.isHidden = true
-      return
+    if normalizedURL == lastAvatarURLString {
+      if avatarImageView.image != nil {
+        avatarFallbackIconView.isHidden = true
+        return
+      }
+      if avatarLoadTask != nil {
+        avatarFallbackIconView.isHidden = false
+        return
+      }
     }
 
-    avatarLoadTask?.cancel()
-    avatarLoadTask = nil
+    if normalizedURL != lastAvatarURLString {
+      avatarLoadTask?.cancel()
+      avatarLoadTask = nil
+    }
     avatarToken = UUID().uuidString
     lastAvatarURLString = normalizedURL
 
+    guard !normalizedURL.isEmpty else {
+      avatarImageView.image = nil
+      avatarFallbackIconView.isHidden = false
+      lastAvatarURLString = nil
+      return
+    }
+
     guard
-      !normalizedURL.isEmpty,
       let url = URL(string: normalizedURL),
       let scheme = url.scheme?.lowercased(),
       scheme == "https" || scheme == "http"
@@ -1053,15 +1065,23 @@ final class ChatHomeCardCell: UITableViewCell {
     let task = Self.avatarSession.dataTask(with: request) { [weak self] data, response, _ in
       guard let self else { return }
       guard token == self.avatarToken else { return }
-      guard let statusCode = (response as? HTTPURLResponse)?.statusCode,
-        (200...299).contains(statusCode)
-      else { return }
-      guard token == self.avatarToken, let data, let image = UIImage(data: data) else { return }
-      Self.avatarImageCache.setObject(image, forKey: normalizedURL as NSString)
+      let statusCode = (response as? HTTPURLResponse)?.statusCode
+      let image: UIImage?
+      if let statusCode, (200...299).contains(statusCode), let data {
+        image = UIImage(data: data)
+      } else {
+        image = nil
+      }
+      if let image {
+        Self.avatarImageCache.setObject(image, forKey: normalizedURL as NSString)
+      }
       DispatchQueue.main.async {
         guard token == self.avatarToken else { return }
-        self.avatarImageView.image = image
-        self.avatarFallbackIconView.isHidden = true
+        self.avatarLoadTask = nil
+        if let image {
+          self.avatarImageView.image = image
+          self.avatarFallbackIconView.isHidden = true
+        }
       }
     }
     avatarLoadTask = task

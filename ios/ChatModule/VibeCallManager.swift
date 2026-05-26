@@ -3,6 +3,7 @@ import CallKit
 import Foundation
 import PushKit
 import UIKit
+import UserNotifications
 
 public final class VibeNativeCallManager: NSObject {
   public static let shared = VibeNativeCallManager()
@@ -21,6 +22,11 @@ public final class VibeNativeCallManager: NSObject {
   private let callController = CXCallController()
   private var pushRegistry: PKPushRegistry?
   private var started = false
+  private var foregroundBannerCallIds = Set<String>()
+  private let pushSyncQueue = DispatchQueue(label: "vibe.native.call.push-sync")
+  private var lastPushSyncSignature: String?
+  private var pushSyncInFlight = false
+  private var pushSyncNeedsRetry = false
 
   private override init() {
     super.init()
@@ -41,16 +47,23 @@ public final class VibeNativeCallManager: NSObject {
       registry.desiredPushTypes = [.voIP]
       self.pushRegistry = registry
       NSLog("[VibeNativeCall] PKPushRegistry configured desiredPushTypes=%@", String(describing: registry.desiredPushTypes))
+      self.syncStoredPushTokens(reason: "start")
     }
   }
 
-  public func handleRemoteNotification(userInfo: [AnyHashable: Any]) -> Bool {
+  public func handleRemoteNotification(userInfo: [AnyHashable: Any], preferSystemUI: Bool = true) -> Bool {
     NSLog("[VibeNativeCall] handleRemoteNotification keys=[%@]", userInfo.keys.map { String(describing: $0) }.sorted().joined(separator: ","))
     guard let payload = normalizeIncomingCallPayload(userInfo: userInfo) else {
       NSLog("[VibeNativeCall] handleRemoteNotification ignored reason=normalizeFailed")
       return false
     }
     NSLog("[VibeNativeCall] handleRemoteNotification normalized callId=%@ callType=%@ fromUser=%@", payload["callId"] ?? "-", payload["callType"] ?? "-", payload["fromUserId"] ?? "-")
+    if !preferSystemUI {
+      _ = VibeNativeCallEngine.shared.handleSignal(payload.reduce(into: [String: Any]()) {
+        $0[$1.key] = $1.value
+      })
+      return true
+    }
     reportIncomingCall(payload: payload, source: "remoteNotification")
     return true
   }
@@ -67,6 +80,66 @@ public final class VibeNativeCallManager: NSObject {
     NSLog("[VibeNativeCall] clearIncomingCallUi callId=%@ uuid=%@", callId, uuid.uuidString)
     provider.reportCall(with: uuid, endedAt: Date(), reason: .remoteEnded)
     store.clearActiveCall(callId: callId)
+  }
+
+  public func presentForegroundIncomingBanner(_ payload: [String: Any]) {
+    guard let normalized = normalizeIncomingCallPayload(userInfo: payload.reduce(into: [AnyHashable: Any]()) {
+      $0[$1.key] = $1.value
+    }) else {
+      NSLog("[VibeNativeCall] foregroundBanner skipped reason=normalizeFailed")
+      return
+    }
+    let callId = normalized["callId"] ?? ""
+    guard !callId.isEmpty else { return }
+    guard !foregroundBannerCallIds.contains(callId) else {
+      NSLog("[VibeNativeCall] foregroundBanner skipped duplicate callId=%@", callId)
+      return
+    }
+    foregroundBannerCallIds.insert(callId)
+
+    let center = UNUserNotificationCenter.current()
+    let content = UNMutableNotificationContent()
+    content.categoryIdentifier = Self.foregroundCallCategoryIdentifier
+    content.threadIdentifier = callId
+    content.title = normalized["fromUserName"] ?? normalized["fromUserId"] ?? "Incoming call"
+    content.body = "Incoming \((normalized["callType"] ?? "voice") == "video" ? "video" : "voice") call"
+    content.sound = .default
+    content.userInfo = normalized
+    let request = UNNotificationRequest(
+      identifier: "vibe.foreground.call.\(callId)",
+      content: content,
+      trigger: nil
+    )
+    center.add(request) { error in
+      if let error {
+        NSLog("[VibeNativeCall] foregroundBanner failed callId=%@ error=%@", callId, error.localizedDescription)
+      } else {
+        NSLog("[VibeNativeCall] foregroundBanner scheduled callId=%@", callId)
+      }
+    }
+  }
+
+  public static let foregroundCallCategoryIdentifier = "VIBE_INCOMING_CALL"
+  public static let foregroundCallAcceptAction = "VIBE_CALL_ACCEPT"
+  public static let foregroundCallDeclineAction = "VIBE_CALL_DECLINE"
+
+  public func setApnsDeviceToken(_ tokenData: Data) {
+    let token = tokenData.map { String(format: "%02x", $0) }.joined()
+    store.setApnsToken(token)
+    NSLog("[VibeNativeCall] APNs token updated len=%d", token.count)
+    syncStoredPushTokens(reason: "apns-token")
+  }
+
+  public func clearApnsDeviceToken() {
+    store.setApnsToken(nil)
+    NSLog("[VibeNativeCall] APNs token cleared")
+    syncStoredPushTokens(reason: "apns-token-invalidated")
+  }
+
+  public func syncStoredPushTokens(reason: String) {
+    pushSyncQueue.async { [weak self] in
+      self?.syncStoredPushTokensLocked(reason: reason)
+    }
   }
 
   private func reportIncomingCall(payload: [String: String], source: String) {
@@ -98,6 +171,108 @@ public final class VibeNativeCallManager: NSObject {
         NSLog("[VibeNativeCall] reportNewIncomingCall ok callId=%@ uuid=%@", callId, uuid.uuidString)
       }
     }
+  }
+
+  private func syncStoredPushTokensLocked(reason: String) {
+    if pushSyncInFlight {
+      pushSyncNeedsRetry = true
+      NSLog("[VibeNativeCall] push token sync skipped reason=%@ state=inFlight", reason)
+      return
+    }
+
+    let tokens = store.getPushTokens()
+    let apns = normalizedString(tokens["apns"])
+    let voip = normalizedString(tokens["voip"] ?? tokens["apns_voip"])
+    guard apns != nil || voip != nil else {
+      NSLog("[VibeNativeCall] push token sync skipped reason=%@ missingTokens=true", reason)
+      return
+    }
+
+    guard let config = resolvePushSyncConfig() else {
+      NSLog("[VibeNativeCall] push token sync skipped reason=%@ missingSession=true", reason)
+      return
+    }
+
+    var pushTokens: [String: String] = [:]
+    if let apns { pushTokens["apns"] = apns }
+    if let voip { pushTokens["apns_voip"] = voip }
+
+    let signature = [
+      config.userId,
+      config.apiBaseUrl,
+      apns ?? "",
+      voip ?? "",
+    ].joined(separator: "|")
+    if lastPushSyncSignature == signature {
+      NSLog("[VibeNativeCall] push token sync skipped reason=%@ unchanged=true", reason)
+      return
+    }
+
+    guard let url = URL(string: "\(config.apiBaseUrl)/api/user/profile") else {
+      NSLog("[VibeNativeCall] push token sync skipped reason=%@ invalidURL=true", reason)
+      return
+    }
+
+    var request = URLRequest(url: url)
+    request.httpMethod = "POST"
+    request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+    request.setValue("Bearer \(config.authToken)", forHTTPHeaderField: "Authorization")
+    request.httpBody = try? JSONSerialization.data(withJSONObject: [
+      "userId": config.userId,
+      "pushTokens": pushTokens,
+    ])
+
+    pushSyncInFlight = true
+    NSLog(
+      "[VibeNativeCall] push token sync start reason=%@ userId=%@ apns=%@ voip=%@",
+      reason,
+      config.userId,
+      apns == nil ? "false" : "true",
+      voip == nil ? "false" : "true"
+    )
+    URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
+      guard let self else { return }
+      let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+      self.pushSyncQueue.async {
+        self.pushSyncInFlight = false
+        let shouldRetry = self.pushSyncNeedsRetry
+        self.pushSyncNeedsRetry = false
+        if let error {
+          NSLog("[VibeNativeCall] push token sync failed reason=%@ error=%@", reason, error.localizedDescription)
+          if shouldRetry {
+            self.syncStoredPushTokensLocked(reason: "queued-after-\(reason)")
+          }
+          return
+        }
+        if (200...299).contains(status) {
+          self.lastPushSyncSignature = signature
+          NSLog("[VibeNativeCall] push token sync ok reason=%@ status=%d", reason, status)
+        } else {
+          NSLog("[VibeNativeCall] push token sync failed reason=%@ status=%d", reason, status)
+        }
+        if shouldRetry {
+          self.syncStoredPushTokensLocked(reason: "queued-after-\(reason)")
+        }
+      }
+    }.resume()
+  }
+
+  private func resolvePushSyncConfig() -> (apiBaseUrl: String, userId: String, authToken: String)? {
+    let engineConfig = ChatEngineStore.shared.getConfig()
+    let callConfig = store.getNativeEngineConfig()
+    guard
+      let userId = normalizedString(engineConfig["userId"] ?? callConfig["userId"]),
+      let authToken = normalizedString(
+        engineConfig["authToken"] ?? engineConfig["token"] ?? callConfig["authToken"] ?? callConfig["token"])
+    else {
+      return nil
+    }
+    let rawBase =
+      normalizedString(
+        engineConfig["apiBaseUrl"] ?? engineConfig["baseUrl"] ?? callConfig["apiBaseUrl"] ?? callConfig["baseUrl"])
+      ?? "https://api.vibegram.io"
+    let apiBaseUrl = rawBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    return (apiBaseUrl, userId, authToken)
   }
 
   private func normalizeIncomingCallPayload(userInfo: [AnyHashable: Any]) -> [String: String]? {
@@ -175,6 +350,12 @@ public final class VibeNativeCallManager: NSObject {
     )
     return result
   }
+
+  private func normalizedString(_ value: Any?) -> String? {
+    guard let value else { return nil }
+    let text = String(describing: value).trimmingCharacters(in: .whitespacesAndNewlines)
+    return text.isEmpty ? nil : text
+  }
 }
 
 extension VibeNativeCallManager: PKPushRegistryDelegate {
@@ -184,12 +365,14 @@ extension VibeNativeCallManager: PKPushRegistryDelegate {
     let token = pushCredentials.token.map { String(format: "%02x", $0) }.joined()
     store.setVoipToken(token)
     NSLog("[VibeNativeCall] VoIP token updated len=%d", token.count)
+    syncStoredPushTokens(reason: "voip-token")
   }
 
   public func pushRegistry(_ registry: PKPushRegistry, didInvalidatePushTokenFor type: PKPushType) {
     NSLog("[VibeNativeCall] PKPush didInvalidateToken type=%@", type.rawValue)
     guard type == .voIP else { return }
     store.setVoipToken(nil)
+    syncStoredPushTokens(reason: "voip-token-invalidated")
   }
 
   public func pushRegistry(

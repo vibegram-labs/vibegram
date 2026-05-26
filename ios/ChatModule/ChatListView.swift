@@ -1,7 +1,23 @@
 import AVFoundation
 import AVKit
+import OSLog
 import QuickLook
 import UIKit
+
+private let chatListUITraceLogger = Logger(
+  subsystem: "com.mohammadshayani.vibe.native",
+  category: "UITrace"
+)
+
+private func chatListUITrace(_ message: String, fault: Bool = false) {
+  if fault {
+    chatListUITraceLogger.fault("\(message, privacy: .public)")
+    NSLog("[VibeUITrace][fault] %@", message)
+  } else {
+    chatListUITraceLogger.notice("\(message, privacy: .public)")
+    NSLog("[VibeUITrace] %@", message)
+  }
+}
 
 private let chatListMediaVerboseDebugLogs = false
 private let chatListInlineVideoVerboseDebugLogs = false
@@ -543,6 +559,7 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
   private var _setRowsGeneration: UInt = 0
   private var pendingRowsPayload: [[String: Any]]?
   private var sourceRowsPayload: [[String: Any]] = []
+  private var searchQuery = ""
   private var nativeSendEnabled = false
   private var engineSurfaceId: String = ""
   private var engineChatId: String = ""
@@ -553,6 +570,7 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
   private var engineOpenedChatId: String = ""
   private var engineChannelBindingEnabled = true
   private var statusAuthorityEnabled = false
+  private var nativeHistoryHydrationGeneration: UInt = 0
   private var nativeOutgoingRowsById: [String: [String: Any]] = [:]
   private var nativeOutgoingOrder: [String] = []
   private var nativeEngineRowsById: [String: [String: Any]] = [:]
@@ -900,12 +918,20 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
   }
 
   func setRows(_ nextRows: [[String: Any]]) {
+    let startedAt = ProcessInfo.processInfo.systemUptime
     sourceRowsPayload = nextRows
+    let traceChatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
     NSLog(
       "[ChatListView] setRows called — count: %d, isApplying: %@", nextRows.count,
       isApplyingRowsUpdate ? "true" : "false")
+    chatListUITrace(
+      "ChatListView setRows start chatId=\(traceChatId.isEmpty ? "<empty>" : String(traceChatId.prefix(12))) incoming=\(nextRows.count) current=\(rows.count) applying=\(isApplyingRowsUpdate ? "Y" : "N") searchActive=\(searchQuery.isEmpty ? "N" : "Y")"
+    )
     if isApplyingRowsUpdate {
       pendingRowsPayload = nextRows
+      chatListUITrace(
+        "ChatListView setRows queued chatId=\(traceChatId.isEmpty ? "<empty>" : String(traceChatId.prefix(12))) incoming=\(nextRows.count)"
+      )
       return
     }
     isApplyingRowsUpdate = true
@@ -913,7 +939,8 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     let mySetRowsGeneration = _setRowsGeneration
 
     let mergedRows = mergedRowsPayload(from: nextRows)
-    let parsed = mergedRows.compactMap(ChatListRow.init).filter { row in
+    let visibleRows = filterRowsForSearch(mergedRows)
+    let parsed = visibleRows.compactMap(ChatListRow.init).filter { row in
       row.messageType != "agent_progress"
     }
     if let targetMessageId = reactionDebugTargetMessageId, reactionDebugRemainingRowsChecks > 0 {
@@ -1010,6 +1037,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
         preInsetOffset, postInsetOffset, preInsetContentH, postInsetContentH,
         self.collectionView.bounds.height, parsed.count,
         self.pendingRowsPayload != nil ? "Y" : "N")
+      chatListUITrace(
+        "ChatListView setRows finalize chatId=\(traceChatId.isEmpty ? "<empty>" : String(traceChatId.prefix(12))) parsed=\(parsed.count) animated=\(animated ? "Y" : "N") wasNearBottom=\(wasNearBottom ? "Y" : "N") queued=\(self.pendingRowsPayload != nil ? "Y" : "N") durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000)) contentH=\(Int(postInsetContentH)) offsetY=\(Int(postInsetOffset))"
+      )
       if shouldDeferPendingBottomScroll, let pendingPayload {
         self.deferredPendingSendBottomScrollMessageId = pendingPayload.messageId
         self.projectedSendTransitionMessageId = pendingPayload.messageId
@@ -1296,6 +1326,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       emitViewport(force: true)
       finishRowsUpdate()
       maybeStartPendingSendTransition()
+      chatListUITrace(
+        "ChatListView setRows content-reconfigure chatId=\(traceChatId.isEmpty ? "<empty>" : String(traceChatId.prefix(12))) reloads=\(safeReloads.count) durationMs=\(Int((ProcessInfo.processInfo.systemUptime - startedAt) * 1000))"
+      )
       return
     }
 
@@ -1712,15 +1745,16 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     nativeDeletedMessageIds.removeAll()
     updateChatEngineBinding()
     updateChatEngineChannelBinding()
-    refreshVisibleStatuses(reason: "chatId")
-    hydrateRowsFromNativeHistoryIfReady(trigger: "chatId")
+    if statusAuthorityEnabled {
+      refreshVisibleStatuses(reason: "chatId")
+      hydrateRowsFromNativeHistoryIfReady(trigger: "chatId")
+    }
   }
 
   func setEngineMyUserId(_ value: String) {
     let next = value.trimmingCharacters(in: .whitespacesAndNewlines)
     if engineMyUserId == next { return }
     engineMyUserId = next
-    updateChatEngineBinding()
   }
 
   func setEnginePeerUserId(_ value: String) {
@@ -1728,7 +1762,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     if enginePeerUserId == next { return }
     enginePeerUserId = next
     updateChatEngineBinding()
-    refreshVisibleStatuses(reason: "peerUserId")
+    if statusAuthorityEnabled {
+      refreshVisibleStatuses(reason: "peerUserId")
+    }
   }
 
   func setEnginePeerAgentId(_ value: String) {
@@ -1755,8 +1791,9 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     statusAuthorityEnabled = enabled
     if enabled {
       hydrateRowsFromNativeHistoryIfReady(trigger: "statusAuthorityEnabled")
+    } else {
+      refreshVisibleStatuses(reason: "statusAuthorityDisabled")
     }
-    refreshVisibleStatuses(reason: "statusAuthorityEnabled")
   }
 
   func beginMessageSelection(messageId: String) {
@@ -2356,6 +2393,16 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       return
     }
     let reason = (note.userInfo?["reason"] as? String) ?? "engine"
+    if ["chatRowsReloaded", "chatMessageInserted", "chatMessageEdited", "chatMessageDeleted",
+      "chatMessageChanged", "messageStatusChanged", "presenceChanged", "peerTyping",
+      "chatChannelStateChanged"].contains(reason)
+    {
+      let traceChatIdRaw = changedChatId?.isEmpty == false ? changedChatId! : engineChatId
+      let traceChatId = traceChatIdRaw.trimmingCharacters(in: .whitespacesAndNewlines)
+      chatListUITrace(
+        "ChatListView engineChanged reason=\(reason) chatId=\(traceChatId.isEmpty ? "<empty>" : String(traceChatId.prefix(12))) rows=\(rows.count) sourceRows=\(sourceRowsPayload.count) overlay=\(nativeEngineRowsById.count)"
+      )
+    }
     if reason == "peerTyping" {
       // Typing indicator is handled in header; do not show list-level typing UI.
       setPeerTyping(false)
@@ -2394,34 +2441,49 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     guard statusAuthorityEnabled else { return }
     let resolvedChatId = engineChatId.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !resolvedChatId.isEmpty else { return }
+    nativeHistoryHydrationGeneration &+= 1
+    let generation = nativeHistoryHydrationGeneration
+    let shouldRestoreLiveRows = nativeEngineRowsById.isEmpty
 
-    // Restore overlay rows from ChatEngine's live index so messages sent while
-    // the view was detached can render immediately before JS catches up.
-    if nativeEngineRowsById.isEmpty {
-      let liveRows = ChatEngine.shared.getLiveMessageRows(["chatId": resolvedChatId])
-      if !liveRows.isEmpty {
-        for (rawMessageId, row) in liveRows {
-          guard let messageId = normalizedMessageId(rawMessageId) else { continue }
-          nativeEngineRowsById[messageId] = row
-          if !nativeEngineOrder.contains(messageId) {
-            nativeEngineOrder.append(messageId)
+    DispatchQueue.global(qos: .utility).async { [weak self] in
+      let liveRows =
+        shouldRestoreLiveRows
+        ? ChatEngine.shared.getLiveMessageRows(["chatId": resolvedChatId])
+        : [:]
+      let historyLoaded = ChatEngine.shared.isChatHistoryLoaded(chatId: resolvedChatId)
+
+      DispatchQueue.main.async { [weak self] in
+        guard let self else { return }
+        guard self.statusAuthorityEnabled else { return }
+        guard self.nativeHistoryHydrationGeneration == generation else { return }
+        guard self.engineChatId.trimmingCharacters(in: .whitespacesAndNewlines) == resolvedChatId
+        else { return }
+
+        // Restore overlay rows from ChatEngine's live index so messages sent while
+        // the view was detached can render immediately before JS catches up.
+        if self.nativeEngineRowsById.isEmpty, !liveRows.isEmpty {
+          for (rawMessageId, row) in liveRows {
+            guard let messageId = self.normalizedMessageId(rawMessageId) else { continue }
+            self.nativeEngineRowsById[messageId] = row
+            if !self.nativeEngineOrder.contains(messageId) {
+              self.nativeEngineOrder.append(messageId)
+            }
           }
+          NSLog(
+            "[ChatListView] hydrateRowsFromNativeHistoryIfReady restored overlay from live rows trigger=%@ chatId=%@ count=%d",
+            trigger, resolvedChatId, liveRows.count
+          )
         }
+
+        if !historyLoaded && self.nativeEngineRowsById.isEmpty { return }
         NSLog(
-          "[ChatListView] hydrateRowsFromNativeHistoryIfReady restored overlay from live rows trigger=%@ chatId=%@ count=%d",
-          trigger, resolvedChatId, liveRows.count
+          "[ChatListView] hydrateRowsFromNativeHistoryIfReady trigger=%@ chatId=%@ sourceRows=%d overlay=%d historyLoaded=%@",
+          trigger, resolvedChatId, self.sourceRowsPayload.count, self.nativeEngineRowsById.count,
+          historyLoaded ? "Y" : "N"
         )
+        self.setRows(self.sourceRowsPayload)
       }
     }
-
-    let historyLoaded = ChatEngine.shared.isChatHistoryLoaded(chatId: resolvedChatId)
-    if !historyLoaded && nativeEngineRowsById.isEmpty { return }
-    NSLog(
-      "[ChatListView] hydrateRowsFromNativeHistoryIfReady trigger=%@ chatId=%@ sourceRows=%d overlay=%d historyLoaded=%@",
-      trigger, resolvedChatId, sourceRowsPayload.count, nativeEngineRowsById.count,
-      historyLoaded ? "Y" : "N"
-    )
-    setRows(sourceRowsPayload)
   }
 
   private func updateChatEngineBinding() {
@@ -3735,6 +3797,48 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
     onNativeEvent(["type": "sendTransitionCompleted", "messageId": revealedMessageId ?? ""])
   }
 
+  func setSearchQuery(_ value: String) {
+    let nextQuery = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard nextQuery != searchQuery else { return }
+    searchQuery = nextQuery
+    NSLog(
+      "[ChatListView] setSearchQuery active=%@ length=%d chatId=%@",
+      searchQuery.isEmpty ? "false" : "true",
+      searchQuery.count,
+      engineChatId
+    )
+    setRows(sourceRowsPayload)
+  }
+
+  private func filterRowsForSearch(_ input: [[String: Any]]) -> [[String: Any]] {
+    let query = searchQuery.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    guard !query.isEmpty else { return input }
+
+    return input.filter { row in
+      guard (row["kind"] as? String)?.lowercased() == "message",
+        let message = row["message"] as? [String: Any]
+      else {
+        return false
+      }
+
+      let values: [Any?] = [
+        message["text"],
+        message["plainContent"],
+        message["plain_content"],
+        message["caption"],
+        message["fileName"],
+        message["file_name"],
+        message["id"],
+        row["id"],
+        row["messageId"],
+      ]
+      return values.contains { value in
+        guard let value else { return false }
+        return String(describing: value).lowercased().contains(query)
+      }
+    }
+  }
+
   private func emitViewport(force: Bool = false) {
     let contentHeight = collectionView.contentSize.height
     let layoutHeight = collectionView.bounds.height
@@ -4195,7 +4299,6 @@ public final class ChatListView: UIView, UICollectionViewDataSource,
       safeBottom = keyboardHeight > 0 ? 0 : safeAreaInsets.bottom
     }
     bar.bottomSafeAreaInset = safeBottom
-
     // Size the bar by updating its width (avoiding y-origin jumps during UIView animations)
     bar.frame = CGRect(x: 0, y: bar.frame.minY, width: w, height: bar.frame.height)
     bar.layoutIfNeeded()

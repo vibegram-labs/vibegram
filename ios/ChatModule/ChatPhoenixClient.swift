@@ -36,6 +36,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   private let proxyConfig: ChatProxyConfiguration?
   private let callbacks: ChatTransportCallbacks
   private let queue = DispatchQueue(label: "vibe.chat.phoenix.client")
+  private let refLock = NSLock()
   private let connectRequestTimeout: TimeInterval = 8.0
   private let heartbeatInterval: TimeInterval = 10.0
   private var session: URLSession?
@@ -55,7 +56,6 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
     self.proxyConfig = proxyConfig
     self.callbacks = callbacks
     super.init()
-    queue.setSpecific(key: queueKey, value: 1)
   }
 
   func connect() {
@@ -116,10 +116,9 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
   }
 
   private func nextRef() -> String {
-    if DispatchQueue.getSpecific(key: queueKey) != nil {
-      return nextRefLocked()
-    }
-    return queue.sync { nextRefLocked() }
+    refLock.lock()
+    defer { refLock.unlock() }
+    return nextRefLocked()
   }
 
   private func nextRefLocked() -> String {
@@ -260,7 +259,7 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
       guard let self else { return }
       self.sendFrame(
         joinRef: nil,
-        ref: self.nextRefLocked(),
+        ref: self.nextRef(),
         topic: "phoenix",
         event: "heartbeat",
         payload: [:]
@@ -281,9 +280,6 @@ final class ChatPhoenixClient: NSObject, URLSessionWebSocketDelegate, URLSession
     session?.invalidateAndCancel()
     session = nil
   }
-
-  private let queueKey = DispatchSpecificKey<UInt8>()
-
   func urlSession(
     _ session: URLSession,
     webSocketTask: URLSessionWebSocketTask,

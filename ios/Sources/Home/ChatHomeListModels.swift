@@ -221,6 +221,12 @@ struct ChatHomeListRow {
       normalizedString(raw["avatarGradientStartDark"] ?? raw["avatar_gradient_start_dark"])
     let avatarGradientEndDark =
       normalizedString(raw["avatarGradientEndDark"] ?? raw["avatar_gradient_end_dark"])
+    let fallbackGradient = avatarGradientSeed(
+      title: title,
+      peerUserId: peerUserId,
+      chatId: chatId,
+      isSavedMessages: isSavedMessages
+    )
     let type = normalizedString(raw["type"] ?? raw["chatType"] ?? raw["chat_type"])
     let isGroup =
       parseBool(raw["isGroup"] ?? raw["is_group"]) ?? (type == "group" || type == "channel")
@@ -241,10 +247,10 @@ struct ChatHomeListRow {
       peerUserId: peerUserId,
       avatarUri: avatarUri,
       avatarFallback: avatarFallback,
-      avatarGradientStartLight: avatarGradientStartLight,
-      avatarGradientEndLight: avatarGradientEndLight,
-      avatarGradientStartDark: avatarGradientStartDark,
-      avatarGradientEndDark: avatarGradientEndDark,
+      avatarGradientStartLight: avatarGradientStartLight ?? fallbackGradient?.lightStart,
+      avatarGradientEndLight: avatarGradientEndLight ?? fallbackGradient?.lightEnd,
+      avatarGradientStartDark: avatarGradientStartDark ?? fallbackGradient?.darkStart,
+      avatarGradientEndDark: avatarGradientEndDark ?? fallbackGradient?.darkEnd,
       isSavedMessages: isSavedMessages,
       type: type,
       isGroup: isGroup,
@@ -258,6 +264,30 @@ struct ChatHomeListRow {
     return array.compactMap { item in
       item as? [String: Any]
     }
+  }
+
+  private static func avatarGradientSeed(
+    title: String,
+    peerUserId: String?,
+    chatId: String,
+    isSavedMessages: Bool
+  ) -> (lightStart: String, lightEnd: String, darkStart: String, darkEnd: String)? {
+    guard !isSavedMessages else { return nil }
+    let seed = normalizedString(peerUserId) ?? normalizedString(title) ?? chatId
+    guard !seed.isEmpty else { return nil }
+    let palettes: [(String, String, String, String)] = [
+      ("#5B8DEF", "#3D6BC6", "#6EA2FF", "#355EAA"),
+      ("#1FA97A", "#167A60", "#3BC99A", "#126B55"),
+      ("#D66A5A", "#AF493F", "#E98574", "#963B33"),
+      ("#A06AD8", "#7C4EB2", "#B984EA", "#6E45A0"),
+      ("#D59A2E", "#AF741D", "#E6B24A", "#966418"),
+      ("#2F9AA8", "#207585", "#4BB6C4", "#1B6575"),
+      ("#E05A8A", "#B83E6A", "#F178A4", "#9C345B"),
+      ("#6078D6", "#4659AE", "#7A91EA", "#3A4E9C"),
+    ]
+    let index = abs(seed.unicodeScalars.reduce(0) { ($0 &* 31) &+ Int($1.value) }) % palettes.count
+    let palette = palettes[index]
+    return (palette.0, palette.1, palette.2, palette.3)
   }
 
   static func parseServerMessages(_ value: Any?) -> [[String: Any]] {

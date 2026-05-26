@@ -91,7 +91,10 @@ final class ChatPinnedBannerView: UIControl {
     textStack.axis = .vertical
     textStack.alignment = .fill
     textStack.distribution = .fill
-    textStack.spacing = 1.0
+    // Spacing 0 avoids the UISV-spacing unsatisfiable-constraint log that fires
+    // when the banner is first measured at height=0 before layout has settled.
+    // The 11pt + 12pt fonts already produce adequate visual separation.
+    textStack.spacing = 0.0
     textStack.addArrangedSubview(titleLabel)
     textStack.addArrangedSubview(bodyLabel)
   }

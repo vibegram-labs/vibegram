@@ -243,6 +243,8 @@ struct SettingsView: View {
     .toolbar {
       ToolbarItem(placement: .topBarLeading) {
         Button {
+          AppUITrace.notice("SettingsView toolbar qr")
+          AppUIStallWatchdog.shared.updateContext("SettingsView toolbar qr")
           activeRoute = .qr
         } label: {
           Image(systemName: "qrcode")
@@ -252,14 +254,27 @@ struct SettingsView: View {
       }
       ToolbarItem(placement: .topBarTrailing) {
         Button("Edit") {
+          AppUITrace.notice("SettingsView toolbar edit")
+          AppUIStallWatchdog.shared.updateContext("SettingsView toolbar edit")
           activeRoute = .profile
         }
         .font(.system(size: 17))
         .foregroundStyle(palette.accent)
       }
     }
+    .onAppear {
+      AppUITrace.notice(
+        "SettingsView onAppear hasProfile=\(profileController.profile != nil) hasImage=\(currentProfile.profileImage != nil)"
+      )
+      AppUIStallWatchdog.shared.updateContext("SettingsView appear")
+    }
     .task {
+      AppUITrace.notice("SettingsView task profile load start")
+      AppUIStallWatchdog.shared.updateContext("SettingsView profile load")
       await profileController.loadIfNeeded()
+      AppUITrace.notice(
+        "SettingsView task profile load done hasProfile=\(profileController.profile != nil)"
+      )
     }
     .sheet(item: $activeModal) { modal in
       switch modal {
@@ -309,6 +324,8 @@ struct SettingsView: View {
   }
 
   private func handleRowPress(_ rowID: String) {
+    AppUITrace.notice("SettingsView rowPress id=\(rowID)")
+    AppUIStallWatchdog.shared.updateContext("SettingsView rowPress id=\(rowID)")
     switch rowID {
     case "edit-profile":
       activeRoute = .profile
@@ -1641,6 +1658,8 @@ private struct SettingsValueLine: View {
 private struct QRCodePanel: View {
   let value: String
   let palette: AppThemePalette
+  @State private var renderedImage: UIImage?
+  @State private var renderedValue = ""
 
   var body: some View {
     ZStack {
@@ -1657,13 +1676,29 @@ private struct QRCodePanel: View {
         Image(systemName: "qrcode")
           .font(.system(size: 72, weight: .light))
           .foregroundStyle(palette.secondaryText)
-      } else if let image = QRCodeRenderer.image(for: value) {
+      } else if renderedValue == value, let image = renderedImage {
         Image(uiImage: image)
           .interpolation(.none)
           .resizable()
           .scaledToFit()
           .frame(width: 190, height: 190)
+      } else {
+        ProgressView()
+          .tint(.black.opacity(0.42))
       }
+    }
+    .task(id: value) {
+      guard !value.isEmpty else {
+        renderedValue = ""
+        renderedImage = nil
+        return
+      }
+      let nextImage = await Task.detached(priority: .userInitiated) {
+        QRCodeRenderer.image(for: value)
+      }.value
+      guard !Task.isCancelled else { return }
+      renderedValue = value
+      renderedImage = nextImage
     }
   }
 }

@@ -10,6 +10,7 @@ defmodule Vibe.Notifications do
   @default_message_title "New message"
   @apns_voip_prod_base "https://api.push.apple.com"
   @apns_voip_sandbox_base "https://api.sandbox.push.apple.com"
+  @fcm_legacy_url "https://fcm.googleapis.com/fcm/send"
   @apns_voip_jwt_cache_ttl_secs 50 * 60
 
   def send_incoming_call_push(to_user_id, payload) when is_binary(to_user_id) and is_map(payload) do
@@ -76,15 +77,25 @@ defmodule Vibe.Notifications do
             )
         end
 
-      case {expo_result, voip_result} do
-        {{:ok, :expo}, _} -> :ok
-        {_, {:ok, :apns_voip}} -> :ok
-        {:noop, :noop} ->
-          Logger.info("[Notifications] Incoming call push skipped: no usable Expo/VoIP token to_user=#{to_user_id}")
+      fcm_result =
+        send_fcm_incoming_call_push(
+          push_targets[:fcm],
+          to_user_id,
+          caller_name,
+          call_type,
+          data
+        )
+
+      case {expo_result, voip_result, fcm_result} do
+        {{:ok, :expo}, _, _} -> :ok
+        {_, {:ok, :apns_voip}, _} -> :ok
+        {_, _, {:ok, :fcm}} -> :ok
+        {:noop, :noop, :noop} ->
+          Logger.info("[Notifications] Incoming call push skipped: no usable Expo/VoIP/FCM token to_user=#{to_user_id}")
           :noop
 
-        {left, right} ->
-          Logger.warning("[Notifications] Incoming call push delivery failed to_user=#{to_user_id} expo=#{inspect(left)} voip=#{inspect(right)}")
+        {expo, voip, fcm} ->
+          Logger.warning("[Notifications] Incoming call push delivery failed to_user=#{to_user_id} expo=#{inspect(expo)} voip=#{inspect(voip)} fcm=#{inspect(fcm)}")
           :error
       end
     else
@@ -252,6 +263,65 @@ defmodule Vibe.Notifications do
     end
   end
 
+  defp send_fcm_incoming_call_push(fcm_token, _to_user_id, _caller_name, _call_type, _data)
+       when not is_binary(fcm_token) do
+    :noop
+  end
+
+  defp send_fcm_incoming_call_push(fcm_token, _to_user_id, _caller_name, _call_type, _data)
+       when is_binary(fcm_token) and fcm_token == "" do
+    :noop
+  end
+
+  defp send_fcm_incoming_call_push(fcm_token, to_user_id, caller_name, call_type, data) do
+    case fcm_server_key() do
+      nil ->
+        Logger.info("[Notifications] FCM call push skipped: missing FCM server key to_user=#{to_user_id}")
+        :noop
+
+      server_key ->
+        string_data =
+          data
+          |> stringify_push_data()
+          |> Map.put("title", caller_name)
+          |> Map.put("body", "Incoming #{call_type} call")
+
+        message = %{
+          to: fcm_token,
+          priority: "high",
+          content_available: true,
+          data: string_data
+        }
+
+        request =
+          Finch.build(
+            :post,
+            @fcm_legacy_url,
+            [
+              {"content-type", "application/json"},
+              {"authorization", "key=#{server_key}"}
+            ],
+            Jason.encode!(message)
+          )
+
+        case Finch.request(request, Vibe.Finch, receive_timeout: 7_000) do
+          {:ok, %Finch.Response{status: status, body: body}} when status in 200..299 ->
+            Logger.info("[Notifications] FCM call push accepted to_user=#{to_user_id} body=#{String.slice(body || "", 0, 240)}")
+            {:ok, :fcm}
+
+          {:ok, %Finch.Response{status: status, body: body}} ->
+            Logger.warning(
+              "[Notifications] FCM call push failed status=#{status} to_user=#{to_user_id} body=#{String.slice(body || "", 0, 240)}"
+            )
+            :error
+
+          {:error, reason} ->
+            Logger.warning("[Notifications] FCM call push request failed to_user=#{to_user_id} reason=#{inspect(reason)}")
+            :error
+        end
+    end
+  end
+
   defp send_apns_voip_incoming_call_push(voip_token, _to_user_id, _caller_name, _call_type, _data)
        when not is_binary(voip_token) do
     :noop
@@ -347,6 +417,46 @@ defmodule Vibe.Notifications do
   end
 
   defp normalized_push_targets(_), do: nil
+
+  defp fcm_server_key do
+    System.get_env("FCM_SERVER_KEY")
+    |> normalize_token_value()
+    |> case do
+      nil ->
+        System.get_env("FIREBASE_SERVER_KEY")
+        |> normalize_token_value()
+      value ->
+        value
+    end
+    |> case do
+      nil ->
+        System.get_env("FIREBASE_CLOUD_MESSAGING_SERVER_KEY")
+        |> normalize_token_value()
+      value ->
+        value
+    end
+  end
+
+  defp stringify_push_data(data) when is_map(data) do
+    data
+    |> Enum.reduce(%{}, fn {key, value}, acc ->
+      string_value =
+        case value do
+          nil -> nil
+          value when is_binary(value) -> value
+          value when is_atom(value) -> Atom.to_string(value)
+          value -> to_string(value)
+        end
+
+      if is_binary(string_value) and string_value != "" do
+        Map.put(acc, to_string(key), string_value)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp stringify_push_data(_), do: %{}
 
   defp normalize_token_value(value) when is_binary(value) do
     case String.trim(value) do

@@ -1,5 +1,16 @@
+import OSLog
 import SwiftUI
 import UIKit
+
+private let appRuntimeUITraceLogger = Logger(
+  subsystem: "com.mohammadshayani.vibe.native",
+  category: "UITrace"
+)
+
+private func appRuntimeUITrace(_ message: String) {
+  appRuntimeUITraceLogger.notice("\(message, privacy: .public)")
+  NSLog("[VibeUITrace] %@", message)
+}
 
 enum AppAppearanceOption: String, CaseIterable, Identifiable {
   case system
@@ -523,14 +534,21 @@ final class AppProfileController: ObservableObject {
   private init() {}
 
   func loadIfNeeded() async {
+    appRuntimeUITrace(
+      "AppProfileController loadIfNeeded hasLoaded=\(hasLoaded) isLoading=\(isLoading) hasProfile=\(profile != nil)"
+    )
     if profile == nil {
       seedFromCurrentSession()
     }
-    guard !hasLoaded else { return }
+    guard !hasLoaded, !isLoading else { return }
     await refresh()
   }
 
   func refresh() async {
+    guard !isLoading else {
+      appRuntimeUITrace("AppProfileController refresh skipped alreadyLoading")
+      return
+    }
     guard let config = AppSessionConfig.current else {
       profile = nil
       hasLoaded = false
@@ -538,6 +556,8 @@ final class AppProfileController: ObservableObject {
       return
     }
 
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    appRuntimeUITrace("AppProfileController refresh start userId=\(config.userID)")
     isLoading = true
     errorMessage = nil
     defer { isLoading = false }
@@ -547,11 +567,19 @@ final class AppProfileController: ObservableObject {
       profile = fetchedProfile
       hasLoaded = true
       persistProfileToSession(fetchedProfile)
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      appRuntimeUITrace(
+        "AppProfileController refresh success durationMs=\(durationMs) hasImage=\(fetchedProfile.profileImage != nil)"
+      )
     } catch {
       errorMessage = error.localizedDescription
       if profile == nil {
         seedFromCurrentSession()
       }
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      appRuntimeUITrace(
+        "AppProfileController refresh error durationMs=\(durationMs) error=\(error.localizedDescription)"
+      )
     }
   }
 
@@ -631,7 +659,7 @@ final class AppProfileController: ObservableObject {
   }
 
   private func persistProfileToSession(_ profile: AppUserProfile) {
-    ChatEngineStore.shared.updateConfig([
+    let changes: [String: Any?] = [
       "username": profile.username,
       "name": profile.name,
       "phoneNumber": profile.phoneNumber,
@@ -650,7 +678,13 @@ final class AppProfileController: ObservableObject {
       "privacyGifts": profile.privacyGifts.rawValue,
       "privacyBirthday": profile.privacyBirthday.rawValue,
       "privacySavedMusic": profile.privacySavedMusic.rawValue,
-    ])
+    ]
+    let startedAt = CFAbsoluteTimeGetCurrent()
+    appRuntimeUITrace("AppProfileController persistProfile schedule keys=\(changes.count)")
+    ChatEngineStore.shared.updateConfigAsync(changes) {
+      let durationMs = Int((CFAbsoluteTimeGetCurrent() - startedAt) * 1000)
+      appRuntimeUITrace("AppProfileController persistProfile done durationMs=\(durationMs)")
+    }
   }
 }
 
