@@ -23,6 +23,88 @@ fi
 
 log() { echo "[deploy] $*"; }
 
+preflight() {
+  local env_file available_kib
+  for env_file in /run/vibe/env/postgres-exporter.env /run/vibe/env/postgres.env; do
+    [ -s "$env_file" ] || {
+      echo "[deploy] required env file is missing or empty: $env_file" >&2
+      exit 1
+    }
+  done
+
+  read -r _ _ _ available_kib _ < <(df -Pk "$REPO_ROOT" | tail -n 1)
+  case "$available_kib" in
+    ""|*[!0-9]*)
+      echo "[deploy] could not determine free space on $REPO_ROOT" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$available_kib" -lt 5242880 ]; then
+    echo "[deploy] less than 5 GiB free on $REPO_ROOT" >&2
+    exit 1
+  fi
+}
+
+prepare_postgres() {
+  local project container mounts
+  project="$(basename "$(dirname "$COMPOSE_FILE")")"
+  container="${project}_postgres_1"
+
+  if mounts="$("$ENGINE_BIN" inspect "$container" --format "{{range .Mounts}}{{println .Destination}}{{end}}" 2>/dev/null)"; then
+    case "$mounts" in
+      *"/wal_archive"*) ;;
+      *)
+        log "recreating postgres to attach /wal_archive"
+        "$ENGINE_BIN" rm -f "$container"
+        ;;
+    esac
+  fi
+
+  log "ensuring postgres can write the WAL archive"
+  "$ENGINE_BIN" run --rm --user 0 \
+    -v "${project}_wal_archive:/wal_archive" \
+    --entrypoint sh postgres:16-alpine \
+    -c "chown 70:70 /wal_archive && chmod 0700 /wal_archive"
+}
+
+verify_archiving() {
+  local project container failed_before failed_after target archived_after tries
+  project="$(basename "$(dirname "$COMPOSE_FILE")")"
+  container="${project}_postgres_1"
+
+  case "$("$ENGINE_BIN" exec "$container" psql -U "${POSTGRES_USER:-postgres}" -d postgres -Atqc "SHOW archive_mode")" in
+    on) ;;
+    *)
+      echo "[deploy] postgres archive_mode is not on" >&2
+      exit 1
+      ;;
+  esac
+
+  failed_before="$("$ENGINE_BIN" exec "$container" psql -U "${POSTGRES_USER:-postgres}" -d postgres -Atqc "SELECT failed_count FROM pg_stat_archiver")"
+  "$ENGINE_BIN" exec "$container" psql -U "${POSTGRES_USER:-postgres}" -d postgres -Atqc "CHECKPOINT" >/dev/null
+  target="$("$ENGINE_BIN" exec "$container" psql -U "${POSTGRES_USER:-postgres}" -d postgres -Atqc "SELECT pg_walfile_name(pg_switch_wal() - 1)")"
+
+  tries=15
+  while [ "$tries" -gt 0 ]; do
+    sleep 2
+    failed_after="$("$ENGINE_BIN" exec "$container" psql -U "${POSTGRES_USER:-postgres}" -d postgres -Atqc "SELECT failed_count FROM pg_stat_archiver")"
+    if [ "$failed_after" -gt "$failed_before" ]; then
+      echo "[deploy] WAL archiving failed after pg_switch_wal()" >&2
+      exit 1
+    fi
+    archived_after="$("$ENGINE_BIN" exec "$container" psql -U "${POSTGRES_USER:-postgres}" -d postgres -Atqc "SELECT COALESCE(last_archived_wal, chr(45)) FROM pg_stat_archiver")"
+    if [[ "$archived_after" == "$target" || "$archived_after" > "$target" ]] &&
+       "$ENGINE_BIN" exec "$container" test -s "/wal_archive/$target"; then
+      log "WAL archiving verified"
+      return 0
+    fi
+    tries=$((tries - 1))
+  done
+
+  echo "[deploy] WAL archiver did not archive the switched segment" >&2
+  exit 1
+}
+
 # Explicit build, not `compose build`: podman-compose cannot resolve a
 # `dockerfile:` key against a parent `context:`, and this is engine-agnostic.
 build_image() {
@@ -96,6 +178,8 @@ main() {
     exit 0
   fi
 
+  preflight
+
   if [ -d .git ]; then
     log "git pull"
     git pull --ff-only
@@ -127,6 +211,8 @@ main() {
 
   # --no-recreate or podman-compose 1.0.6 stops the data tier, fails to rm it
   # (dependents), fails to create it (name taken), and restarts it for nothing.
+  prepare_postgres
+
   log "starting data tier"
   "${COMPOSE[@]}" up -d --no-recreate postgres pgbouncer valkey
 
@@ -138,6 +224,8 @@ main() {
     [ "$tries" -le 0 ] && { echo "[deploy] postgres did not come up" >&2; exit 1; }
     sleep 2
   done
+
+  verify_archiving
 
   migrate core vibe Vibe.Release
   migrate agent-runtime vibe_agents VibeAgents.Release

@@ -7,6 +7,12 @@ set -euo pipefail
 b64() { openssl rand -base64 "$1"; }
 hex() { openssl rand -hex "$1"; }
 
+if [ "${1:-}" = "--readonly" ]; then
+  shift
+  REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+  exec "${REPO_ROOT}/deploy/scripts/set-readonly-secrets.sh" "$@"
+fi
+
 core_db_pw=$(b64 24)
 agents_db_pw=$(b64 24)
 readonly_db_pw=$(b64 24)
