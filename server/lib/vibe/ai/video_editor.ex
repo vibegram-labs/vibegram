@@ -201,7 +201,6 @@ defmodule Vibe.AI.VideoEditor do
         background: false,
         store: false,
         stream: false,
-        generation_config: %{aspect_ratio: opts[:aspect_ratio] || "9:16"},
         response_format: %{delivery: "uri"}
       }
       |> maybe_put(:previous_interaction_id, opts[:previous_interaction_id])
@@ -236,7 +235,10 @@ defmodule Vibe.AI.VideoEditor do
          String.contains?(text, "not available") do
       "Video editing is not available in this region"
     else
-      "Video model error (#{status})"
+      case provider_message(text) do
+        nil -> "Video model error (#{status})"
+        message -> "Video model error (#{status}): #{message}"
+      end
     end
   end
 
@@ -278,6 +280,16 @@ defmodule Vibe.AI.VideoEditor do
     end
   end
 
+
+  defp provider_message(text) do
+    case Jason.decode(text) do
+      {:ok, %{"error" => %{"message" => message}}} when is_binary(message) ->
+        String.slice(message, 0, 200)
+
+      _ ->
+        nil
+    end
+  end
 
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, _key, ""), do: map

@@ -369,7 +369,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     let nominalFrameRate: Float
   }
 
-  /// Mutable because an AI edit replaces the clip under the player.
   private var asset: AVAsset
   private let headerTitleText: String
   private let previewOnly: Bool
@@ -448,16 +447,10 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
   private var isExporting = false
 
   // MARK: AI edit
-  //
-  // Gemini Omni Flash accepts at most 10 seconds of input, so AI mode clamps the
-  // trim selection rather than letting the user pick a window the model will
-  // reject. There is no region/mask parameter for video — prompt only.
   static let aiMaxClipSeconds: Double = 10.0
   private var isAIModeActive = false
   private var isAIWorking = false
-  /// Chains refinements onto the previous result instead of re-editing the original.
   private var aiInteractionID: String?
-  /// Set when an AI edit replaces the asset, so Undo can restore the original.
   private var aiOriginalAsset: AVAsset?
   private var aiTask: Task<Void, Never>?
   private let aiPromptBar = ChatVideoAIPromptBar()
@@ -818,8 +811,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     drawingView.frame = previewView.bounds
 
     let safe = view.safeAreaInsets
-    // 44pt: the app's header control size everywhere else, and what the image
-    // viewer's header and bottom bar now use.
     let headerSide: CGFloat = 44.0
     topContainer.frame = CGRect(
       x: 16.0,
@@ -882,9 +873,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     let playerProgressHeight: CGFloat = 54.0
     let mediaControlHeight: CGFloat = previewOnly ? playerProgressHeight : timelineHeight
     let captionHeight = max(44.0, min(64.0, captionSize.height))
-    // AI mode brings its own prompt field. Leaving the caption box up as well put
-    // two text inputs on screen at once with no way to tell which one the model
-    // reads, so the caption stands down while AI mode owns the input.
     let showsCaption = !isAIModeActive && (!previewOnly || !captionText.isEmpty)
     let toolbarHeight: CGFloat = 42.0
     let bottomInset = keyboardHeight > 0.0 ? (keyboardHeight + 6.0) : (safe.bottom + 10.0)
@@ -1037,8 +1025,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
       captionPlaceholderLabel.frame = .zero
     }
 
-    // AI prompt capsule sits between the caption and the tool row, and takes no
-    // space at all when the AI tool is off.
     let aiTop =
       (showsCaption
         ? captionBlurView.frame.maxY
@@ -1127,8 +1113,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
       sendSpinner.center = CGPoint(x: sendButton.bounds.midX, y: sendButton.bounds.midY)
 
       let qualityWidth: CGFloat = 56.0
-      // Same height as every other control in the row — at 34pt it sat as a
-      // short pill between 42pt circles and read as a misalignment.
       let qualityHeight: CGFloat = toolSize
       qualityGlassView.frame = CGRect(
         x: sendGlassView.frame.minX - 10.0 - qualityWidth,
@@ -1333,9 +1317,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
   private func updateChromeAppearance() {
     let neutralFill = UIColor.black.withAlphaComponent(0.16)
     let accentFill = UIColor.systemBlue.withAlphaComponent(0.28)
-    // Header pills carry no fill: a wash over the material is what made them read
-    // grey rather than as glass. The scrim behind them already keeps the glyphs
-    // legible over a bright frame.
     backGlassView.contentView.backgroundColor = .clear
     titleGlassView.contentView.backgroundColor = .clear
     menuGlassView.contentView.backgroundColor = .clear
@@ -1592,6 +1573,11 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
 
   private func hasOverlayContent() -> Bool {
     drawingView.hasStrokeContent || !textOverlayView.subviews.isEmpty
+  }
+
+  /// True when the preview differs from the source file, so a save must re-render.
+  private func hasPendingVideoEdits() -> Bool {
+    trimStartRatio > 0.001 || trimEndRatio < 0.999 || isMuted || hasOverlayContent()
   }
 
   private func overlaySnapshotImage() -> UIImage? {
@@ -1959,6 +1945,23 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
   }
 
   private func saveVideoToPhotos() {
+    if hasPendingVideoEdits() {
+      setExporting(true)
+      exportEditedVideo(losslessIfPossible: true) { [weak self] result in
+        DispatchQueue.main.async {
+          guard let self else { return }
+          self.setExporting(false)
+          switch result {
+          case .success(let url):
+            self.persistVideoToPhotos(from: url, cleanupAfterSave: true)
+          case .failure(let error):
+            self.presentInfoAlert(title: "Save Failed", message: error.localizedDescription)
+          }
+        }
+      }
+      return
+    }
+
     guard let urlAsset = asset as? AVURLAsset else {
       presentInfoAlert(title: "Unable to Save", message: "This video source is unavailable.")
       return
@@ -1984,7 +1987,7 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
       var request = URLRequest(url: sourceURL)
       request.timeoutInterval = 120
       request.setValue("true", forHTTPHeaderField: "ngrok-skip-browser-warning")
-      if let authHeader = ChatEngine.shared.authorizationHeaderForAPI() {
+      if let authHeader = ChatEngine.shared.authorizationHeaderForRemoteURL(sourceURL) {
         request.setValue(authHeader, forHTTPHeaderField: "Authorization")
       }
 
@@ -2298,7 +2301,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     isAIModeActive = active
 
     if active {
-      // Snap the current window down to something the model will actually take.
       let (start, end) = clampSelectionForAI(start: trimStartRatio, end: trimEndRatio)
       trimStartRatio = start
       trimEndRatio = end
@@ -2322,8 +2324,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     }
   }
 
-  /// Keeps the trim window within the model's 10-second input ceiling. Returns
-  /// the pair unchanged when AI mode is off, so normal trimming is unaffected.
   private func clampSelectionForAI(start: CGFloat, end: CGFloat) -> (CGFloat, CGFloat) {
     guard isAIModeActive else { return (start, end) }
 
@@ -2333,8 +2333,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     let maxRatio = CGFloat(min(1.0, Self.aiMaxClipSeconds / duration))
     guard (end - start) > maxRatio else { return (start, end) }
 
-    // Anchor on whichever edge the user was not dragging: if the start moved,
-    // pull the end in, otherwise push the start forward.
     if start != trimStartRatio {
       return (start, min(1.0, start + maxRatio))
     }
@@ -2358,13 +2356,8 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     player.pause()
     view.endEditing(true)
 
-    // The frame the user is looking at carries the wait, under a travelling
-    // Metal blur — a spinner over a frozen sheet said nothing about which clip
-    // was being worked on.
     aiProcessingOverlay.onCancel = { [weak self] in self?.cancelVideoAIEdit() }
     aiProcessingOverlay.setCaption("Editing with AI")
-    // Over the clip, not over the screen: the trim bar and the prompt stay
-    // readable, and the blur lands on the thing being edited.
     aiProcessingOverlay.present(
       in: view,
       over: previewView.convert(previewView.bounds, to: view),
@@ -2373,11 +2366,8 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
       detail: "Sent to Google · this step is not end-to-end encrypted"
     )
 
-    // Export exactly the selected ≤10s window, then hand those bytes over.
     exportEditedVideo { [weak self] result in
       guard let self else { return }
-      // Cancel can land while the export is still running. Without this the
-      // export would finish afterwards and start the paid upload anyway.
       guard self.isAIWorking else { return }
 
       switch result {
@@ -2444,9 +2434,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     adoptAIEditedAsset(editedAsset)
   }
 
-  /// Stops the in-flight edit and takes the overlay down. The export that may
-  /// still be running writes to a temp file nobody reads, so there is nothing to
-  /// unwind beyond the task itself.
   private func cancelVideoAIEdit() {
     guard isAIWorking else { return }
     aiTask?.cancel()
@@ -2457,16 +2444,11 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     aiProcessingOverlay.dismiss()
   }
 
-  /// Still of the frame currently under the playhead, for the processing
-  /// overlay to blur. `AVPlayerLayer` contents cannot be snapshotted by the
-  /// view hierarchy, so this goes back to the asset for the pixels.
   private func currentPlayerFrameImage() -> UIImage? {
     let generator = AVAssetImageGenerator(asset: asset)
     generator.appliesPreferredTrackTransform = true
     generator.requestedTimeToleranceBefore = CMTime(seconds: 0.4, preferredTimescale: 600)
     generator.requestedTimeToleranceAfter = CMTime(seconds: 0.4, preferredTimescale: 600)
-    // Downscale: this only ever feeds a heavy blur, so full resolution would be
-    // decode cost with nothing to show for it.
     generator.maximumSize = CGSize(width: 720.0, height: 720.0)
 
     let time = player.currentTime()
@@ -2484,8 +2466,6 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     adoptAIEditedAsset(original)
   }
 
-  /// Swaps the asset under the player and resets the trim window to the whole
-  /// (now short) clip, since the returned video *is* the selection.
   private func adoptAIEditedAsset(_ newAsset: AVAsset) {
     asset = newAsset
     trimStartRatio = 0.0
@@ -2499,6 +2479,7 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     timelineView.setSelection(startRatio: 0.0, endRatio: 1.0)
     loadThumbnails()
     updateAIChrome()
+    refreshNaturalSize(from: newAsset)
 
     player.seek(to: .zero)
     player.play()
@@ -2506,9 +2487,30 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
     view.setNeedsLayout()
   }
 
+  /// The AI result can come back at a different aspect ratio than the source.
+  private func refreshNaturalSize(from newAsset: AVAsset) {
+    guard #available(iOS 16.0, *) else { return }
+    Task { [weak self] in
+      guard let self else { return }
+      guard let track = try? await newAsset.loadTracks(withMediaType: .video).first,
+        let size = try? await track.load(.naturalSize),
+        let transform = try? await track.load(.preferredTransform)
+      else { return }
+      let displayed = size.applying(transform)
+      await MainActor.run {
+        self.naturalVideoSize = CGSize(
+          width: abs(displayed.width), height: abs(displayed.height))
+        self.view.setNeedsLayout()
+      }
+    }
+  }
+
   private func exportEditedVideo(
+    losslessIfPossible: Bool = false,
     completion: @escaping (Result<URL, Error>) -> Void
   ) {
+    // Passthrough keeps the source frames byte-for-byte; it cannot render overlays.
+    let passthrough = losslessIfPossible && !hasOverlayContent()
     loadExportSource { [weak self] result in
       guard let self else { return }
       switch result {
@@ -2538,7 +2540,8 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
 
         do {
           try compositionVideoTrack.insertTimeRange(timeRange, of: source.videoTrack, at: .zero)
-          compositionVideoTrack.preferredTransform = .identity
+          compositionVideoTrack.preferredTransform =
+            passthrough ? source.preferredTransform : .identity
 
           if !self.isMuted, let sourceAudioTrack = source.audioTrack,
             let compositionAudioTrack = composition.addMutableTrack(
@@ -2575,13 +2578,16 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
           self.selectedQuality.label
         )
 
-        let primaryPresets = self.selectedQuality.preferredPresets + [AVAssetExportPresetMediumQuality]
+        let primaryPresets =
+          passthrough
+          ? [AVAssetExportPresetPassthrough]
+          : self.selectedQuality.preferredPresets + [AVAssetExportPresetMediumQuality]
         self.exportEditedComposition(
           composition: composition,
-          videoComposition: videoComposition,
+          videoComposition: passthrough ? nil : videoComposition,
           presetCandidates: primaryPresets,
           preferredOutputTypes: [.mp4, .mov],
-          logContext: "primary"
+          logContext: passthrough ? "lossless" : "primary"
         ) { primaryResult in
           switch primaryResult {
           case .success(let url):
@@ -2591,6 +2597,11 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
               "[ChatVideoEditExport] primary failed error=%@ retrying safer fallback",
               primaryError.localizedDescription
             )
+            if passthrough {
+              // The composition carries the source rotation; re-render it from scratch.
+              self.exportEditedVideo(losslessIfPossible: false, completion: completion)
+              return
+            }
             self.exportEditedComposition(
               composition: composition,
               videoComposition: videoComposition,
@@ -2693,7 +2704,7 @@ final class ChatVideoEditViewController: UIViewController, UITextViewDelegate,
 
   private func exportEditedComposition(
     composition: AVAsset,
-    videoComposition: AVMutableVideoComposition,
+    videoComposition: AVMutableVideoComposition?,
     presetCandidates: [String],
     preferredOutputTypes: [AVFileType],
     logContext: String,
