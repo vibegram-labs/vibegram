@@ -345,6 +345,15 @@ defmodule VibeWeb.Router do
     post "/ai/edit_video", AIController, :edit_video
   end
 
+  # Status polling for the job above — same auth, but the ordinary API rate
+  # limit: :ai_media's 10-per-5-minutes budget is sized for the paid call,
+  # not a client polling every couple of seconds.
+  scope "/api", VibeWeb do
+    pipe_through [:api, :api_authenticated]
+
+    get "/ai/edit_video/:job_id", AIController, :edit_video_status
+  end
+
   scope "/api", VibeWeb do
     pipe_through :public_agent_rate_limited
 

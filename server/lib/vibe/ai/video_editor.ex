@@ -22,11 +22,16 @@ defmodule Vibe.AI.VideoEditor do
 
   def edit_video(bytes, mime_type, prompt, opts)
       when is_binary(bytes) and is_binary(prompt) and prompt != "" do
+    on_phase = Keyword.get(opts, :on_phase, fn _ -> :ok end)
+
     with {:ok, key} <- api_key(),
          :ok <- check_size(bytes),
          :ok <- check_duration(bytes, mime_type),
+         :ok <- on_phase.("uploading"),
          {:ok, file_uri} <- upload_file(key, bytes, mime_type),
+         :ok <- on_phase.("generating"),
          {:ok, interaction} <- create_interaction(key, file_uri, prompt, opts),
+         :ok <- on_phase.("finalizing"),
          {:ok, video_bytes} <- extract_video(key, interaction) do
       {:ok, %{bytes: video_bytes, mime_type: "video/mp4", interaction_id: interaction["id"]}}
     end

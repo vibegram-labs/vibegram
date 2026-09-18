@@ -5,7 +5,7 @@ defmodule VibeWeb.AIController do
   use VibeWeb, :controller
 
   alias Vibe.AI.ImageEditor
-  alias Vibe.AI.VideoEditor
+  alias Vibe.AI.VideoEditJobs
 
   require Logger
 
@@ -75,19 +75,15 @@ defmodule VibeWeb.AIController do
             "prompt=<redacted #{byte_size(prompt)} bytes>"
         )
 
-        case VideoEditor.edit_video(bytes, upload.content_type || "video/mp4", prompt, opts) do
-          {:ok, %{bytes: out, mime_type: mime, interaction_id: id}} ->
-            json(conn, %{
-              success: true,
-              mime_type: mime,
-              video_b64: Base.encode64(out),
-              interaction_id: id
-            })
+        {:ok, job_id} =
+          VideoEditJobs.start(
+            bytes,
+            upload.content_type || "video/mp4",
+            prompt,
+            Keyword.put(opts, :owner_id, conn.assigns.current_user.id)
+          )
 
-          {:error, reason} ->
-            Logger.error("[AIController] edit_video failed: #{inspect(reason)}")
-            bad_request(conn, "Failed to edit video", reason)
-        end
+        json(conn, %{success: true, job_id: job_id})
 
       {:error, reason} ->
         bad_request(conn, "Failed to edit video", reason)
@@ -102,6 +98,29 @@ defmodule VibeWeb.AIController do
       "Missing or invalid parameters",
       "Provide multipart `video` (10s or less) and a non-empty `prompt`"
     )
+  end
+
+  @doc """
+  Poll the status of an async video edit job.
+  """
+  def edit_video_status(conn, _params) do
+    job_id = conn.path_params["job_id"]
+
+    case VideoEditJobs.status(job_id) do
+      {:error, :not_found} ->
+        conn
+        |> put_status(:not_found)
+        |> json(%{success: false, error: "not found"})
+
+      {:ok, %{owner_id: owner_id}}
+      when owner_id != conn.assigns.current_user.id ->
+        conn
+        |> put_status(:not_found)
+        |> json(%{success: false, error: "not found"})
+
+      {:ok, status_map} ->
+        json(conn, status_map |> Map.delete(:owner_id) |> Map.put(:success, true))
+    end
   end
 
   # ── Helpers ───────────────────────────────────────────────────────────────

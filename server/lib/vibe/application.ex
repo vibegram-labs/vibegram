@@ -24,6 +24,7 @@ defmodule Vibe.Application do
     ensure_ets_table(:vibe_internal_nonces)
     ensure_ets_table(:agent_run_seen)
     ensure_ets_table(:agent_run_state)
+    ensure_ets_table(:ai_video_edit_jobs)
 
     Vibe.LogScrub.install()
     Vibe.Telemetry.SlowQuery.attach()
@@ -62,7 +63,9 @@ defmodule Vibe.Application do
       {Task.Supervisor, name: Vibe.TaskSupervisor},
       Vibe.MusicCacheFill,
       {Registry, keys: :unique, name: Vibe.AI.TeamRunRegistry},
-      {DynamicSupervisor, name: Vibe.AI.TeamRunMonitorSupervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Vibe.AI.TeamRunMonitorSupervisor, strategy: :one_for_one},
+      {Registry, keys: :unique, name: Vibe.AI.TeamComputer.PreviewRegistry},
+      {DynamicSupervisor, name: Vibe.AI.TeamComputer.PreviewSupervisor, strategy: :one_for_one}
         ]
 
     opts = [strategy: :one_for_one, name: Vibe.Supervisor]
