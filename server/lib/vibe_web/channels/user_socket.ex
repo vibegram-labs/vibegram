@@ -11,6 +11,8 @@ defmodule VibeWeb.UserSocket do
   channel("agent:*", VibeWeb.AgentChannel)
   # Owner-only live view of an agent's browser
   channel("computer:*", VibeWeb.ComputerChannel)
+  # Real-time AI video-edit job progress
+  channel("video_edit:*", VibeWeb.VideoEditChannel)
   # VibeNet peer relay network
   channel("relay:*", VibeWeb.RelayChannel)
 
